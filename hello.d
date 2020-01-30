@@ -6,13 +6,32 @@ import std.string;
 import std.stdio;
 import std.uni;
 
-struct Value {
+// something that can be referenced by a name
+interface Symbol {}
+
+class Value : Symbol {
     enum Type {
         integer,
     }
     Type type;
     union {
         int i;
+    }
+    bool truthy() {
+        return this.type == Type.integer && this.i != 0;
+    }
+
+    override string toString() const {
+        import std.conv : to;
+
+        final switch (this.type) {
+            case Type.integer: return this.i.to!string;
+        }
+    }
+
+    this(int i) {
+        this.i = i;
+        this.type = Type.integer;
     }
 }
 
@@ -154,9 +173,6 @@ struct Argument
     string name;
 }
 
-// something that can be referenced by a name
-interface Symbol {}
-
 class Function : Symbol
 {
     string name;
@@ -167,14 +183,39 @@ class Function : Symbol
 
     Statement statement;
 
+    @(This.Init!null)
+    Scope scope_; // bound scope
+
     mixin(GenerateThis);
     mixin(GenerateToString);
 }
 
+struct ControlFlow
+{
+    enum Type {
+        pass,
+        return_,
+    }
+    Type type;
+    bool isPass() { return type == Type.pass; }
+    bool isReturn() { return type == Type.return_; }
+    static ControlFlow pass() { return ControlFlow(Type.pass); }
+    static ControlFlow return_(Value v) {
+        ControlFlow cf = ControlFlow(Type.return_);
+        cf.value = v;
+        return cf;
+    }
+    union {
+        Value value;
+    }
+}
+
 interface Statement {
+    ControlFlow interpret(Scope);
 }
 
 interface Expression {
+    Value interpret(Scope);
 }
 
 Function parseFunction(ref Parser parser) {
@@ -203,6 +244,16 @@ Function parseFunction(ref Parser parser) {
 class SequenceStatement : Statement {
     Statement[] statements;
 
+    override ControlFlow interpret(Scope scope_) {
+        auto subscope = new Scope(scope_);
+        foreach (statement; statements) {
+            auto effect = statement.interpret(subscope);
+            if (effect.isReturn) {
+                return effect;
+            }
+        }
+        return ControlFlow.pass;
+    }
     mixin(GenerateThis);
     mixin(GenerateToString);
 }
@@ -227,6 +278,10 @@ SequenceStatement parseSequence(ref Parser parser) {
 class ReturnStatement : Statement {
     Expression value;
 
+    override ControlFlow interpret(Scope scope_) {
+        return ControlFlow.return_(value.interpret(scope_));
+    }
+
     mixin(GenerateThis);
     mixin(GenerateToString);
 }
@@ -248,6 +303,15 @@ ReturnStatement parseReturn(ref Parser parser) {
 class IfStatement : Statement {
     Expression test;
     Statement then;
+
+    override ControlFlow interpret(Scope scope_) {
+        auto value = test.interpret(scope_);
+        if (value.truthy) {
+            auto subscope = new Scope(scope_);
+            return then.interpret(subscope);
+        }
+        return ControlFlow.pass;
+    }
 
     mixin(GenerateThis);
     mixin(GenerateToString);
@@ -295,6 +359,19 @@ class ArithmeticOp : Expression {
     Expression left;
     Expression right;
 
+    override Value interpret(Scope scope_) {
+        auto leftval = this.left.interpret(scope_);
+        auto rightval = this.right.interpret(scope_);
+        final switch (this.op) {
+            case Op.add:
+                return new Value(leftval.i + rightval.i);
+            case Op.sub:
+                return new Value(leftval.i - rightval.i);
+            case Op.eq:
+                return new Value(leftval.i == rightval.i);
+        }
+    }
+
     mixin(GenerateThis);
     mixin(GenerateToString);
 }
@@ -337,6 +414,16 @@ class Call : Expression {
     string name;
     Expression[] args;
 
+    override Value interpret(Scope scope_) {
+        auto fun = cast(Function) scope_.lookup(name);
+        assert(fun, "no such function: " ~ name);
+        Value[] values;
+        foreach (arg; this.args) {
+            values ~= arg.interpret(scope_);
+        }
+        return interpret_call(fun, values);
+    }
+
     mixin(GenerateThis);
     mixin(GenerateToString);
 }
@@ -363,6 +450,14 @@ class Variable : Expression
 {
     string name;
 
+    override Value interpret(Scope scope_) {
+        auto symbol = scope_.lookup(name);
+        assert(symbol, "no such variable: " ~ name);
+        auto value = cast(Value) symbol;
+        assert(value, "not a value: " ~ name);
+        return value;
+    }
+
     mixin(GenerateThis);
     mixin(GenerateToString);
 }
@@ -370,6 +465,10 @@ class Variable : Expression
 class Literal : Expression
 {
     int value;
+
+    override Value interpret(Scope) {
+        return new Value(this.value);
+    }
 
     override string toString() const {
         import std.conv : to;
@@ -394,7 +493,44 @@ Expression parseExpressionLeaf(ref Parser parser) {
     }
 }
 
+class Scope
+{
+    Scope parent;
+
+    Symbol[string] symbols;
+
+    this(Scope parent = null) {
+        this.parent = parent;
+    }
+
+    void add(string name, Symbol symbol) {
+        assert(name !in this.symbols);
+        this.symbols[name] = symbol;
+    }
+
+    Symbol lookup(string name) {
+        if (auto p = name in this.symbols) return *p;
+        if (parent) return parent.lookup(name);
+        return null;
+    }
+}
+
+Value interpret_call(Function function_, Value[] args)
+{
+    auto callscope = new Scope(function_.scope_);
+
+    foreach (arg, value; function_.args.zip(args))
+    {
+        callscope.add(arg.name, value);
+    }
+    auto effect = function_.statement.interpret(callscope);
+    if (effect.isReturn) return effect.value;
+    assert(false, "missing return");
+}
+
 void main() {
+    writefln!"running.";
+
     string code = "int ack(int m, int n) {
         if (m == 0) return n + 1;
         if (n == 0) return ack(m - 1, 1);
@@ -402,9 +538,16 @@ void main() {
     }";
     auto parser = new Parser(code);
     auto fun = parser.parseFunction;
+    // assert(parser.eof);
 
     writefln!"%s"(fun);
 
-    // assert(parser.eof);
-    // interpret(fun, 3, 4);
+    auto scope_ = new Scope;
+
+    scope_.add("ack", fun);
+    fun.scope_ = scope_;
+
+    auto ret = interpret_call(fun, [new Value(3), new Value(4)]);
+
+    writefln!"ack(3, 4) = %s"(ret);
 }

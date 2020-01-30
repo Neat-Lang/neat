@@ -1,6 +1,7 @@
 module hello;
 
 import boilerplate;
+import std.algorithm;
 import std.range;
 import std.string;
 import std.stdio;
@@ -9,29 +10,45 @@ import std.uni;
 // something that can be referenced by a name
 interface Symbol {}
 
-class Value : Symbol {
+struct Value {
     enum Type {
+        undef,
         integer,
+        symbol,
     }
     Type type;
     union {
-        int i;
+        int integer;
+        Symbol symbol;
     }
     bool truthy() {
-        return this.type == Type.integer && this.i != 0;
+        return this.type == Type.integer && this.integer != 0;
     }
 
-    override string toString() const {
+    string toString() const {
         import std.conv : to;
 
         final switch (this.type) {
-            case Type.integer: return this.i.to!string;
+            case Type.integer: return this.integer.to!string;
+            case Type.symbol: return this.symbol.to!string;
+            case Type.undef: return "<undef>";
         }
     }
 
-    this(int i) {
-        this.i = i;
+    this(int integer) {
         this.type = Type.integer;
+        this.integer = integer;
+    }
+
+    this(Symbol symbol) {
+        this.type = Type.symbol;
+        this.symbol = symbol;
+    }
+
+    static Value undef() {
+        Value value;
+        value.type = Type.undef;
+        return value;
     }
 }
 
@@ -245,13 +262,15 @@ class SequenceStatement : Statement {
     Statement[] statements;
 
     override ControlFlow interpret(Scope scope_) {
-        auto subscope = new Scope(scope_);
+        auto subscope = Scope.alloc(scope_);
         foreach (statement; statements) {
             auto effect = statement.interpret(subscope);
             if (effect.isReturn) {
+                subscope.release;
                 return effect;
             }
         }
+        subscope.release;
         return ControlFlow.pass;
     }
     mixin(GenerateThis);
@@ -307,8 +326,10 @@ class IfStatement : Statement {
     override ControlFlow interpret(Scope scope_) {
         auto value = test.interpret(scope_);
         if (value.truthy) {
-            auto subscope = new Scope(scope_);
-            return then.interpret(subscope);
+            auto subscope = Scope.alloc(scope_);
+            auto res = then.interpret(subscope);
+            subscope.release;
+            return res;
         }
         return ControlFlow.pass;
     }
@@ -362,13 +383,15 @@ class ArithmeticOp : Expression {
     override Value interpret(Scope scope_) {
         auto leftval = this.left.interpret(scope_);
         auto rightval = this.right.interpret(scope_);
+        assert(leftval.type == Value.Type.integer);
+        assert(rightval.type == Value.Type.integer);
         final switch (this.op) {
             case Op.add:
-                return new Value(leftval.i + rightval.i);
+                return Value(leftval.integer + rightval.integer);
             case Op.sub:
-                return new Value(leftval.i - rightval.i);
+                return Value(leftval.integer - rightval.integer);
             case Op.eq:
-                return new Value(leftval.i == rightval.i);
+                return Value(leftval.integer == rightval.integer);
         }
     }
 
@@ -415,7 +438,9 @@ class Call : Expression {
     Expression[] args;
 
     override Value interpret(Scope scope_) {
-        auto fun = cast(Function) scope_.lookup(name);
+        auto funvalue = scope_.lookup(name);
+        assert(funvalue.type == Value.Type.symbol);
+        auto fun = cast(Function) funvalue.symbol;
         assert(fun, "no such function: " ~ name);
         Value[] values;
         foreach (arg; this.args) {
@@ -451,10 +476,8 @@ class Variable : Expression
     string name;
 
     override Value interpret(Scope scope_) {
-        auto symbol = scope_.lookup(name);
-        assert(symbol, "no such variable: " ~ name);
-        auto value = cast(Value) symbol;
-        assert(value, "not a value: " ~ name);
+        auto value = scope_.lookup(name);
+        assert(value.type != Value.Type.undef, "no such variable: " ~ name);
         return value;
     }
 
@@ -467,7 +490,7 @@ class Literal : Expression
     int value;
 
     override Value interpret(Scope) {
-        return new Value(this.value);
+        return Value(this.value);
     }
 
     override string toString() const {
@@ -497,33 +520,76 @@ class Scope
 {
     Scope parent;
 
-    Symbol[string] symbols;
+    ref Scope freelist() { return this.parent; }
 
-    this(Scope parent = null) {
-        this.parent = parent;
+    size_t refs;
+
+    struct Variable
+    {
+        string name;
+
+        Value value;
+    }
+    Appender!(Variable[]) vars;
+
+    static Scope freelistHead = null;
+
+    static Scope alloc(Scope parent = null)
+    {
+        if (parent) parent.claim;
+        if (freelistHead is null) {
+            auto scope_ = new Scope;
+            scope_.parent = parent;
+            scope_.refs = 1;
+            scope_.vars.clear;
+            return scope_;
+        }
+        auto scope_ = freelistHead;
+        freelistHead = freelistHead.freelist;
+        scope_.parent = parent;
+        scope_.refs = 1;
+        scope_.vars.clear;
+        return scope_;
     }
 
-    void add(string name, Symbol symbol) {
-        assert(name !in this.symbols);
-        this.symbols[name] = symbol;
+    void claim() {
+        this.refs ++;
     }
 
-    Symbol lookup(string name) {
-        if (auto p = name in this.symbols) return *p;
-        if (parent) return parent.lookup(name);
-        return null;
+    void release() {
+        assert(this.refs > 0);
+        this.refs --;
+        if (this.refs == 0) {
+            if (this.parent) this.parent.release;
+            this.freelist = freelistHead;
+            freelistHead = this;
+        }
+    }
+
+    void add(string name, Value value) {
+        assert(!this.vars.data().any!(var => var.name == name));
+        this.vars ~= Variable(name, value);
+    }
+
+    Value lookup(string name) {
+        foreach (var; this.vars) {
+            if (var.name == name) return var.value;
+        }
+        if (this.parent) return this.parent.lookup(name);
+        return Value.undef;
     }
 }
 
 Value interpret_call(Function function_, Value[] args)
 {
-    auto callscope = new Scope(function_.scope_);
+    auto callscope = Scope.alloc(function_.scope_);
 
     foreach (arg, value; function_.args.zip(args))
     {
         callscope.add(arg.name, value);
     }
     auto effect = function_.statement.interpret(callscope);
+    callscope.release;
     if (effect.isReturn) return effect.value;
     assert(false, "missing return");
 }
@@ -542,12 +608,14 @@ void main() {
 
     writefln!"%s"(fun);
 
-    auto scope_ = new Scope;
+    auto scope_ = Scope.alloc;
 
-    scope_.add("ack", fun);
+    scope_.add("ack", Value(fun));
     fun.scope_ = scope_;
 
-    auto ret = interpret_call(fun, [new Value(3), new Value(4)]);
+    for (int i = 0; i < 10; i++) {
+        auto ret = interpret_call(fun, [Value(3), Value(8)]);
 
-    writefln!"ack(3, 4) = %s"(ret);
+        writefln!"ack(3, 8) = %s"(ret);
+    }
 }

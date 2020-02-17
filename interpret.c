@@ -28,7 +28,7 @@ typedef struct {
 
 typedef struct {
     BaseInstr base;
-    size_t symbol_offset;
+    int symbol_offset;
     int args_num;
     // and then: [args: ArgExpr x args_num]
 } CallInstr;
@@ -70,13 +70,13 @@ typedef struct {
 } Value;
 
 typedef struct {
-    size_t slot_types_len;
+    int slot_types_len;
     // and then: [slot type: Type], [Instr]
 } Block;
 
 typedef struct {
     Type ret;
-    size_t args_len;
+    int args_len;
     char name[0];
     // and then: arg types
 } Symbol;
@@ -87,7 +87,7 @@ typedef enum {
     BC_SYMBOL,
 } SymbolKind;
 
-typedef void (*callptr_t)(size_t values_len, Value *values_ptr, Value *ret_ptr);
+typedef void (*callptr_t)(int values_len, Value *values_ptr, Value *ret_ptr);
 
 typedef struct {
     SymbolKind kind;
@@ -96,13 +96,13 @@ typedef struct {
         callptr_t callptr;
         struct {
             Type *arg_types; // cache for offset off symbol
-            void *block_data; // blocks_len, [block offsets : size_t], [body : Block]
+            void *block_data; // blocks_len, [block offsets : int], [body : Block]
         };
     };
 } SymbolEntry;
 
 typedef struct {
-    size_t length;
+    int length;
     SymbolEntry *ptr;
 } SymbolTable;
 
@@ -117,20 +117,20 @@ typedef enum {
 
 typedef struct {
     SectionKind kind;
-    size_t length; // including Section header
+    int length; // including Section header
     // and then: data
 } Section;
 
 typedef struct {
     Section base;
-    size_t declaration_index;
+    int declaration_index;
 } DefineSection;
 
 #define WORD_ALIGN(I) ((I + 7) & 0xfffffffffffffff8)
 #define ASIZEOF(T) WORD_ALIGN(sizeof(T))
 
 int declare(Environment *environment, Symbol *symbol) {
-    printf("declare symbol %s at %li\n", symbol->name, environment->entries.length);
+    printf("declare symbol %s at %i\n", symbol->name, environment->entries.length);
     environment->entries.ptr = realloc(
         environment->entries.ptr, ++environment->entries.length * sizeof(SymbolEntry));
     environment->entries.ptr[environment->entries.length - 1] = (SymbolEntry) {
@@ -141,7 +141,7 @@ int declare(Environment *environment, Symbol *symbol) {
 }
 
 SymbolEntry *find_symbol(Environment *environment, const char *name) {
-    for (size_t i = 0; i < environment->entries.length; i++) {
+    for (int i = 0; i < environment->entries.length; i++) {
         SymbolEntry *entry = &environment->entries.ptr[i];
 
         if (strcmp(entry->symbol->name, name) == 0) {
@@ -168,7 +168,7 @@ void resolve_bc(Environment *environment, const char *name, void *block_data) {
 }
 
 void call(
-    Environment *environment, SymbolEntry *entry, size_t values_len,
+    Environment *environment, SymbolEntry *entry, int values_len,
     Value *restrict values_ptr, Value *restrict ret_ptr)
 {
     assert(entry->symbol->args_len == values_len);
@@ -180,12 +180,12 @@ void call(
     }
     assert(entry->kind == BC_SYMBOL);
 
-    size_t *restrict block_offsets = (size_t*) entry->block_data;
+    int *restrict block_offsets = (int*) entry->block_data;
     int blkid = 0; // entry
 
     while (true) {
         Block *restrict blk = (Block*)((char*) entry->symbol + block_offsets[blkid]);
-        // printf(" blk %i (%li) %p\n", blkid, blk->slot_types_len, (void*) blk);
+        // printf(" blk %i (%i) %p\n", blkid, blk->slot_types_len, (void*) blk);
         Type *restrict type_cur = (Type*)((char*) blk + ASIZEOF(Block));
         for (int i = 0; i < blk->slot_types_len; i++) {
             type_cur = (Type*)((char*) type_cur + ASIZEOF(Type)); // TODO handle types with dynamic size
@@ -344,20 +344,20 @@ void add_ret_instr(Data *data, int slot) {
     ret_instr->slot = slot;
 }
 
-size_t alloc_block_offsets(Data *data, size_t num_offsets) {
+size_t alloc_block_offsets(Data *data, int num_offsets) {
     size_t offset = data->length;
-    alloc(data, sizeof(size_t) * num_offsets);
+    alloc(data, sizeof(int) * num_offsets);
     return offset;
 }
 
-void start_block(Data *data, size_t symbol_base_offset, size_t *offset_ptr, size_t slot_types_len) {
+void start_block(Data *data, int symbol_base_offset, int *offset_ptr, int slot_types_len) {
     data->length = WORD_ALIGN(data->length);
     *offset_ptr = data->length - symbol_base_offset;
     Block *block = alloc(data, ASIZEOF(Block));
     block->slot_types_len = slot_types_len;
 }
 
-void int_eq_fn(size_t arg_len, Value *arg_ptr, Value *ret_ptr) {
+void int_eq_fn(int arg_len, Value *arg_ptr, Value *ret_ptr) {
     assert(arg_len == 2);
     assert(arg_ptr[0].type.kind == INT);
     assert(arg_ptr[1].type.kind == INT);
@@ -365,7 +365,7 @@ void int_eq_fn(size_t arg_len, Value *arg_ptr, Value *ret_ptr) {
     ret_ptr->int_value = arg_ptr[0].int_value == arg_ptr[1].int_value;
 }
 
-void int_add_fn(size_t arg_len, Value *arg_ptr, Value *ret_ptr) {
+void int_add_fn(int arg_len, Value *arg_ptr, Value *ret_ptr) {
     assert(arg_len == 2);
     assert(arg_ptr[0].type.kind == INT);
     assert(arg_ptr[1].type.kind == INT);
@@ -373,7 +373,7 @@ void int_add_fn(size_t arg_len, Value *arg_ptr, Value *ret_ptr) {
     ret_ptr->int_value = arg_ptr[0].int_value + arg_ptr[1].int_value;
 }
 
-void int_sub_fn(size_t arg_len, Value *arg_ptr, Value *ret_ptr) {
+void int_sub_fn(int arg_len, Value *arg_ptr, Value *ret_ptr) {
     assert(arg_len == 2);
     assert(arg_ptr[0].type.kind == INT);
     assert(arg_ptr[1].type.kind == INT);
@@ -388,7 +388,7 @@ int main(int argc, const char **argv) {
         Data file_data = { .ptr = NULL, .length = 0 };
 
         int int_eq_offset = 0;
-        size_t int_eq_section = begin_declare_section(&file_data);
+        int int_eq_section = begin_declare_section(&file_data);
         Symbol *int_eq = alloc(&file_data, ASIZEOF(Symbol));
         int_eq->ret.kind = INT;
         int_eq->args_len = 2;
@@ -398,7 +398,7 @@ int main(int argc, const char **argv) {
         end_section(&file_data, int_eq_section);
 
         int int_add_offset = 1;
-        size_t int_add_section = begin_declare_section(&file_data);
+        int int_add_section = begin_declare_section(&file_data);
         Symbol *int_add = alloc(&file_data, ASIZEOF(Symbol));
         int_add->ret.kind = INT;
         int_add->args_len = 2;
@@ -408,7 +408,7 @@ int main(int argc, const char **argv) {
         end_section(&file_data, int_add_section);
 
         int int_sub_offset = 2;
-        size_t int_sub_section = begin_declare_section(&file_data);
+        int int_sub_section = begin_declare_section(&file_data);
         Symbol *int_sub = alloc(&file_data, ASIZEOF(Symbol));
         int_sub->ret.kind = INT;
         int_sub->args_len = 2;
@@ -418,8 +418,8 @@ int main(int argc, const char **argv) {
         end_section(&file_data, int_sub_section);
 
         int ack_offset = 3;
-        size_t ack_declare_section = begin_declare_section(&file_data);
-        size_t ack_byte_offset = file_data.length;
+        int ack_declare_section = begin_declare_section(&file_data);
+        int ack_byte_offset = file_data.length;
         Symbol *ack = alloc(&file_data, ASIZEOF(Symbol));
         ack->ret.kind = INT;
         ack->args_len = 2;
@@ -428,9 +428,9 @@ int main(int argc, const char **argv) {
         add_type_int(&file_data);
         end_section(&file_data, ack_declare_section);
 
-        size_t ack_define_section = begin_define_section(&file_data, ack_offset);
-        size_t block_offsets_offset = alloc_block_offsets(&file_data, 5);
-    #define BLOCK_OFFSETS ((size_t*)((char*) file_data.ptr + block_offsets_offset))
+        int ack_define_section = begin_define_section(&file_data, ack_offset);
+        int block_offsets_offset = alloc_block_offsets(&file_data, 5);
+    #define BLOCK_OFFSETS ((int*)((char*) file_data.ptr + block_offsets_offset))
         // block 0
         start_block(&file_data, ack_byte_offset, &BLOCK_OFFSETS[0], 2);
         add_type_int(&file_data);

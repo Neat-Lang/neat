@@ -167,7 +167,10 @@ void resolve_bc(Environment *environment, const char *name, void *block_data) {
     entry->block_data = block_data;
 }
 
-void call(Environment *environment, SymbolEntry *entry, size_t values_len, Value *values_ptr, Value *ret_ptr) {
+void call(
+    Environment *environment, SymbolEntry *entry, size_t values_len,
+    Value *restrict values_ptr, Value *restrict ret_ptr)
+{
     assert(entry->symbol->args_len == values_len);
     assert(entry->kind != UNRESOLVED_SYMBOL);
 
@@ -177,19 +180,19 @@ void call(Environment *environment, SymbolEntry *entry, size_t values_len, Value
     }
     assert(entry->kind == BC_SYMBOL);
 
-    size_t *block_offsets = (size_t*) entry->block_data;
+    size_t *restrict block_offsets = (size_t*) entry->block_data;
     int blkid = 0; // entry
 
     while (true) {
-        Block *blk = (Block*)((char*) entry->symbol + block_offsets[blkid]);
+        Block *restrict blk = (Block*)((char*) entry->symbol + block_offsets[blkid]);
         // printf(" blk %i (%li) %p\n", blkid, blk->slot_types_len, (void*) blk);
-        Type *type_cur = (Type*)((char*) blk + ASIZEOF(Block));
+        Type *restrict type_cur = (Type*)((char*) blk + ASIZEOF(Block));
         for (int i = 0; i < blk->slot_types_len; i++) {
             type_cur = (Type*)((char*) type_cur + ASIZEOF(Type)); // TODO handle types with dynamic size
         }
         // fill in lazily as you walk instructions
         Value values[blk->slot_types_len];
-        BaseInstr *instr = (BaseInstr*) type_cur; // instrs start after types
+        BaseInstr *restrict instr = (BaseInstr*) type_cur; // instrs start after types
         Value *current_value = values;
         for (int instr_id = 0; instr_id < blk->slot_types_len; instr_id++) {
             // printf("  instr %i = %i %p\n", instr_id, instr->kind, (void*) instr);
@@ -205,29 +208,27 @@ void call(Environment *environment, SymbolEntry *entry, size_t values_len, Value
                 {
                     CallInstr *callinstr = (CallInstr*) instr;
                     Value call_args[callinstr->args_num];
+                    ArgExpr *cur_arg = (ArgExpr*)((char*) callinstr + ASIZEOF(CallInstr));
                     for (int arg_id = 0; arg_id < callinstr->args_num; arg_id++) {
-                        ArgExpr arg_expr = ((ArgExpr*)(callinstr + 1))[arg_id];
-                        switch (arg_expr.kind) {
+                        switch (cur_arg->kind) {
                             case INT_LITERAL_ARG:
                                 call_args[arg_id].type.kind = INT;
-                                call_args[arg_id].int_value = arg_expr.value;
+                                call_args[arg_id].int_value = cur_arg->value;
                                 break;
                             case SLOT_ARG:
-                                call_args[arg_id] = values[arg_expr.value];
+                                call_args[arg_id] = values[cur_arg->value];
                                 break;
                             default:
                                 assert(false);
                         }
+                        cur_arg = (ArgExpr*)((char*) cur_arg + ASIZEOF(ArgExpr));;
                     }
+                    instr = (BaseInstr*) cur_arg;
                     SymbolEntry *entry = &environment->entries.ptr[callinstr->symbol_offset];
                     // char *symbol_name = (char*) entry->symbol + ASIZEOF(Symbol);
                     // printf("    call %s(%i, %i)\n", symbol_name, call_args[0].int_value, call_args[1].int_value);
                     call(environment, entry, callinstr->args_num, call_args, current_value);
                     assert(current_value->type.kind == INT);
-                    instr = (BaseInstr*) (
-                        (char*) instr
-                        + ASIZEOF(CallInstr)
-                        + ASIZEOF(ArgExpr) * callinstr->args_num);
                 }
                 break;
                 default:

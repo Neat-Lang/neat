@@ -1,4 +1,3 @@
-#include <alloca.h>
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -185,34 +184,27 @@ void call(Environment *environment, SymbolEntry *entry, size_t values_len, Value
         Block *blk = (Block*)((char*) entry->symbol + block_offsets[blkid]);
         // printf(" blk %i (%li) %p\n", blkid, blk->slot_types_len, (void*) blk);
         Type *type_cur = (Type*)((char*) blk + ASIZEOF(Block));
-        int regsz = 0;
-        Type **types = alloca(sizeof(Type*) * blk->slot_types_len);
         for (int i = 0; i < blk->slot_types_len; i++) {
-            types[i] = type_cur;
-            if (type_cur->kind == INT) {
-                regsz += 4;
-            }
-            type_cur = (Type*)((char*) type_cur + ASIZEOF(Type)); // TODO
+            type_cur = (Type*)((char*) type_cur + ASIZEOF(Type)); // TODO handle types with dynamic size
         }
-        char *blkreg = alloca(regsz);
         // fill in lazily as you walk instructions
-        Value *values = alloca(blk->slot_types_len * ASIZEOF(Value));
+        Value values[blk->slot_types_len];
         BaseInstr *instr = (BaseInstr*) type_cur; // instrs start after types
+        Value *current_value = values;
         for (int instr_id = 0; instr_id < blk->slot_types_len; instr_id++) {
             // printf("  instr %i = %i %p\n", instr_id, instr->kind, (void*) instr);
-            Type *type = types[instr_id];
             switch (instr->kind) {
                 case INSTR_ARG:
                 {
                     ArgInstr *arginstr = (ArgInstr*) instr;
-                    *(int*) blkreg = values_ptr[arginstr->index].int_value;
+                    *current_value = values_ptr[arginstr->index];
                     instr = (BaseInstr*) ((char*) instr + ASIZEOF(ArgInstr));
                 }
                 break;
                 case INSTR_CALL:
                 {
                     CallInstr *callinstr = (CallInstr*) instr;
-                    Value *call_args = alloca(callinstr->args_num * ASIZEOF(Value));
+                    Value call_args[callinstr->args_num];
                     for (int arg_id = 0; arg_id < callinstr->args_num; arg_id++) {
                         ArgExpr arg_expr = ((ArgExpr*)(callinstr + 1))[arg_id];
                         switch (arg_expr.kind) {
@@ -230,10 +222,8 @@ void call(Environment *environment, SymbolEntry *entry, size_t values_len, Value
                     SymbolEntry *entry = &environment->entries.ptr[callinstr->symbol_offset];
                     // char *symbol_name = (char*) entry->symbol + ASIZEOF(Symbol);
                     // printf("    call %s(%i, %i)\n", symbol_name, call_args[0].int_value, call_args[1].int_value);
-                    Value call_ret;
-                    call(environment, entry, callinstr->args_num, call_args, &call_ret);
-                    assert(call_ret.type.kind == INT);
-                    *(int*) blkreg = call_ret.int_value;
+                    call(environment, entry, callinstr->args_num, call_args, current_value);
+                    assert(current_value->type.kind == INT);
                     instr = (BaseInstr*) (
                         (char*) instr
                         + ASIZEOF(CallInstr)
@@ -243,11 +233,7 @@ void call(Environment *environment, SymbolEntry *entry, size_t values_len, Value
                 default:
                     assert(false);
             }
-            if (type->kind == INT) {
-                values[instr_id].type.kind = INT;
-                values[instr_id].int_value = *(int*) blkreg;
-                blkreg += 4;
-            }
+            current_value = (Value*)((char*) current_value + ASIZEOF(Value));
         }
         // printf("  ~instr %i\n", instr->kind);
         switch (instr->kind) {
@@ -540,7 +526,7 @@ int main(int argc, const char **argv) {
 #undef BLOCK_OFFSETS
     SymbolEntry *entry = find_symbol(&environment, "ack");
     Value ret;
-    Value *args = alloca(sizeof(Value) * 2);
+    Value args[2];
     args[0].type.kind = INT;
     args[0].int_value = 3;
     args[1].type.kind = INT;

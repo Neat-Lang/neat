@@ -35,10 +35,11 @@ void resolve_c(Environment *environment, const char *name, callptr_t callptr) {
     entry->callptr = callptr;
 }
 
-void resolve_bc(Environment *environment, const char *name, void *block_data) {
+void resolve_bc(Environment *environment, const char *name, void *block_data, int slots) {
     SymbolEntry *entry = find_symbol(environment, name);
     const char *symbol_name = entry->symbol->name;
     entry->kind = BC_SYMBOL;
     entry->arg_types = (Type*) WORD_ALIGN((size_t)(symbol_name + strlen(symbol_name) + 1));
     entry->block_data = block_data;
+    entry->slots = slots;
 }

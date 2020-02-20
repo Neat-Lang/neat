@@ -25,27 +25,30 @@ void call(
     }
     assert(entry->kind == BC_SYMBOL);
 
-    int *restrict block_offsets = (int*) entry->block_data;
+    int num_slots = entry->slots;
+    int *block_offsets = (int*) ((char*) entry->block_data);
+
     int blkid = 0; // entry
 
+    // fill in lazily as you walk instructions
+    Value values[num_slots];
+
     while (true) {
-        Block *restrict blk = (Block*)((char*) entry->symbol + block_offsets[blkid]);
-        // printf(" blk %i (%i) %p\n", blkid, blk->slot_types_len, (void*) blk);
-        Type *restrict type_cur = (Type*)((char*) blk + ASIZEOF(Block));
-        for (int i = 0; i < blk->slot_types_len; i++) {
-            type_cur = (Type*)((char*) type_cur + ASIZEOF(Type)); // TODO handle types with dynamic size
-        }
-        // fill in lazily as you walk instructions
-        Value values[blk->slot_types_len];
-        BaseInstr *restrict instr = (BaseInstr*) type_cur; // instrs start after types
-        Value *current_value = values;
-        for (int instr_id = 0; instr_id < blk->slot_types_len; instr_id++) {
-            // printf("  instr %i = %i %p\n", instr_id, instr->kind, (void*) instr);
+restart_block_loop:;
+        char *start = ((char*) block_offsets + block_offsets[blkid]);
+        int start_slot = *(int*) start;
+        int cur_slot = start_slot;
+        BaseInstr *restrict instr = (BaseInstr*) (start + ASIZEOF(int));
+        // printf(" blk %i (%p) start %i\n", blkid, (void*) instr, start_slot);
+        Value *current_value = &values[start_slot];
+        while (true) {
+            // printf("  instr %i @%lu\n", instr->kind, (char*) instr - (char*) block_offsets);
             switch (instr->kind) {
                 case INSTR_ARG:
                 {
                     ArgInstr *arginstr = (ArgInstr*) instr;
                     *current_value = values_ptr[arginstr->index];
+                    // printf("    %%%i = arg(%i) = %i\n", cur_slot, arginstr->index, current_value->int_value);
                     instr = (BaseInstr*) ((char*) instr + ASIZEOF(ArgInstr));
                 }
                 break;
@@ -57,10 +60,12 @@ void call(
                     for (int arg_id = 0; arg_id < callinstr->args_num; arg_id++) {
                         switch (cur_arg->kind) {
                             case INT_LITERAL_ARG:
+                                // printf("      -literal %i\n", cur_arg->value);
                                 call_args[arg_id].type.kind = INT;
                                 call_args[arg_id].int_value = cur_arg->value;
                                 break;
                             case SLOT_ARG:
+                                // printf("      -slot %i\n", cur_arg->value);
                                 call_args[arg_id] = values[cur_arg->value];
                                 break;
                             default:
@@ -71,37 +76,32 @@ void call(
                     instr = (BaseInstr*) cur_arg;
                     SymbolEntry *entry = &environment->entries.ptr[callinstr->symbol_offset];
                     // char *symbol_name = (char*) entry->symbol + ASIZEOF(Symbol);
-                    // printf("    call %s(%i, %i)\n", symbol_name, call_args[0].int_value, call_args[1].int_value);
+                    // printf("    %%%i = call %s(%i, %i)\n", cur_slot, symbol_name, call_args[0].int_value, call_args[1].int_value);
                     call(environment, entry, callinstr->args_num, call_args, current_value);
                     assert(current_value->type.kind == INT);
                 }
                 break;
+                case INSTR_TESTBRANCH:
+                {
+                    TestBranchInstr *tbr_instr = (TestBranchInstr*) instr;
+                    Value slot = values[tbr_instr->slot];
+                    assert(slot.type.kind == INT);
+                    blkid = (slot.int_value) ? tbr_instr->then_blk : tbr_instr->else_blk;
+                }
+                goto restart_block_loop;
+                case INSTR_RETURN:
+                {
+                    ReturnInstr *ret_instr = (ReturnInstr*) instr;
+                    Value slot = values[ret_instr->slot];
+                    *ret_ptr = slot;
+                    return;
+                }
                 default:
+                    fprintf(stderr, "what is instr %i\n", instr->kind);
                     assert(false);
             }
             current_value = (Value*)((char*) current_value + ASIZEOF(Value));
-        }
-        // printf("  ~instr %i\n", instr->kind);
-        switch (instr->kind) {
-            case INSTR_TESTBRANCH:
-            {
-                TestBranchInstr *tbr_instr = (TestBranchInstr*) instr;
-                Value slot = values[tbr_instr->slot];
-                assert(slot.type.kind == INT);
-                blkid = (slot.int_value) ? tbr_instr->then_blk : tbr_instr->else_blk;
-            }
-            break;
-            case INSTR_RETURN:
-            {
-                ReturnInstr *ret_instr = (ReturnInstr*) instr;
-                Value slot = values[ret_instr->slot];
-                *ret_ptr = slot;
-                return;
-            }
-            break;
-            default:
-                fprintf(stderr, "what is instr %i\n", instr->kind);
-                assert(false);
+            cur_slot ++;
         }
     }
 }
@@ -152,7 +152,7 @@ int main(int argc, const char **argv) {
         else if (section->kind == DEFINE_SECTION) {
             DefineSection *define_section = (DefineSection*) section;
             Symbol *symbol = environment.entries.ptr[define_section->declaration_index].symbol;
-            resolve_bc(&environment, symbol->name, (char*) define_section + ASIZEOF(DefineSection));
+            resolve_bc(&environment, symbol->name, (char*) define_section + ASIZEOF(DefineSection), define_section->slots);
         }
         section = (Section*)((char*) section + section->length);
     }

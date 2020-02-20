@@ -25,7 +25,8 @@ typedef struct {
         callptr_t callptr;
         struct {
             Type *arg_types; // cache for offset off symbol
-            void *block_data; // blocks_len, [block offsets : int], [body : Block]
+            void *block_data; // [block offsets : int], [body : {int start_slot, instrs}]
+            int slots;
         };
     };
 } SymbolEntry;
@@ -45,4 +46,4 @@ SymbolEntry *find_symbol(Environment *environment, const char *name);
 
 void resolve_c(Environment *environment, const char *name, callptr_t callptr);
 
-void resolve_bc(Environment *environment, const char *name, void *block_data);
+void resolve_bc(Environment *environment, const char *name, void *block_data, int slots);

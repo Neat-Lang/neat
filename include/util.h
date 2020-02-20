@@ -26,12 +26,14 @@ typedef struct {
 typedef struct {
     Section base;
     int declaration_index;
+    int slots; // number of value slots
 } DefineSection;
 
 typedef struct {
-    int slot_types_len;
-    // and then: [slot type: Type], [Instr]
-} Block;
+    Data *data; // main file (where the types will be written)
+    int start; // start of this section
+    int blocks_start; // start of the blocks data (offsets)
+} DefineSectionState;
 
 typedef struct {
     Type type;

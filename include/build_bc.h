@@ -23,9 +23,9 @@ void add_string(Data *data, const char* text);
 
 void add_type_int(Data *data);
 
-void add_arg_instr(DefineSectionState *state, int index);
+int add_arg_instr(DefineSectionState *state, int index);
 
-void start_call_instr(DefineSectionState *state, int offset, int args);
+int start_call_instr(DefineSectionState *state, int offset, int args);
 
 void add_call_slot_arg(DefineSectionState *state, int slotid);
 
@@ -35,4 +35,4 @@ void add_tbr_instr(DefineSectionState *state, int slot, int blkthen, int blkelse
 
 void add_ret_instr(DefineSectionState *state, int slot);
 
-void start_block(DefineSectionState *state, int symbol_base_offset, int *block_offset_ptr, int slots);
+void start_block(DefineSectionState *state, int symbol_base_offset, int *block_offset_ptr);

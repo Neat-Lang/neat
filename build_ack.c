@@ -51,79 +51,82 @@ int main(int argc, const char **argv) {
     // TODO refactor to be at the end? or something, so we can progressively add blocks
     int block_offsets_offset = alloc_offsets(&file_data, 5);
 #define BLOCK_OFFSETS ((int*)((char*) file_data.ptr + block_offsets_offset))
-    // block 0
-    start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[0], 2);
+    { // block 0
+        start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[0]);
+        int arg0 = add_arg_instr(&ack_define_section, 0); // %0 = arg(0)
 
-    // TODO make return slot ids
-    add_arg_instr(&ack_define_section, 0); // %0 = arg(0)
+        int call = start_call_instr(&ack_define_section, int_eq_offset, 2); // %1 = %0 == 0
+        add_call_slot_arg(&ack_define_section, arg0);
+        add_call_int_arg(&ack_define_section, 0);
 
-    start_call_instr(&ack_define_section, int_eq_offset, 2); // %1 = %0 == 0
-    add_call_slot_arg(&ack_define_section, 0);
-    add_call_int_arg(&ack_define_section, 0);
+        add_tbr_instr(&ack_define_section, call, 1, 2);
+    }
 
-    add_tbr_instr(&ack_define_section, 1, 1, 2);
+    { // block 1
+        start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[1]);
 
-    // block 1
-    start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[1], 2);
+        int arg1 = add_arg_instr(&ack_define_section, 1); // %2 = arg(1)
 
-    add_arg_instr(&ack_define_section, 1); // %2 = arg(1)
+        int call = start_call_instr(&ack_define_section, int_add_offset, arg1); // %3 = %2 + 1
+        add_call_slot_arg(&ack_define_section, arg1);
+        add_call_int_arg(&ack_define_section, 1);
 
-    start_call_instr(&ack_define_section, int_add_offset, 2); // %3 = %2 + 1
-    add_call_slot_arg(&ack_define_section, 2);
-    add_call_int_arg(&ack_define_section, 1);
+        add_ret_instr(&ack_define_section, call); // ret %3
+    }
 
-    add_ret_instr(&ack_define_section, 3); // ret %3
+    { // block 2
+        start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[2]);
 
-    // block 2
-    start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[2], 2);
+        int arg1 = add_arg_instr(&ack_define_section, 1); // %4 = arg(1)
 
-    add_arg_instr(&ack_define_section, 1); // %4 = arg(1)
+        int call = start_call_instr(&ack_define_section, int_eq_offset, 2); // %5 = %4 == 0
+        add_call_slot_arg(&ack_define_section, arg1);
+        add_call_int_arg(&ack_define_section, 0);
 
-    start_call_instr(&ack_define_section, int_eq_offset, 2); // %5 = %4 == 0
-    add_call_slot_arg(&ack_define_section, 4);
-    add_call_int_arg(&ack_define_section, 0);
+        add_tbr_instr(&ack_define_section, call, 3, 4);
+    }
 
-    add_tbr_instr(&ack_define_section, 5, 3, 4);
+    { // block 3
+        start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[3]);
 
-    // block 3
-    start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[3], 3);
+        int arg0 = add_arg_instr(&ack_define_section, 0); // %6 = arg(0)
 
-    add_arg_instr(&ack_define_section, 0); // %6 = arg(0)
+        int call1 = start_call_instr(&ack_define_section, int_sub_offset, 2); // %7 = %6 - 1
+        add_call_slot_arg(&ack_define_section, arg0);
+        add_call_int_arg(&ack_define_section, 1);
 
-    start_call_instr(&ack_define_section, int_sub_offset, 2); // %7 = %6 - 1
-    add_call_slot_arg(&ack_define_section, 6);
-    add_call_int_arg(&ack_define_section, 1);
+        int call2 = start_call_instr(&ack_define_section, ack_offset, 2); // %8 = ack(%7, 1)
+        add_call_slot_arg(&ack_define_section, call1);
+        add_call_int_arg(&ack_define_section, 1);
 
-    start_call_instr(&ack_define_section, ack_offset, 2); // %8 = ack(%7, 1)
-    add_call_slot_arg(&ack_define_section, 7);
-    add_call_int_arg(&ack_define_section, 1);
+        add_ret_instr(&ack_define_section, call2);
+    }
 
-    add_ret_instr(&ack_define_section, 8);
+    { // block 4
+        start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[4]);
 
-    // block 4
-    start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[4], 6);
+        int arg1 = add_arg_instr(&ack_define_section, 1); // %9 = arg(1)
 
-    add_arg_instr(&ack_define_section, 1); // %9 = arg(1)
+        int call1 = start_call_instr(&ack_define_section, int_sub_offset, 2); // %10 = %9 - 1
+        add_call_slot_arg(&ack_define_section, arg1);
+        add_call_int_arg(&ack_define_section, 1);
 
-    start_call_instr(&ack_define_section, int_sub_offset, 2); // %10 = %9 - 1
-    add_call_slot_arg(&ack_define_section, 9);
-    add_call_int_arg(&ack_define_section, 1);
+        int arg0 = add_arg_instr(&ack_define_section, 0); // %11 = arg(0)
 
-    add_arg_instr(&ack_define_section, 0); // %11 = arg(0)
+        int call2 = start_call_instr(&ack_define_section, ack_offset, 2); // %12 = ack(%11, %10)
+        add_call_slot_arg(&ack_define_section, arg0);
+        add_call_slot_arg(&ack_define_section, call1);
 
-    start_call_instr(&ack_define_section, ack_offset, 2); // %12 = ack(%11, %10)
-    add_call_slot_arg(&ack_define_section, 11);
-    add_call_slot_arg(&ack_define_section, 10);
+        int call3 = start_call_instr(&ack_define_section, int_sub_offset, 2); // %13 = %11 - 1
+        add_call_slot_arg(&ack_define_section, arg0);
+        add_call_int_arg(&ack_define_section, 1);
 
-    start_call_instr(&ack_define_section, int_sub_offset, 2); // %13 = %11 - 1
-    add_call_slot_arg(&ack_define_section, 11);
-    add_call_int_arg(&ack_define_section, 1);
+        int call4 = start_call_instr(&ack_define_section, ack_offset, 2); // %14 = ack(%13, %12)
+        add_call_slot_arg(&ack_define_section, call3);
+        add_call_slot_arg(&ack_define_section, call2);
 
-    start_call_instr(&ack_define_section, ack_offset, 2); // %14 = ack(%13, %12)
-    add_call_slot_arg(&ack_define_section, 13);
-    add_call_slot_arg(&ack_define_section, 12);
-
-    add_ret_instr(&ack_define_section, 14); // ret %14
+        add_ret_instr(&ack_define_section, call4); // ret %14
+    }
 #undef TYPE_OFFSETS
 #undef BLOCK_OFFSETS
     end_define_section(ack_define_section);

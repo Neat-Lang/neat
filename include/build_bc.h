@@ -35,4 +35,4 @@ void add_tbr_instr(DefineSectionState *state, int slot, int blkthen, int blkelse
 
 void add_ret_instr(DefineSectionState *state, int slot);
 
-void start_block(DefineSectionState *state, int symbol_base_offset, int *block_offset_ptr);
+void start_block(DefineSectionState *state, int symbol_base_offset);

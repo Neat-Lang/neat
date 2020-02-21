@@ -19,6 +19,7 @@ DefineSectionState begin_define_section(Data *data, size_t index) {
 
     result.start = data->length;
     result.data = data;
+    result.num_blocks = 0;
 
     DefineSection *define_section = alloc(data, ASIZEOF(DefineSection));
     define_section->base.kind = DEFINE_SECTION;
@@ -38,6 +39,14 @@ void end_declare_section(Data *data, size_t start) {
 }
 
 void end_define_section(DefineSectionState state) {
+    DefineSection *define_section = (DefineSection*)((char*) state.data->ptr + state.start);
+    define_section->block_offsets_start = state.data->length - state.blocks_start;
+
+    int *block_offsets = alloc(state.data, sizeof(int) * state.num_blocks);
+    for (int i = 0; i < state.num_blocks; i++) {
+        block_offsets[i] = ((int*) state.offsets_data.ptr)[i];
+    }
+
     end_declare_section(state.data, state.start);
 }
 
@@ -52,8 +61,7 @@ void add_string(Data *data, const char* text) {
     strcpy(target, text);
 }
 
-static int increment_slot(DefineSectionState *state)
-{
+static int increment_slot(DefineSectionState *state) {
     DefineSection *define_section = (DefineSection*)((char*) state->data->ptr + state->start);
 
     return define_section->slots++;
@@ -100,17 +108,13 @@ void add_ret_instr(DefineSectionState *state, int slot) {
     ret_instr->slot = slot;
 }
 
-size_t alloc_offsets(Data *data, int num_offsets) {
-    size_t offset = data->length;
-    alloc(data, sizeof(int) * num_offsets);
-    return offset;
-}
-
-void start_block(DefineSectionState *state, int symbol_base_offset, int *block_offset_ptr) {
+void start_block(DefineSectionState *state, int symbol_base_offset) {
     DefineSection *define_section = (DefineSection*)((char*) state->data->ptr + state->start);
     state->data->length = WORD_ALIGN(state->data->length);
 
+    int *block_offset_ptr = alloc(&state->offsets_data, sizeof(int));
     *block_offset_ptr = state->data->length - state->blocks_start;
+    state->num_blocks++;
 
     int *start_slot = (int*) alloc(state->data, ASIZEOF(int));
 

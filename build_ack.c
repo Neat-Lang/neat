@@ -48,11 +48,8 @@ int main(int argc, const char **argv) {
     end_declare_section(&file_data, ack_declare_section);
 
     DefineSectionState ack_define_section = begin_define_section(&file_data, ack_offset);
-    // TODO refactor to be at the end? or something, so we can progressively add blocks
-    int block_offsets_offset = alloc_offsets(&file_data, 5);
-#define BLOCK_OFFSETS ((int*)((char*) file_data.ptr + block_offsets_offset))
     { // block 0
-        start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[0]);
+        start_block(&ack_define_section, ack_byte_offset);
         int arg0 = add_arg_instr(&ack_define_section, 0); // %0 = arg(0)
 
         int call = start_call_instr(&ack_define_section, int_eq_offset, 2); // %1 = %0 == 0
@@ -63,7 +60,7 @@ int main(int argc, const char **argv) {
     }
 
     { // block 1
-        start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[1]);
+        start_block(&ack_define_section, ack_byte_offset);
 
         int arg1 = add_arg_instr(&ack_define_section, 1); // %2 = arg(1)
 
@@ -75,7 +72,7 @@ int main(int argc, const char **argv) {
     }
 
     { // block 2
-        start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[2]);
+        start_block(&ack_define_section, ack_byte_offset);
 
         int arg1 = add_arg_instr(&ack_define_section, 1); // %4 = arg(1)
 
@@ -87,7 +84,7 @@ int main(int argc, const char **argv) {
     }
 
     { // block 3
-        start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[3]);
+        start_block(&ack_define_section, ack_byte_offset);
 
         int arg0 = add_arg_instr(&ack_define_section, 0); // %6 = arg(0)
 
@@ -103,7 +100,7 @@ int main(int argc, const char **argv) {
     }
 
     { // block 4
-        start_block(&ack_define_section, ack_byte_offset, &BLOCK_OFFSETS[4]);
+        start_block(&ack_define_section, ack_byte_offset);
 
         int arg1 = add_arg_instr(&ack_define_section, 1); // %9 = arg(1)
 
@@ -127,8 +124,6 @@ int main(int argc, const char **argv) {
 
         add_ret_instr(&ack_define_section, call4); // ret %14
     }
-#undef TYPE_OFFSETS
-#undef BLOCK_OFFSETS
     end_define_section(ack_define_section);
 
     FILE *bcfile = fopen("ack.bc", "w");

@@ -108,7 +108,7 @@ void add_ret_instr(DefineSectionState *state, int slot) {
     ret_instr->slot = slot;
 }
 
-void start_block(DefineSectionState *state, int symbol_base_offset) {
+void start_block(DefineSectionState *state) {
     DefineSection *define_section = (DefineSection*)((char*) state->data->ptr + state->start);
     state->data->length = WORD_ALIGN(state->data->length);
 

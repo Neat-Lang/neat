@@ -38,7 +38,6 @@ int main(int argc, const char **argv) {
 
     int ack_offset = 3;
     int ack_declare_section = begin_declare_section(&file_data);
-    int ack_byte_offset = file_data.length;
     Symbol *ack = alloc(&file_data, ASIZEOF(Symbol));
     ack->ret.kind = INT;
     ack->args_len = 2;
@@ -49,7 +48,7 @@ int main(int argc, const char **argv) {
 
     DefineSectionState ack_define_section = begin_define_section(&file_data, ack_offset);
     { // block 0
-        start_block(&ack_define_section, ack_byte_offset);
+        start_block(&ack_define_section);
         int arg0 = add_arg_instr(&ack_define_section, 0); // %0 = arg(0)
 
         int call = start_call_instr(&ack_define_section, int_eq_offset, 2); // %1 = %0 == 0
@@ -60,7 +59,7 @@ int main(int argc, const char **argv) {
     }
 
     { // block 1
-        start_block(&ack_define_section, ack_byte_offset);
+        start_block(&ack_define_section);
 
         int arg1 = add_arg_instr(&ack_define_section, 1); // %2 = arg(1)
 
@@ -72,7 +71,7 @@ int main(int argc, const char **argv) {
     }
 
     { // block 2
-        start_block(&ack_define_section, ack_byte_offset);
+        start_block(&ack_define_section);
 
         int arg1 = add_arg_instr(&ack_define_section, 1); // %4 = arg(1)
 
@@ -84,7 +83,7 @@ int main(int argc, const char **argv) {
     }
 
     { // block 3
-        start_block(&ack_define_section, ack_byte_offset);
+        start_block(&ack_define_section);
 
         int arg0 = add_arg_instr(&ack_define_section, 0); // %6 = arg(0)
 
@@ -100,7 +99,7 @@ int main(int argc, const char **argv) {
     }
 
     { // block 4
-        start_block(&ack_define_section, ack_byte_offset);
+        start_block(&ack_define_section);
 
         int arg1 = add_arg_instr(&ack_define_section, 1); // %9 = arg(1)
 

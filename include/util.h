@@ -12,6 +12,10 @@ typedef struct {
     size_t length;
 } Data;
 
+Data *alloc_data();
+
+void free_data(Data *data);
+
 typedef enum {
     DECLARE_SECTION,
     DEFINE_SECTION
@@ -31,8 +35,8 @@ typedef struct {
 } DefineSection;
 
 typedef struct {
-    Data *data; // main file (where the types will be written)
-    Data offsets_data; // [BlockData] + 1 for full size
+    Data *main_data;
+    Data *offsets_data; // [BlockData] + 1 for full size
     int start; // start of this section in the file
     int num_blocks; // number of blocks
     int num_registers; // number of registers used by the currently building section.

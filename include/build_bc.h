@@ -11,11 +11,11 @@ void *alloc(Data *data, size_t size);
 
 size_t begin_declare_section(Data *data);
 
-DefineSectionState begin_define_section(Data *data, size_t index);
+DefineSectionState *begin_define_section(size_t index);
 
 void end_declare_section(Data *data, size_t start);
 
-void end_define_section(DefineSectionState state);
+void end_define_section(Data *data, DefineSectionState *state);
 
 size_t alloc_offsets(Data *data, int num_offsets);
 

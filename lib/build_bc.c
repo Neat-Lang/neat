@@ -96,12 +96,22 @@ void add_call_int_arg(DefineSectionState *state, int value) {
     arg_expr->value = value;
 }
 
-void add_tbr_instr(DefineSectionState *state, int reg, int blkthen, int blkelse) {
+int add_tbr_instr(DefineSectionState *state, int reg) {
+    int offset = state->data->length;
     TestBranchInstr *tbr_instr = alloc(state->data, ASIZEOF(TestBranchInstr));
     tbr_instr->base.kind = INSTR_TESTBRANCH;
     tbr_instr->reg = reg;
-    tbr_instr->then_blk = blkthen;
-    tbr_instr->else_blk = blkelse;
+    return offset;
+}
+
+void tbr_resolve_then(DefineSectionState *state, int offset, int thenblk) {
+    TestBranchInstr *tbr_instr = (TestBranchInstr*)(state->data->ptr + offset);
+    tbr_instr->then_blk = thenblk;
+}
+
+void tbr_resolve_else(DefineSectionState *state, int offset, int elseblk) {
+    TestBranchInstr *tbr_instr = (TestBranchInstr*)(state->data->ptr + offset);
+    tbr_instr->else_blk = elseblk;
 }
 
 void add_ret_instr(DefineSectionState *state, int reg) {
@@ -110,12 +120,12 @@ void add_ret_instr(DefineSectionState *state, int reg) {
     ret_instr->reg = reg;
 }
 
-void start_block(DefineSectionState *state) {
+int start_block(DefineSectionState *state) {
     state->data->length = WORD_ALIGN(state->data->length);
 
     BlockData *block_data = alloc(&state->offsets_data, sizeof(BlockData));
     block_data->block_offset = state->data->length - state->start;
     block_data->register_offset = state->num_registers;
     block_data->regfile_offset = state->regfile_size;
-    state->num_blocks++;
+    return state->num_blocks++;
 }

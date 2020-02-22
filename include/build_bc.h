@@ -31,8 +31,12 @@ void add_call_reg_arg(DefineSectionState *state, int reg);
 
 void add_call_int_arg(DefineSectionState *state, int value);
 
-void add_tbr_instr(DefineSectionState *state, int reg, int blkthen, int blkelse);
+int add_tbr_instr(DefineSectionState *state, int reg);
+
+void tbr_resolve_then(DefineSectionState *state, int tbr_offset, int block);
+
+void tbr_resolve_else(DefineSectionState *state, int tbr_offset, int block);
 
 void add_ret_instr(DefineSectionState *state, int reg);
 
-void start_block(DefineSectionState *state);
+int start_block(DefineSectionState *state);

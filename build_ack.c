@@ -47,7 +47,8 @@ int main(int argc, const char **argv) {
     end_declare_section(&file_data, ack_declare_section);
 
     DefineSectionState ack_define_section = begin_define_section(&file_data, ack_offset);
-    { // block 0
+    int branch1;
+    {
         start_block(&ack_define_section);
         int arg0 = add_arg_instr(&ack_define_section, 0); // %0 = arg(0)
 
@@ -55,11 +56,13 @@ int main(int argc, const char **argv) {
         add_call_reg_arg(&ack_define_section, arg0);
         add_call_int_arg(&ack_define_section, 0);
 
-        add_tbr_instr(&ack_define_section, call, 1, 2);
+        branch1 = add_tbr_instr(&ack_define_section, call);
     }
 
-    { // block 1
-        start_block(&ack_define_section);
+    {
+        int then1 = start_block(&ack_define_section);
+
+        tbr_resolve_then(&ack_define_section, branch1, then1);
 
         int arg1 = add_arg_instr(&ack_define_section, 1); // %2 = arg(1)
 
@@ -70,8 +73,11 @@ int main(int argc, const char **argv) {
         add_ret_instr(&ack_define_section, call); // ret %3
     }
 
-    { // block 2
-        start_block(&ack_define_section);
+    int branch2;
+    {
+        int else1 = start_block(&ack_define_section);
+
+        tbr_resolve_else(&ack_define_section, branch1, else1);
 
         int arg1 = add_arg_instr(&ack_define_section, 1); // %4 = arg(1)
 
@@ -79,11 +85,13 @@ int main(int argc, const char **argv) {
         add_call_reg_arg(&ack_define_section, arg1);
         add_call_int_arg(&ack_define_section, 0);
 
-        add_tbr_instr(&ack_define_section, call, 3, 4);
+        branch2 = add_tbr_instr(&ack_define_section, call);
     }
 
-    { // block 3
-        start_block(&ack_define_section);
+    {
+        int then2 = start_block(&ack_define_section);
+
+        tbr_resolve_then(&ack_define_section, branch2, then2);
 
         int arg0 = add_arg_instr(&ack_define_section, 0); // %6 = arg(0)
 
@@ -98,8 +106,10 @@ int main(int argc, const char **argv) {
         add_ret_instr(&ack_define_section, call2);
     }
 
-    { // block 4
-        start_block(&ack_define_section);
+    {
+        int else2 = start_block(&ack_define_section);
+
+        tbr_resolve_else(&ack_define_section, branch2, else2);
 
         int arg1 = add_arg_instr(&ack_define_section, 1); // %9 = arg(1)
 

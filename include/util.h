@@ -39,14 +39,8 @@ typedef struct {
     int regfile_size; // data currently used for registers, in bytes.
 } DefineSectionState;
 
-// TODO offset from start of symbol?
 typedef struct {
     int block_offset; // offset of this block from start of section
     int register_offset; // index of first register
     int regfile_offset; // offset of first value from base of register file
 } BlockData;
-
-typedef struct {
-    Type type;
-    int int_value;
-} Value;

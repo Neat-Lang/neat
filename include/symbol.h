@@ -16,7 +16,7 @@ typedef enum {
     BC_SYMBOL,
 } SymbolKind;
 
-typedef void (*callptr_t)(int values_len, Value *values_ptr, Value *ret_ptr);
+typedef void (*callptr_t)(int values_len, void **values_ptr, void *ret_ptr);
 
 typedef struct {
     SymbolKind kind;

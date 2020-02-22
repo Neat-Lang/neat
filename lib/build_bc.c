@@ -65,11 +65,8 @@ void add_string(Data *data, const char* text) {
     strcpy(target, text);
 }
 
-#include <stdio.h>
-
 int add_arg_instr(DefineSectionState *state, int index) {
     ArgInstr *arg_instr = alloc(state->data, ASIZEOF(ArgInstr));
-    printf("arg%i at %li\n", index, (char*) arg_instr - ((char*) state->data->ptr + state->start + ASIZEOF(DefineSection)));
     arg_instr->base.kind = INSTR_ARG;
     arg_instr->index = index;
     // TODO
@@ -87,10 +84,10 @@ int start_call_instr(DefineSectionState *state, int offset, int args) {
     return state->num_registers++;
 }
 
-void add_call_slot_arg(DefineSectionState *state, int slotid) {
+void add_call_reg_arg(DefineSectionState *state, int reg) {
     ArgExpr *arg_expr = alloc(state->data, ASIZEOF(ArgExpr));
-    arg_expr->kind = SLOT_ARG;
-    arg_expr->value = slotid;
+    arg_expr->kind = REG_ARG;
+    arg_expr->value = reg;
 }
 
 void add_call_int_arg(DefineSectionState *state, int value) {
@@ -99,18 +96,18 @@ void add_call_int_arg(DefineSectionState *state, int value) {
     arg_expr->value = value;
 }
 
-void add_tbr_instr(DefineSectionState *state, int slot, int blkthen, int blkelse) {
+void add_tbr_instr(DefineSectionState *state, int reg, int blkthen, int blkelse) {
     TestBranchInstr *tbr_instr = alloc(state->data, ASIZEOF(TestBranchInstr));
     tbr_instr->base.kind = INSTR_TESTBRANCH;
-    tbr_instr->slot = slot;
+    tbr_instr->reg = reg;
     tbr_instr->then_blk = blkthen;
     tbr_instr->else_blk = blkelse;
 }
 
-void add_ret_instr(DefineSectionState *state, int slot) {
+void add_ret_instr(DefineSectionState *state, int reg) {
     ReturnInstr *ret_instr = alloc(state->data, ASIZEOF(ReturnInstr));
     ret_instr->base.kind = INSTR_RETURN;
-    ret_instr->slot = slot;
+    ret_instr->reg = reg;
 }
 
 void start_block(DefineSectionState *state) {

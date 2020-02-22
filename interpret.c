@@ -1,3 +1,4 @@
+#include <alloca.h>
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -14,7 +15,7 @@
 
 void call(
     Environment *environment, SymbolEntry *entry, int values_len,
-    Value *restrict values_ptr, Value *restrict ret_ptr)
+    void **restrict values_ptr, void *restrict ret_ptr)
 {
     assert(entry->symbol->args_len == values_len);
     assert(entry->kind != UNRESOLVED_SYMBOL);
@@ -31,102 +32,94 @@ void call(
     int blkid = 0; // entry
 
     // fill in lazily as you walk instructions
-    Value values[num_registers];
+    char *regfile = alloca(metadata[num_blocks].regfile_offset);
+    void *values[num_registers];
 
-    while (true) {
 restart_block_loop:;
-        int start_register = metadata[blkid].register_offset;
-        int cur_register = start_register;
-        BaseInstr *restrict instr = (BaseInstr*) ((char*) entry->section + metadata[blkid].block_offset);
-        // printf(" blk %i (%p) offset %i start %i\n", blkid, (void*) instr, metadata[blkid].block_offset, start_register);
-        Value *current_value = &values[start_register];
-        while (true) {
-            // printf("  instr %i @%lu\n", instr->kind, (char*) instr - block_data);
-            switch (instr->kind) {
-                case INSTR_ARG:
-                {
-                    ArgInstr *arginstr = (ArgInstr*) instr;
-                    *current_value = values_ptr[arginstr->index];
-                    // printf("    %%%i = arg(%i) = %i\n", cur_slot, arginstr->index, current_value->int_value);
-                    instr = (BaseInstr*) ((char*) instr + ASIZEOF(ArgInstr));
-                }
-                break;
-                case INSTR_CALL:
-                {
-                    CallInstr *callinstr = (CallInstr*) instr;
-                    Value call_args[callinstr->args_num];
-                    ArgExpr *cur_arg = (ArgExpr*)((char*) callinstr + ASIZEOF(CallInstr));
-                    for (int arg_id = 0; arg_id < callinstr->args_num; arg_id++) {
-                        switch (cur_arg->kind) {
-                            case INT_LITERAL_ARG:
-                                // printf("      -literal %i\n", cur_arg->value);
-                                call_args[arg_id].type.kind = INT;
-                                call_args[arg_id].int_value = cur_arg->value;
-                                break;
-                            case SLOT_ARG:
-                                // printf("      -slot %i\n", cur_arg->value);
-                                call_args[arg_id] = values[cur_arg->value];
-                                break;
-                            default:
-                                assert(false);
-                        }
-                        cur_arg = (ArgExpr*)((char*) cur_arg + ASIZEOF(ArgExpr));;
-                    }
-                    instr = (BaseInstr*) cur_arg;
-                    SymbolEntry *entry = &environment->entries.ptr[callinstr->symbol_offset];
-                    // char *symbol_name = (char*) entry->symbol + ASIZEOF(Symbol);
-                    // printf("    %%%i = call %s(%i, %i)\n", cur_slot, symbol_name, call_args[0].int_value, call_args[1].int_value);
-                    call(environment, entry, callinstr->args_num, call_args, current_value);
-                    assert(current_value->type.kind == INT);
-                }
-                break;
-                case INSTR_TESTBRANCH:
-                {
-                    TestBranchInstr *tbr_instr = (TestBranchInstr*) instr;
-                    Value slot = values[tbr_instr->slot];
-                    assert(slot.type.kind == INT);
-                    blkid = (slot.int_value) ? tbr_instr->then_blk : tbr_instr->else_blk;
-                }
-                goto restart_block_loop;
-                case INSTR_RETURN:
-                {
-                    ReturnInstr *ret_instr = (ReturnInstr*) instr;
-                    Value slot = values[ret_instr->slot];
-                    *ret_ptr = slot;
-                    return;
-                }
-                default:
-                    fprintf(stderr, "what is instr %i\n", instr->kind);
-                    assert(false);
+    int start_register = metadata[blkid].register_offset;
+    char *cur_regfile = (char*) regfile + metadata[blkid].regfile_offset;
+    BaseInstr *restrict instr = (BaseInstr*) ((char*) entry->section + metadata[blkid].block_offset);
+    /*printf(" blk %i (%p) offset %i start %i regfile %i\n",
+            blkid, (void*) instr, metadata[blkid].block_offset, start_register, metadata[blkid].regfile_offset);*/
+    void **current_value = &values[start_register];
+    while (true) {
+        /*printf("  instr %i @%lu sp %p - %p\n",
+                instr->kind, (char*) instr - (char*) entry->section, cur_regfile, regfile);*/
+        switch (instr->kind) {
+            case INSTR_ARG:
+            {
+                ArgInstr *arginstr = (ArgInstr*) instr;
+                // TODO copy into regfile?
+                *current_value = values_ptr[arginstr->index];
+                // printf("    %%%i = arg(%i) = %i\n", cur_slot, arginstr->index, current_value->int_value);
+                instr = (BaseInstr*) ((char*) instr + ASIZEOF(ArgInstr));
             }
-            current_value = (Value*)((char*) current_value + ASIZEOF(Value));
-            cur_register ++;
+            break;
+            case INSTR_CALL:
+            {
+                CallInstr *callinstr = (CallInstr*) instr;
+                void *call_args[callinstr->args_num];
+                ArgExpr *cur_arg = (ArgExpr*)((char*) callinstr + ASIZEOF(CallInstr));
+                for (int arg_id = 0; arg_id < callinstr->args_num; arg_id++) {
+                    switch (cur_arg->kind) {
+                        case INT_LITERAL_ARG:
+                            // printf("      -literal %i\n", cur_arg->value);
+                            call_args[arg_id] = (void*) &cur_arg->value;
+                            break;
+                        case REG_ARG:
+                            // printf("      -register %i\n", cur_arg->value);
+                            call_args[arg_id] = values[cur_arg->value];
+                            break;
+                        default:
+                            assert(false);
+                    }
+                    cur_arg = (ArgExpr*)((char*) cur_arg + ASIZEOF(ArgExpr));
+                }
+                instr = (BaseInstr*) cur_arg;
+                SymbolEntry *callee = &environment->entries.ptr[callinstr->symbol_offset];
+                *current_value = cur_regfile;
+                cur_regfile = (char*) cur_regfile + sizeof(int); // TODO
+                // char *symbol_name = (char*) callee->symbol + ASIZEOF(Symbol);
+                // printf("    %p = call %s(%i, %i)\n", *current_value, symbol_name, *(int*)call_args[0], *(int*)call_args[1]);
+                call(environment, callee, callinstr->args_num, call_args, *current_value);
+                // printf("     => %i\n", **(int**) current_value);
+            }
+            break;
+            case INSTR_TESTBRANCH:
+            {
+                TestBranchInstr *tbr_instr = (TestBranchInstr*) instr;
+                int regvalue = *(int*) values[tbr_instr->reg];
+                blkid = regvalue ? tbr_instr->then_blk : tbr_instr->else_blk;
+            }
+            goto restart_block_loop;
+            case INSTR_RETURN:
+            {
+                ReturnInstr *ret_instr = (ReturnInstr*) instr;
+                // TODO memcpy
+                *(int*) ret_ptr = *(int*) values[ret_instr->reg];
+                return;
+            }
+            default:
+                fprintf(stderr, "what is instr %i\n", instr->kind);
+                assert(false);
         }
+        current_value++;
     }
 }
 
-void int_eq_fn(int arg_len, Value *arg_ptr, Value *ret_ptr) {
+void int_eq_fn(int arg_len, void **arg_ptr, void *ret_ptr) {
     assert(arg_len == 2);
-    assert(arg_ptr[0].type.kind == INT);
-    assert(arg_ptr[1].type.kind == INT);
-    ret_ptr->type.kind = INT;
-    ret_ptr->int_value = arg_ptr[0].int_value == arg_ptr[1].int_value;
+    *(int*) ret_ptr = *(int*) arg_ptr[0] == *(int*) arg_ptr[1];
 }
 
-void int_add_fn(int arg_len, Value *arg_ptr, Value *ret_ptr) {
+void int_add_fn(int arg_len, void **arg_ptr, void *ret_ptr) {
     assert(arg_len == 2);
-    assert(arg_ptr[0].type.kind == INT);
-    assert(arg_ptr[1].type.kind == INT);
-    ret_ptr->type.kind = INT;
-    ret_ptr->int_value = arg_ptr[0].int_value + arg_ptr[1].int_value;
+    *(int*) ret_ptr = *(int*) arg_ptr[0] + *(int*) arg_ptr[1];
 }
 
-void int_sub_fn(int arg_len, Value *arg_ptr, Value *ret_ptr) {
+void int_sub_fn(int arg_len, void **arg_ptr, void *ret_ptr) {
     assert(arg_len == 2);
-    assert(arg_ptr[0].type.kind == INT);
-    assert(arg_ptr[1].type.kind == INT);
-    ret_ptr->type.kind = INT;
-    ret_ptr->int_value = arg_ptr[0].int_value - arg_ptr[1].int_value;
+    *(int*) ret_ptr = *(int*) arg_ptr[0] - *(int*) arg_ptr[1];
 }
 
 int main(int argc, const char **argv) {
@@ -162,15 +155,14 @@ int main(int argc, const char **argv) {
     // whew...
 #undef BLOCK_OFFSETS
     SymbolEntry *entry = find_symbol(&environment, "ack");
-    Value ret;
-    Value args[2];
-    args[0].type.kind = INT;
-    args[0].int_value = 3;
-    args[1].type.kind = INT;
-    args[1].int_value = 8;
+    int ret;
+    int argvalues[2];
+    argvalues[0] = 3;
+    argvalues[1] = 8;
+    void *args[] = { &argvalues[0], &argvalues[1] };
     for (int i = 0; i < 10; i++) {
         call(&environment, entry, 2, args, &ret);
-        printf("ack(%i, %i) = %i\n", args[0].int_value, args[1].int_value, ret.int_value);
+        printf("ack(%i, %i) = %i\n", argvalues[0], argvalues[1], ret);
     }
     return 0;
 }

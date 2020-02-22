@@ -27,12 +27,12 @@ int add_arg_instr(DefineSectionState *state, int index);
 
 int start_call_instr(DefineSectionState *state, int offset, int args);
 
-void add_call_slot_arg(DefineSectionState *state, int slotid);
+void add_call_reg_arg(DefineSectionState *state, int reg);
 
 void add_call_int_arg(DefineSectionState *state, int value);
 
-void add_tbr_instr(DefineSectionState *state, int slot, int blkthen, int blkelse);
+void add_tbr_instr(DefineSectionState *state, int reg, int blkthen, int blkelse);
 
-void add_ret_instr(DefineSectionState *state, int slot);
+void add_ret_instr(DefineSectionState *state, int reg);
 
 void start_block(DefineSectionState *state);

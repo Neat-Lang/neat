@@ -26,19 +26,19 @@ typedef struct {
 
 typedef struct {
     BaseInstr base;
-    int slot;
+    int reg;
     int then_blk;
     int else_blk;
 } TestBranchInstr;
 
 typedef struct {
     BaseInstr base;
-    int slot;
+    int reg;
 } ReturnInstr;
 
 typedef enum {
     INT_LITERAL_ARG,
-    SLOT_ARG,
+    REG_ARG,
 } ArgKind;
 
 typedef struct {

@@ -52,7 +52,7 @@ int main(int argc, const char **argv) {
         int arg0 = add_arg_instr(&ack_define_section, 0); // %0 = arg(0)
 
         int call = start_call_instr(&ack_define_section, int_eq_offset, 2); // %1 = %0 == 0
-        add_call_slot_arg(&ack_define_section, arg0);
+        add_call_reg_arg(&ack_define_section, arg0);
         add_call_int_arg(&ack_define_section, 0);
 
         add_tbr_instr(&ack_define_section, call, 1, 2);
@@ -64,7 +64,7 @@ int main(int argc, const char **argv) {
         int arg1 = add_arg_instr(&ack_define_section, 1); // %2 = arg(1)
 
         int call = start_call_instr(&ack_define_section, int_add_offset, arg1); // %3 = %2 + 1
-        add_call_slot_arg(&ack_define_section, arg1);
+        add_call_reg_arg(&ack_define_section, arg1);
         add_call_int_arg(&ack_define_section, 1);
 
         add_ret_instr(&ack_define_section, call); // ret %3
@@ -76,7 +76,7 @@ int main(int argc, const char **argv) {
         int arg1 = add_arg_instr(&ack_define_section, 1); // %4 = arg(1)
 
         int call = start_call_instr(&ack_define_section, int_eq_offset, 2); // %5 = %4 == 0
-        add_call_slot_arg(&ack_define_section, arg1);
+        add_call_reg_arg(&ack_define_section, arg1);
         add_call_int_arg(&ack_define_section, 0);
 
         add_tbr_instr(&ack_define_section, call, 3, 4);
@@ -88,11 +88,11 @@ int main(int argc, const char **argv) {
         int arg0 = add_arg_instr(&ack_define_section, 0); // %6 = arg(0)
 
         int call1 = start_call_instr(&ack_define_section, int_sub_offset, 2); // %7 = %6 - 1
-        add_call_slot_arg(&ack_define_section, arg0);
+        add_call_reg_arg(&ack_define_section, arg0);
         add_call_int_arg(&ack_define_section, 1);
 
         int call2 = start_call_instr(&ack_define_section, ack_offset, 2); // %8 = ack(%7, 1)
-        add_call_slot_arg(&ack_define_section, call1);
+        add_call_reg_arg(&ack_define_section, call1);
         add_call_int_arg(&ack_define_section, 1);
 
         add_ret_instr(&ack_define_section, call2);
@@ -104,22 +104,22 @@ int main(int argc, const char **argv) {
         int arg1 = add_arg_instr(&ack_define_section, 1); // %9 = arg(1)
 
         int call1 = start_call_instr(&ack_define_section, int_sub_offset, 2); // %10 = %9 - 1
-        add_call_slot_arg(&ack_define_section, arg1);
+        add_call_reg_arg(&ack_define_section, arg1);
         add_call_int_arg(&ack_define_section, 1);
 
         int arg0 = add_arg_instr(&ack_define_section, 0); // %11 = arg(0)
 
         int call2 = start_call_instr(&ack_define_section, ack_offset, 2); // %12 = ack(%11, %10)
-        add_call_slot_arg(&ack_define_section, arg0);
-        add_call_slot_arg(&ack_define_section, call1);
+        add_call_reg_arg(&ack_define_section, arg0);
+        add_call_reg_arg(&ack_define_section, call1);
 
         int call3 = start_call_instr(&ack_define_section, int_sub_offset, 2); // %13 = %11 - 1
-        add_call_slot_arg(&ack_define_section, arg0);
+        add_call_reg_arg(&ack_define_section, arg0);
         add_call_int_arg(&ack_define_section, 1);
 
         int call4 = start_call_instr(&ack_define_section, ack_offset, 2); // %14 = ack(%13, %12)
-        add_call_slot_arg(&ack_define_section, call3);
-        add_call_slot_arg(&ack_define_section, call2);
+        add_call_reg_arg(&ack_define_section, call3);
+        add_call_reg_arg(&ack_define_section, call2);
 
         add_ret_instr(&ack_define_section, call4); // ret %14
     }

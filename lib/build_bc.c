@@ -20,11 +20,12 @@ DefineSectionState begin_define_section(Data *data, size_t index) {
     result.start = data->length;
     result.data = data;
     result.num_blocks = 0;
+    result.num_registers = 0;
+    result.regfile_size = 0;
 
     DefineSection *define_section = alloc(data, ASIZEOF(DefineSection));
     define_section->base.kind = DEFINE_SECTION;
     define_section->declaration_index = index;
-    define_section->slots = 0;
 
     return result;
 }
@@ -38,16 +39,21 @@ void end_declare_section(Data *data, size_t start) {
 
 void end_define_section(DefineSectionState state) {
     DefineSection *define_section = (DefineSection*)((char*) state.data->ptr + state.start);
-    define_section->block_offsets_start = state.data->length - (state.start + ASIZEOF(DefineSection));
+    define_section->num_blocks = state.num_blocks;
+    define_section->block_offsets_start = state.data->length - state.start;
 
-    int *block_offsets = alloc(state.data, sizeof(int) * state.num_blocks);
+    BlockData *block_data = alloc(state.data, sizeof(BlockData) * (state.num_blocks + 1));
     for (int i = 0; i < state.num_blocks; i++) {
-        block_offsets[i] = ((int*) state.offsets_data.ptr)[i];
+        block_data[i] = ((BlockData*) state.offsets_data.ptr)[i];
     }
+    block_data[state.num_blocks] = (BlockData) {
+        .block_offset = 0,
+        .register_offset = state.num_registers,
+        .regfile_offset = state.regfile_size,
+    };
 
     end_declare_section(state.data, state.start);
 }
-
 
 void add_type_int(Data *data) {
     Type *type = alloc(data, ASIZEOF(Type));
@@ -59,17 +65,16 @@ void add_string(Data *data, const char* text) {
     strcpy(target, text);
 }
 
-static int increment_slot(DefineSectionState *state) {
-    DefineSection *define_section = (DefineSection*)((char*) state->data->ptr + state->start);
-
-    return define_section->slots++;
-}
+#include <stdio.h>
 
 int add_arg_instr(DefineSectionState *state, int index) {
     ArgInstr *arg_instr = alloc(state->data, ASIZEOF(ArgInstr));
+    printf("arg%i at %li\n", index, (char*) arg_instr - ((char*) state->data->ptr + state->start + ASIZEOF(DefineSection)));
     arg_instr->base.kind = INSTR_ARG;
     arg_instr->index = index;
-    return increment_slot(state);
+    // TODO
+    state->regfile_size += 4;
+    return state->num_registers++;
 }
 
 int start_call_instr(DefineSectionState *state, int offset, int args) {
@@ -77,7 +82,9 @@ int start_call_instr(DefineSectionState *state, int offset, int args) {
     call_instr->base.kind = INSTR_CALL;
     call_instr->symbol_offset = offset;
     call_instr->args_num = args;
-    return increment_slot(state);
+    // TODO void, other types
+    state->regfile_size += 4;
+    return state->num_registers++;
 }
 
 void add_call_slot_arg(DefineSectionState *state, int slotid) {
@@ -107,14 +114,11 @@ void add_ret_instr(DefineSectionState *state, int slot) {
 }
 
 void start_block(DefineSectionState *state) {
-    DefineSection *define_section = (DefineSection*)((char*) state->data->ptr + state->start);
     state->data->length = WORD_ALIGN(state->data->length);
 
-    int *block_offset_ptr = alloc(&state->offsets_data, sizeof(int));
-    *block_offset_ptr = state->data->length - (state->start + ASIZEOF(DefineSection));
+    BlockData *block_data = alloc(&state->offsets_data, sizeof(BlockData));
+    block_data->block_offset = state->data->length - state->start;
+    block_data->register_offset = state->num_registers;
+    block_data->regfile_offset = state->regfile_size;
     state->num_blocks++;
-
-    int *start_slot = (int*) alloc(state->data, ASIZEOF(int));
-
-    *start_slot = define_section->slots;
 }

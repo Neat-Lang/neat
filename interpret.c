@@ -25,24 +25,23 @@ void call(
     }
     assert(entry->kind == BC_SYMBOL);
 
-    int num_slots = entry->slots;
-    int *block_offsets = (int*) ((char*) entry->block_data + entry->block_offsets_start);
-
+    int num_blocks = entry->section->num_blocks;
+    BlockData *metadata = (BlockData*) ((char*) entry->section + entry->section->block_offsets_start);
+    int num_registers = metadata[num_blocks].register_offset;
     int blkid = 0; // entry
 
     // fill in lazily as you walk instructions
-    Value values[num_slots];
+    Value values[num_registers];
 
     while (true) {
 restart_block_loop:;
-        char *start = ((char*) entry->block_data + block_offsets[blkid]);
-        int start_slot = *(int*) start;
-        int cur_slot = start_slot;
-        BaseInstr *restrict instr = (BaseInstr*) (start + ASIZEOF(int));
-        // printf(" blk %i (%p) start %i\n", blkid, (void*) instr, start_slot);
-        Value *current_value = &values[start_slot];
+        int start_register = metadata[blkid].register_offset;
+        int cur_register = start_register;
+        BaseInstr *restrict instr = (BaseInstr*) ((char*) entry->section + metadata[blkid].block_offset);
+        // printf(" blk %i (%p) offset %i start %i\n", blkid, (void*) instr, metadata[blkid].block_offset, start_register);
+        Value *current_value = &values[start_register];
         while (true) {
-            // printf("  instr %i @%lu\n", instr->kind, (char*) instr - (char*) block_offsets);
+            // printf("  instr %i @%lu\n", instr->kind, (char*) instr - block_data);
             switch (instr->kind) {
                 case INSTR_ARG:
                 {
@@ -101,7 +100,7 @@ restart_block_loop:;
                     assert(false);
             }
             current_value = (Value*)((char*) current_value + ASIZEOF(Value));
-            cur_slot ++;
+            cur_register ++;
         }
     }
 }
@@ -152,9 +151,7 @@ int main(int argc, const char **argv) {
         else if (section->kind == DEFINE_SECTION) {
             DefineSection *define_section = (DefineSection*) section;
             Symbol *symbol = environment.entries.ptr[define_section->declaration_index].symbol;
-            int slots = define_section->slots;
-            int block_offsets_start = define_section->block_offsets_start;
-            resolve_bc(&environment, symbol->name, (char*) define_section + ASIZEOF(DefineSection), block_offsets_start, slots);
+            resolve_bc(&environment, symbol->name, define_section);
         }
         section = (Section*)((char*) section + section->length);
     }

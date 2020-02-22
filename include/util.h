@@ -33,9 +33,8 @@ typedef struct {
 typedef struct {
     Data *data; // main file (where the types will be written)
     Data offsets_data;
-    int start; // start of this section
+    int start; // start of this section in the file
     int num_blocks; // number of blocks
-    int blocks_start; // start of the blocks data
 } DefineSectionState;
 
 typedef struct {

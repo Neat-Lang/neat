@@ -26,8 +26,6 @@ DefineSectionState begin_define_section(Data *data, size_t index) {
     define_section->declaration_index = index;
     define_section->slots = 0;
 
-    result.blocks_start = data->length;
-
     return result;
 }
 
@@ -40,7 +38,7 @@ void end_declare_section(Data *data, size_t start) {
 
 void end_define_section(DefineSectionState state) {
     DefineSection *define_section = (DefineSection*)((char*) state.data->ptr + state.start);
-    define_section->block_offsets_start = state.data->length - state.blocks_start;
+    define_section->block_offsets_start = state.data->length - (state.start + ASIZEOF(DefineSection));
 
     int *block_offsets = alloc(state.data, sizeof(int) * state.num_blocks);
     for (int i = 0; i < state.num_blocks; i++) {
@@ -113,7 +111,7 @@ void start_block(DefineSectionState *state) {
     state->data->length = WORD_ALIGN(state->data->length);
 
     int *block_offset_ptr = alloc(&state->offsets_data, sizeof(int));
-    *block_offset_ptr = state->data->length - state->blocks_start;
+    *block_offset_ptr = state->data->length - (state->start + ASIZEOF(DefineSection));
     state->num_blocks++;
 
     int *start_slot = (int*) alloc(state->data, ASIZEOF(int));

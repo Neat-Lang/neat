@@ -79,7 +79,7 @@ restart_block_loop:;
                 SymbolEntry *callee = &environment->entries.ptr[callinstr->symbol_offset];
                 *current_value = cur_regfile;
                 cur_regfile = (char*) cur_regfile + sizeof(int); // TODO
-                // char *symbol_name = (char*) callee->symbol + ASIZEOF(Symbol);
+                // char *symbol_name = (char*) callee->symbol + sizeof(Symbol);
                 // printf("    %p = call %s(%i, %i)\n", *current_value, symbol_name, *(int*)call_args[0], *(int*)call_args[1]);
                 call(environment, callee, callinstr->args_num, call_args, *current_value);
                 // printf("     => %i\n", **(int**) current_value);

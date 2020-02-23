@@ -4,10 +4,9 @@
 #include "util.h"
 
 typedef struct {
-    Type ret;
     int args_len;
     char name[0];
-    // and then: arg types
+    // and then: name, ret type, arg types
 } Symbol;
 
 typedef enum {

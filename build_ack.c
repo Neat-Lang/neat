@@ -11,40 +11,36 @@ int main(int argc, const char **argv) {
 
     int int_eq_offset = 0;
     int int_eq_section = begin_declare_section(file_data);
-    Symbol *int_eq = alloc(file_data, ASIZEOF(Symbol));
-    int_eq->ret.kind = INT;
-    int_eq->args_len = 2;
+    declare_symbol(file_data, 2);
     add_string(file_data, "int_eq");
+    add_type_int(file_data); // ret
     add_type_int(file_data);
     add_type_int(file_data);
     end_declare_section(file_data, int_eq_section);
 
     int int_add_offset = 1;
     int int_add_section = begin_declare_section(file_data);
-    Symbol *int_add = alloc(file_data, ASIZEOF(Symbol));
-    int_add->ret.kind = INT;
-    int_add->args_len = 2;
+    declare_symbol(file_data, 2);
     add_string(file_data, "int_add");
+    add_type_int(file_data); // ret
     add_type_int(file_data);
     add_type_int(file_data);
     end_declare_section(file_data, int_add_section);
 
     int int_sub_offset = 2;
     int int_sub_section = begin_declare_section(file_data);
-    Symbol *int_sub = alloc(file_data, ASIZEOF(Symbol));
-    int_sub->ret.kind = INT;
-    int_sub->args_len = 2;
+    declare_symbol(file_data, 2);
     add_string(file_data, "int_sub");
+    add_type_int(file_data); // ret
     add_type_int(file_data);
     add_type_int(file_data);
     end_declare_section(file_data, int_sub_section);
 
     int ack_offset = 3;
     int ack_declare_section = begin_declare_section(file_data);
-    Symbol *ack = alloc(file_data, ASIZEOF(Symbol));
-    ack->ret.kind = INT;
-    ack->args_len = 2;
+    declare_symbol(file_data, 2);
     add_string(file_data, "ack");
+    add_type_int(file_data); // ret
     add_type_int(file_data);
     add_type_int(file_data);
     end_declare_section(file_data, ack_declare_section);

@@ -1,5 +1,7 @@
 #include "build_bc.h"
 
+#include "symbol.h"
+
 void *alloc(Data *data, size_t size) {
     size_t prev_length = data->length;
     data->length += size;
@@ -36,6 +38,12 @@ void end_declare_section(Data *data, size_t start) {
 
     Section *section = (Section*)((char*) data->ptr + start);
     section->length = length;
+}
+
+void declare_symbol(Data *data, int args)
+{
+    Symbol *sym = alloc(data, sizeof(Symbol));
+    sym->args_len = 2;
 }
 
 void end_define_section(Data *data, DefineSectionState *state) {

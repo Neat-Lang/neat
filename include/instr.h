@@ -2,6 +2,7 @@
 
 typedef enum {
     INSTR_ARG,
+    INSTR_LITERAL,
     INSTR_CALL,
     INSTR_BRANCH,
     INSTR_TESTBRANCH,
@@ -19,10 +20,20 @@ typedef struct {
 
 typedef struct {
     BaseInstr base;
+    int value;
+} LiteralInstr;
+
+typedef struct {
+    BaseInstr base;
     int symbol_offset;
     int args_num;
     // and then: [args: ArgExpr x args_num]
 } CallInstr;
+
+typedef struct {
+    BaseInstr base;
+    int blk;
+} BranchInstr;
 
 typedef struct {
     BaseInstr base;

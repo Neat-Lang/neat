@@ -6,7 +6,7 @@
 #include "symbol.h"
 
 int declare(Environment *environment, Symbol *symbol) {
-    printf("declare symbol %s at %i\n", symbol->name, environment->entries.length);
+    printf("declare symbol %s at %i (%i)\n", symbol->name, environment->entries.length, symbol->args_len);
     environment->entries.ptr = realloc(
         environment->entries.ptr, ++environment->entries.length * sizeof(SymbolEntry));
     environment->entries.ptr[environment->entries.length - 1] = (SymbolEntry) {
@@ -30,9 +30,15 @@ SymbolEntry *find_symbol(Environment *environment, const char *name) {
 }
 
 void resolve_c(Environment *environment, const char *name, callptr_t callptr) {
-    SymbolEntry *entry = find_symbol(environment, name);
-    entry->kind = C_SYMBOL;
-    entry->callptr = callptr;
+    // loop manually; intrinsics may be multiply defined (TODO assert this isn't the case)
+    for (int i = 0; i < environment->entries.length; i++) {
+        SymbolEntry *entry = &environment->entries.ptr[i];
+
+        if (strcmp(entry->symbol->name, name) == 0) {
+            entry->kind = C_SYMBOL;
+            entry->callptr = callptr;
+        }
+    }
 }
 
 void resolve_bc(Environment *environment, const char *name, DefineSection *define_section) {

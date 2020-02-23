@@ -27,11 +27,17 @@ void add_type_int(Data *data);
 
 int add_arg_instr(DefineSectionState *state, int index);
 
+int add_literal_instr(DefineSectionState *state, int value);
+
 int start_call_instr(DefineSectionState *state, int offset, int args);
 
 void add_call_reg_arg(DefineSectionState *state, int reg);
 
 void add_call_int_arg(DefineSectionState *state, int value);
+
+int add_br_instr(DefineSectionState *state);
+
+void br_resolve(DefineSectionState *state, int br_offset, int block);
 
 int add_tbr_instr(DefineSectionState *state, int reg);
 

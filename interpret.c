@@ -55,6 +55,15 @@ restart_block_loop:;
                 instr = (BaseInstr*) ((char*) instr + ASIZEOF(ArgInstr));
             }
             break;
+            case INSTR_LITERAL:
+            {
+                LiteralInstr *litinstr = (LiteralInstr*) instr;
+                *(int*) cur_regfile = litinstr->value;
+                *current_value = cur_regfile;
+                cur_regfile = (char*) cur_regfile + sizeof(int);
+                instr = (BaseInstr*) ((char*) instr + ASIZEOF(LiteralInstr));
+            }
+            break;
             case INSTR_CALL:
             {
                 CallInstr *callinstr = (CallInstr*) instr;
@@ -71,6 +80,7 @@ restart_block_loop:;
                             call_args[arg_id] = values[cur_arg->value];
                             break;
                         default:
+                            printf("      -?? %i\n", cur_arg->kind);
                             assert(false);
                     }
                     cur_arg = (ArgExpr*)((char*) cur_arg + ASIZEOF(ArgExpr));

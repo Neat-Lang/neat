@@ -89,6 +89,15 @@ int add_arg_instr(DefineSectionState *state, int index) {
     return state->num_registers++;
 }
 
+int add_literal_instr(DefineSectionState *state, int value) {
+    LiteralInstr *lit_instr = alloc(state->main_data, ASIZEOF(LiteralInstr));
+    lit_instr->base.kind = INSTR_LITERAL;
+    lit_instr->value = value;
+    // TODO
+    state->regfile_size += 4;
+    return state->num_registers++;
+}
+
 int start_call_instr(DefineSectionState *state, int offset, int args) {
     CallInstr *call_instr = alloc(state->main_data, ASIZEOF(CallInstr));
     call_instr->base.kind = INSTR_CALL;
@@ -109,6 +118,18 @@ void add_call_int_arg(DefineSectionState *state, int value) {
     ArgExpr *arg_expr = alloc(state->main_data, ASIZEOF(ArgExpr));
     arg_expr->kind = INT_LITERAL_ARG;
     arg_expr->value = value;
+}
+
+int add_br_instr(DefineSectionState *state) {
+    int offset = state->main_data->length;
+    BranchInstr *tbr_instr = alloc(state->main_data, ASIZEOF(BranchInstr));
+    tbr_instr->base.kind = INSTR_BRANCH;
+    return offset;
+}
+
+void br_resolve(DefineSectionState *state, int offset, int blk) {
+    BranchInstr *br_instr = (BranchInstr*)((char*) state->main_data->ptr + offset);
+    br_instr->blk = blk;
 }
 
 int add_tbr_instr(DefineSectionState *state, int reg) {

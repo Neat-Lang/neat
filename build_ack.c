@@ -50,10 +50,11 @@ int main(int argc, const char **argv) {
     {
         start_block(ack_define_section);
         int arg0 = add_arg_instr(ack_define_section, 0); // %0 = arg(0)
+        int argzero = add_literal_instr(ack_define_section, 0); // %1 = 0
 
         int call = start_call_instr(ack_define_section, int_eq_offset, 2); // %1 = %0 == 0
         add_call_reg_arg(ack_define_section, arg0);
-        add_call_int_arg(ack_define_section, 0);
+        add_call_reg_arg(ack_define_section, argzero);
 
         branch1 = add_tbr_instr(ack_define_section, call);
     }
@@ -65,17 +66,25 @@ int main(int argc, const char **argv) {
 
         int arg1 = add_arg_instr(ack_define_section, 1); // %2 = arg(1)
 
-        int call = start_call_instr(ack_define_section, int_add_offset, arg1); // %3 = %2 + 1
+        int call = start_call_instr(ack_define_section, int_add_offset, 2); // %3 = %2 + 1
         add_call_reg_arg(ack_define_section, arg1);
         add_call_int_arg(ack_define_section, 1);
 
         add_ret_instr(ack_define_section, call); // ret %3
     }
 
+    int empty_else;
+    {
+        start_block(ack_define_section);
+
+        empty_else = add_br_instr(ack_define_section);
+    }
+
     int branch2;
     {
         int else1 = start_block(ack_define_section);
 
+        br_resolve(ack_define_section, empty_else, else1);
         tbr_resolve_else(ack_define_section, branch1, else1);
 
         int arg1 = add_arg_instr(ack_define_section, 1); // %4 = arg(1)

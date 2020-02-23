@@ -10,48 +10,6 @@ import std.uni;
 // something that can be referenced by a name
 interface Symbol {}
 
-struct Value {
-    enum Type {
-        undef,
-        integer,
-        symbol,
-    }
-    Type type;
-    union {
-        int integer;
-        Symbol symbol;
-    }
-    bool truthy() {
-        return this.type == Type.integer && this.integer != 0;
-    }
-
-    string toString() const {
-        import std.conv : to;
-
-        final switch (this.type) {
-            case Type.integer: return this.integer.to!string;
-            case Type.symbol: return this.symbol.to!string;
-            case Type.undef: return "<undef>";
-        }
-    }
-
-    this(int integer) {
-        this.type = Type.integer;
-        this.integer = integer;
-    }
-
-    this(Symbol symbol) {
-        this.type = Type.symbol;
-        this.symbol = symbol;
-    }
-
-    static Value undef() {
-        Value value;
-        value.type = Type.undef;
-        return value;
-    }
-}
-
 class Type
 {
     override string toString() const { assert(false); }
@@ -60,6 +18,75 @@ class Type
 class Integer : Type
 {
     override string toString() const { return "int"; }
+}
+
+extern(C) {
+    struct Data {
+        void* ptr;
+        size_t length;
+    }
+    Data *alloc_data();
+    size_t begin_declare_section(void* data);
+    void* begin_define_section(size_t index);
+    void end_define_section(Data* data, void* state);
+    void declare_symbol(void* data, int args);
+    void add_string(void* data, const char* text);
+    void add_type_int(Data* data);
+    void end_declare_section(void* data, size_t offset);
+
+    void add_ret_instr(void* state, int reg);
+    int add_tbr_instr(void* state, int reg);
+    int add_literal_instr(void* state, int value);
+    int add_arg_instr(void* state, int index);
+    void tbr_resolve_then(void* state, int tbr_offset, int block);
+    void tbr_resolve_else(void* state, int tbr_offset, int block);
+    int add_br_instr(void* state);
+    void br_resolve(void* state, int br_offset, int block);
+    int start_call_instr(void* state, int offset, int args);
+    void add_call_reg_arg(void* state, int reg);
+    int start_block(void* state);
+}
+
+class Generator {
+    Data* mainFile;
+    void* defineSection;
+
+    invariant(mainFile !is null);
+
+    int numDeclarations;
+
+    this(Data* mainFile, Data* defineSection = null) {
+        this.mainFile = mainFile;
+        this.defineSection = defineSection;
+    }
+
+    template opDispatch(string name) {
+        auto opDispatch(T...)(T args) {
+            static string member() {
+                switch (name) {
+                    case "add_string":
+                    case "add_type_int":
+                    case "declare_symbol":
+                    case "begin_declare_section":
+                    case "end_declare_section":
+                        return "this.mainFile";
+                    default: return "this.defineSection";
+                }
+            }
+            return mixin(name ~ "(" ~ member() ~ ", args)");
+        }
+    }
+}
+
+int gen_int_stub(string op)(Generator gen) {
+    size_t start = gen.begin_declare_section;
+    gen.declare_symbol(2);
+    gen.add_string(toStringz("int_" ~ op));
+    gen.add_type_int; // ret
+    gen.add_type_int;
+    gen.add_type_int;
+    gen.end_declare_section(start);
+    return gen.numDeclarations++;
 }
 
 class Parser
@@ -194,11 +221,14 @@ class Function : Symbol
 {
     string name;
 
-    Type type;
+    Type ret;
 
     Argument[] args;
 
     Statement statement;
+
+    @(This.Init!(-1))
+    int decl_offset;
 
     @(This.Init!null)
     Scope scope_; // bound scope
@@ -207,32 +237,34 @@ class Function : Symbol
     mixin(GenerateToString);
 }
 
-struct ControlFlow
-{
-    enum Type {
-        pass,
-        return_,
+void add_type(Data* data, Type type) {
+    if (cast(Integer) type) {
+        add_type_int(data);
+        return;
     }
-    Type type;
-    bool isPass() { return type == Type.pass; }
-    bool isReturn() { return type == Type.return_; }
-    static ControlFlow pass() { return ControlFlow(Type.pass); }
-    static ControlFlow return_(Value v) {
-        ControlFlow cf = ControlFlow(Type.return_);
-        cf.value = v;
-        return cf;
+    assert(false);
+}
+
+int declare(Generator output, Function fun) {
+    if (fun.decl_offset != -1) return fun.decl_offset;
+    size_t section = begin_declare_section(output.mainFile);
+    declare_symbol(output.mainFile, cast(int) fun.args.length);
+    add_string(output.mainFile, fun.name.toStringz);
+    add_type(output.mainFile, fun.ret);
+    foreach (arg; fun.args) {
+        add_type(output.mainFile, arg.type);
     }
-    union {
-        Value value;
-    }
+    end_declare_section(output.mainFile, section);
+    fun.decl_offset = output.numDeclarations++;
+    return fun.decl_offset;
 }
 
 interface Statement {
-    ControlFlow interpret(Scope);
+    void emit(Scope scope_, Generator output);
 }
 
-interface Expression {
-    Value interpret(Scope);
+interface Expression : Symbol {
+    int emit(Scope scope_, Generator output);
 }
 
 Function parseFunction(ref Parser parser) {
@@ -261,17 +293,11 @@ Function parseFunction(ref Parser parser) {
 class SequenceStatement : Statement {
     Statement[] statements;
 
-    override ControlFlow interpret(Scope scope_) {
-        auto subscope = Scope.alloc(scope_);
+    override void emit(Scope scope_, Generator output) {
+        auto subscope = new Scope(scope_);
         foreach (statement; statements) {
-            auto effect = statement.interpret(subscope);
-            if (effect.isReturn) {
-                subscope.release;
-                return effect;
-            }
+            statement.emit(subscope, output);
         }
-        subscope.release;
-        return ControlFlow.pass;
     }
     mixin(GenerateThis);
     mixin(GenerateToString);
@@ -297,8 +323,10 @@ SequenceStatement parseSequence(ref Parser parser) {
 class ReturnStatement : Statement {
     Expression value;
 
-    override ControlFlow interpret(Scope scope_) {
-        return ControlFlow.return_(value.interpret(scope_));
+    override void emit(Scope scope_, Generator output) {
+        int reg = this.value.emit(scope_, output);
+        output.add_ret_instr(reg);
+        output.start_block;
     }
 
     mixin(GenerateThis);
@@ -323,15 +351,18 @@ class IfStatement : Statement {
     Expression test;
     Statement then;
 
-    override ControlFlow interpret(Scope scope_) {
-        auto value = test.interpret(scope_);
-        if (value.truthy) {
-            auto subscope = Scope.alloc(scope_);
-            auto res = then.interpret(subscope);
-            subscope.release;
-            return res;
-        }
-        return ControlFlow.pass;
+    override void emit(Scope scope_, Generator output) {
+        int reg = test.emit(scope_, output);
+        int tbr_offset = output.add_tbr_instr(reg);
+        int thenblk = output.start_block;
+        output.tbr_resolve_then(tbr_offset, thenblk);
+        auto subscope = new Scope(scope_);
+        then.emit(subscope, output);
+        int after_then = output.add_br_instr;
+        // TODO else blk
+        int afterblk = output.start_block;
+        output.tbr_resolve_else(tbr_offset, afterblk);
+        output.br_resolve(after_then, afterblk);
     }
 
     mixin(GenerateThis);
@@ -380,19 +411,23 @@ class ArithmeticOp : Expression {
     Expression left;
     Expression right;
 
-    override Value interpret(Scope scope_) {
-        auto leftval = this.left.interpret(scope_);
-        auto rightval = this.right.interpret(scope_);
-        assert(leftval.type == Value.Type.integer);
-        assert(rightval.type == Value.Type.integer);
-        final switch (this.op) {
-            case Op.add:
-                return Value(leftval.integer + rightval.integer);
-            case Op.sub:
-                return Value(leftval.integer - rightval.integer);
-            case Op.eq:
-                return Value(leftval.integer == rightval.integer);
-        }
+    override int emit(Scope scope_, Generator output) {
+        int leftreg = this.left.emit(scope_, output);
+        int rightreg = this.right.emit(scope_, output);
+        int offset = {
+            final switch (this.op) {
+                case Op.add:
+                    return gen_int_stub!"add"(output);
+                case Op.sub:
+                    return gen_int_stub!"sub"(output);
+                case Op.eq:
+                    return gen_int_stub!"eq"(output);
+            }
+        }();
+        int callreg = output.start_call_instr(offset, 2);
+        output.add_call_reg_arg(leftreg);
+        output.add_call_reg_arg(rightreg);
+        return callreg;
     }
 
     mixin(GenerateThis);
@@ -437,16 +472,18 @@ class Call : Expression {
     string name;
     Expression[] args;
 
-    override Value interpret(Scope scope_) {
-        auto funvalue = scope_.lookup(name);
-        assert(funvalue.type == Value.Type.symbol);
-        auto fun = cast(Function) funvalue.symbol;
-        assert(fun, "no such function: " ~ name);
-        Value[] values;
+    override int emit(Scope scope_, Generator output) {
+        auto funsym = scope_.lookup(name);
+        int fun_offset = declare(output, cast(Function) funsym);
+        int[] regs;
         foreach (arg; this.args) {
-            values ~= arg.interpret(scope_);
+            regs ~= arg.emit(scope_, output);
         }
-        return interpret_call(fun, values);
+        int callreg = output.start_call_instr(fun_offset, cast(int) this.args.length);
+        foreach (reg; regs) {
+            output.add_call_reg_arg(reg);
+        }
+        return callreg;
     }
 
     mixin(GenerateThis);
@@ -475,10 +512,12 @@ class Variable : Expression
 {
     string name;
 
-    override Value interpret(Scope scope_) {
-        auto value = scope_.lookup(name);
-        assert(value.type != Value.Type.undef, "no such variable: " ~ name);
-        return value;
+    override int emit(Scope scope_, Generator output) {
+        auto sym = scope_.lookup(name);
+        assert(sym, format!"unknown name %s"(name));
+        auto expr = cast(Expression) sym;
+        assert(expr, format!"%s"(sym));
+        return expr.emit(scope_, output);
     }
 
     mixin(GenerateThis);
@@ -489,14 +528,31 @@ class Literal : Expression
 {
     int value;
 
-    override Value interpret(Scope) {
-        return Value(this.value);
+    override int emit(Scope, Generator output) {
+        return output.add_literal_instr(this.value);
     }
 
     override string toString() const {
         import std.conv : to;
 
         return value.to!string;
+    }
+
+    mixin(GenerateThis);
+}
+
+class ArgExpr : Expression
+{
+    int index;
+
+    override int emit(Scope, Generator output) {
+        return output.add_arg_instr(this.index);
+    }
+
+    override string toString() const {
+        import std.format : format;
+
+        return format!"%%%s"(this.index);
     }
 
     mixin(GenerateThis);
@@ -520,83 +576,58 @@ class Scope
 {
     Scope parent;
 
-    ref Scope freelist() { return this.parent; }
-
-    size_t refs;
+    this(Scope parent) {
+        this.parent = parent;
+    }
 
     struct Variable
     {
         string name;
 
-        Value value;
+        Symbol value;
     }
     Appender!(Variable[]) vars;
 
-    static Scope freelistHead = null;
-
-    static Scope alloc(Scope parent = null)
-    {
-        if (parent) parent.claim;
-        if (freelistHead is null) {
-            auto scope_ = new Scope;
-            scope_.parent = parent;
-            scope_.refs = 1;
-            scope_.vars.clear;
-            return scope_;
-        }
-        auto scope_ = freelistHead;
-        freelistHead = freelistHead.freelist;
-        scope_.parent = parent;
-        scope_.refs = 1;
-        scope_.vars.clear;
-        return scope_;
-    }
-
-    void claim() {
-        this.refs ++;
-    }
-
-    void release() {
-        assert(this.refs > 0);
-        this.refs --;
-        if (this.refs == 0) {
-            if (this.parent) this.parent.release;
-            this.freelist = freelistHead;
-            freelistHead = this;
-        }
-    }
-
-    void add(string name, Value value) {
+    void add(string name, Symbol value) {
         assert(!this.vars.data().any!(var => var.name == name));
         this.vars ~= Variable(name, value);
     }
 
-    Value lookup(string name) {
+    Symbol lookup(string name) {
         foreach (var; this.vars) {
             if (var.name == name) return var.value;
         }
         if (this.parent) return this.parent.lookup(name);
-        return Value.undef;
+        return null;
     }
 }
 
-Value interpret_call(Function function_, Value[] args)
-{
-    auto callscope = Scope.alloc(function_.scope_);
-
-    foreach (arg, value; function_.args.zip(args))
-    {
-        callscope.add(arg.name, value);
+class BytecodeFile {
+    Generator generator;
+    this() {
+        this.generator = new Generator(alloc_data());
     }
-    auto effect = function_.statement.interpret(callscope);
-    callscope.release;
-    if (effect.isReturn) return effect.value;
-    assert(false, "missing return");
+    void define(Function fun, Scope scope_) {
+        int declid = declare(this.generator, fun);
+        assert(this.generator.defineSection is null);
+        this.generator.defineSection = begin_define_section(declid);
+        this.generator.start_block;
+        auto funscope = new Scope(scope_);
+        foreach (i, arg; fun.args) {
+            funscope.add(arg.name, new ArgExpr(cast(int) i));
+        }
+        fun.statement.emit(funscope, this.generator);
+        end_define_section(this.generator.mainFile, this.generator.defineSection);
+        this.generator.defineSection = null;
+    }
+    void writeTo(string filename) {
+        static import std.file;
+
+        std.file.write(filename, (cast(ubyte*) this.generator.mainFile.ptr)[0 .. this.generator.mainFile.length]);
+    }
 }
 
 void main() {
-    writefln!"running.";
-
     string code = "int ack(int m, int n) {
         if (m == 0) return n + 1;
         if (n == 0) return ack(m - 1, 1);
@@ -608,14 +639,10 @@ void main() {
 
     writefln!"%s"(fun);
 
-    auto scope_ = Scope.alloc;
+    auto scope_ = new Scope(null);
 
-    scope_.add("ack", Value(fun));
-    fun.scope_ = scope_;
-
-    for (int i = 0; i < 10; i++) {
-        auto ret = interpret_call(fun, [Value(3), Value(8)]);
-
-        writefln!"ack(3, 8) = %s"(ret);
-    }
+    scope_.add("ack", fun);
+    auto output = new BytecodeFile;
+    output.define(fun, scope_);
+    output.writeTo("ack.bc");
 }

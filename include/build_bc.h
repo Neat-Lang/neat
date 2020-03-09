@@ -9,21 +9,39 @@
 
 void *alloc(Data *data, size_t size);
 
-size_t begin_declare_section(Data *data);
+size_t begin_declare_section(BytecodeBuilder *builder);
 
-DefineSectionState *begin_define_section(size_t index);
+DefineSectionState *begin_define_section(BytecodeBuilder *builder, size_t index);
 
 void end_declare_section(Data *data, size_t start);
 
-void declare_symbol(Data *data, int args);
+void declare_symbol(BytecodeBuilder *builder, int args);
 
-void end_define_section(Data *data, DefineSectionState *state);
+void end_define_section(BytecodeBuilder *builder, DefineSectionState *state);
 
 size_t alloc_offsets(Data *data, int num_offsets);
 
 void add_string(Data *data, const char* text);
 
 void add_type_int(Data *data);
+
+void add_type_pointer(Data *data);
+
+void add_type_struct(Data *data, int members);
+
+size_t start_alloc_instr(DefineSectionState *state);
+
+int end_alloc_instr(DefineSectionState *state, size_t offset);
+
+size_t start_offset_instr(DefineSectionState *state, int reg, size_t index);
+
+int end_offset_instr(DefineSectionState *state, size_t offset);
+
+size_t start_load_instr(DefineSectionState *state, int pointer_reg);
+
+int end_load_instr(DefineSectionState *state, size_t offset);
+
+void add_store_instr(DefineSectionState *state, int value_reg, int pointer_reg);
 
 int add_arg_instr(DefineSectionState *state, int index);
 

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "symbol.h"
+#include "type.h"
 
 int declare(Environment *environment, Symbol *symbol) {
     printf("declare symbol %s at %i (%i)\n", symbol->name, environment->entries.length, symbol->args_len);
@@ -41,10 +42,18 @@ void resolve_c(Environment *environment, const char *name, callptr_t callptr) {
     }
 }
 
+Type *get_ret_ptr(Symbol *symbol) {
+    const char *symbol_name = symbol->name;
+    return (Type*) WORD_ALIGN((size_t)(symbol_name + strlen(symbol_name) + 1));
+}
+
+Type *get_arg_ptr(Symbol *symbol) {
+    return skip_type(get_ret_ptr(symbol));
+}
+
 void resolve_bc(Environment *environment, const char *name, DefineSection *define_section) {
     SymbolEntry *entry = find_symbol(environment, name);
-    const char *symbol_name = entry->symbol->name;
     entry->kind = BC_SYMBOL;
-    entry->arg_types = (Type*) WORD_ALIGN((size_t)(symbol_name + strlen(symbol_name) + 1));
+    entry->arg_types = get_arg_ptr(entry->symbol);
     entry->section = define_section;
 }

@@ -16,6 +16,16 @@ Data *alloc_data();
 
 void free_data(Data *data);
 
+typedef struct {
+    Data *data;
+    size_t symbol_offsets_len;
+    size_t *symbol_offsets_ptr;
+} BytecodeBuilder;
+
+BytecodeBuilder *alloc_bc_builder();
+
+void free_bc_builder(BytecodeBuilder*);
+
 typedef enum {
     DECLARE_SECTION,
     DEFINE_SECTION
@@ -37,6 +47,7 @@ typedef struct {
 typedef struct {
     Data *main_data;
     Data *offsets_data; // [BlockData] + 1 for full size
+    BytecodeBuilder *file_builder; // used to get symbol offsets to get type
     int start; // start of this section in the file
     int num_blocks; // number of blocks
     int num_registers; // number of registers used by the currently building section.

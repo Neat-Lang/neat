@@ -35,6 +35,7 @@ typedef struct {
 } SymbolTable;
 
 typedef struct  {
+    void *file;
     SymbolTable entries;
 } Environment;
 
@@ -45,3 +46,7 @@ SymbolEntry *find_symbol(Environment *environment, const char *name);
 void resolve_c(Environment *environment, const char *name, callptr_t callptr);
 
 void resolve_bc(Environment *environment, const char *name, DefineSection *define_section);
+
+Type *get_ret_ptr(Symbol *symbol);
+
+Type *get_arg_ptr(Symbol *symbol);

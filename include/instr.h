@@ -7,6 +7,10 @@ typedef enum {
     INSTR_BRANCH,
     INSTR_TESTBRANCH,
     INSTR_RETURN,
+    INSTR_ALLOC,
+    INSTR_OFFSET_ADDRESS,
+    INSTR_LOAD,
+    INSTR_STORE,
 } InstrKind;
 
 typedef struct {
@@ -25,7 +29,36 @@ typedef struct {
 
 typedef struct {
     BaseInstr base;
-    int symbol_offset;
+    // and then: type
+} AllocInstr;
+
+/**
+ * Take register containing a pointer to a struct.
+ * Yield the address of a member of the struct.
+ */
+typedef struct {
+    BaseInstr base;
+    int reg; // struct
+    int index; // member index
+    // and then: struct type
+} OffsetAddressInstr;
+
+typedef struct {
+    BaseInstr base;
+    int pointer_reg;
+    // and then: value type
+} LoadInstr;
+
+typedef struct {
+    BaseInstr base;
+    int value_reg;
+    int pointer_reg;
+    // and then: value type
+} StoreInstr;
+
+typedef struct {
+    BaseInstr base;
+    int symbol_offset; // offset from start of file
     int args_num;
     // and then: [args: ArgExpr x args_num]
 } CallInstr;

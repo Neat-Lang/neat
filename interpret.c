@@ -33,7 +33,7 @@ void call(
 
     // fill in lazily as you walk instructions
     char *regfile = alloca(metadata[num_blocks].regfile_offset);
-    void *values[num_registers];
+    void *values[num_registers]; // array of pointers into regfile
 
 restart_block_loop:;
     int start_register = metadata[blkid].register_offset;
@@ -64,6 +64,63 @@ restart_block_loop:;
                 instr = (BaseInstr*) ((char*) instr + ASIZEOF(LiteralInstr));
             }
             break;
+            case INSTR_ALLOC:
+            {
+                AllocInstr *alloc_instr = (AllocInstr*) instr;
+                Type *type = (Type*)((char*) alloc_instr + ASIZEOF(AllocInstr));
+                size_t size = typesz(type);
+                memset(cur_regfile, 0, size); // zero initialize alloc
+                *current_value = cur_regfile; // pointer to pointer
+                cur_regfile = (char*) cur_regfile + sizeof(void*);
+                **(void***) current_value = cur_regfile;
+                cur_regfile = (char*) cur_regfile + size; // TODO alignment
+                instr = (BaseInstr*) skip_type(type);
+            }
+            break;
+            case INSTR_OFFSET_ADDRESS:
+            {
+                OffsetAddressInstr *offset_instr = (OffsetAddressInstr*) instr;
+                Type *type = (Type*)((char*) offset_instr + ASIZEOF(OffsetAddressInstr));
+                assert(type->kind == STRUCT);
+                instr = (BaseInstr*) skip_type(type);
+
+                type = (Type*)((char*) type + ASIZEOF(Type)); // first member type
+                size_t offset = 0;
+                for (int i = 0; i < offset_instr->index; i++) {
+                    offset += typesz(type);
+                    type = skip_type(type);
+                }
+                void *ptr = *(void**) values[offset_instr->reg];
+                *(void**) cur_regfile = (char*) ptr + offset;
+                *current_value = cur_regfile;
+                cur_regfile = (char*) cur_regfile + sizeof(void*);
+            }
+            break;
+            case INSTR_STORE:
+            {
+                StoreInstr *store_instr = (StoreInstr*) instr;
+                Type *type = (Type*)((char*) store_instr + ASIZEOF(StoreInstr));
+                instr = (BaseInstr*) skip_type(type);
+
+                int size = typesz(type);
+                void *ptr = *(void**) values[store_instr->pointer_reg];
+                void *data = values[store_instr->value_reg];
+                memcpy(ptr, data, size);
+            }
+            break;
+            case INSTR_LOAD:
+            {
+                LoadInstr *load_instr = (LoadInstr*) instr;
+                Type *type = (Type*)((char*) load_instr + ASIZEOF(LoadInstr));
+                instr = (BaseInstr*) skip_type(type);
+
+                int size = typesz(type);
+                void *ptr = *(void**) values[load_instr->pointer_reg];
+                memcpy(cur_regfile, ptr, size);
+                *current_value = cur_regfile;
+                cur_regfile = (char*) cur_regfile + size; // TODO alignment
+            }
+            break;
             case INSTR_CALL:
             {
                 CallInstr *callinstr = (CallInstr*) instr;
@@ -87,8 +144,9 @@ restart_block_loop:;
                 }
                 instr = (BaseInstr*) cur_arg;
                 SymbolEntry *callee = &environment->entries.ptr[callinstr->symbol_offset];
+                Type *ret_type = get_ret_ptr(callee->symbol);
                 *current_value = cur_regfile;
-                cur_regfile = (char*) cur_regfile + sizeof(int); // TODO
+                cur_regfile = (char*) cur_regfile + typesz(ret_type);
                 // char *symbol_name = (char*) callee->symbol + sizeof(Symbol);
                 // printf("    %p = call %s(%i, %i)\n", *current_value, symbol_name, *(int*)call_args[0], *(int*)call_args[1]);
                 call(environment, callee, callinstr->args_num, call_args, *current_value);

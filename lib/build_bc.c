@@ -1,5 +1,7 @@
 #include "build_bc.h"
 
+#include <assert.h>
+
 #include "symbol.h"
 
 void *alloc(Data *data, size_t size) {
@@ -10,18 +12,23 @@ void *alloc(Data *data, size_t size) {
     return (char*) data->ptr + prev_length;
 }
 
-size_t begin_declare_section(Data *data) {
-    size_t start = data->length;
-    Section *section = alloc(data, ASIZEOF(Section));
+size_t begin_declare_section(BytecodeBuilder *builder) {
+    builder->symbol_offsets_ptr = realloc(
+        builder->symbol_offsets_ptr, (++builder->symbol_offsets_len) * sizeof(size_t));
+    size_t start = builder->data->length;
+    Section *section = alloc(builder->data, ASIZEOF(Section));
+    // symbol starts after section header
+    builder->symbol_offsets_ptr[builder->symbol_offsets_len - 1] = builder->data->length;
     section->kind = DECLARE_SECTION;
     return start;
 }
 
-DefineSectionState* begin_define_section(size_t index) {
+DefineSectionState* begin_define_section(BytecodeBuilder *builder, size_t index) {
     DefineSectionState *result = calloc(1, sizeof(DefineSectionState));
 
     result->main_data = alloc_data();
     result->offsets_data = alloc_data();
+    result->file_builder = builder;
     result->num_blocks = 0;
     result->num_registers = 0;
     result->regfile_size = 0;
@@ -40,13 +47,13 @@ void end_declare_section(Data *data, size_t start) {
     section->length = length;
 }
 
-void declare_symbol(Data *data, int args)
+void declare_symbol(BytecodeBuilder *builder, int args)
 {
-    Symbol *sym = alloc(data, sizeof(Symbol));
+    Symbol *sym = alloc(builder->data, sizeof(Symbol));
     sym->args_len = 2;
 }
 
-void end_define_section(Data *data, DefineSectionState *state) {
+void end_define_section(BytecodeBuilder *builder, DefineSectionState *state) {
     DefineSection *define_section = (DefineSection*) state->main_data->ptr;
     define_section->num_blocks = state->num_blocks;
     define_section->block_offsets_start = state->main_data->length;
@@ -64,7 +71,7 @@ void end_define_section(Data *data, DefineSectionState *state) {
     };
 
     end_declare_section(state->main_data, 0);
-    void *target = alloc(data, state->main_data->length);
+    void *target = alloc(builder->data, state->main_data->length);
     memcpy(target, state->main_data->ptr, state->main_data->length);
     free_data(state->main_data);
     free(state);
@@ -75,18 +82,90 @@ void add_type_int(Data *data) {
     type->kind = INT;
 }
 
+void add_type_struct(Data *data, int members) {
+    StructType *type = alloc(data, ASIZEOF(StructType));
+    type->base.kind = STRUCT;
+    type->members = members;
+}
+
+void add_type_pointer(Data *data) {
+    PointerType *type = alloc(data, ASIZEOF(PointerType));
+    type->base.kind = POINTER;
+}
+
 void add_string(Data *data, const char* text) {
     char *target = alloc(data, WORD_ALIGN(strlen(text) + 1));
     strcpy(target, text);
 }
 
 int add_arg_instr(DefineSectionState *state, int index) {
+    DefineSection *define_section = (DefineSection*) state->main_data->ptr;
+    size_t own_offset = state->file_builder->symbol_offsets_ptr[define_section->declaration_index];
+    Symbol *own_symbol = (Symbol*)((char*) state->file_builder->data->ptr + own_offset);
     ArgInstr *arg_instr = alloc(state->main_data, ASIZEOF(ArgInstr));
     arg_instr->base.kind = INSTR_ARG;
     arg_instr->index = index;
-    // TODO
-    state->regfile_size += 4;
+    state->regfile_size += typesz(get_ret_ptr(own_symbol));
     return state->num_registers++;
+}
+
+size_t start_alloc_instr(DefineSectionState *state) {
+    size_t offset = state->main_data->length;
+    AllocInstr *alloc_instr = alloc(state->main_data, ASIZEOF(AllocInstr));
+    alloc_instr->base.kind = INSTR_ALLOC;
+    return offset;
+}
+
+int end_alloc_instr(DefineSectionState *state, size_t offset) {
+    AllocInstr *alloc_instr = (AllocInstr*) ((char*) state->main_data->ptr + offset);
+    Type *type = (Type*)((char*) alloc_instr + ASIZEOF(AllocInstr));
+    state->regfile_size += sizeof(void*) + typesz(type);
+    return state->num_registers++;
+}
+
+size_t start_offset_instr(DefineSectionState *state, int reg, size_t index) {
+    size_t offset = state->main_data->length;
+    OffsetAddressInstr *offset_instr = alloc(state->main_data, ASIZEOF(OffsetAddressInstr));
+    offset_instr->base.kind = INSTR_OFFSET_ADDRESS;
+    offset_instr->reg = reg;
+    offset_instr->index = index;
+    return offset;
+}
+
+int end_offset_instr(DefineSectionState *state, size_t offset) {
+    OffsetAddressInstr *offset_instr = (OffsetAddressInstr*) ((char*) state->main_data->ptr + offset);
+    Type *type = (Type*)((char*) offset_instr + ASIZEOF(OffsetAddressInstr));
+    assert(type->kind == STRUCT);
+    type = (Type*)((char*) type + ASIZEOF(Type)); // first member type
+    for (int i = 0; i < offset_instr->index; i++) {
+        type = skip_type(type);
+    }
+    // member type n
+    state->regfile_size += typesz(type);
+    return state->num_registers++;
+}
+
+size_t start_load_instr(DefineSectionState *state, int pointer_reg) {
+    size_t offset = state->main_data->length;
+    LoadInstr *load_instr = alloc(state->main_data, ASIZEOF(LoadInstr));
+    load_instr->base.kind = INSTR_LOAD;
+    load_instr->pointer_reg = pointer_reg;
+    return offset;
+}
+
+int end_load_instr(DefineSectionState *state, size_t offset) {
+    LoadInstr *load_instr = (LoadInstr*) ((char*) state->main_data->ptr + offset);
+    Type *type = (Type*)((char*) load_instr + ASIZEOF(LoadInstr));
+    state->regfile_size += typesz(type);
+    return state->num_registers++;
+}
+
+void add_store_instr(DefineSectionState *state, int value_reg, int pointer_reg) {
+    StoreInstr *store_instr = alloc(state->main_data, ASIZEOF(StoreInstr));
+    store_instr->base.kind = INSTR_STORE;
+    store_instr->value_reg = value_reg;
+    store_instr->pointer_reg = pointer_reg;
+    state->num_registers++; // void
 }
 
 int add_literal_instr(DefineSectionState *state, int value) {
@@ -99,12 +178,13 @@ int add_literal_instr(DefineSectionState *state, int value) {
 }
 
 int start_call_instr(DefineSectionState *state, int offset, int args) {
+    size_t target_offset = state->file_builder->symbol_offsets_ptr[offset];
+    Symbol *target = (Symbol*)((char*) state->file_builder->data->ptr + target_offset);
     CallInstr *call_instr = alloc(state->main_data, ASIZEOF(CallInstr));
     call_instr->base.kind = INSTR_CALL;
     call_instr->symbol_offset = offset;
     call_instr->args_num = args;
-    // TODO void, other types
-    state->regfile_size += 4;
+    state->regfile_size += typesz(get_ret_ptr(target));
     return state->num_registers++;
 }
 

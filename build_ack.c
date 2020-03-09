@@ -7,56 +7,85 @@
 #include "symbol.h"
 
 int main(int argc, const char **argv) {
-    Data *file_data = alloc_data();
+    BytecodeBuilder *builder = alloc_bc_builder();
 
-    int int_eq_offset = 0;
-    int int_eq_section = begin_declare_section(file_data);
-    declare_symbol(file_data, 2);
-    add_string(file_data, "int_eq");
-    add_type_int(file_data); // ret
-    add_type_int(file_data);
-    add_type_int(file_data);
-    end_declare_section(file_data, int_eq_section);
+    int int_eq_offset = builder->symbol_offsets_len;
+    int int_eq_section = begin_declare_section(builder);
+    declare_symbol(builder, 2);
+    add_string(builder->data, "int_eq");
+    add_type_int(builder->data); // ret
+    add_type_int(builder->data);
+    add_type_int(builder->data);
+    end_declare_section(builder->data, int_eq_section);
 
-    int int_add_offset = 1;
-    int int_add_section = begin_declare_section(file_data);
-    declare_symbol(file_data, 2);
-    add_string(file_data, "int_add");
-    add_type_int(file_data); // ret
-    add_type_int(file_data);
-    add_type_int(file_data);
-    end_declare_section(file_data, int_add_section);
+    int int_add_offset = builder->symbol_offsets_len;
+    int int_add_section = begin_declare_section(builder);
+    declare_symbol(builder, 2);
+    add_string(builder->data, "int_add");
+    add_type_int(builder->data); // ret
+    add_type_int(builder->data);
+    add_type_int(builder->data);
+    end_declare_section(builder->data, int_add_section);
 
-    int int_sub_offset = 2;
-    int int_sub_section = begin_declare_section(file_data);
-    declare_symbol(file_data, 2);
-    add_string(file_data, "int_sub");
-    add_type_int(file_data); // ret
-    add_type_int(file_data);
-    add_type_int(file_data);
-    end_declare_section(file_data, int_sub_section);
+    int int_sub_offset = builder->symbol_offsets_len;
+    int int_sub_section = begin_declare_section(builder);
+    declare_symbol(builder, 2);
+    add_string(builder->data, "int_sub");
+    add_type_int(builder->data); // ret
+    add_type_int(builder->data);
+    add_type_int(builder->data);
+    end_declare_section(builder->data, int_sub_section);
 
-    int ack_offset = 3;
-    int ack_declare_section = begin_declare_section(file_data);
-    declare_symbol(file_data, 2);
-    add_string(file_data, "ack");
-    add_type_int(file_data); // ret
-    add_type_int(file_data);
-    add_type_int(file_data);
-    end_declare_section(file_data, ack_declare_section);
+    int ack_offset = builder->symbol_offsets_len;
+    int ack_declare_section = begin_declare_section(builder);
+    declare_symbol(builder, 2);
+    add_string(builder->data, "ack");
+    add_type_int(builder->data); // ret
+    add_type_int(builder->data);
+    add_type_int(builder->data);
+    end_declare_section(builder->data, ack_declare_section);
 
-    DefineSectionState *ack_define_section = begin_define_section(ack_offset);
+    DefineSectionState *ack_define_section = begin_define_section(builder, ack_offset);
     int branch1;
     {
         start_block(ack_define_section);
-        int arg0 = add_arg_instr(ack_define_section, 0); // %0 = arg(0)
-        int argzero = add_literal_instr(ack_define_section, 0); // %1 = 0
+        // %0 = new { int, int }
+        size_t alloc = start_alloc_instr(ack_define_section);
+        add_type_struct(ack_define_section->main_data, 2);
+        add_type_int(ack_define_section->main_data);
+        add_type_int(ack_define_section->main_data);
+        int frame = end_alloc_instr(ack_define_section, alloc);
 
-        int call = start_call_instr(ack_define_section, int_eq_offset, 2); // %1 = %0 == 0
-        add_call_reg_arg(ack_define_section, arg0);
+        size_t offset1 = start_offset_instr(ack_define_section, frame, 0);
+        add_type_struct(ack_define_section->main_data, 2);
+        add_type_int(ack_define_section->main_data);
+        add_type_int(ack_define_section->main_data);
+        int frame_m = end_offset_instr(ack_define_section, offset1); // %1 = &%0->_0
+
+        size_t offset2 = start_offset_instr(ack_define_section, frame, 1);
+        add_type_struct(ack_define_section->main_data, 2);
+        add_type_int(ack_define_section->main_data);
+        add_type_int(ack_define_section->main_data);
+        int frame_n = end_offset_instr(ack_define_section, offset2); // %2 = &%0->_1
+
+        int arg0 = add_arg_instr(ack_define_section, 0); // %3 = arg(0)
+        int arg1 = add_arg_instr(ack_define_section, 1); // %4 = arg(1)
+        add_store_instr(ack_define_section, arg0, frame_m); // *%1 = %3
+        add_type_int(ack_define_section->main_data);
+        add_store_instr(ack_define_section, arg1, frame_n); // *%2 = %4
+        add_type_int(ack_define_section->main_data);
+        int argzero = add_literal_instr(ack_define_section, 0); // %2 = 0
+
+        size_t arg0_load_offset = start_load_instr(ack_define_section, frame_m);
+        add_type_int(ack_define_section->main_data);
+        int arg0_frame = end_load_instr(ack_define_section, arg0_load_offset);
+
+        int call = start_call_instr(ack_define_section, int_eq_offset, 2); // %3 = m == 0
+        // add_call_reg_arg(ack_define_section, arg0); (void) arg0_frame;
+        add_call_reg_arg(ack_define_section, arg0_frame);
         add_call_reg_arg(ack_define_section, argzero);
 
-        branch1 = add_tbr_instr(ack_define_section, call);
+        branch1 = add_tbr_instr(ack_define_section, call); // tbr %3, :1, :2
     }
 
     {
@@ -141,15 +170,15 @@ int main(int argc, const char **argv) {
 
         add_ret_instr(ack_define_section, call4); // ret %14
     }
-    end_define_section(file_data, ack_define_section);
+    end_define_section(builder, ack_define_section);
 
     int bcfile = creat("ack.bc", 0644);
-    for (int i = 0; i < file_data->length;)
+    for (int i = 0; i < builder->data->length;)
     {
-        int written = write(bcfile, (char*) file_data->ptr + i, file_data->length - i);
+        int written = write(bcfile, (char*) builder->data->ptr + i, builder->data->length - i);
         assert(written != -1);
         i += written;
     }
     close(bcfile);
-    free_data(file_data);
+    free_bc_builder(builder);
 }

@@ -12,12 +12,49 @@ interface Symbol {}
 
 class Type
 {
+    abstract void emit(Data* data);
+
     override string toString() const { assert(false); }
 }
 
 class Integer : Type
 {
+    override void emit(Data* data) {
+        add_type_int(data);
+    }
+
     override string toString() const { return "int"; }
+}
+
+class Struct : Type
+{
+    Type[] members;
+
+    override void emit(Data* data) {
+        add_type_struct(data, cast(int) this.members.length);
+        this.members.each!(a => a.emit(data));
+    }
+
+    override string toString() const { return format!"{ %(%s, %) }"(this.members); }
+
+    mixin(GenerateThis);
+}
+
+class Pointer : Type
+{
+    Type target;
+
+    this(Type target) {
+        this.target = target;
+    }
+
+    override void emit(Data* data) {
+        assert(false);
+        // add_type_pointer(data);
+        target.emit(data);
+    }
+
+    override string toString() const { return format!"%s*"(this.target); }
 }
 
 extern(C) {
@@ -25,52 +62,71 @@ extern(C) {
         void* ptr;
         size_t length;
     }
+    struct BytecodeBuilder {
+        Data* data;
+        size_t symbol_offsets_len;
+        size_t* symbol_offsets_ptr;
+    }
+    struct DefineSectionState {
+        Data *main_data;
+        // ...
+    }
     Data *alloc_data();
-    size_t begin_declare_section(void* data);
-    void* begin_define_section(size_t index);
-    void end_define_section(Data* data, void* state);
-    void declare_symbol(void* data, int args);
-    void add_string(void* data, const char* text);
+    BytecodeBuilder *alloc_bc_builder();
+    size_t begin_declare_section(BytecodeBuilder* data);
+    DefineSectionState* begin_define_section(BytecodeBuilder*, size_t index);
+    void end_define_section(BytecodeBuilder* data, DefineSectionState* state);
+    void declare_symbol(BytecodeBuilder* data, int args);
+    void add_string(Data* data, const char* text);
     void add_type_int(Data* data);
-    void end_declare_section(void* data, size_t offset);
+    void add_type_struct(Data* data, int members);
+    void end_declare_section(Data* data, size_t offset);
 
-    void add_ret_instr(void* state, int reg);
-    int add_tbr_instr(void* state, int reg);
-    int add_literal_instr(void* state, int value);
-    int add_arg_instr(void* state, int index);
-    void tbr_resolve_then(void* state, int tbr_offset, int block);
-    void tbr_resolve_else(void* state, int tbr_offset, int block);
-    int add_br_instr(void* state);
-    void br_resolve(void* state, int br_offset, int block);
-    int start_call_instr(void* state, int offset, int args);
-    void add_call_reg_arg(void* state, int reg);
-    int start_block(void* state);
+    void add_ret_instr(DefineSectionState* state, int reg);
+    int add_tbr_instr(DefineSectionState* state, int reg);
+    int add_literal_instr(DefineSectionState* state, int value);
+    int add_arg_instr(DefineSectionState* state, int index);
+    void tbr_resolve_then(DefineSectionState* state, int tbr_offset, int block);
+    void tbr_resolve_else(DefineSectionState* state, int tbr_offset, int block);
+    int add_br_instr(DefineSectionState* state);
+    void br_resolve(DefineSectionState* state, int br_offset, int block);
+    int start_call_instr(DefineSectionState* state, int offset, int args);
+    void add_store_instr(DefineSectionState* state, int value_reg, int pointer_reg);
+    size_t start_offset_instr(DefineSectionState* state, int reg, size_t index);
+    int end_offset_instr(DefineSectionState* state, size_t offset);
+    size_t start_alloc_instr(DefineSectionState* state);
+    int end_alloc_instr(DefineSectionState* state, size_t offset);
+    size_t start_load_instr(DefineSectionState* state, int pointer_reg);
+    int end_load_instr(DefineSectionState* state, size_t offset);
+    void add_call_reg_arg(DefineSectionState* state, int reg);
+    int start_block(DefineSectionState* state);
 }
 
 class Generator {
-    Data* mainFile;
-    void* defineSection;
+    BytecodeBuilder* builder;
+    DefineSectionState* defineSectionState;
 
-    invariant(mainFile !is null);
+    invariant(builder !is null);
 
     int numDeclarations;
 
-    this(Data* mainFile, Data* defineSection = null) {
-        this.mainFile = mainFile;
-        this.defineSection = defineSection;
+    this(BytecodeBuilder* builder, DefineSectionState* defineSectionState = null) {
+        this.builder = builder;
+        this.defineSectionState = defineSectionState;
     }
 
     template opDispatch(string name) {
         auto opDispatch(T...)(T args) {
             static string member() {
                 switch (name) {
-                    case "add_string":
-                    case "add_type_int":
                     case "declare_symbol":
                     case "begin_declare_section":
+                        return "this.builder";
                     case "end_declare_section":
-                        return "this.mainFile";
-                    default: return "this.defineSection";
+                    case "add_string":
+                    case "add_type_int":
+                        assert(false, "specify data explicitly: may appear in either");
+                    default: return "this.defineSectionState";
                 }
             }
             return mixin(name ~ "(" ~ member() ~ ", args)");
@@ -79,14 +135,15 @@ class Generator {
 }
 
 int gen_int_stub(string op)(Generator gen) {
-    size_t start = gen.begin_declare_section;
+    int offset = cast(int) gen.builder.symbol_offsets_len;
+    size_t section = gen.begin_declare_section;
     gen.declare_symbol(2);
-    gen.add_string(toStringz("int_" ~ op));
-    gen.add_type_int; // ret
-    gen.add_type_int;
-    gen.add_type_int;
-    gen.end_declare_section(start);
-    return gen.numDeclarations++;
+    add_string(gen.builder.data, toStringz("int_" ~ op));
+    add_type_int(gen.builder.data); // ret
+    add_type_int(gen.builder.data);
+    add_type_int(gen.builder.data);
+    end_declare_section(gen.builder.data, section);
+    return offset;
 }
 
 class Parser
@@ -237,7 +294,7 @@ class Function : Symbol
     mixin(GenerateToString);
 }
 
-void add_type(Data* data, Type type) {
+void add_type(Data *data, Type type) {
     if (cast(Integer) type) {
         add_type_int(data);
         return;
@@ -247,15 +304,16 @@ void add_type(Data* data, Type type) {
 
 int declare(Generator output, Function fun) {
     if (fun.decl_offset != -1) return fun.decl_offset;
-    size_t section = begin_declare_section(output.mainFile);
-    declare_symbol(output.mainFile, cast(int) fun.args.length);
-    add_string(output.mainFile, fun.name.toStringz);
-    add_type(output.mainFile, fun.ret);
+    int offset = cast(int) output.builder.symbol_offsets_len;
+    size_t section = output.begin_declare_section;
+    output.declare_symbol(cast(int) fun.args.length);
+    add_string(output.builder.data, fun.name.toStringz);
+    add_type(output.builder.data, fun.ret);
     foreach (arg; fun.args) {
-        add_type(output.mainFile, arg.type);
+        add_type(output.builder.data, arg.type);
     }
-    end_declare_section(output.mainFile, section);
-    fun.decl_offset = output.numDeclarations++;
+    end_declare_section(output.builder.data, section);
+    fun.decl_offset = offset;
     return fun.decl_offset;
 }
 
@@ -264,6 +322,7 @@ interface Statement {
 }
 
 interface Expression : Symbol {
+    Type type(Scope scope_);
     int emit(Scope scope_, Generator output);
 }
 
@@ -411,6 +470,10 @@ class ArithmeticOp : Expression {
     Expression left;
     Expression right;
 
+    override Type type(Scope) {
+        return new Integer;
+    }
+
     override int emit(Scope scope_, Generator output) {
         int leftreg = this.left.emit(scope_, output);
         int rightreg = this.right.emit(scope_, output);
@@ -472,6 +535,11 @@ class Call : Expression {
     string name;
     Expression[] args;
 
+    override Type type(Scope scope_) {
+        auto funsym = scope_.lookup(name);
+        return (cast(Function) funsym).ret;
+    }
+
     override int emit(Scope scope_, Generator output) {
         auto funsym = scope_.lookup(name);
         int fun_offset = declare(output, cast(Function) funsym);
@@ -512,6 +580,14 @@ class Variable : Expression
 {
     string name;
 
+    override Type type(Scope scope_) {
+        auto sym = scope_.lookup(name);
+        assert(sym, format!"unknown name %s"(name));
+        auto expr = cast(Expression) sym;
+        assert(expr, format!"%s"(sym));
+        return expr.type(scope_);
+    }
+
     override int emit(Scope scope_, Generator output) {
         auto sym = scope_.lookup(name);
         assert(sym, format!"unknown name %s"(name));
@@ -532,6 +608,10 @@ class Literal : Expression
         return output.add_literal_instr(this.value);
     }
 
+    override Type type(Scope) {
+        return new Integer;
+    }
+
     override string toString() const {
         import std.conv : to;
 
@@ -549,10 +629,109 @@ class ArgExpr : Expression
         return output.add_arg_instr(this.index);
     }
 
+    override Type type(Scope) {
+        return new Integer;
+    }
+
     override string toString() const {
         import std.format : format;
 
-        return format!"%%%s"(this.index);
+        return format!"_%s"(this.index);
+    }
+
+    mixin(GenerateThis);
+}
+
+class RegExpr : Expression
+{
+    Type regType;
+
+    int reg;
+
+    override int emit(Scope, Generator) {
+        return this.reg;
+    }
+
+    override Type type(Scope) {
+        return this.regType;
+    }
+
+    override string toString() const {
+        import std.format : format;
+
+        return format!"%%%s"(this.reg);
+    }
+
+    mixin(GenerateThis);
+}
+
+class StructMember : Expression
+{
+    Expression base;
+
+    int index;
+
+    override Type type(Scope scope_) {
+        Type type = base.type(scope_);
+        auto ptrType = cast(Pointer) type;
+        assert(ptrType);
+        auto structType = cast(Struct) ptrType.target;
+        assert(structType);
+        return new Pointer(structType.members[this.index]);
+    }
+
+    override int emit(Scope scope_, Generator output) {
+        int reg = this.base.emit(scope_, output);
+        Type type = base.type(scope_);
+        auto ptrType = cast(Pointer) type;
+        assert(ptrType, type.toString);
+        auto structType = cast(Struct) ptrType.target;
+        assert(structType);
+        size_t offset = output.start_offset_instr(reg, this.index);
+        structType.emit(output.defineSectionState.main_data);
+        return output.end_offset_instr(offset);
+    }
+
+    override string toString() const {
+        return format!"%s._%s"(this.base, this.index);
+    }
+
+    mixin(GenerateThis);
+}
+
+class Load : Expression
+{
+    Expression base;
+
+    override Type type(Scope scope_) {
+        Type superType = this.base.type(scope_);
+        Pointer pointerType = cast(Pointer) superType;
+        assert(pointerType, superType.toString);
+        return pointerType.target;
+    }
+
+    override int emit(Scope scope_, Generator output) {
+        int reg = this.base.emit(scope_, output);
+        size_t offset = output.start_load_instr(reg);
+        this.type(scope_).emit(output.defineSectionState.main_data);
+        return output.end_load_instr(offset);
+    }
+
+    mixin(GenerateThis);
+}
+
+class StackAlloc : Expression
+{
+    Type valueType;
+
+    override Type type(Scope scope_) {
+        return new Pointer(this.valueType);
+    }
+
+    override int emit(Scope scope_, Generator output) {
+        size_t offset = output.start_alloc_instr;
+        this.valueType.emit(output.defineSectionState.main_data);
+        return output.end_alloc_instr(offset);
     }
 
     mixin(GenerateThis);
@@ -605,25 +784,34 @@ class Scope
 class BytecodeFile {
     Generator generator;
     this() {
-        this.generator = new Generator(alloc_data());
+        this.generator = new Generator(alloc_bc_builder());
     }
     void define(Function fun, Scope scope_) {
         int declid = declare(this.generator, fun);
-        assert(this.generator.defineSection is null);
-        this.generator.defineSection = begin_define_section(declid);
+        assert(this.generator.defineSectionState is null);
+        this.generator.defineSectionState = begin_define_section(this.generator.builder, declid);
         this.generator.start_block;
+        auto stackframeType = new Struct(fun.args.length.iota.map!(i => cast(Type) new Integer).array);
+        auto stackframeGen = new StackAlloc(stackframeType);
+        auto stackframeReg = new RegExpr(stackframeGen.type(null), stackframeGen.emit(null, this.generator));
         auto funscope = new Scope(scope_);
         foreach (i, arg; fun.args) {
-            funscope.add(arg.name, new ArgExpr(cast(int) i));
+            auto member = new StructMember(stackframeReg, cast(int) i);
+            auto argReg = (new ArgExpr(cast(int) i)).emit(null, this.generator);
+
+            this.generator.add_store_instr(argReg, member.emit(null, this.generator));
+            (cast(Pointer) member.type(null)).target.emit(this.generator.defineSectionState.main_data);
+
+            funscope.add(arg.name, new Load(member));
         }
         fun.statement.emit(funscope, this.generator);
-        end_define_section(this.generator.mainFile, this.generator.defineSection);
-        this.generator.defineSection = null;
+        end_define_section(this.generator.builder, this.generator.defineSectionState);
+        this.generator.defineSectionState = null;
     }
     void writeTo(string filename) {
         static import std.file;
 
-        std.file.write(filename, (cast(ubyte*) this.generator.mainFile.ptr)[0 .. this.generator.mainFile.length]);
+        std.file.write(filename, (cast(ubyte*) this.generator.builder.data.ptr)[0 .. this.generator.builder.data.length]);
     }
 }
 

@@ -36,19 +36,21 @@ void call(
     void *values[num_registers]; // array of pointers into regfile
 
 restart_block_loop:;
-    int start_register = metadata[blkid].register_offset;
+    int curReg = metadata[blkid].register_offset;
     char *cur_regfile = (char*) regfile + metadata[blkid].regfile_offset;
     BaseInstr *restrict instr = (BaseInstr*) ((char*) entry->section + metadata[blkid].block_offset);
     /*printf(" blk %i (%p) offset %i start %i regfile %i\n",
             blkid, (void*) instr, metadata[blkid].block_offset, start_register, metadata[blkid].regfile_offset);*/
-    void **current_value = &values[start_register];
+#define verbose 0
     while (true) {
+        void **current_value = &values[curReg];
         /*printf("  instr %i @%lu sp %p - %p\n",
                 instr->kind, (char*) instr - (char*) entry->section, cur_regfile, regfile);*/
         switch (instr->kind) {
             case INSTR_ARG:
             {
                 ArgInstr *arginstr = (ArgInstr*) instr;
+                if (verbose) printf("    %%%i = arg(%i)\n", curReg, arginstr->index);
                 // TODO copy into regfile?
                 *current_value = values_ptr[arginstr->index];
                 // printf("    %%%i = arg(%i) = %i\n", cur_slot, arginstr->index, current_value->int_value);
@@ -58,6 +60,7 @@ restart_block_loop:;
             case INSTR_LITERAL:
             {
                 LiteralInstr *litinstr = (LiteralInstr*) instr;
+                if (verbose) printf("    %%%i = %i\n", curReg, litinstr->value);
                 *(int*) cur_regfile = litinstr->value;
                 *current_value = cur_regfile;
                 cur_regfile = (char*) cur_regfile + sizeof(int);
@@ -67,6 +70,7 @@ restart_block_loop:;
             case INSTR_ALLOC:
             {
                 AllocInstr *alloc_instr = (AllocInstr*) instr;
+                if (verbose) printf("    %%%i = alloca ??\n", curReg);
                 Type *type = (Type*)((char*) alloc_instr + ASIZEOF(AllocInstr));
                 size_t size = typesz(type);
                 memset(cur_regfile, 0, size); // zero initialize alloc
@@ -80,6 +84,7 @@ restart_block_loop:;
             case INSTR_OFFSET_ADDRESS:
             {
                 OffsetAddressInstr *offset_instr = (OffsetAddressInstr*) instr;
+                if (verbose) printf("    %%%i = &%%%i._%i\n", curReg, offset_instr->reg, offset_instr->index);
                 Type *type = (Type*)((char*) offset_instr + ASIZEOF(OffsetAddressInstr));
                 assert(type->kind == STRUCT);
                 instr = (BaseInstr*) skip_type(type);
@@ -99,6 +104,7 @@ restart_block_loop:;
             case INSTR_STORE:
             {
                 StoreInstr *store_instr = (StoreInstr*) instr;
+                if (verbose) printf("    *%%%i := %%%i\n", store_instr->pointer_reg, store_instr->value_reg);
                 Type *type = (Type*)((char*) store_instr + ASIZEOF(StoreInstr));
                 instr = (BaseInstr*) skip_type(type);
 
@@ -111,6 +117,7 @@ restart_block_loop:;
             case INSTR_LOAD:
             {
                 LoadInstr *load_instr = (LoadInstr*) instr;
+                if (verbose) printf("    %%%i = *%%%i\n", curReg, load_instr->pointer_reg);
                 Type *type = (Type*)((char*) load_instr + ASIZEOF(LoadInstr));
                 instr = (BaseInstr*) skip_type(type);
 
@@ -147,15 +154,18 @@ restart_block_loop:;
                 Type *ret_type = get_ret_ptr(callee->symbol);
                 *current_value = cur_regfile;
                 cur_regfile = (char*) cur_regfile + typesz(ret_type);
-                // char *symbol_name = (char*) callee->symbol + sizeof(Symbol);
-                // printf("    %p = call %s(%i, %i)\n", *current_value, symbol_name, *(int*)call_args[0], *(int*)call_args[1]);
+                if (verbose) {
+                    char *symbol_name = (char*) callee->symbol + sizeof(Symbol);
+                    printf("    %p = call %s(%i, %i)\n", *current_value, symbol_name, *(int*)call_args[0], *(int*)call_args[1]);
+                }
                 call(environment, callee, callinstr->args_num, call_args, *current_value);
-                // printf("     => %i\n", **(int**) current_value);
+                if (verbose) printf("     => %i\n", **(int**) current_value);
             }
             break;
             case INSTR_TESTBRANCH:
             {
                 TestBranchInstr *tbr_instr = (TestBranchInstr*) instr;
+                if (verbose) printf("    tbr %%%i ? %i: : %i:\n", tbr_instr->reg, tbr_instr->then_blk, tbr_instr->else_blk);
                 int regvalue = *(int*) values[tbr_instr->reg];
                 blkid = regvalue ? tbr_instr->then_blk : tbr_instr->else_blk;
             }
@@ -163,6 +173,7 @@ restart_block_loop:;
             case INSTR_RETURN:
             {
                 ReturnInstr *ret_instr = (ReturnInstr*) instr;
+                if (verbose) printf("    ret %%%i\n", ret_instr->reg);
                 // TODO memcpy
                 *(int*) ret_ptr = *(int*) values[ret_instr->reg];
                 return;
@@ -171,7 +182,8 @@ restart_block_loop:;
                 fprintf(stderr, "what is instr %i\n", instr->kind);
                 assert(false);
         }
-        current_value++;
+#undef verbose
+        curReg++;
     }
 }
 

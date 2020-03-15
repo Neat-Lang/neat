@@ -7,7 +7,7 @@
 #include "type.h"
 
 int declare(Environment *environment, Symbol *symbol) {
-    printf("declare symbol %s at %i (%i)\n", symbol->name, environment->entries.length, symbol->args_len);
+    printf("declare symbol '%s' at %i (%i)\n", symbol->name, environment->entries.length, symbol->args_len);
     environment->entries.ptr = realloc(
         environment->entries.ptr, ++environment->entries.length * sizeof(SymbolEntry));
     environment->entries.ptr[environment->entries.length - 1] = (SymbolEntry) {

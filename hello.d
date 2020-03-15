@@ -24,6 +24,10 @@ class Integer : Type
     }
 
     override string toString() const { return "int"; }
+
+    override bool opEquals(const Object obj) {
+        return cast(Integer) obj !is null;
+    }
 }
 
 class Struct : Type
@@ -326,6 +330,10 @@ interface Expression : Symbol {
     int emit(Scope scope_, Generator output);
 }
 
+interface Reference : Expression {
+    int emitLocation(Scope scope_, Generator output);
+}
+
 Function parseFunction(ref Parser parser) {
     with (parser) {
         begin;
@@ -444,10 +452,47 @@ IfStatement parseIf(ref Parser parser) {
     }
 }
 
+class AssignStatement : Statement {
+    Reference target;
+
+    Expression value;
+
+    override void emit(Scope scope_, Generator output) {
+        auto targetType = this.target.type(scope_), valueType = this.value.type(scope_);
+        assert(targetType == valueType,
+               format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));
+
+        int target_reg = this.target.emitLocation(scope_, output);
+        int value_reg = this.value.emit(scope_, output);
+
+        output.add_store_instr(value_reg, target_reg);
+        valueType.emit(output.defineSectionState.main_data);
+    }
+
+    mixin(GenerateThis);
+    mixin(GenerateToString);
+}
+
+AssignStatement parseAssignment(ref Parser parser) {
+    with (parser) {
+        begin;
+        auto lhs = parser.parseIdentifier;
+        if (!lhs || !accept("=")) {
+            revert;
+            return null;
+        }
+        auto expr = parser.parseExpression;
+        expect(";");
+        commit;
+        return new AssignStatement(new Variable(lhs), expr);
+    }
+}
+
 Statement parseStatement(ref Parser parser) {
     if (auto stmt = parser.parseReturn) return stmt;
     if (auto stmt = parser.parseIf) return stmt;
     if (auto stmt = parser.parseSequence) return stmt;
+    if (auto stmt = parser.parseAssignment) return stmt;
     parser.fail("statement expected");
     assert(false);
 }
@@ -576,7 +621,7 @@ Expression parseCall(ref Parser parser) {
     }
 }
 
-class Variable : Expression
+class Variable : Reference
 {
     string name;
 
@@ -594,6 +639,14 @@ class Variable : Expression
         auto expr = cast(Expression) sym;
         assert(expr, format!"%s"(sym));
         return expr.emit(scope_, output);
+    }
+
+    override int emitLocation(Scope scope_, Generator output) {
+        auto sym = scope_.lookup(name);
+        assert(sym, format!"unknown name %s"(name));
+        auto reference = cast(Reference) sym;
+        assert(reference, format!"%s"(sym));
+        return reference.emitLocation(scope_, output);
     }
 
     mixin(GenerateThis);
@@ -642,18 +695,23 @@ class ArgExpr : Expression
     mixin(GenerateThis);
 }
 
-class RegExpr : Expression
+// reg contains pointer to type
+class LoadRegExpr : Reference
 {
-    Type regType;
-
     int reg;
 
+    Type targetType;
+
     override int emit(Scope, Generator) {
+        assert(false);
+    }
+
+    override int emitLocation(Scope, Generator) {
         return this.reg;
     }
 
     override Type type(Scope) {
-        return this.regType;
+        return this.targetType;
     }
 
     override string toString() const {
@@ -665,27 +723,30 @@ class RegExpr : Expression
     mixin(GenerateThis);
 }
 
-class StructMember : Expression
+class StructMember : Reference
 {
-    Expression base;
+    Reference base;
 
     int index;
 
     override Type type(Scope scope_) {
         Type type = base.type(scope_);
-        auto ptrType = cast(Pointer) type;
-        assert(ptrType);
-        auto structType = cast(Struct) ptrType.target;
+        auto structType = cast(Struct) type;
         assert(structType);
-        return new Pointer(structType.members[this.index]);
+        return structType.members[this.index];
     }
 
     override int emit(Scope scope_, Generator output) {
-        int reg = this.base.emit(scope_, output);
+        int locationReg = emitLocation(scope_, output);
+        size_t offset = output.start_load_instr(locationReg);
+        this.type(scope_).emit(output.defineSectionState.main_data);
+        return output.end_load_instr(offset);
+    }
+
+    override int emitLocation(Scope scope_, Generator output) {
+        int reg = this.base.emitLocation(scope_, output);
         Type type = base.type(scope_);
-        auto ptrType = cast(Pointer) type;
-        assert(ptrType, type.toString);
-        auto structType = cast(Struct) ptrType.target;
+        auto structType = cast(Struct) type;
         assert(structType);
         size_t offset = output.start_offset_instr(reg, this.index);
         structType.emit(output.defineSectionState.main_data);
@@ -793,16 +854,18 @@ class BytecodeFile {
         this.generator.start_block;
         auto stackframeType = new Struct(fun.args.length.iota.map!(i => cast(Type) new Integer).array);
         auto stackframeGen = new StackAlloc(stackframeType);
-        auto stackframeReg = new RegExpr(stackframeGen.type(null), stackframeGen.emit(null, this.generator));
+        auto type = stackframeGen.type(null);
+        assert(cast(Pointer) type);
+        auto stackframeReg = new LoadRegExpr(stackframeGen.emit(null, this.generator), (cast(Pointer) type).target);
         auto funscope = new Scope(scope_);
         foreach (i, arg; fun.args) {
             auto member = new StructMember(stackframeReg, cast(int) i);
             auto argReg = (new ArgExpr(cast(int) i)).emit(null, this.generator);
 
-            this.generator.add_store_instr(argReg, member.emit(null, this.generator));
-            (cast(Pointer) member.type(null)).target.emit(this.generator.defineSectionState.main_data);
+            this.generator.add_store_instr(argReg, member.emitLocation(null, this.generator));
+            member.type(null).emit(this.generator.defineSectionState.main_data);
 
-            funscope.add(arg.name, new Load(member));
+            funscope.add(arg.name, member);
         }
         fun.statement.emit(funscope, this.generator);
         end_define_section(this.generator.builder, this.generator.defineSectionState);
@@ -817,7 +880,7 @@ class BytecodeFile {
 
 void main() {
     string code = "int ack(int m, int n) {
-        if (m == 0) return n + 1;
+        if (m == 0) { n = n + 1; return n; }
         if (n == 0) return ack(m - 1, 1);
         return ack(m - 1, ack(m, n - 1));
     }";

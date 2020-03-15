@@ -42,6 +42,7 @@ DefineSectionState* begin_define_section(BytecodeBuilder *builder, size_t index)
 
 void end_declare_section(Data *data, size_t start) {
     size_t length = data->length - start;
+    assert(length != 0);
 
     Section *section = (Section*)((char*) data->ptr + start);
     section->length = length;

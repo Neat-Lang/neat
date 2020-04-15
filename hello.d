@@ -8,24 +8,34 @@ import std.stdio;
 import std.uni;
 
 // something that can be referenced by a name
-interface Symbol {}
+interface Symbol
+{
+}
 
 class Type
 {
     abstract void emit(Data* data);
 
-    override string toString() const { assert(false); }
+    override string toString() const
+    {
+        assert(false);
+    }
 }
 
 class Integer : Type
 {
-    override void emit(Data* data) {
+    override void emit(Data* data)
+    {
         add_type_int(data);
     }
 
-    override string toString() const { return "int"; }
+    override string toString() const
+    {
+        return "int";
+    }
 
-    override bool opEquals(const Object obj) {
+    override bool opEquals(const Object obj)
+    {
         return cast(Integer) obj !is null;
     }
 }
@@ -34,12 +44,16 @@ class Struct : Type
 {
     Type[] members;
 
-    override void emit(Data* data) {
+    override void emit(Data* data)
+    {
         add_type_struct(data, cast(int) this.members.length);
         this.members.each!(a => a.emit(data));
     }
 
-    override string toString() const { return format!"{ %(%s, %) }"(this.members); }
+    override string toString() const
+    {
+        return format!"{ %(%s, %) }"(this.members);
+    }
 
     mixin(GenerateThis);
 }
@@ -48,35 +62,47 @@ class Pointer : Type
 {
     Type target;
 
-    this(Type target) {
+    this(Type target)
+    {
         this.target = target;
     }
 
-    override void emit(Data* data) {
+    override void emit(Data* data)
+    {
         assert(false);
         // add_type_pointer(data);
         target.emit(data);
     }
 
-    override string toString() const { return format!"%s*"(this.target); }
+    override string toString() const
+    {
+        return format!"%s*"(this.target);
+    }
 }
 
-extern(C) {
-    struct Data {
+extern (C)
+{
+    struct Data
+    {
         void* ptr;
         size_t length;
     }
-    struct BytecodeBuilder {
+
+    struct BytecodeBuilder
+    {
         Data* data;
         size_t symbol_offsets_len;
         size_t* symbol_offsets_ptr;
     }
-    struct DefineSectionState {
-        Data *main_data;
+
+    struct DefineSectionState
+    {
+        Data* main_data;
         // ...
     }
-    Data *alloc_data();
-    BytecodeBuilder *alloc_bc_builder();
+
+    Data* alloc_data();
+    BytecodeBuilder* alloc_bc_builder();
     size_t begin_declare_section(BytecodeBuilder* data);
     DefineSectionState* begin_define_section(BytecodeBuilder*, size_t index);
     void end_define_section(BytecodeBuilder* data, DefineSectionState* state);
@@ -106,39 +132,48 @@ extern(C) {
     int start_block(DefineSectionState* state);
 }
 
-class Generator {
+class Generator
+{
     BytecodeBuilder* builder;
     DefineSectionState* defineSectionState;
 
-    invariant(builder !is null);
+    invariant (builder !is null);
 
     int numDeclarations;
 
-    this(BytecodeBuilder* builder, DefineSectionState* defineSectionState = null) {
+    this(BytecodeBuilder* builder, DefineSectionState* defineSectionState = null)
+    {
         this.builder = builder;
         this.defineSectionState = defineSectionState;
     }
 
-    template opDispatch(string name) {
-        auto opDispatch(T...)(T args) {
-            static string member() {
-                switch (name) {
+    template opDispatch(string name)
+    {
+        auto opDispatch(T...)(T args)
+        {
+            static string member()
+            {
+                switch (name)
+                {
                     case "declare_symbol":
-                    case "begin_declare_section":
+                        case "begin_declare_section":
                         return "this.builder";
                     case "end_declare_section":
-                    case "add_string":
-                    case "add_type_int":
+                        case "add_string":
+                        case "add_type_int":
                         assert(false, "specify data explicitly: may appear in either");
-                    default: return "this.defineSectionState";
+                    default:
+                        return "this.defineSectionState";
                 }
             }
+
             return mixin(name ~ "(" ~ member() ~ ", args)");
         }
     }
 }
 
-int gen_int_stub(string op)(Generator gen) {
+int gen_int_stub(string op)(Generator gen)
+{
     int offset = cast(int) gen.builder.symbol_offsets_len;
     size_t section = gen.begin_declare_section;
     gen.declare_symbol(2);
@@ -154,20 +189,25 @@ class Parser
 {
     string[] stack;
 
-    invariant(!this.stack.empty);
+    invariant (!this.stack.empty);
 
     size_t level;
 
-    invariant(this.level <= this.stack.length);
+    invariant (this.level <= this.stack.length);
 
-    @property ref string text() {
+    @property ref string text()
+    {
         return this.stack[this.level];
     }
 
-    void begin() {
-        if (this.level == this.stack.length - 1) {
+    void begin()
+    {
+        if (this.level == this.stack.length - 1)
+        {
             this.stack ~= this.text;
-        } else {
+        }
+        else
+        {
             this.stack[this.level + 1] = this.text;
         }
         this.level++;
@@ -186,11 +226,13 @@ class Parser
         this.level--;
     }
 
-    this(string text) {
+    this(string text)
+    {
         this.stack ~= text;
     }
 
-    bool accept(string match) {
+    bool accept(string match)
+    {
         begin;
 
         strip;
@@ -204,33 +246,41 @@ class Parser
         return false;
     }
 
-    void expect(string match) {
-        if (!accept(match)) {
+    void expect(string match)
+    {
+        if (!accept(match))
+        {
             fail(format!"'%s' expected."(match));
         }
     }
 
-    void fail(string msg) {
+    void fail(string msg)
+    {
         assert(false, format!"at %s: %s"(this.text, msg));
     }
 
-    void strip() {
+    void strip()
+    {
         this.text = this.text.strip;
     }
 }
 
-bool parseNumber(ref Parser parser, out int i) {
+bool parseNumber(ref Parser parser, out int i)
+{
     import std.conv : to;
 
-    with (parser) {
+    with (parser)
+    {
         begin;
         strip;
-        if (text.empty || !text.front.isNumber) {
+        if (text.empty || !text.front.isNumber)
+        {
             revert;
             return false;
         }
         string number;
-        while (!text.empty && text.front.isNumber) {
+        while (!text.empty && text.front.isNumber)
+        {
             number ~= text.front;
             text.popFront;
         }
@@ -240,16 +290,20 @@ bool parseNumber(ref Parser parser, out int i) {
     }
 }
 
-string parseIdentifier(ref Parser parser) {
-    with (parser) {
+string parseIdentifier(ref Parser parser)
+{
+    with (parser)
+    {
         begin;
         strip;
-        if (text.empty || !text.front.isAlpha) {
+        if (text.empty || !text.front.isAlpha)
+        {
             revert;
             return null;
         }
         string identifier;
-        while (!text.empty && text.front.isAlphaNum) {
+        while (!text.empty && text.front.isAlphaNum)
+        {
             identifier ~= text.front;
             text.popFront;
         }
@@ -258,11 +312,14 @@ string parseIdentifier(ref Parser parser) {
     }
 }
 
-Type parseType(ref Parser parser) {
-    with (parser) {
+Type parseType(ref Parser parser)
+{
+    with (parser)
+    {
         begin;
 
-        if (parser.parseIdentifier == "int") {
+        if (parser.parseIdentifier == "int")
+        {
             commit;
             return new Integer;
         }
@@ -298,22 +355,27 @@ class Function : Symbol
     mixin(GenerateToString);
 }
 
-void add_type(Data *data, Type type) {
-    if (cast(Integer) type) {
+void add_type(Data* data, Type type)
+{
+    if (cast(Integer) type)
+    {
         add_type_int(data);
         return;
     }
     assert(false);
 }
 
-int declare(Generator output, Function fun) {
-    if (fun.decl_offset != -1) return fun.decl_offset;
+int declare(Generator output, Function fun)
+{
+    if (fun.decl_offset != -1)
+        return fun.decl_offset;
     int offset = cast(int) output.builder.symbol_offsets_len;
     size_t section = output.begin_declare_section;
     output.declare_symbol(cast(int) fun.args.length);
     add_string(output.builder.data, fun.name.toStringz);
     add_type(output.builder.data, fun.ret);
-    foreach (arg; fun.args) {
+    foreach (arg; fun.args)
+    {
         add_type(output.builder.data, arg.type);
     }
     end_declare_section(output.builder.data, section);
@@ -321,37 +383,47 @@ int declare(Generator output, Function fun) {
     return fun.decl_offset;
 }
 
-interface ASTStatement {
+interface ASTStatement
+{
     Statement compile(Scope scope_);
 }
 
-interface Statement {
+interface Statement
+{
     void emit(Generator output);
 }
 
-interface ASTExpression : Symbol {
+interface ASTExpression : Symbol
+{
     Expression compile(Scope scope_);
 }
 
-interface Expression : Symbol {
+interface Expression : Symbol
+{
     Type type();
     int emit(Generator output);
 }
 
-interface Reference : Expression {
+interface Reference : Expression
+{
     int emitLocation(Generator output);
 }
 
-Function parseFunction(ref Parser parser) {
-    with (parser) {
+Function parseFunction(ref Parser parser)
+{
+    with (parser)
+    {
         begin;
         auto ret = parser.parseType;
         auto name = parser.parseIdentifier;
         expect("(");
         Argument[] args;
-        while (!accept(")")) {
-            if (!args.empty) {
-                if (!accept(",")) {
+        while (!accept(")"))
+        {
+            if (!args.empty)
+            {
+                if (!accept(","))
+                {
                     fail("',' or ')' expected");
                 }
             }
@@ -369,13 +441,14 @@ class ASTSequenceStatement : ASTStatement
 {
     @AllNonNull
     ASTStatement[] statements;
-    
-    override Statement compile(Scope scope_) {
+
+    override Statement compile(Scope scope_)
+    {
         return new SequenceStatement(
-            statements.map!(a => a.compile(scope_)).array
+                statements.map!(a => a.compile(scope_)).array
         );
     }
-    
+
     mixin(GenerateAll);
 }
 
@@ -384,24 +457,31 @@ class SequenceStatement : Statement
     @AllNonNull
     Statement[] statements;
 
-    override void emit(Generator output) {
-        foreach (statement; statements) {
+    override void emit(Generator output)
+    {
+        foreach (statement; statements)
+        {
             statement.emit(output);
         }
     }
+
     mixin(GenerateThis);
     mixin(GenerateToString);
 }
 
-ASTSequenceStatement parseSequence(ref Parser parser) {
-    with (parser) {
+ASTSequenceStatement parseSequence(ref Parser parser)
+{
+    with (parser)
+    {
         begin;
-        if (!accept("{")) {
+        if (!accept("{"))
+        {
             revert;
             return null;
         }
         ASTStatement[] statements;
-        while (!accept("}")) {
+        while (!accept("}"))
+        {
             auto stmt = parser.parseStatement;
             statements ~= stmt;
         }
@@ -410,20 +490,24 @@ ASTSequenceStatement parseSequence(ref Parser parser) {
     }
 }
 
-class ASTReturnStatement : ASTStatement {
+class ASTReturnStatement : ASTStatement
+{
     ASTExpression value;
-    
-    override ReturnStatement compile(Scope scope_) {
+
+    override ReturnStatement compile(Scope scope_)
+    {
         return new ReturnStatement(value.compile(scope_));
     }
-    
+
     mixin(GenerateAll);
 }
 
-class ReturnStatement : Statement {
+class ReturnStatement : Statement
+{
     Expression value;
 
-    override void emit(Generator output) {
+    override void emit(Generator output)
+    {
         int reg = this.value.emit(output);
         output.add_ret_instr(reg);
         output.start_block;
@@ -432,10 +516,13 @@ class ReturnStatement : Statement {
     mixin(GenerateAll);
 }
 
-ASTReturnStatement parseReturn(ref Parser parser) {
-    with (parser) {
+ASTReturnStatement parseReturn(ref Parser parser)
+{
+    with (parser)
+    {
         begin;
-        if (parser.parseIdentifier != "return") {
+        if (parser.parseIdentifier != "return")
+        {
             revert;
             return null;
         }
@@ -446,26 +533,30 @@ ASTReturnStatement parseReturn(ref Parser parser) {
     }
 }
 
-class ASTIfStatement : ASTStatement {
+class ASTIfStatement : ASTStatement
+{
     ASTExpression test;
     ASTStatement then;
-    
-    override IfStatement compile(Scope scope_) {
+
+    override IfStatement compile(Scope scope_)
+    {
         auto ifscope = new Scope(scope_);
         auto test = this.test.compile(scope_);
         auto then = this.then.compile(scope_);
-        
+
         return new IfStatement(test, then);
     }
-    
+
     mixin(GenerateAll);
 }
 
-class IfStatement : Statement {
+class IfStatement : Statement
+{
     Expression test;
     Statement then;
 
-    override void emit(Generator output) {
+    override void emit(Generator output)
+    {
         int reg = test.emit(output);
         int tbr_offset = output.add_tbr_instr(reg);
         int thenblk = output.start_block;
@@ -482,10 +573,13 @@ class IfStatement : Statement {
     mixin(GenerateToString);
 }
 
-ASTIfStatement parseIf(ref Parser parser) {
-    with (parser) {
+ASTIfStatement parseIf(ref Parser parser)
+{
+    with (parser)
+    {
         begin;
-        if (parser.parseIdentifier != "if") {
+        if (parser.parseIdentifier != "if")
+        {
             revert;
             return null;
         }
@@ -498,30 +592,34 @@ ASTIfStatement parseIf(ref Parser parser) {
     }
 }
 
-class ASTAssignStatement : ASTStatement {
+class ASTAssignStatement : ASTStatement
+{
     ASTExpression target;
 
     ASTExpression value;
-    
-    override AssignStatement compile(Scope scope_) {
+
+    override AssignStatement compile(Scope scope_)
+    {
         auto target = this.target.compile(scope_);
         auto value = this.value.compile(scope_);
         auto targetref = cast(Reference) target;
         assert(targetref, "target of assignment must be a reference");
         return new AssignStatement(targetref, value);
     }
-    
+
     mixin(GenerateAll);
 }
 
-class AssignStatement : Statement {
+class AssignStatement : Statement
+{
     Reference target;
     Expression value;
 
-    override void emit(Generator output) {
+    override void emit(Generator output)
+    {
         auto targetType = this.target.type(), valueType = this.value.type();
         assert(targetType == valueType,
-               format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));
+                format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));
 
         int target_reg = this.target.emitLocation(output);
         int value_reg = this.value.emit(output);
@@ -533,11 +631,14 @@ class AssignStatement : Statement {
     mixin(GenerateAll);
 }
 
-ASTAssignStatement parseAssignment(ref Parser parser) {
-    with (parser) {
+ASTAssignStatement parseAssignment(ref Parser parser)
+{
+    with (parser)
+    {
         begin;
         auto lhs = parser.parseIdentifier;
-        if (!lhs || !accept("=")) {
+        if (!lhs || !accept("="))
+        {
             revert;
             return null;
         }
@@ -548,24 +649,32 @@ ASTAssignStatement parseAssignment(ref Parser parser) {
     }
 }
 
-ASTStatement parseStatement(ref Parser parser) {
-    if (auto stmt = parser.parseReturn) return stmt;
-    if (auto stmt = parser.parseIf) return stmt;
-    if (auto stmt = parser.parseSequence) return stmt;
-    if (auto stmt = parser.parseAssignment) return stmt;
+ASTStatement parseStatement(ref Parser parser)
+{
+    if (auto stmt = parser.parseReturn)
+        return stmt;
+    if (auto stmt = parser.parseIf)
+        return stmt;
+    if (auto stmt = parser.parseSequence)
+        return stmt;
+    if (auto stmt = parser.parseAssignment)
+        return stmt;
     parser.fail("statement expected");
     assert(false);
 }
 
-ASTExpression parseExpression(ref Parser parser) {
-    if (auto expr = parser.parseCall) {
+ASTExpression parseExpression(ref Parser parser)
+{
+    if (auto expr = parser.parseCall)
+    {
         return expr;
     }
 
     return parser.parseArithmetic;
 }
 
-enum ArithmeticOpType {
+enum ArithmeticOpType
+{
     add,
     sub,
     eq,
@@ -576,29 +685,33 @@ class ASTArithmeticOp : ASTExpression
     ArithmeticOpType op;
     ASTExpression left;
     ASTExpression right;
-    
-    override ArithmeticOp compile(Scope scope_) {
+
+    override ArithmeticOp compile(Scope scope_)
+    {
         return new ArithmeticOp(op, left.compile(scope_), right.compile(scope_));
     }
-    
+
     mixin(GenerateAll);
 }
 
-
-class ArithmeticOp : Expression {
+class ArithmeticOp : Expression
+{
     ArithmeticOpType op;
     Expression left;
     Expression right;
 
-    override Type type() {
+    override Type type()
+    {
         return new Integer;
     }
 
-    override int emit(Generator output) {
+    override int emit(Generator output)
+    {
         int leftreg = this.left.emit(output);
         int rightreg = this.right.emit(output);
         int offset = {
-            with (ArithmeticOpType) final switch (this.op) {
+            with (ArithmeticOpType) final switch (this.op)
+            {
                 case add:
                     return gen_int_stub!"add"(output);
                 case sub:
@@ -617,25 +730,32 @@ class ArithmeticOp : Expression {
     mixin(GenerateToString);
 }
 
-ASTExpression parseArithmetic(ref Parser parser, size_t level = 0) {
+ASTExpression parseArithmetic(ref Parser parser, size_t level = 0)
+{
     auto left = parser.parseExpressionLeaf;
-    if (level <= 1) {
+    if (level <= 1)
+    {
         parseAddSub(parser, left);
     }
-    if (level == 0) {
+    if (level == 0)
+    {
         parseComparison(parser, left);
     }
     return left;
 }
 
-void parseAddSub(ref Parser parser, ref ASTExpression left) {
-    while (true) {
-        if (parser.accept("+")) {
+void parseAddSub(ref Parser parser, ref ASTExpression left)
+{
+    while (true)
+    {
+        if (parser.accept("+"))
+        {
             auto right = parser.parseExpressionLeaf;
             left = new ASTArithmeticOp(ArithmeticOpType.add, left, right);
             continue;
         }
-        if (parser.accept("-")) {
+        if (parser.accept("-"))
+        {
             auto right = parser.parseExpressionLeaf;
             left = new ASTArithmeticOp(ArithmeticOpType.sub, left, right);
             continue;
@@ -644,8 +764,10 @@ void parseAddSub(ref Parser parser, ref ASTExpression left) {
     }
 }
 
-void parseComparison(ref Parser parser, ref ASTExpression left) {
-    if (parser.accept("==")) {
+void parseComparison(ref Parser parser, ref ASTExpression left)
+{
+    if (parser.accept("=="))
+    {
         auto right = parser.parseArithmetic(1);
         left = new ASTArithmeticOp(ArithmeticOpType.eq, left, right);
     }
@@ -654,36 +776,42 @@ void parseComparison(ref Parser parser, ref ASTExpression left) {
 class ASTCall : ASTExpression
 {
     string function_;
-    
+
     ASTExpression[] args;
-    
-    override Call compile(Scope scope_) {
-         auto function_ = cast(Function) scope_.lookup(this.function_);
-         assert(function_);
-         auto args = this.args.map!(a => a.compile(scope_)).array;
-         return new Call(function_, args);
+
+    override Call compile(Scope scope_)
+    {
+        auto function_ = cast(Function) scope_.lookup(this.function_);
+        assert(function_);
+        auto args = this.args.map!(a => a.compile(scope_)).array;
+        return new Call(function_, args);
     }
-    
+
     mixin(GenerateAll);
 }
 
-class Call : Expression {
+class Call : Expression
+{
     Function function_;
 
     Expression[] args;
 
-    override Type type() {
+    override Type type()
+    {
         return function_.ret;
     }
 
-    override int emit(Generator output) {
+    override int emit(Generator output)
+    {
         int fun_offset = declare(output, this.function_);
         int[] regs;
-        foreach (arg; this.args) {
+        foreach (arg; this.args)
+        {
             regs ~= arg.emit(output);
         }
         int callreg = output.start_call_instr(fun_offset, cast(int) this.args.length);
-        foreach (reg; regs) {
+        foreach (reg; regs)
+        {
             output.add_call_reg_arg(reg);
         }
         return callreg;
@@ -693,17 +821,22 @@ class Call : Expression {
     mixin(GenerateToString);
 }
 
-ASTExpression parseCall(ref Parser parser) {
-    with (parser) {
+ASTExpression parseCall(ref Parser parser)
+{
+    with (parser)
+    {
         begin;
         auto name = parser.parseIdentifier;
-        if (!name || !accept("(")) {
+        if (!name || !accept("("))
+        {
             revert;
             return null;
         }
         ASTExpression[] args;
-        while (!accept(")")) {
-            if (!args.empty) expect(",");
+        while (!accept(")"))
+        {
+            if (!args.empty)
+                expect(",");
             args ~= parser.parseExpression;
         }
         commit;
@@ -720,7 +853,7 @@ class Variable : ASTExpression
     {
         return cast(Expression) scope_.lookup(name);
     }
-    
+
     mixin(GenerateThis);
     mixin(GenerateToString);
 }
@@ -728,11 +861,12 @@ class Variable : ASTExpression
 class ASTLiteral : ASTExpression
 {
     int value;
-    
-    override Literal compile(Scope) {
+
+    override Literal compile(Scope)
+    {
         return new Literal(this.value);
     }
-    
+
     mixin(GenerateAll);
 }
 
@@ -740,15 +874,18 @@ class Literal : Expression
 {
     int value;
 
-    override int emit(Generator output) {
+    override int emit(Generator output)
+    {
         return output.add_literal_instr(this.value);
     }
 
-    override Type type() {
+    override Type type()
+    {
         return new Integer;
     }
 
-    override string toString() const {
+    override string toString() const
+    {
         import std.conv : to;
 
         return value.to!string;
@@ -761,15 +898,18 @@ class ArgExpr : Expression
 {
     int index;
 
-    override int emit(Generator output) {
+    override int emit(Generator output)
+    {
         return output.add_arg_instr(this.index);
     }
 
-    override Type type() {
+    override Type type()
+    {
         return new Integer;
     }
 
-    override string toString() const {
+    override string toString() const
+    {
         import std.format : format;
 
         return format!"_%s"(this.index);
@@ -785,19 +925,23 @@ class LoadRegExpr : Reference
 
     Type targetType;
 
-    override Type type() {
+    override Type type()
+    {
         return this.targetType;
     }
 
-    override int emit(Generator) {
+    override int emit(Generator)
+    {
         assert(false);
     }
 
-    override int emitLocation(Generator) {
+    override int emitLocation(Generator)
+    {
         return this.reg;
     }
 
-    override string toString() const {
+    override string toString() const
+    {
         import std.format : format;
 
         return format!"%%%s"(this.reg);
@@ -812,21 +956,24 @@ class StructMember : Reference
 
     int index;
 
-    override Type type() {
+    override Type type()
+    {
         Type type = base.type();
         auto structType = cast(Struct) type;
         assert(structType);
         return structType.members[this.index];
     }
 
-    override int emit(Generator output) {
+    override int emit(Generator output)
+    {
         int locationReg = emitLocation(output);
         size_t offset = output.start_load_instr(locationReg);
         this.type().emit(output.defineSectionState.main_data);
         return output.end_load_instr(offset);
     }
 
-    override int emitLocation(Generator output) {
+    override int emitLocation(Generator output)
+    {
         int reg = this.base.emitLocation(output);
         Type type = base.type();
         auto structType = cast(Struct) type;
@@ -836,7 +983,8 @@ class StructMember : Reference
         return output.end_offset_instr(offset);
     }
 
-    override string toString() const {
+    override string toString() const
+    {
         return format!"%s._%s"(this.base, this.index);
     }
 
@@ -847,14 +995,16 @@ class Deref : Expression
 {
     Expression base;
 
-    override Type type() {
+    override Type type()
+    {
         Type superType = this.base.type();
         Pointer pointerType = cast(Pointer) superType;
         assert(pointerType, superType.toString);
         return pointerType.target;
     }
 
-    override int emit(Generator output) {
+    override int emit(Generator output)
+    {
         int reg = this.base.emit(output);
         size_t offset = output.start_load_instr(reg);
         this.type().emit(output.defineSectionState.main_data);
@@ -879,13 +1029,17 @@ RegValue allocStack(Type valueType, Generator output)
     return RegValue(reg, new Pointer(valueType));
 }
 
-ASTExpression parseExpressionLeaf(ref Parser parser) {
-    with (parser) {
-        if (auto name = parser.parseIdentifier) {
+ASTExpression parseExpressionLeaf(ref Parser parser)
+{
+    with (parser)
+    {
+        if (auto name = parser.parseIdentifier)
+        {
             return new Variable(name);
         }
         int i;
-        if (parser.parseNumber(i)) {
+        if (parser.parseNumber(i))
+        {
             return new ASTLiteral(i);
         }
         fail("Expression expected.");
@@ -897,7 +1051,8 @@ class Scope
 {
     Scope parent;
 
-    this(Scope parent) {
+    this(Scope parent)
+    {
         this.parent = parent;
     }
 
@@ -907,38 +1062,51 @@ class Scope
 
         Symbol value;
     }
+
     Appender!(Variable[]) vars;
 
-    void add(string name, Symbol value) {
+    void add(string name, Symbol value)
+    {
         assert(!this.vars.data().any!(var => var.name == name));
         this.vars ~= Variable(name, value);
     }
 
-    Symbol lookup(string name) {
-        foreach (var; this.vars) {
-            if (var.name == name) return var.value;
+    Symbol lookup(string name)
+    {
+        foreach (var; this.vars)
+        {
+            if (var.name == name)
+                return var.value;
         }
-        if (this.parent) return this.parent.lookup(name);
+        if (this.parent)
+            return this.parent.lookup(name);
         return null;
     }
 }
 
-class BytecodeFile {
+class BytecodeFile
+{
     Generator generator;
-    this() {
+    this()
+    {
         this.generator = new Generator(alloc_bc_builder());
     }
-    void define(Function fun, Scope modscope_) {
+
+    void define(Function fun, Scope modscope_)
+    {
         int declid = declare(this.generator, fun);
         assert(this.generator.defineSectionState is null);
         this.generator.defineSectionState = begin_define_section(this.generator.builder, declid);
         this.generator.start_block;
-        auto stackframeType = new Struct(fun.args.length.iota.map!(i => cast(Type) new Integer).array);
+        auto stackframeType = new Struct(fun.args.length.iota.map!(i => cast(Type) new Integer)
+                .array);
         auto stackframeGen = allocStack(stackframeType, this.generator);
         assert(cast(Pointer) stackframeGen.type);
-        auto stackframeReg = new LoadRegExpr(stackframeGen.reg, (cast(Pointer) stackframeGen.type).target);
+        auto stackframeReg = new LoadRegExpr(stackframeGen.reg, (cast(Pointer) stackframeGen.type)
+                .target);
         auto funscope = new Scope(modscope_);
-        foreach (i, arg; fun.args) {
+        foreach (i, arg; fun.args)
+        {
             auto member = new StructMember(stackframeReg, cast(int) i);
             auto argReg = (new ArgExpr(cast(int) i)).emit(this.generator);
 
@@ -952,14 +1120,18 @@ class BytecodeFile {
         end_define_section(this.generator.builder, this.generator.defineSectionState);
         this.generator.defineSectionState = null;
     }
-    void writeTo(string filename) {
+
+    void writeTo(string filename)
+    {
         static import std.file;
 
-        std.file.write(filename, (cast(ubyte*) this.generator.builder.data.ptr)[0 .. this.generator.builder.data.length]);
+        std.file.write(filename, (cast(ubyte*) this.generator.builder.data.ptr)[0 .. this
+                .generator.builder.data.length]);
     }
 }
 
-void main() {
+void main()
+{
     string code = "int ack(int m, int n) {
         if (m == 0) { n = n + 1; return n; }
         if (n == 0) return ack(m - 1, 1);

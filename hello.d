@@ -286,7 +286,7 @@ class Function : Symbol
 
     Argument[] args;
 
-    Statement statement;
+    ASTStatement statement;
 
     @(This.Init!(-1))
     int decl_offset;
@@ -321,17 +321,25 @@ int declare(Generator output, Function fun) {
     return fun.decl_offset;
 }
 
+interface ASTStatement {
+    Statement compile(Scope scope_);
+}
+
 interface Statement {
-    void emit(Scope scope_, Generator output);
+    void emit(Generator output);
+}
+
+interface ASTExpression : Symbol {
+    Expression compile(Scope scope_);
 }
 
 interface Expression : Symbol {
-    Type type(Scope scope_);
-    int emit(Scope scope_, Generator output);
+    Type type();
+    int emit(Generator output);
 }
 
 interface Reference : Expression {
-    int emitLocation(Scope scope_, Generator output);
+    int emitLocation(Generator output);
 }
 
 Function parseFunction(ref Parser parser) {
@@ -357,50 +365,74 @@ Function parseFunction(ref Parser parser) {
     }
 }
 
-class SequenceStatement : Statement {
+class ASTSequenceStatement : ASTStatement
+{
+    @AllNonNull
+    ASTStatement[] statements;
+    
+    override Statement compile(Scope scope_) {
+        return new SequenceStatement(
+            statements.map!(a => a.compile(scope_)).array
+        );
+    }
+    
+    mixin(GenerateAll);
+}
+
+class SequenceStatement : Statement
+{
+    @AllNonNull
     Statement[] statements;
 
-    override void emit(Scope scope_, Generator output) {
-        auto subscope = new Scope(scope_);
+    override void emit(Generator output) {
         foreach (statement; statements) {
-            statement.emit(subscope, output);
+            statement.emit(output);
         }
     }
     mixin(GenerateThis);
     mixin(GenerateToString);
 }
 
-SequenceStatement parseSequence(ref Parser parser) {
+ASTSequenceStatement parseSequence(ref Parser parser) {
     with (parser) {
         begin;
         if (!accept("{")) {
             revert;
             return null;
         }
-        Statement[] statements;
+        ASTStatement[] statements;
         while (!accept("}")) {
             auto stmt = parser.parseStatement;
             statements ~= stmt;
         }
         commit;
-        return new SequenceStatement(statements);
+        return new ASTSequenceStatement(statements);
     }
+}
+
+class ASTReturnStatement : ASTStatement {
+    ASTExpression value;
+    
+    override ReturnStatement compile(Scope scope_) {
+        return new ReturnStatement(value.compile(scope_));
+    }
+    
+    mixin(GenerateAll);
 }
 
 class ReturnStatement : Statement {
     Expression value;
 
-    override void emit(Scope scope_, Generator output) {
-        int reg = this.value.emit(scope_, output);
+    override void emit(Generator output) {
+        int reg = this.value.emit(output);
         output.add_ret_instr(reg);
         output.start_block;
     }
 
-    mixin(GenerateThis);
-    mixin(GenerateToString);
+    mixin(GenerateAll);
 }
 
-ReturnStatement parseReturn(ref Parser parser) {
+ASTReturnStatement parseReturn(ref Parser parser) {
     with (parser) {
         begin;
         if (parser.parseIdentifier != "return") {
@@ -410,21 +442,35 @@ ReturnStatement parseReturn(ref Parser parser) {
         auto expr = parser.parseExpression;
         expect(";");
         commit;
-        return new ReturnStatement(expr);
+        return new ASTReturnStatement(expr);
     }
+}
+
+class ASTIfStatement : ASTStatement {
+    ASTExpression test;
+    ASTStatement then;
+    
+    override IfStatement compile(Scope scope_) {
+        auto ifscope = new Scope(scope_);
+        auto test = this.test.compile(scope_);
+        auto then = this.then.compile(scope_);
+        
+        return new IfStatement(test, then);
+    }
+    
+    mixin(GenerateAll);
 }
 
 class IfStatement : Statement {
     Expression test;
     Statement then;
 
-    override void emit(Scope scope_, Generator output) {
-        int reg = test.emit(scope_, output);
+    override void emit(Generator output) {
+        int reg = test.emit(output);
         int tbr_offset = output.add_tbr_instr(reg);
         int thenblk = output.start_block;
         output.tbr_resolve_then(tbr_offset, thenblk);
-        auto subscope = new Scope(scope_);
-        then.emit(subscope, output);
+        then.emit(output);
         int after_then = output.add_br_instr;
         // TODO else blk
         int afterblk = output.start_block;
@@ -436,7 +482,7 @@ class IfStatement : Statement {
     mixin(GenerateToString);
 }
 
-IfStatement parseIf(ref Parser parser) {
+ASTIfStatement parseIf(ref Parser parser) {
     with (parser) {
         begin;
         if (parser.parseIdentifier != "if") {
@@ -448,32 +494,46 @@ IfStatement parseIf(ref Parser parser) {
         parser.expect(")");
         auto thenStmt = parser.parseStatement;
         commit;
-        return new IfStatement(expr, thenStmt);
+        return new ASTIfStatement(expr, thenStmt);
     }
+}
+
+class ASTAssignStatement : ASTStatement {
+    ASTExpression target;
+
+    ASTExpression value;
+    
+    override AssignStatement compile(Scope scope_) {
+        auto target = this.target.compile(scope_);
+        auto value = this.value.compile(scope_);
+        auto targetref = cast(Reference) target;
+        assert(targetref, "target of assignment must be a reference");
+        return new AssignStatement(targetref, value);
+    }
+    
+    mixin(GenerateAll);
 }
 
 class AssignStatement : Statement {
     Reference target;
-
     Expression value;
 
-    override void emit(Scope scope_, Generator output) {
-        auto targetType = this.target.type(scope_), valueType = this.value.type(scope_);
+    override void emit(Generator output) {
+        auto targetType = this.target.type(), valueType = this.value.type();
         assert(targetType == valueType,
                format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));
 
-        int target_reg = this.target.emitLocation(scope_, output);
-        int value_reg = this.value.emit(scope_, output);
+        int target_reg = this.target.emitLocation(output);
+        int value_reg = this.value.emit(output);
 
         output.add_store_instr(value_reg, target_reg);
         valueType.emit(output.defineSectionState.main_data);
     }
 
-    mixin(GenerateThis);
-    mixin(GenerateToString);
+    mixin(GenerateAll);
 }
 
-AssignStatement parseAssignment(ref Parser parser) {
+ASTAssignStatement parseAssignment(ref Parser parser) {
     with (parser) {
         begin;
         auto lhs = parser.parseIdentifier;
@@ -484,11 +544,11 @@ AssignStatement parseAssignment(ref Parser parser) {
         auto expr = parser.parseExpression;
         expect(";");
         commit;
-        return new AssignStatement(new Variable(lhs), expr);
+        return new ASTAssignStatement(new Variable(lhs), expr);
     }
 }
 
-Statement parseStatement(ref Parser parser) {
+ASTStatement parseStatement(ref Parser parser) {
     if (auto stmt = parser.parseReturn) return stmt;
     if (auto stmt = parser.parseIf) return stmt;
     if (auto stmt = parser.parseSequence) return stmt;
@@ -497,7 +557,7 @@ Statement parseStatement(ref Parser parser) {
     assert(false);
 }
 
-Expression parseExpression(ref Parser parser) {
+ASTExpression parseExpression(ref Parser parser) {
     if (auto expr = parser.parseCall) {
         return expr;
     }
@@ -505,30 +565,45 @@ Expression parseExpression(ref Parser parser) {
     return parser.parseArithmetic;
 }
 
-class ArithmeticOp : Expression {
-    enum Op {
-        add,
-        sub,
-        eq,
+enum ArithmeticOpType {
+    add,
+    sub,
+    eq,
+}
+
+class ASTArithmeticOp : ASTExpression
+{
+    ArithmeticOpType op;
+    ASTExpression left;
+    ASTExpression right;
+    
+    override ArithmeticOp compile(Scope scope_) {
+        return new ArithmeticOp(op, left.compile(scope_), right.compile(scope_));
     }
-    Op op;
+    
+    mixin(GenerateAll);
+}
+
+
+class ArithmeticOp : Expression {
+    ArithmeticOpType op;
     Expression left;
     Expression right;
 
-    override Type type(Scope) {
+    override Type type() {
         return new Integer;
     }
 
-    override int emit(Scope scope_, Generator output) {
-        int leftreg = this.left.emit(scope_, output);
-        int rightreg = this.right.emit(scope_, output);
+    override int emit(Generator output) {
+        int leftreg = this.left.emit(output);
+        int rightreg = this.right.emit(output);
         int offset = {
-            final switch (this.op) {
-                case Op.add:
+            with (ArithmeticOpType) final switch (this.op) {
+                case add:
                     return gen_int_stub!"add"(output);
-                case Op.sub:
+                case sub:
                     return gen_int_stub!"sub"(output);
-                case Op.eq:
+                case eq:
                     return gen_int_stub!"eq"(output);
             }
         }();
@@ -542,7 +617,7 @@ class ArithmeticOp : Expression {
     mixin(GenerateToString);
 }
 
-Expression parseArithmetic(ref Parser parser, size_t level = 0) {
+ASTExpression parseArithmetic(ref Parser parser, size_t level = 0) {
     auto left = parser.parseExpressionLeaf;
     if (level <= 1) {
         parseAddSub(parser, left);
@@ -553,44 +628,59 @@ Expression parseArithmetic(ref Parser parser, size_t level = 0) {
     return left;
 }
 
-void parseAddSub(ref Parser parser, ref Expression left) {
+void parseAddSub(ref Parser parser, ref ASTExpression left) {
     while (true) {
         if (parser.accept("+")) {
             auto right = parser.parseExpressionLeaf;
-            left = new ArithmeticOp(ArithmeticOp.Op.add, left, right);
+            left = new ASTArithmeticOp(ArithmeticOpType.add, left, right);
             continue;
         }
         if (parser.accept("-")) {
             auto right = parser.parseExpressionLeaf;
-            left = new ArithmeticOp(ArithmeticOp.Op.sub, left, right);
+            left = new ASTArithmeticOp(ArithmeticOpType.sub, left, right);
             continue;
         }
         break;
     }
 }
 
-void parseComparison(ref Parser parser, ref Expression left) {
+void parseComparison(ref Parser parser, ref ASTExpression left) {
     if (parser.accept("==")) {
         auto right = parser.parseArithmetic(1);
-        left = new ArithmeticOp(ArithmeticOp.Op.eq, left, right);
+        left = new ASTArithmeticOp(ArithmeticOpType.eq, left, right);
     }
 }
 
+class ASTCall : ASTExpression
+{
+    string function_;
+    
+    ASTExpression[] args;
+    
+    override Call compile(Scope scope_) {
+         auto function_ = cast(Function) scope_.lookup(this.function_);
+         assert(function_);
+         auto args = this.args.map!(a => a.compile(scope_)).array;
+         return new Call(function_, args);
+    }
+    
+    mixin(GenerateAll);
+}
+
 class Call : Expression {
-    string name;
+    Function function_;
+
     Expression[] args;
 
-    override Type type(Scope scope_) {
-        auto funsym = scope_.lookup(name);
-        return (cast(Function) funsym).ret;
+    override Type type() {
+        return function_.ret;
     }
 
-    override int emit(Scope scope_, Generator output) {
-        auto funsym = scope_.lookup(name);
-        int fun_offset = declare(output, cast(Function) funsym);
+    override int emit(Generator output) {
+        int fun_offset = declare(output, this.function_);
         int[] regs;
         foreach (arg; this.args) {
-            regs ~= arg.emit(scope_, output);
+            regs ~= arg.emit(output);
         }
         int callreg = output.start_call_instr(fun_offset, cast(int) this.args.length);
         foreach (reg; regs) {
@@ -603,7 +693,7 @@ class Call : Expression {
     mixin(GenerateToString);
 }
 
-Expression parseCall(ref Parser parser) {
+ASTExpression parseCall(ref Parser parser) {
     with (parser) {
         begin;
         auto name = parser.parseIdentifier;
@@ -611,57 +701,50 @@ Expression parseCall(ref Parser parser) {
             revert;
             return null;
         }
-        Expression[] args;
+        ASTExpression[] args;
         while (!accept(")")) {
             if (!args.empty) expect(",");
             args ~= parser.parseExpression;
         }
         commit;
-        return new Call(name, args);
+        return new ASTCall(name, args);
     }
 }
 
-class Variable : Reference
+class Variable : ASTExpression
 {
     string name;
 
-    override Type type(Scope scope_) {
-        auto sym = scope_.lookup(name);
-        assert(sym, format!"unknown name %s"(name));
-        auto expr = cast(Expression) sym;
-        assert(expr, format!"%s"(sym));
-        return expr.type(scope_);
+    override Expression compile(Scope scope_)
+    out (result; result !is null)
+    {
+        return cast(Expression) scope_.lookup(name);
     }
-
-    override int emit(Scope scope_, Generator output) {
-        auto sym = scope_.lookup(name);
-        assert(sym, format!"unknown name %s"(name));
-        auto expr = cast(Expression) sym;
-        assert(expr, format!"%s"(sym));
-        return expr.emit(scope_, output);
-    }
-
-    override int emitLocation(Scope scope_, Generator output) {
-        auto sym = scope_.lookup(name);
-        assert(sym, format!"unknown name %s"(name));
-        auto reference = cast(Reference) sym;
-        assert(reference, format!"%s"(sym));
-        return reference.emitLocation(scope_, output);
-    }
-
+    
     mixin(GenerateThis);
     mixin(GenerateToString);
+}
+
+class ASTLiteral : ASTExpression
+{
+    int value;
+    
+    override Literal compile(Scope) {
+        return new Literal(this.value);
+    }
+    
+    mixin(GenerateAll);
 }
 
 class Literal : Expression
 {
     int value;
 
-    override int emit(Scope, Generator output) {
+    override int emit(Generator output) {
         return output.add_literal_instr(this.value);
     }
 
-    override Type type(Scope) {
+    override Type type() {
         return new Integer;
     }
 
@@ -678,11 +761,11 @@ class ArgExpr : Expression
 {
     int index;
 
-    override int emit(Scope, Generator output) {
+    override int emit(Generator output) {
         return output.add_arg_instr(this.index);
     }
 
-    override Type type(Scope) {
+    override Type type() {
         return new Integer;
     }
 
@@ -702,16 +785,16 @@ class LoadRegExpr : Reference
 
     Type targetType;
 
-    override int emit(Scope, Generator) {
+    override Type type() {
+        return this.targetType;
+    }
+
+    override int emit(Generator) {
         assert(false);
     }
 
-    override int emitLocation(Scope, Generator) {
+    override int emitLocation(Generator) {
         return this.reg;
-    }
-
-    override Type type(Scope) {
-        return this.targetType;
     }
 
     override string toString() const {
@@ -729,23 +812,23 @@ class StructMember : Reference
 
     int index;
 
-    override Type type(Scope scope_) {
-        Type type = base.type(scope_);
+    override Type type() {
+        Type type = base.type();
         auto structType = cast(Struct) type;
         assert(structType);
         return structType.members[this.index];
     }
 
-    override int emit(Scope scope_, Generator output) {
-        int locationReg = emitLocation(scope_, output);
+    override int emit(Generator output) {
+        int locationReg = emitLocation(output);
         size_t offset = output.start_load_instr(locationReg);
-        this.type(scope_).emit(output.defineSectionState.main_data);
+        this.type().emit(output.defineSectionState.main_data);
         return output.end_load_instr(offset);
     }
 
-    override int emitLocation(Scope scope_, Generator output) {
-        int reg = this.base.emitLocation(scope_, output);
-        Type type = base.type(scope_);
+    override int emitLocation(Generator output) {
+        int reg = this.base.emitLocation(output);
+        Type type = base.type();
         auto structType = cast(Struct) type;
         assert(structType);
         size_t offset = output.start_offset_instr(reg, this.index);
@@ -760,52 +843,50 @@ class StructMember : Reference
     mixin(GenerateThis);
 }
 
-class Load : Expression
+class Deref : Expression
 {
     Expression base;
 
-    override Type type(Scope scope_) {
-        Type superType = this.base.type(scope_);
+    override Type type() {
+        Type superType = this.base.type();
         Pointer pointerType = cast(Pointer) superType;
         assert(pointerType, superType.toString);
         return pointerType.target;
     }
 
-    override int emit(Scope scope_, Generator output) {
-        int reg = this.base.emit(scope_, output);
+    override int emit(Generator output) {
+        int reg = this.base.emit(output);
         size_t offset = output.start_load_instr(reg);
-        this.type(scope_).emit(output.defineSectionState.main_data);
+        this.type().emit(output.defineSectionState.main_data);
         return output.end_load_instr(offset);
     }
 
     mixin(GenerateThis);
 }
 
-class StackAlloc : Expression
+struct RegValue
 {
-    Type valueType;
+    int reg;
 
-    override Type type(Scope scope_) {
-        return new Pointer(this.valueType);
-    }
-
-    override int emit(Scope scope_, Generator output) {
-        size_t offset = output.start_alloc_instr;
-        this.valueType.emit(output.defineSectionState.main_data);
-        return output.end_alloc_instr(offset);
-    }
-
-    mixin(GenerateThis);
+    Type type;
 }
 
-Expression parseExpressionLeaf(ref Parser parser) {
+RegValue allocStack(Type valueType, Generator output)
+{
+    size_t offset = output.start_alloc_instr;
+    valueType.emit(output.defineSectionState.main_data);
+    int reg = output.end_alloc_instr(offset);
+    return RegValue(reg, new Pointer(valueType));
+}
+
+ASTExpression parseExpressionLeaf(ref Parser parser) {
     with (parser) {
         if (auto name = parser.parseIdentifier) {
             return new Variable(name);
         }
         int i;
         if (parser.parseNumber(i)) {
-            return new Literal(i);
+            return new ASTLiteral(i);
         }
         fail("Expression expected.");
         assert(false);
@@ -847,27 +928,27 @@ class BytecodeFile {
     this() {
         this.generator = new Generator(alloc_bc_builder());
     }
-    void define(Function fun, Scope scope_) {
+    void define(Function fun, Scope modscope_) {
         int declid = declare(this.generator, fun);
         assert(this.generator.defineSectionState is null);
         this.generator.defineSectionState = begin_define_section(this.generator.builder, declid);
         this.generator.start_block;
         auto stackframeType = new Struct(fun.args.length.iota.map!(i => cast(Type) new Integer).array);
-        auto stackframeGen = new StackAlloc(stackframeType);
-        auto type = stackframeGen.type(null);
-        assert(cast(Pointer) type);
-        auto stackframeReg = new LoadRegExpr(stackframeGen.emit(null, this.generator), (cast(Pointer) type).target);
-        auto funscope = new Scope(scope_);
+        auto stackframeGen = allocStack(stackframeType, this.generator);
+        assert(cast(Pointer) stackframeGen.type);
+        auto stackframeReg = new LoadRegExpr(stackframeGen.reg, (cast(Pointer) stackframeGen.type).target);
+        auto funscope = new Scope(modscope_);
         foreach (i, arg; fun.args) {
             auto member = new StructMember(stackframeReg, cast(int) i);
-            auto argReg = (new ArgExpr(cast(int) i)).emit(null, this.generator);
+            auto argReg = (new ArgExpr(cast(int) i)).emit(this.generator);
 
-            this.generator.add_store_instr(argReg, member.emitLocation(null, this.generator));
-            member.type(null).emit(this.generator.defineSectionState.main_data);
+            this.generator.add_store_instr(argReg, member.emitLocation(this.generator));
+            member.type().emit(this.generator.defineSectionState.main_data);
 
             funscope.add(arg.name, member);
         }
-        fun.statement.emit(funscope, this.generator);
+        auto statement = fun.statement.compile(funscope);
+        statement.emit(this.generator);
         end_define_section(this.generator.builder, this.generator.defineSectionState);
         this.generator.defineSectionState = null;
     }

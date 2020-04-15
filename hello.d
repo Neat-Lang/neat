@@ -894,30 +894,6 @@ class Literal : Expression
     mixin(GenerateThis);
 }
 
-class ArgExpr : Expression
-{
-    int index;
-
-    override int emit(Generator output)
-    {
-        return output.add_arg_instr(this.index);
-    }
-
-    override Type type()
-    {
-        return new Integer;
-    }
-
-    override string toString() const
-    {
-        import std.format : format;
-
-        return format!"_%s"(this.index);
-    }
-
-    mixin(GenerateThis);
-}
-
 // reg contains pointer to type
 class LoadRegExpr : Reference
 {
@@ -1108,7 +1084,7 @@ class BytecodeFile
         foreach (i, arg; fun.args)
         {
             auto member = new StructMember(stackframeReg, cast(int) i);
-            auto argReg = (new ArgExpr(cast(int) i)).emit(this.generator);
+            auto argReg = this.generator.add_arg_instr(i);
 
             this.generator.add_store_instr(argReg, member.emitLocation(this.generator));
             member.type().emit(this.generator.defineSectionState.main_data);

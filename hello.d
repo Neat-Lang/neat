@@ -381,8 +381,7 @@ Type parseType(ref Parser parser)
             return new Integer;
         }
 
-        fail("unknown type");
-        assert(false);
+        return null;
     }
 }
 
@@ -747,6 +746,47 @@ ASTVarDeclStatement parseVarDecl(ref Parser parser)
     }
 }
 
+class ASTExprStatement : ASTStatement
+{
+    ASTExpression value;
+
+    override Statement compile(Namespace namespace)
+    {
+        return new ExprStatement(this.value.compile(namespace));
+    }
+
+    mixin(GenerateAll);
+}
+
+class ExprStatement : Statement
+{
+    Expression value;
+
+    override void emit(Generator output)
+    {
+        value.emit(output); // discard reg
+    }
+
+    mixin(GenerateAll);
+}
+
+ASTExprStatement parseExprStatement(ref Parser parser)
+{
+    with (parser)
+    {
+        begin;
+        auto value = parser.parseExpression;
+        if (!value)
+        {
+            revert;
+            return null;
+        }
+        expect(";");
+        commit;
+        return new ASTExprStatement(value);
+    }
+}
+
 ASTStatement parseStatement(ref Parser parser)
 {
     if (auto stmt = parser.parseReturn)
@@ -758,6 +798,8 @@ ASTStatement parseStatement(ref Parser parser)
     if (auto stmt = parser.parseAssignment)
         return stmt;
     if (auto stmt = parser.parseVarDecl)
+        return stmt;
+    if (auto stmt = parser.parseExprStatement)
         return stmt;
     parser.fail("statement expected");
     assert(false);

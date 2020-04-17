@@ -1113,7 +1113,10 @@ class StackFrame : Reference
         return generator.frameReg;
     }
 
-    override string toString() const { return "__frame"; }
+    override string toString() const
+    {
+        return "__frame";
+    }
 
     mixin(GenerateThis);
 }
@@ -1220,7 +1223,8 @@ T find(T)(Namespace namespace)
 {
     while (namespace)
     {
-        if (auto result = cast(T) namespace) return result;
+        if (auto result = cast(T) namespace)
+            return result;
         namespace = namespace.parent;
     }
     assert(false);
@@ -1243,7 +1247,9 @@ class FunctionScope : Namespace
 
     size_t stackframeSize()
     {
-        return this.traces.map!(a => (new Struct(a)).size).reduce!max;
+        return this.traces
+            .map!(a => (new Struct(a)).size)
+            .reduce!max;
     }
 
     override Symbol lookup(string name)
@@ -1272,7 +1278,8 @@ class VarDeclScope : Namespace
     {
         auto myTypes = this.declarations.map!(a => a.value.type).array;
 
-        if (frameBase) return myTypes;
+        if (frameBase)
+            return myTypes;
 
         return parent.find!VarDeclScope.enumerateDeclaredTypes ~ myTypes;
     }
@@ -1360,7 +1367,8 @@ class BytecodeFile
 
         this.generator.start_block;
         generator.frameReg = generator.emit_alloc_instr(stackframe.stackframeSize);
-        scope(success) generator.resetFrame;
+        scope (success)
+            generator.resetFrame;
 
         foreach (statement; argAssignments)
         {

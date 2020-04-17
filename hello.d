@@ -705,6 +705,48 @@ ASTAssignStatement parseAssignment(ref Parser parser)
     }
 }
 
+class ASTVarDeclStatement : ASTStatement
+{
+    string name;
+
+    Type type;
+
+    ASTExpression initial;
+
+    override Statement compile(Namespace namespace)
+    {
+        auto initial = this.initial.compile(namespace);
+
+        return namespace.find!VarDeclScope.declare(this.name, initial);
+    }
+
+    mixin(GenerateAll);
+}
+
+ASTVarDeclStatement parseVarDecl(ref Parser parser)
+{
+    with (parser)
+    {
+        begin;
+        auto type = parser.parseType;
+        if (!type)
+        {
+            revert;
+            return null;
+        }
+        auto name = parser.parseIdentifier;
+        if (!name || !accept("="))
+        {
+            revert;
+            return null;
+        }
+        auto initial = parser.parseExpression;
+        expect(";");
+        commit;
+        return new ASTVarDeclStatement(name, type, initial);
+    }
+}
+
 ASTStatement parseStatement(ref Parser parser)
 {
     if (auto stmt = parser.parseReturn)
@@ -714,6 +756,8 @@ ASTStatement parseStatement(ref Parser parser)
     if (auto stmt = parser.parseScope)
         return stmt;
     if (auto stmt = parser.parseAssignment)
+        return stmt;
+    if (auto stmt = parser.parseVarDecl)
         return stmt;
     parser.fail("statement expected");
     assert(false);
@@ -945,6 +989,32 @@ class Literal : Expression
         import std.conv : to;
 
         return value.to!string;
+    }
+
+    mixin(GenerateThis);
+}
+
+class ArgExpr : Expression
+{
+    int index;
+
+    Type type_;
+
+    override int emit(Generator output)
+    {
+        return output.add_arg_instr(this.index);
+    }
+
+    override Type type()
+    {
+        return type_;
+    }
+
+    override string toString() const
+    {
+        import std.format : format;
+
+        return format!"_%s"(this.index);
     }
 
     mixin(GenerateThis);
@@ -1273,7 +1343,7 @@ void main()
 {
     string code = "int ack(int m, int n) {
         if (m == 0) { n = n + 1; return n; }
-        if (n == 0) return ack(m - 1, 1);
+        if (n == 0) { int m1 = m - 1; return ack(m1, 1); }
         return ack(m - 1, ack(m, n - 1));
     }";
     auto parser = new Parser(code);

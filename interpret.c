@@ -154,7 +154,7 @@ restart_block_loop:;
                 cur_regfile = (char*) cur_regfile + typesz(ret_type);
                 if (verbose) {
                     char *symbol_name = (char*) callee->symbol + sizeof(Symbol);
-                    printf("    %p = call %s(%i, %i)\n", *current_value, symbol_name, *(int*)call_args[0], *(int*)call_args[1]);
+                    printf("    %%%i = call %s(%i, %i)\n", curReg, symbol_name, *(int*)call_args[0], *(int*)call_args[1]);
                 }
                 call(environment, callee, callinstr->args_num, call_args, *current_value);
                 if (verbose) printf("     => %i\n", **(int**) current_value);

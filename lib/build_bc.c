@@ -131,12 +131,7 @@ int end_offset_instr(DefineSectionState *state, size_t offset) {
     OffsetAddressInstr *offset_instr = (OffsetAddressInstr*) ((char*) state->main_data->ptr + offset);
     Type *type = (Type*)((char*) offset_instr + ASIZEOF(OffsetAddressInstr));
     assert(type->kind == STRUCT);
-    type = (Type*)((char*) type + ASIZEOF(Type)); // first member type
-    for (int i = 0; i < offset_instr->index; i++) {
-        type = skip_type(type);
-    }
-    // member type n
-    state->regfile_size += typesz(type);
+    state->regfile_size += sizeof(void*);
     return state->num_registers++;
 }
 

@@ -1386,7 +1386,8 @@ void main()
     string code = "int ack(int m, int n) {
         if (m == 0) { n = n + 1; return n; }
         if (n == 0) { int m1 = m - 1; return ack(m1, 1); }
-        return ack(m - 1, ack(m, n - 1));
+        int m1 = m - 1; int n1 = n - 1;
+        return ack(m1, ack(m, n1));
     }";
     auto parser = new Parser(code);
     auto fun = parser.parseFunction;

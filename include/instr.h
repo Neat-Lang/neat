@@ -29,7 +29,7 @@ typedef struct {
 
 typedef struct {
     BaseInstr base;
-    // and then: type
+    int size;
 } AllocInstr;
 
 /**

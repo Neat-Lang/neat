@@ -110,17 +110,11 @@ int add_arg_instr(DefineSectionState *state, int index) {
     return state->num_registers++;
 }
 
-size_t start_alloc_instr(DefineSectionState *state) {
-    size_t offset = state->main_data->length;
+int emit_alloc_instr(DefineSectionState *state, size_t size) {
     AllocInstr *alloc_instr = alloc(state->main_data, ASIZEOF(AllocInstr));
     alloc_instr->base.kind = INSTR_ALLOC;
-    return offset;
-}
-
-int end_alloc_instr(DefineSectionState *state, size_t offset) {
-    AllocInstr *alloc_instr = (AllocInstr*) ((char*) state->main_data->ptr + offset);
-    Type *type = (Type*)((char*) alloc_instr + ASIZEOF(AllocInstr));
-    state->regfile_size += sizeof(void*) + typesz(type);
+    alloc_instr->size = size;
+    state->regfile_size += sizeof(void*) + size;
     return state->num_registers++;
 }
 

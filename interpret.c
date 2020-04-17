@@ -70,15 +70,13 @@ restart_block_loop:;
             case INSTR_ALLOC:
             {
                 AllocInstr *alloc_instr = (AllocInstr*) instr;
-                if (verbose) printf("    %%%i = alloca ??\n", curReg);
-                Type *type = (Type*)((char*) alloc_instr + ASIZEOF(AllocInstr));
-                size_t size = typesz(type);
-                memset(cur_regfile, 0, size); // zero initialize alloc
+                if (verbose) printf("    %%%i = alloca %i\n", curReg, alloc_instr->size);
                 *current_value = cur_regfile; // pointer to pointer
                 cur_regfile = (char*) cur_regfile + sizeof(void*);
+                memset(cur_regfile, 0, alloc_instr->size); // zero initialize alloc
                 **(void***) current_value = cur_regfile;
-                cur_regfile = (char*) cur_regfile + size; // TODO alignment
-                instr = (BaseInstr*) skip_type(type);
+                cur_regfile = (char*) cur_regfile + alloc_instr->size; // TODO alignment
+                instr = (BaseInstr*) ((char*) instr + ASIZEOF(AllocInstr));
             }
             break;
             case INSTR_OFFSET_ADDRESS:

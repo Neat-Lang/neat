@@ -29,9 +29,7 @@ void add_type_pointer(Data *data);
 
 void add_type_struct(Data *data, int members);
 
-size_t start_alloc_instr(DefineSectionState *state);
-
-int end_alloc_instr(DefineSectionState *state, size_t offset);
+int emit_alloc_instr(DefineSectionState *state, size_t size);
 
 size_t start_offset_instr(DefineSectionState *state, int reg, size_t index);
 

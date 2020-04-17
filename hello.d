@@ -5,6 +5,7 @@ import std.algorithm;
 import std.range;
 import std.string;
 import std.stdio;
+import std.typecons;
 import std.uni;
 
 // something that can be referenced by a name
@@ -15,6 +16,8 @@ interface Symbol
 class Type
 {
     abstract void emit(Data* data);
+
+    abstract size_t size() const;
 
     override string toString() const
     {
@@ -29,6 +32,11 @@ class Integer : Type
         add_type_int(data);
     }
 
+    override size_t size() const
+    {
+        return 4;
+    }
+
     override string toString() const
     {
         return "int";
@@ -40,6 +48,29 @@ class Integer : Type
     }
 }
 
+class Void : Type
+{
+    override void emit(Data* data)
+    {
+        assert(false);
+    }
+
+    override size_t size() const
+    {
+        return 0;
+    }
+
+    override string toString() const
+    {
+        return "void";
+    }
+
+    override bool opEquals(const Object obj)
+    {
+        return cast(Void) obj !is null;
+    }
+}
+
 class Struct : Type
 {
     Type[] members;
@@ -48,6 +79,11 @@ class Struct : Type
     {
         add_type_struct(data, cast(int) this.members.length);
         this.members.each!(a => a.emit(data));
+    }
+
+    override size_t size() const
+    {
+        return members.map!(a => a.size).sum;
     }
 
     override string toString() const
@@ -65,6 +101,11 @@ class Pointer : Type
     this(Type target)
     {
         this.target = target;
+    }
+
+    override size_t size() const
+    {
+        return 8;
     }
 
     override void emit(Data* data)
@@ -124,8 +165,7 @@ extern (C)
     void add_store_instr(DefineSectionState* state, int value_reg, int pointer_reg);
     size_t start_offset_instr(DefineSectionState* state, int reg, size_t index);
     int end_offset_instr(DefineSectionState* state, size_t offset);
-    size_t start_alloc_instr(DefineSectionState* state);
-    int end_alloc_instr(DefineSectionState* state, size_t offset);
+    int emit_alloc_instr(DefineSectionState* state, size_t size);
     size_t start_load_instr(DefineSectionState* state, int pointer_reg);
     int end_load_instr(DefineSectionState* state, size_t offset);
     void add_call_reg_arg(DefineSectionState* state, int reg);
@@ -140,6 +180,23 @@ class Generator
     invariant (builder !is null);
 
     int numDeclarations;
+
+    Nullable!int frameReg_;
+
+    void frameReg(int i)
+    {
+        this.frameReg_ = i;
+    }
+
+    void resetFrame()
+    {
+        this.frameReg_.nullify;
+    }
+
+    int frameReg()
+    {
+        return this.frameReg_.get;
+    }
 
     this(BytecodeBuilder* builder, DefineSectionState* defineSectionState = null)
     {
@@ -348,9 +405,6 @@ class Function : Symbol
     @(This.Init!(-1))
     int decl_offset;
 
-    @(This.Init!null)
-    Scope scope_; // bound scope
-
     mixin(GenerateThis);
     mixin(GenerateToString);
 }
@@ -385,7 +439,7 @@ int declare(Generator output, Function fun)
 
 interface ASTStatement
 {
-    Statement compile(Scope scope_);
+    Statement compile(Namespace namespace);
 }
 
 interface Statement
@@ -395,7 +449,7 @@ interface Statement
 
 interface ASTExpression : Symbol
 {
-    Expression compile(Scope scope_);
+    Expression compile(Namespace namespace);
 }
 
 interface Expression : Symbol
@@ -437,15 +491,17 @@ Function parseFunction(ref Parser parser)
     }
 }
 
-class ASTSequenceStatement : ASTStatement
+class ASTScopeStatement : ASTStatement
 {
     @AllNonNull
     ASTStatement[] statements;
 
-    override Statement compile(Scope scope_)
+    override Statement compile(Namespace namespace)
     {
+        auto subscope = new VarDeclScope(namespace, No.frameBase);
+
         return new SequenceStatement(
-                statements.map!(a => a.compile(scope_)).array
+                statements.map!(a => a.compile(subscope)).array
         );
     }
 
@@ -469,7 +525,7 @@ class SequenceStatement : Statement
     mixin(GenerateToString);
 }
 
-ASTSequenceStatement parseSequence(ref Parser parser)
+ASTScopeStatement parseScope(ref Parser parser)
 {
     with (parser)
     {
@@ -486,7 +542,7 @@ ASTSequenceStatement parseSequence(ref Parser parser)
             statements ~= stmt;
         }
         commit;
-        return new ASTSequenceStatement(statements);
+        return new ASTScopeStatement(statements);
     }
 }
 
@@ -494,9 +550,9 @@ class ASTReturnStatement : ASTStatement
 {
     ASTExpression value;
 
-    override ReturnStatement compile(Scope scope_)
+    override ReturnStatement compile(Namespace namespace)
     {
-        return new ReturnStatement(value.compile(scope_));
+        return new ReturnStatement(value.compile(namespace));
     }
 
     mixin(GenerateAll);
@@ -538,11 +594,11 @@ class ASTIfStatement : ASTStatement
     ASTExpression test;
     ASTStatement then;
 
-    override IfStatement compile(Scope scope_)
+    override IfStatement compile(Namespace namespace)
     {
-        auto ifscope = new Scope(scope_);
-        auto test = this.test.compile(scope_);
-        auto then = this.then.compile(scope_);
+        auto ifscope = new VarDeclScope(namespace, No.frameBase);
+        auto test = this.test.compile(ifscope);
+        auto then = this.then.compile(ifscope);
 
         return new IfStatement(test, then);
     }
@@ -598,10 +654,10 @@ class ASTAssignStatement : ASTStatement
 
     ASTExpression value;
 
-    override AssignStatement compile(Scope scope_)
+    override AssignStatement compile(Namespace namespace)
     {
-        auto target = this.target.compile(scope_);
-        auto value = this.value.compile(scope_);
+        auto target = this.target.compile(namespace);
+        auto value = this.value.compile(namespace);
         auto targetref = cast(Reference) target;
         assert(targetref, "target of assignment must be a reference");
         return new AssignStatement(targetref, value);
@@ -655,7 +711,7 @@ ASTStatement parseStatement(ref Parser parser)
         return stmt;
     if (auto stmt = parser.parseIf)
         return stmt;
-    if (auto stmt = parser.parseSequence)
+    if (auto stmt = parser.parseScope)
         return stmt;
     if (auto stmt = parser.parseAssignment)
         return stmt;
@@ -686,9 +742,9 @@ class ASTArithmeticOp : ASTExpression
     ASTExpression left;
     ASTExpression right;
 
-    override ArithmeticOp compile(Scope scope_)
+    override ArithmeticOp compile(Namespace namespace)
     {
-        return new ArithmeticOp(op, left.compile(scope_), right.compile(scope_));
+        return new ArithmeticOp(op, left.compile(namespace), right.compile(namespace));
     }
 
     mixin(GenerateAll);
@@ -779,11 +835,11 @@ class ASTCall : ASTExpression
 
     ASTExpression[] args;
 
-    override Call compile(Scope scope_)
+    override Call compile(Namespace namespace)
     {
-        auto function_ = cast(Function) scope_.lookup(this.function_);
+        auto function_ = cast(Function) namespace.lookup(this.function_);
         assert(function_);
-        auto args = this.args.map!(a => a.compile(scope_)).array;
+        auto args = this.args.map!(a => a.compile(namespace)).array;
         return new Call(function_, args);
     }
 
@@ -848,10 +904,10 @@ class Variable : ASTExpression
 {
     string name;
 
-    override Expression compile(Scope scope_)
+    override Expression compile(Namespace namespace)
     out (result; result !is null)
     {
-        return cast(Expression) scope_.lookup(name);
+        return cast(Expression) namespace.lookup(name);
     }
 
     mixin(GenerateThis);
@@ -862,7 +918,7 @@ class ASTLiteral : ASTExpression
 {
     int value;
 
-    override Literal compile(Scope)
+    override Literal compile(Namespace)
     {
         return new Literal(this.value);
     }
@@ -922,6 +978,30 @@ class LoadRegExpr : Reference
 
         return format!"%%%s"(this.reg);
     }
+
+    mixin(GenerateThis);
+}
+
+class StackFrame : Reference
+{
+    Type targetType;
+
+    override Type type()
+    {
+        return this.targetType;
+    }
+
+    override int emit(Generator generator)
+    {
+        assert(false);
+    }
+
+    override int emitLocation(Generator generator)
+    {
+        return generator.frameReg;
+    }
+
+    override string toString() const { return "__frame"; }
 
     mixin(GenerateThis);
 }
@@ -997,14 +1077,6 @@ struct RegValue
     Type type;
 }
 
-RegValue allocStack(Type valueType, Generator output)
-{
-    size_t offset = output.start_alloc_instr;
-    valueType.emit(output.defineSectionState.main_data);
-    int reg = output.end_alloc_instr(offset);
-    return RegValue(reg, new Pointer(valueType));
-}
-
 ASTExpression parseExpressionLeaf(ref Parser parser)
 {
     with (parser)
@@ -1023,33 +1095,87 @@ ASTExpression parseExpressionLeaf(ref Parser parser)
     }
 }
 
-class Scope
+class Namespace
 {
-    Scope parent;
+    Namespace parent; // lexical parent
 
-    this(Scope parent)
+    abstract Symbol lookup(string name);
+
+    mixin(GenerateThis);
+}
+
+T find(T)(Namespace namespace)
+{
+    while (namespace)
     {
-        this.parent = parent;
+        if (auto result = cast(T) namespace) return result;
+        namespace = namespace.parent;
     }
+    assert(false);
+}
+
+class FunctionScope : Namespace
+{
+    // union of structs
+    @(This.Init!null)
+    Type[][] traces;
+
+    StructMember addFrameTrace(Type[] types)
+    {
+        traces ~= types;
+
+        auto struct_ = new Struct(types);
+
+        return new StructMember(new StackFrame(struct_), cast(int) types.length - 1);
+    }
+
+    size_t stackframeSize()
+    {
+        return this.traces.map!(a => (new Struct(a)).size).reduce!max;
+    }
+
+    override Symbol lookup(string name)
+    {
+        return parent.lookup(name);
+    }
+
+    mixin(GenerateThis);
+}
+
+class VarDeclScope : Namespace
+{
+    Flag!"frameBase" frameBase; // base of function frame. all variables here are parameters.
 
     struct Variable
     {
         string name;
 
-        Symbol value;
+        Expression value;
     }
 
-    Appender!(Variable[]) vars;
+    @(This.Init!null)
+    Variable[] declarations;
 
-    void add(string name, Symbol value)
+    Type[] enumerateDeclaredTypes()
     {
-        assert(!this.vars.data().any!(var => var.name == name));
-        this.vars ~= Variable(name, value);
+        auto myTypes = this.declarations.map!(a => a.value.type).array;
+
+        if (frameBase) return myTypes;
+
+        return parent.find!VarDeclScope.enumerateDeclaredTypes ~ myTypes;
     }
 
-    Symbol lookup(string name)
+    Statement declare(string name, Expression value)
     {
-        foreach (var; this.vars)
+        auto member = this.find!FunctionScope.addFrameTrace(enumerateDeclaredTypes ~ value.type());
+
+        declarations ~= Variable(name, member);
+        return new AssignStatement(member, value);
+    }
+
+    override Symbol lookup(string name)
+    {
+        foreach (var; this.declarations)
         {
             if (var.name == name)
                 return var.value;
@@ -1058,6 +1184,40 @@ class Scope
             return this.parent.lookup(name);
         return null;
     }
+
+    mixin(GenerateThis);
+}
+
+class Module : Namespace
+{
+    struct Entry
+    {
+        string name;
+
+        Symbol value;
+    }
+
+    @(This.Init!null)
+    Entry[] entries;
+
+    void add(string name, Symbol symbol)
+    {
+        this.entries ~= Entry(name, symbol);
+    }
+
+    override Symbol lookup(string name)
+    {
+        foreach (entry; this.entries)
+        {
+            if (entry.name == name)
+                return entry.value;
+        }
+        if (this.parent)
+            return this.parent.lookup(name);
+        return null;
+    }
+
+    mixin(GenerateThis);
 }
 
 class BytecodeFile
@@ -1068,31 +1228,34 @@ class BytecodeFile
         this.generator = new Generator(alloc_bc_builder());
     }
 
-    void define(Function fun, Scope modscope_)
+    void define(Function fun, Namespace module_)
     {
         int declid = declare(this.generator, fun);
         assert(this.generator.defineSectionState is null);
         this.generator.defineSectionState = begin_define_section(this.generator.builder, declid);
-        this.generator.start_block;
-        auto stackframeType = new Struct(fun.args.length.iota.map!(i => cast(Type) new Integer)
-                .array);
-        auto stackframeGen = allocStack(stackframeType, this.generator);
-        assert(cast(Pointer) stackframeGen.type);
-        auto stackframeReg = new LoadRegExpr(stackframeGen.reg, (cast(Pointer) stackframeGen.type)
-                .target);
-        auto funscope = new Scope(modscope_);
+        auto stackframe = new FunctionScope(module_);
+        auto argscope = new VarDeclScope(stackframe, Yes.frameBase);
+        Statement[] argAssignments;
         foreach (i, arg; fun.args)
         {
-            auto member = new StructMember(stackframeReg, cast(int) i);
-            auto argReg = this.generator.add_arg_instr(i);
+            auto argExpr = new ArgExpr(cast(int) i, arg.type);
 
-            this.generator.add_store_instr(argReg, member.emitLocation(this.generator));
-            member.type().emit(this.generator.defineSectionState.main_data);
-
-            funscope.add(arg.name, member);
+            argAssignments ~= argscope.declare(arg.name, argExpr);
+            arg.type.emit(this.generator.defineSectionState.main_data);
         }
-        auto statement = fun.statement.compile(funscope);
-        statement.emit(this.generator);
+
+        auto functionBody = fun.statement.compile(argscope);
+
+        this.generator.start_block;
+        generator.frameReg = generator.emit_alloc_instr(stackframe.stackframeSize);
+        scope(success) generator.resetFrame;
+
+        foreach (statement; argAssignments)
+        {
+            statement.emit(this.generator);
+        }
+
+        functionBody.emit(this.generator);
         end_define_section(this.generator.builder, this.generator.defineSectionState);
         this.generator.defineSectionState = null;
     }
@@ -1119,10 +1282,10 @@ void main()
 
     writefln!"%s"(fun);
 
-    auto scope_ = new Scope(null);
+    auto toplevel = new Module(null);
 
-    scope_.add("ack", fun);
+    toplevel.add("ack", fun);
     auto output = new BytecodeFile;
-    output.define(fun, scope_);
+    output.define(fun, toplevel);
     output.writeTo("ack.bc");
 }

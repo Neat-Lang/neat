@@ -50,11 +50,7 @@ int main(int argc, const char **argv) {
     {
         start_block(ack_define_section);
         // %0 = new { int, int }
-        size_t alloc = start_alloc_instr(ack_define_section);
-        add_type_struct(ack_define_section->main_data, 2);
-        add_type_int(ack_define_section->main_data);
-        add_type_int(ack_define_section->main_data);
-        int frame = end_alloc_instr(ack_define_section, alloc);
+        int frame = emit_alloc_instr(ack_define_section, 8);
 
         size_t offset1 = start_offset_instr(ack_define_section, frame, 0);
         add_type_struct(ack_define_section->main_data, 2);

@@ -1,9 +1,13 @@
 CFLAGS = -g -O2 -Wall -Werror -Wfatal-errors -Iinclude -Lbuild -lcx
+DFLAGS = -Iinclude -Iinclude/boilerplate/src
 LIB_SOURCES = $(shell find lib -name \*.c)
 LIB_OBJECTS = $(patsubst %.c,build/%.o,$(LIB_SOURCES))
 HEADERS = $(shell find include -name \*.h)
+DSHOULD_INCLUDES = $(shell dub fetch dshould 1>&2 && dub build dshould 1>&2 && \
+	dub describe dshould |\
+	jq -r '[[.. |.importPaths? |arrays[]] |unique[] |select(contains(".dub"))] |map("-I"+.) |join(" ")')
 
-default: build/interpret build/build_ack build/hello
+default: build/interpret build/build_ack build/hello build/backend_test
 
 $(LIB_OBJECTS): build/%.o: %.c $(HEADERS)
 	gcc $(CFLAGS) -c $< -o $@
@@ -23,4 +27,8 @@ build/interpret: build/libcx.a interpret.c
 	gcc interpret.c $(CFLAGS) -o $@
 
 build/hello: build/libcx.a hello.d
-	ldc2 -g -i -odbuild hello.d -ofbuild/hello -Iinclude/boilerplate/src -L-Lbuild -L-lcx
+	ldc2 -g -i -odbuild hello.d -ofbuild/hello ${DFLAGS} -L-Lbuild -L-lcx
+
+build/backend_test: backend.d
+	ldc2 -g -i -lib -odbuild backend_deps.d -ofbuild/libbackend_deps.a ${DFLAGS} ${DSHOULD_INCLUDES}
+	ldc2 -g -odbuild -ofbuild/backend_test -main -unittest backend.d -L-Lbuild -L-lbackend_deps ${DFLAGS} ${DSHOULD_INCLUDES}

@@ -229,6 +229,47 @@ class Generator
     }
 }
 
+/*class BytecodeType
+{
+    enum Kind
+    {
+        Int,
+        Void,
+    }
+    Kind kind;
+    mixin(GenerateThis);
+}
+
+class BytecodeBackend : Backend
+{
+    Generator generator;
+
+    int[string] declarations;
+
+    override void declare(string name, BackendType ret, BackendType[] args)
+    in (cast(BytecodeType) ret)
+    in (args.all!(a => cast(BytecodeType) a))
+    {
+        declarations[name] = cast(int) generator.builder.symbol_offsets_len;
+        size_t section = gen.begin_declare_section;
+        gen.declare_symbol(args.length);
+        add_string(gen.builder.data, toStringz(name));
+        // add_type_
+        // Are we really doing this? Just write an interpreter.
+    }
+
+    mixin(GenerateThis);
+}*/
+
+string genIntStub(string op)(Backend backend)
+{
+    auto int_ = backend.getIntType();
+    auto name = "int_" ~ op;
+
+    backend.declare(name, int_, [int_, int_]);
+    return name;
+}
+
 int gen_int_stub(string op)(Generator gen)
 {
     int offset = cast(int) gen.builder.symbol_offsets_len;

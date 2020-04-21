@@ -5,6 +5,13 @@ import std.algorithm;
 import std.array;
 import std.format;
 
+// helper to allow delayed jump resolution
+interface TestBranchRecord
+{
+    void resolveThen(int index);
+    void resolveElse(int index);
+}
+
 interface BackendBlock
 {
     alias Reg = int;
@@ -12,7 +19,9 @@ interface BackendBlock
     int index();
     Reg arg(int index);
     Reg call(string name, Reg[] args);
+    Reg literal(int value);
     void ret(Reg);
+    TestBranchRecord testBranch(Reg test);
 }
 
 interface BackendFunction
@@ -80,6 +89,8 @@ class IpBackendBlock : BackendBlock
             Call,
             Return,
             Arg,
+            Literal,
+            TestBranch,
         }
         Kind kind;
         union
@@ -97,9 +108,21 @@ class IpBackendBlock : BackendBlock
             {
                 int index;
             }
+            static struct Literal
+            {
+                IpValue value;
+            }
+            static struct TestBranch
+            {
+                Reg test;
+                int thenBlock;
+                int elseBlock;
+            }
             Call call;
             Return return_;
             Arg arg;
+            Literal literal;
+            TestBranch testBranch;
         }
     }
 
@@ -108,7 +131,7 @@ class IpBackendBlock : BackendBlock
 
     override int index()
     {
-        return this.index;
+        return this.index_;
     }
 
     override int arg(int index)
@@ -116,6 +139,14 @@ class IpBackendBlock : BackendBlock
         auto instr = Instr(Instr.Kind.Arg);
 
         instr.arg.index = index;
+        return append(instr);
+    }
+
+    override int literal(int value)
+    {
+        auto instr = Instr(Instr.Kind.Literal);
+
+        instr.literal.value = IpValue.make!int(value);
         return append(instr);
     }
 
@@ -134,6 +165,26 @@ class IpBackendBlock : BackendBlock
 
         instr.return_.reg = reg;
         append(instr);
+    }
+
+    override TestBranchRecord testBranch(Reg test)
+    {
+        auto instr = Instr(Instr.Kind.TestBranch);
+
+        instr.testBranch.test = test;
+
+        auto offset = append(instr) - this.regBase;
+
+        return new class TestBranchRecord {
+            override void resolveThen(int index)
+            {
+                this.outer.instrs[offset].testBranch.thenBlock = index;
+            }
+            override void resolveElse(int index)
+            {
+                this.outer.instrs[offset].testBranch.elseBlock = index;
+            }
+        };
     }
 
     private int append(Instr instr)
@@ -202,6 +253,8 @@ class IpBackendModule : BackendModule
 
             foreach (i, instr; fun.blocks[block].instrs)
             {
+                const lastInstr = i == fun.blocks[block].instrs.length - 1;
+
                 int reg = fun.blocks[block].regBase + cast(int) i;
 
                 with (IpBackendBlock.Instr.Kind)
@@ -209,14 +262,30 @@ class IpBackendModule : BackendModule
                     final switch (instr.kind)
                     {
                         case Call:
+                            assert(!lastInstr);
                             IpValue[] callArgs = instr.call.args.map!(reg => regs[reg]).array;
                             regs[reg] = call(instr.call.name, callArgs);
                             break;
                         case Return:
+                            assert(lastInstr);
                             return regs[instr.return_.reg];
                             break;
                         case Arg:
+                            assert(!lastInstr);
                             regs[reg] = args[instr.arg.index];
+                            break;
+                        case Literal:
+                            assert(!lastInstr);
+                            regs[reg] = instr.literal.value;
+                            break;
+                        case TestBranch:
+                            assert(lastInstr);
+                            IpValue testValue = regs[instr.testBranch.test];
+                            if (testValue.get!int) {
+                                block = instr.testBranch.thenBlock;
+                            } else {
+                                block = instr.testBranch.elseBlock;
+                            }
                             break;
                     }
                 }
@@ -257,4 +326,71 @@ unittest
     }
 
     mod.call("square", IpValue.make!int(5)).should.equal(IpValue.make!int(25));
+}
+
+/+
+    int ack(int m, int n) {
+        if (m == 0) { return n + 1; }
+        if (n == 0) { return ack(m - 1, 1); }
+        return ack(m - 1, ack(m, n - 1));
+    }
++/
+unittest
+{
+    auto mod = new IpBackendModule;
+    mod.defineCallback("int_add", delegate IpValue(IpValue[] args)
+    in (args.length == 2)
+    {
+        return IpValue.make!int(args[0].get!int + args[1].get!int);
+    });
+    mod.defineCallback("int_sub", delegate IpValue(IpValue[] args)
+    in (args.length == 2)
+    {
+        return IpValue.make!int(args[0].get!int - args[1].get!int);
+    });
+    mod.defineCallback("int_eq", delegate IpValue(IpValue[] args)
+    in (args.length == 2)
+    {
+        return IpValue.make!int(args[0].get!int == args[1].get!int);
+    });
+
+    auto ack = mod.define("ack", mod.intType, [mod.intType, mod.intType]);
+
+    auto if1_test = ack.startBlock;
+    auto m = if1_test.arg(0);
+    auto n = if1_test.arg(1);
+    auto zero = if1_test.literal(0);
+    auto one = if1_test.literal(1);
+
+    auto if1_test_reg = if1_test.call("int_eq", [m, zero]);
+    auto if1_test_jumprecord = if1_test.testBranch(if1_test_reg);
+
+    with (ack.startBlock) {
+        if1_test_jumprecord.resolveThen(index);
+        auto add = call("int_add", [n, one]);
+        ret(add);
+    }
+    auto if2_test = ack.startBlock;
+    if1_test_jumprecord.resolveElse(if2_test.index);
+    auto if2_test_reg = if2_test.call("int_eq", [n, zero]);
+    auto if2_test_jumprecord = if2_test.testBranch(if2_test_reg);
+
+    with (ack.startBlock) {
+        if2_test_jumprecord.resolveThen(index);
+        auto sub = call("int_sub", [m, one]);
+        auto ackrec = call("ack", [sub, one]);
+
+        ret(ackrec);
+    }
+
+    with (ack.startBlock) {
+        if2_test_jumprecord.resolveElse(index);
+        auto n1 = call("int_sub", [n, one]);
+        auto ackrec1 = call("ack", [m, n1]);
+        auto m1 = call("int_sub", [m, one]);
+        auto ackrec2 = call("ack", [m1, ackrec1]);
+        ret(ackrec2);
+    }
+
+    mod.call("ack", IpValue.make!int(3), IpValue.make!int(8)).should.equal(IpValue.make!int(2045));
 }

@@ -29,6 +29,8 @@ build/interpret: build/libcx.a interpret.c
 build/hello: build/libcx.a hello.d
 	ldc2 -g -i -odbuild hello.d -ofbuild/hello ${DFLAGS} -L-Lbuild -L-lcx
 
-build/backend_test: backend.d
+build/libbackend_deps.a: backend_deps.d
 	ldc2 -g -i -lib -odbuild backend_deps.d -ofbuild/libbackend_deps.a ${DFLAGS} ${DSHOULD_INCLUDES}
+
+build/backend_test: backend.d build/libbackend_deps.a
 	ldc2 -g -odbuild -ofbuild/backend_test -main -unittest backend.d -L-Lbuild -L-lbackend_deps ${DFLAGS} ${DSHOULD_INCLUDES}

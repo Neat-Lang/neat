@@ -20,6 +20,10 @@ interface BackendBlock
     Reg arg(int index);
     Reg call(string name, Reg[] args);
     Reg literal(int value);
+    Reg alloca(BackendType type);
+    Reg fieldOffset(BackendType structType, Reg structBase, int member);
+    void store(BackendType dataType, Reg target, Reg value);
+    Reg load(BackendType dataType, Reg target);
     void ret(Reg);
     TestBranchRecord testBranch(Reg test);
 }
@@ -37,6 +41,7 @@ interface BackendModule
 {
     BackendType intType();
     BackendType voidType();
+    BackendType structType(BackendType[] types);
     BackendFunction define(string name, BackendType ret, BackendType[] args);
 }
 
@@ -52,12 +57,19 @@ class IpBackend : Backend
 
 class IpBackendType : BackendType
 {
-    enum Kind
-    {
-        Int,
-        Void,
-    }
-    Kind kind;
+}
+
+class IntType : IpBackendType
+{
+}
+
+class VoidType : IpBackendType
+{
+}
+
+class StructType : IpBackendType
+{
+    IpBackendType[] types;
     mixin(GenerateThis);
 }
 
@@ -66,14 +78,150 @@ struct IpValue
     enum Kind
     {
         Int,
+        Void,
+        Struct,
+        Pointer,
     }
     Kind kind;
     union
     {
-        int i;
+        int int_value;
+        IpValue[] fields;
+        PointerValue pointer_;
     }
-    int get(T : int)() { return i; }
-    static IpValue make(T : int)(int i) { auto ret = IpValue(Kind.Int); ret.i = i; return ret; }
+
+    int as(T : int)()
+    in (this.kind == Kind.Int)
+    {
+        return int_value;
+    }
+
+    PointerValue asPointer()
+    in (this.kind == Kind.Pointer)
+    {
+        return this.pointer_;
+    }
+
+    ref IpValue accessField(int field)
+    in (this.kind == Kind.Struct)
+    {
+        return this.fields[field];
+    }
+
+    static IpValue make(T : int)(int i)
+    {
+        auto ret = IpValue(Kind.Int);
+
+        ret.int_value = i;
+        return ret;
+    }
+
+    static IpValue make(T : void)()
+    {
+        return IpValue(Kind.Void);
+    }
+
+    static IpValue makeStruct(IpValue[] values)
+    {
+        auto ret = IpValue(Kind.Struct);
+
+        ret.fields = values.dup;
+        return ret;
+    }
+
+    static IpValue makePointer(PointerValue pointer)
+    {
+        auto ret = IpValue(Kind.Pointer);
+
+        ret.pointer_ = pointer;
+        return ret;
+    }
+
+    void checkSameType(IpValue other)
+    {
+        if (this.kind == Kind.Int && other.kind == Kind.Int)
+        {
+            return;
+        }
+        assert(false, "TODO");
+    }
+
+    string toString() const
+    {
+        final switch (this.kind)
+        {
+            case Kind.Int:
+                return format!"%si"(this.int_value);
+            case Kind.Void:
+                return "void";
+            case Kind.Pointer:
+                return format!"&%s"(this.pointer_);
+            case Kind.Struct:
+                return format!"{%(%s, %)}"(this.fields);
+        }
+    }
+}
+
+/**
+ * This type defines a region of addressable values.
+ * It is used for the alloca region of stackframes, and the heap.
+ */
+class MemoryRegion
+{
+    IpValue[] values;
+
+    IpValue allocate(IpValue value)
+    {
+        this.values ~= value;
+
+        return IpValue.makePointer(PointerValue(this, [cast(int) this.values.length - 1]));
+    }
+
+    mixin(GenerateToString);
+}
+
+struct PointerValue
+{
+    private MemoryRegion base;
+
+    // the value of the pointer is found by reading the value accessPath[0],
+    // then following struct fields at each offset in turn.
+    private int[] accessPath;
+
+    invariant (accessPath.length >= 1);
+
+    public IpValue load()
+    {
+        return refValue;
+    }
+
+    public void store(IpValue value)
+    {
+        refValue.checkSameType(value);
+        refValue = value;
+    }
+
+    public IpValue offset(int member)
+    in (refValue.kind == IpValue.Kind.Struct && member < refValue.fields.length,
+        format("tried to take invalid offset %s of %s from %s", member, refValue, this))
+    {
+        return IpValue.makePointer(PointerValue(base, accessPath ~ member));
+    }
+
+    private ref IpValue refValue()
+    {
+        IpValue* current_value = &this.base.values[this.accessPath[0]];
+
+        foreach (index; this.accessPath[1 .. $])
+        {
+            assert(current_value.kind == IpValue.Kind.Struct);
+
+            current_value = &current_value.accessField(index);
+        }
+        return *current_value;
+    }
+
+    mixin(GenerateThis);
 }
 
 class IpBackendBlock : BackendBlock
@@ -91,6 +239,10 @@ class IpBackendBlock : BackendBlock
             Arg,
             Literal,
             TestBranch,
+            Alloca,
+            FieldOffset,
+            Load,
+            Store,
         }
         Kind kind;
         union
@@ -118,11 +270,36 @@ class IpBackendBlock : BackendBlock
                 int thenBlock;
                 int elseBlock;
             }
+            static struct Alloca
+            {
+                IpBackendType type;
+            }
+            static struct FieldOffset
+            {
+                StructType structType;
+                Reg base;
+                int member;
+            }
+            static struct Load
+            {
+                IpBackendType targetType;
+                Reg target;
+            }
+            static struct Store
+            {
+                IpBackendType targetType;
+                Reg target;
+                Reg value;
+            }
             Call call;
             Return return_;
             Arg arg;
             Literal literal;
             TestBranch testBranch;
+            Alloca alloca;
+            FieldOffset fieldOffset;
+            Load load;
+            Store store;
         }
     }
 
@@ -165,6 +342,50 @@ class IpBackendBlock : BackendBlock
 
         instr.return_.reg = reg;
         append(instr);
+    }
+
+    override int alloca(BackendType type)
+    in (cast(IpBackendType) type)
+    {
+        auto instr = Instr(Instr.Kind.Alloca);
+
+        instr.alloca.type = cast(IpBackendType) type;
+        return append(instr);
+    }
+
+    override Reg fieldOffset(BackendType structType, Reg structBase, int member)
+    in (cast(StructType) structType)
+    {
+        auto instr = Instr(Instr.Kind.FieldOffset);
+
+        instr.fieldOffset.structType = cast(StructType) structType;
+        instr.fieldOffset.base = structBase;
+        instr.fieldOffset.member = member;
+
+        return append(instr);
+    }
+
+    override void store(BackendType targetType, Reg target, Reg value)
+    in (cast(IpBackendType) targetType)
+    {
+        auto instr = Instr(Instr.Kind.Store);
+
+        instr.store.targetType = cast(IpBackendType) targetType;
+        instr.store.target = target;
+        instr.store.value = value;
+
+        append(instr);
+    }
+
+    override Reg load(BackendType targetType, Reg target)
+    in (cast(IpBackendType) targetType)
+    {
+        auto instr = Instr(Instr.Kind.Load);
+
+        instr.load.targetType = cast(IpBackendType) targetType;
+        instr.load.target = target;
+
+        return append(instr);
     }
 
     override TestBranchRecord testBranch(Reg test)
@@ -223,6 +444,19 @@ class IpBackendFunction : BackendFunction
     mixin(GenerateThis);
 }
 
+IpValue getInitValue(IpBackendType type)
+{
+    if (cast(IntType) type)
+    {
+        return IpValue.make!int(0);
+    }
+    if (auto strct = cast(StructType) type)
+    {
+        return IpValue.makeStruct(strct.types.map!getInitValue.array);
+    }
+    assert(false, "what is init for " ~ type.toString);
+}
+
 class IpBackendModule : BackendModule
 {
     alias Callable = IpValue delegate(IpValue[]);
@@ -245,6 +479,7 @@ class IpBackendModule : BackendModule
         }
         auto fun = this.functions[name];
         auto regs = new IpValue[fun.regCount];
+        auto allocaRegion = new MemoryRegion;
 
         int block = 0;
         while (true)
@@ -281,11 +516,37 @@ class IpBackendModule : BackendModule
                         case TestBranch:
                             assert(lastInstr);
                             IpValue testValue = regs[instr.testBranch.test];
-                            if (testValue.get!int) {
+                            if (testValue.as!int) {
                                 block = instr.testBranch.thenBlock;
                             } else {
                                 block = instr.testBranch.elseBlock;
                             }
+                            break;
+                        case Alloca:
+                            auto value = getInitValue(instr.alloca.type);
+
+                            regs[reg] = allocaRegion.allocate(value);
+                            break;
+                        case FieldOffset:
+                            // TODO validate type
+                            auto base = regs[instr.fieldOffset.base];
+
+                            assert(base.kind == IpValue.Kind.Pointer);
+                            regs[reg] = base.asPointer.offset(instr.fieldOffset.member);
+                            break;
+                        case Load:
+                            // TODO validate type
+                            auto target = regs[instr.load.target];
+
+                            assert(target.kind == IpValue.Kind.Pointer);
+                            regs[reg] = target.asPointer.load;
+                            break;
+                        case Store:
+                            auto target = regs[instr.store.target];
+
+                            assert(target.kind == IpValue.Kind.Pointer);
+                            target.asPointer.store(regs[instr.store.value]);
+                            regs[reg] = IpValue.make!void;
                             break;
                     }
                 }
@@ -293,9 +554,15 @@ class IpBackendModule : BackendModule
         }
     }
 
-    override IpBackendType intType() { return new IpBackendType(IpBackendType.Kind.Int); }
+    override IntType intType() { return new IntType; }
 
-    override IpBackendType voidType() { return new IpBackendType(IpBackendType.Kind.Void); }
+    override IpBackendType voidType() { return new VoidType; }
+
+    override IpBackendType structType(BackendType[] types)
+    in (types.all!(a => cast(IpBackendType) a))
+    {
+        return new StructType(types.map!(a => cast(IpBackendType) a).array);
+    }
 
     override IpBackendFunction define(string name, BackendType ret, BackendType[] args)
     in (name !in callbacks && name !in functions)
@@ -315,7 +582,7 @@ unittest
     mod.defineCallback("int_mul", delegate IpValue(IpValue[] args)
     in (args.length == 2)
     {
-        return IpValue.make!int(args[0].get!int * args[1].get!int);
+        return IpValue.make!int(args[0].as!int * args[1].as!int);
     });
     auto square = mod.define("square", mod.intType, [mod.intType, mod.intType]);
     with (square.startBlock) {
@@ -341,17 +608,17 @@ unittest
     mod.defineCallback("int_add", delegate IpValue(IpValue[] args)
     in (args.length == 2)
     {
-        return IpValue.make!int(args[0].get!int + args[1].get!int);
+        return IpValue.make!int(args[0].as!int + args[1].as!int);
     });
     mod.defineCallback("int_sub", delegate IpValue(IpValue[] args)
     in (args.length == 2)
     {
-        return IpValue.make!int(args[0].get!int - args[1].get!int);
+        return IpValue.make!int(args[0].as!int - args[1].as!int);
     });
     mod.defineCallback("int_eq", delegate IpValue(IpValue[] args)
     in (args.length == 2)
     {
-        return IpValue.make!int(args[0].get!int == args[1].get!int);
+        return IpValue.make!int(args[0].as!int == args[1].as!int);
     });
 
     auto ack = mod.define("ack", mod.intType, [mod.intType, mod.intType]);
@@ -393,4 +660,34 @@ unittest
     }
 
     mod.call("ack", IpValue.make!int(3), IpValue.make!int(8)).should.equal(IpValue.make!int(2045));
+}
+
+unittest
+{
+    /*
+     * int square(int i) { int k = i; int l = k * k; return l; }
+     */
+    auto mod = new IpBackendModule;
+    mod.defineCallback("int_mul", delegate IpValue(IpValue[] args)
+    in (args.length == 2)
+    {
+        return IpValue.make!int(args[0].as!int * args[1].as!int);
+    });
+    auto square = mod.define("square", mod.intType, [mod.intType, mod.intType]);
+    auto stackframeType = mod.structType([mod.intType, mod.intType]);
+    with (square.startBlock) {
+        auto stackframe = alloca(stackframeType);
+        auto arg0 = arg(0);
+        auto var = fieldOffset(stackframeType, stackframe, 0);
+        store(mod.intType, var, arg0);
+        auto varload = load(mod.intType, var);
+        auto reg = call("int_mul", [varload, varload]);
+        auto retvar = fieldOffset(stackframeType, stackframe, 0);
+        store(mod.intType, retvar, reg);
+
+        auto retreg = load(mod.intType, retvar);
+        ret(retreg);
+    }
+
+    mod.call("square", IpValue.make!int(5)).should.equal(IpValue.make!int(25));
 }

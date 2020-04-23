@@ -32,91 +32,149 @@ class StructType : IpBackendType
     mixin(GenerateThis);
 }
 
-class IpBackendBlock : BackendBlock
+class BasicBlock
 {
-    int index_;
-
     int regBase;
 
-    static struct Instr
-    {
-        enum Kind
-        {
-            Call,
-            Return,
-            Arg,
-            Literal,
-            TestBranch,
-            Alloca,
-            FieldOffset,
-            Load,
-            Store,
-        }
-        Kind kind;
-        union
-        {
-            static struct Call
-            {
-                string name;
-                Reg[] args;
-            }
-            static struct Return
-            {
-                Reg reg;
-            }
-            static struct Arg
-            {
-                int index;
-            }
-            static struct Literal
-            {
-                Value value;
-            }
-            static struct TestBranch
-            {
-                Reg test;
-                int thenBlock;
-                int elseBlock;
-            }
-            static struct Alloca
-            {
-                IpBackendType type;
-            }
-            static struct FieldOffset
-            {
-                StructType structType;
-                Reg base;
-                int member;
-            }
-            static struct Load
-            {
-                IpBackendType targetType;
-                Reg target;
-            }
-            static struct Store
-            {
-                IpBackendType targetType;
-                Reg target;
-                Reg value;
-            }
-            Call call;
-            Return return_;
-            Arg arg;
-            Literal literal;
-            TestBranch testBranch;
-            Alloca alloca;
-            FieldOffset fieldOffset;
-            Load load;
-            Store store;
-        }
-    }
+    @(This.Init!false)
+    bool finished;
 
     @(This.Init!null)
     Instr[] instrs;
 
-    override int index()
+    private int append(Instr instr)
     {
-        return this.index_;
+        assert(!this.finished);
+        if (instr.kind.isBlockFinisher) this.finished = true;
+
+        this.instrs ~= instr;
+        return cast(int) (this.instrs.length - 1 + this.regBase);
+    }
+
+    mixin(GenerateThis);
+}
+
+struct Instr
+{
+    enum Kind
+    {
+        Call,
+        Arg,
+        Literal,
+        Alloca,
+        FieldOffset,
+        Load,
+        Store,
+        // block finishers
+        Return,
+        TestBranch,
+    }
+    Kind kind;
+    union
+    {
+        static struct Call
+        {
+            string name;
+            Reg[] args;
+        }
+        static struct Return
+        {
+            Reg reg;
+        }
+        static struct Arg
+        {
+            int index;
+        }
+        static struct Literal
+        {
+            Value value;
+        }
+        static struct TestBranch
+        {
+            Reg test;
+            int thenBlock;
+            int elseBlock;
+        }
+        static struct Alloca
+        {
+            IpBackendType type;
+        }
+        static struct FieldOffset
+        {
+            StructType structType;
+            Reg base;
+            int member;
+        }
+        static struct Load
+        {
+            IpBackendType targetType;
+            Reg target;
+        }
+        static struct Store
+        {
+            IpBackendType targetType;
+            Reg target;
+            Reg value;
+        }
+        Call call;
+        Return return_;
+        Arg arg;
+        Literal literal;
+        TestBranch testBranch;
+        Alloca alloca;
+        FieldOffset fieldOffset;
+        Load load;
+        Store store;
+    }
+}
+
+private bool isBlockFinisher(Instr.Kind kind)
+{
+    with (Instr.Kind) final switch (kind)
+    {
+        case Return:
+        case TestBranch:
+            return true;
+        case Call:
+        case Arg:
+        case Literal:
+        case Alloca:
+        case FieldOffset:
+        case Load:
+        case Store:
+            return false;
+    }
+}
+
+class IpBackendFunction : BackendFunction
+{
+    string name;
+
+    IpBackendType retType;
+
+    IpBackendType[] argTypes;
+
+    @(This.Init!null)
+    BasicBlock[] blocks;
+
+    private BasicBlock block()
+    {
+        if (this.blocks.empty || this.blocks.back.finished)
+        {
+            int regBase = this.blocks.empty
+                ? 0
+                : (this.blocks.back.regBase + cast(int) this.blocks.back.instrs.length);
+
+            this.blocks ~= new BasicBlock(regBase);
+        }
+
+        return this.blocks[$ - 1];
+    }
+
+    override int blockIndex()
+    {
+        block;
+        return cast(int) (this.blocks.length - 1);
     }
 
     override int arg(int index)
@@ -124,7 +182,7 @@ class IpBackendBlock : BackendBlock
         auto instr = Instr(Instr.Kind.Arg);
 
         instr.arg.index = index;
-        return append(instr);
+        return block.append(instr);
     }
 
     override int literal(int value)
@@ -132,7 +190,7 @@ class IpBackendBlock : BackendBlock
         auto instr = Instr(Instr.Kind.Literal);
 
         instr.literal.value = Value.make!int(value);
-        return append(instr);
+        return block.append(instr);
     }
 
     override int call(string name, Reg[] args)
@@ -141,7 +199,7 @@ class IpBackendBlock : BackendBlock
 
         instr.call.name = name;
         instr.call.args = args.dup;
-        return append(instr);
+        return block.append(instr);
     }
 
     override void ret(Reg reg)
@@ -149,7 +207,7 @@ class IpBackendBlock : BackendBlock
         auto instr = Instr(Instr.Kind.Return);
 
         instr.return_.reg = reg;
-        append(instr);
+        block.append(instr);
     }
 
     override int alloca(BackendType type)
@@ -158,7 +216,7 @@ class IpBackendBlock : BackendBlock
         auto instr = Instr(Instr.Kind.Alloca);
 
         instr.alloca.type = cast(IpBackendType) type;
-        return append(instr);
+        return block.append(instr);
     }
 
     override Reg fieldOffset(BackendType structType, Reg structBase, int member)
@@ -170,7 +228,7 @@ class IpBackendBlock : BackendBlock
         instr.fieldOffset.base = structBase;
         instr.fieldOffset.member = member;
 
-        return append(instr);
+        return block.append(instr);
     }
 
     override void store(BackendType targetType, Reg target, Reg value)
@@ -182,7 +240,7 @@ class IpBackendBlock : BackendBlock
         instr.store.target = target;
         instr.store.value = value;
 
-        append(instr);
+        block.append(instr);
     }
 
     override Reg load(BackendType targetType, Reg target)
@@ -193,7 +251,7 @@ class IpBackendBlock : BackendBlock
         instr.load.targetType = cast(IpBackendType) targetType;
         instr.load.target = target;
 
-        return append(instr);
+        return block.append(instr);
     }
 
     override TestBranchRecord testBranch(Reg test)
@@ -202,44 +260,22 @@ class IpBackendBlock : BackendBlock
 
         instr.testBranch.test = test;
 
-        auto offset = append(instr) - this.regBase;
+        auto block = block;
+
+        block.append(instr);
+
+        assert(block.finished);
 
         return new class TestBranchRecord {
             override void resolveThen(int index)
             {
-                this.outer.instrs[offset].testBranch.thenBlock = index;
+                block.instrs[$ - 1].testBranch.thenBlock = index;
             }
             override void resolveElse(int index)
             {
-                this.outer.instrs[offset].testBranch.elseBlock = index;
+                block.instrs[$ - 1].testBranch.elseBlock = index;
             }
         };
-    }
-
-    private int append(Instr instr)
-    {
-        this.instrs ~= instr;
-        return cast(int) (this.instrs.length - 1 + this.regBase);
-    }
-
-    mixin(GenerateThis);
-}
-
-class IpBackendFunction : BackendFunction
-{
-    string name;
-
-    IpBackendType ret;
-
-    IpBackendType[] args;
-
-    @(This.Init!null)
-    IpBackendBlock[] blocks;
-
-    override IpBackendBlock startBlock()
-    {
-        blocks ~= new IpBackendBlock(cast(int) blocks.length, regCount);
-        return blocks[$-1];
     }
 
     int regCount()
@@ -299,7 +335,7 @@ class IpBackendModule : BackendModule
 
                 int reg = fun.blocks[block].regBase + cast(int) i;
 
-                with (IpBackendBlock.Instr.Kind)
+                with (Instr.Kind)
                 {
                     final switch (instr.kind)
                     {
@@ -392,7 +428,7 @@ unittest
         return Value.make!int(args[0].as!int * args[1].as!int);
     });
     auto square = mod.define("square", mod.intType, [mod.intType, mod.intType]);
-    with (square.startBlock) {
+    with (square) {
         auto arg0 = arg(0);
         auto reg = call("int_mul", [arg0, arg0]);
 
@@ -430,35 +466,31 @@ unittest
 
     auto ack = mod.define("ack", mod.intType, [mod.intType, mod.intType]);
 
-    auto if1_test = ack.startBlock;
-    auto m = if1_test.arg(0);
-    auto n = if1_test.arg(1);
-    auto zero = if1_test.literal(0);
-    auto one = if1_test.literal(1);
+    with (ack)
+    {
+        auto m = arg(0);
+        auto n = arg(1);
+        auto zero = literal(0);
+        auto one = literal(1);
 
-    auto if1_test_reg = if1_test.call("int_eq", [m, zero]);
-    auto if1_test_jumprecord = if1_test.testBranch(if1_test_reg);
+        auto if1_test_reg = call("int_eq", [m, zero]);
+        auto if1_test_jumprecord = testBranch(if1_test_reg);
 
-    with (ack.startBlock) {
-        if1_test_jumprecord.resolveThen(index);
+        if1_test_jumprecord.resolveThen(blockIndex);
         auto add = call("int_add", [n, one]);
         ret(add);
-    }
-    auto if2_test = ack.startBlock;
-    if1_test_jumprecord.resolveElse(if2_test.index);
-    auto if2_test_reg = if2_test.call("int_eq", [n, zero]);
-    auto if2_test_jumprecord = if2_test.testBranch(if2_test_reg);
 
-    with (ack.startBlock) {
-        if2_test_jumprecord.resolveThen(index);
+        if1_test_jumprecord.resolveElse(blockIndex);
+        auto if2_test_reg = call("int_eq", [n, zero]);
+        auto if2_test_jumprecord = testBranch(if2_test_reg);
+
+        if2_test_jumprecord.resolveThen(blockIndex);
         auto sub = call("int_sub", [m, one]);
         auto ackrec = call("ack", [sub, one]);
 
         ret(ackrec);
-    }
 
-    with (ack.startBlock) {
-        if2_test_jumprecord.resolveElse(index);
+        if2_test_jumprecord.resolveElse(blockIndex);
         auto n1 = call("int_sub", [n, one]);
         auto ackrec1 = call("ack", [m, n1]);
         auto m1 = call("int_sub", [m, one]);
@@ -482,7 +514,7 @@ unittest
     });
     auto square = mod.define("square", mod.intType, [mod.intType, mod.intType]);
     auto stackframeType = mod.structType([mod.intType, mod.intType]);
-    with (square.startBlock) {
+    with (square) {
         auto stackframe = alloca(stackframeType);
         auto arg0 = arg(0);
         auto var = fieldOffset(stackframeType, stackframe, 0);

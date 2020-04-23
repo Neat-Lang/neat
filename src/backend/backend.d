@@ -21,13 +21,7 @@ interface BackendType
 
 interface BackendFunction
 {
-    BackendBlock startBlock();
-}
-
-interface BackendBlock
-{
-
-    int index();
+    int blockIndex();
     Reg arg(int index);
     Reg call(string name, Reg[] args);
     Reg literal(int value);
@@ -35,6 +29,7 @@ interface BackendBlock
     Reg fieldOffset(BackendType structType, Reg structBase, int member);
     void store(BackendType dataType, Reg target, Reg value);
     Reg load(BackendType dataType, Reg target);
+    // block enders
     void ret(Reg);
     TestBranchRecord testBranch(Reg test);
 }

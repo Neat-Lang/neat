@@ -1,54 +1,12 @@
-module backend;
+module backend.interpreter;
 
 import backend_deps;
+import backend.backend;
+import backend.value;
+import boilerplate;
 import std.algorithm;
 import std.array;
 import std.format;
-
-// helper to allow delayed jump resolution
-interface TestBranchRecord
-{
-    void resolveThen(int index);
-    void resolveElse(int index);
-}
-
-interface BackendBlock
-{
-    alias Reg = int;
-
-    int index();
-    Reg arg(int index);
-    Reg call(string name, Reg[] args);
-    Reg literal(int value);
-    Reg alloca(BackendType type);
-    Reg fieldOffset(BackendType structType, Reg structBase, int member);
-    void store(BackendType dataType, Reg target, Reg value);
-    Reg load(BackendType dataType, Reg target);
-    void ret(Reg);
-    TestBranchRecord testBranch(Reg test);
-}
-
-interface BackendFunction
-{
-    BackendBlock startBlock();
-}
-
-interface BackendType
-{
-}
-
-interface BackendModule
-{
-    BackendType intType();
-    BackendType voidType();
-    BackendType structType(BackendType[] types);
-    BackendFunction define(string name, BackendType ret, BackendType[] args);
-}
-
-interface Backend
-{
-    BackendModule createModule();
-}
 
 class IpBackend : Backend
 {
@@ -70,156 +28,6 @@ class VoidType : IpBackendType
 class StructType : IpBackendType
 {
     IpBackendType[] types;
-    mixin(GenerateThis);
-}
-
-struct IpValue
-{
-    enum Kind
-    {
-        Int,
-        Void,
-        Struct,
-        Pointer,
-    }
-    Kind kind;
-    union
-    {
-        int int_value;
-        IpValue[] fields;
-        PointerValue pointer_;
-    }
-
-    int as(T : int)()
-    in (this.kind == Kind.Int)
-    {
-        return int_value;
-    }
-
-    PointerValue asPointer()
-    in (this.kind == Kind.Pointer)
-    {
-        return this.pointer_;
-    }
-
-    ref IpValue accessField(int field)
-    in (this.kind == Kind.Struct)
-    {
-        return this.fields[field];
-    }
-
-    static IpValue make(T : int)(int i)
-    {
-        auto ret = IpValue(Kind.Int);
-
-        ret.int_value = i;
-        return ret;
-    }
-
-    static IpValue make(T : void)()
-    {
-        return IpValue(Kind.Void);
-    }
-
-    static IpValue makeStruct(IpValue[] values)
-    {
-        auto ret = IpValue(Kind.Struct);
-
-        ret.fields = values.dup;
-        return ret;
-    }
-
-    static IpValue makePointer(PointerValue pointer)
-    {
-        auto ret = IpValue(Kind.Pointer);
-
-        ret.pointer_ = pointer;
-        return ret;
-    }
-
-    void checkSameType(IpValue other)
-    {
-        if (this.kind == Kind.Int && other.kind == Kind.Int)
-        {
-            return;
-        }
-        assert(false, "TODO");
-    }
-
-    string toString() const
-    {
-        final switch (this.kind)
-        {
-            case Kind.Int:
-                return format!"%si"(this.int_value);
-            case Kind.Void:
-                return "void";
-            case Kind.Pointer:
-                return format!"&%s"(this.pointer_);
-            case Kind.Struct:
-                return format!"{%(%s, %)}"(this.fields);
-        }
-    }
-}
-
-/**
- * This type defines a region of addressable values.
- * It is used for the alloca region of stackframes, and the heap.
- */
-class MemoryRegion
-{
-    IpValue[] values;
-
-    IpValue allocate(IpValue value)
-    {
-        this.values ~= value;
-
-        return IpValue.makePointer(PointerValue(this, [cast(int) this.values.length - 1]));
-    }
-
-    mixin(GenerateToString);
-}
-
-struct PointerValue
-{
-    private MemoryRegion base;
-
-    // the value of the pointer is found by reading the value accessPath[0],
-    // then following struct fields at each offset in turn.
-    private int[] accessPath;
-
-    invariant (accessPath.length >= 1);
-
-    public IpValue load()
-    {
-        return refValue;
-    }
-
-    public void store(IpValue value)
-    {
-        refValue.checkSameType(value);
-        refValue = value;
-    }
-
-    public IpValue offset(int member)
-    in (refValue.kind == IpValue.Kind.Struct && member < refValue.fields.length,
-        format("tried to take invalid offset %s of %s from %s", member, refValue, this))
-    {
-        return IpValue.makePointer(PointerValue(base, accessPath ~ member));
-    }
-
-    private ref IpValue refValue()
-    {
-        IpValue* current_value = &this.base.values[this.accessPath[0]];
-
-        foreach (index; this.accessPath[1 .. $])
-        {
-            assert(current_value.kind == IpValue.Kind.Struct);
-
-            current_value = &current_value.accessField(index);
-        }
-        return *current_value;
-    }
 
     mixin(GenerateThis);
 }
@@ -262,7 +70,7 @@ class IpBackendBlock : BackendBlock
             }
             static struct Literal
             {
-                IpValue value;
+                Value value;
             }
             static struct TestBranch
             {
@@ -323,7 +131,7 @@ class IpBackendBlock : BackendBlock
     {
         auto instr = Instr(Instr.Kind.Literal);
 
-        instr.literal.value = IpValue.make!int(value);
+        instr.literal.value = Value.make!int(value);
         return append(instr);
     }
 
@@ -444,33 +252,32 @@ class IpBackendFunction : BackendFunction
     mixin(GenerateThis);
 }
 
-IpValue getInitValue(IpBackendType type)
+Value getInitValue(IpBackendType type)
 {
     if (cast(IntType) type)
     {
-        return IpValue.make!int(0);
+        return Value.make!int(0);
     }
     if (auto strct = cast(StructType) type)
     {
-        return IpValue.makeStruct(strct.types.map!getInitValue.array);
+        return Value.makeStruct(strct.types.map!getInitValue.array);
     }
     assert(false, "what is init for " ~ type.toString);
 }
 
 class IpBackendModule : BackendModule
 {
-    alias Callable = IpValue delegate(IpValue[]);
+    alias Callable = Value delegate(Value[]);
     Callable[string] callbacks;
     IpBackendFunction[string] functions;
 
-    void defineCallback(
-        string name, IpValue delegate(IpValue[]) call)
+    void defineCallback(string name, Callable call)
     in (name !in callbacks && name !in functions)
     {
         callbacks[name] = call;
     }
 
-    IpValue call(string name, IpValue[] args...)
+    Value call(string name, Value[] args...)
     in (name in this.functions || name in this.callbacks, format!"%s not found"(name))
     {
         if (name in this.callbacks)
@@ -478,7 +285,7 @@ class IpBackendModule : BackendModule
             return this.callbacks[name](args);
         }
         auto fun = this.functions[name];
-        auto regs = new IpValue[fun.regCount];
+        auto regs = new Value[fun.regCount];
         auto allocaRegion = new MemoryRegion;
 
         int block = 0;
@@ -498,7 +305,7 @@ class IpBackendModule : BackendModule
                     {
                         case Call:
                             assert(!lastInstr);
-                            IpValue[] callArgs = instr.call.args.map!(reg => regs[reg]).array;
+                            Value[] callArgs = instr.call.args.map!(reg => regs[reg]).array;
                             regs[reg] = call(instr.call.name, callArgs);
                             break;
                         case Return:
@@ -515,7 +322,7 @@ class IpBackendModule : BackendModule
                             break;
                         case TestBranch:
                             assert(lastInstr);
-                            IpValue testValue = regs[instr.testBranch.test];
+                            Value testValue = regs[instr.testBranch.test];
                             if (testValue.as!int) {
                                 block = instr.testBranch.thenBlock;
                             } else {
@@ -531,22 +338,22 @@ class IpBackendModule : BackendModule
                             // TODO validate type
                             auto base = regs[instr.fieldOffset.base];
 
-                            assert(base.kind == IpValue.Kind.Pointer);
+                            assert(base.kind == Value.Kind.Pointer);
                             regs[reg] = base.asPointer.offset(instr.fieldOffset.member);
                             break;
                         case Load:
                             // TODO validate type
                             auto target = regs[instr.load.target];
 
-                            assert(target.kind == IpValue.Kind.Pointer);
+                            assert(target.kind == Value.Kind.Pointer);
                             regs[reg] = target.asPointer.load;
                             break;
                         case Store:
                             auto target = regs[instr.store.target];
 
-                            assert(target.kind == IpValue.Kind.Pointer);
+                            assert(target.kind == Value.Kind.Pointer);
                             target.asPointer.store(regs[instr.store.value]);
-                            regs[reg] = IpValue.make!void;
+                            regs[reg] = Value.make!void;
                             break;
                     }
                 }
@@ -579,10 +386,10 @@ class IpBackendModule : BackendModule
 unittest
 {
     auto mod = new IpBackendModule;
-    mod.defineCallback("int_mul", delegate IpValue(IpValue[] args)
+    mod.defineCallback("int_mul", delegate Value(Value[] args)
     in (args.length == 2)
     {
-        return IpValue.make!int(args[0].as!int * args[1].as!int);
+        return Value.make!int(args[0].as!int * args[1].as!int);
     });
     auto square = mod.define("square", mod.intType, [mod.intType, mod.intType]);
     with (square.startBlock) {
@@ -592,7 +399,7 @@ unittest
         ret(reg);
     }
 
-    mod.call("square", IpValue.make!int(5)).should.equal(IpValue.make!int(25));
+    mod.call("square", Value.make!int(5)).should.equal(Value.make!int(25));
 }
 
 /+
@@ -605,20 +412,20 @@ unittest
 unittest
 {
     auto mod = new IpBackendModule;
-    mod.defineCallback("int_add", delegate IpValue(IpValue[] args)
+    mod.defineCallback("int_add", delegate Value(Value[] args)
     in (args.length == 2)
     {
-        return IpValue.make!int(args[0].as!int + args[1].as!int);
+        return Value.make!int(args[0].as!int + args[1].as!int);
     });
-    mod.defineCallback("int_sub", delegate IpValue(IpValue[] args)
+    mod.defineCallback("int_sub", delegate Value(Value[] args)
     in (args.length == 2)
     {
-        return IpValue.make!int(args[0].as!int - args[1].as!int);
+        return Value.make!int(args[0].as!int - args[1].as!int);
     });
-    mod.defineCallback("int_eq", delegate IpValue(IpValue[] args)
+    mod.defineCallback("int_eq", delegate Value(Value[] args)
     in (args.length == 2)
     {
-        return IpValue.make!int(args[0].as!int == args[1].as!int);
+        return Value.make!int(args[0].as!int == args[1].as!int);
     });
 
     auto ack = mod.define("ack", mod.intType, [mod.intType, mod.intType]);
@@ -659,7 +466,7 @@ unittest
         ret(ackrec2);
     }
 
-    mod.call("ack", IpValue.make!int(3), IpValue.make!int(8)).should.equal(IpValue.make!int(2045));
+    mod.call("ack", Value.make!int(3), Value.make!int(8)).should.equal(Value.make!int(2045));
 }
 
 unittest
@@ -668,10 +475,10 @@ unittest
      * int square(int i) { int k = i; int l = k * k; return l; }
      */
     auto mod = new IpBackendModule;
-    mod.defineCallback("int_mul", delegate IpValue(IpValue[] args)
+    mod.defineCallback("int_mul", delegate Value(Value[] args)
     in (args.length == 2)
     {
-        return IpValue.make!int(args[0].as!int * args[1].as!int);
+        return Value.make!int(args[0].as!int * args[1].as!int);
     });
     auto square = mod.define("square", mod.intType, [mod.intType, mod.intType]);
     auto stackframeType = mod.structType([mod.intType, mod.intType]);
@@ -689,5 +496,5 @@ unittest
         ret(retreg);
     }
 
-    mod.call("square", IpValue.make!int(5)).should.equal(IpValue.make!int(25));
+    mod.call("square", Value.make!int(5)).should.equal(Value.make!int(25));
 }

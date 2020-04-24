@@ -31,10 +31,17 @@ interface BackendFunction
     Reg load(BackendType dataType, Reg target);
     // block enders
     void ret(Reg);
+    BranchRecord branch();
     TestBranchRecord testBranch(Reg test);
 }
 
-// helper to allow delayed jump resolution
+/// helpers to allow delayed jump resolution
+interface BranchRecord
+{
+    void resolve(int index);
+}
+
+/// ditto
 interface TestBranchRecord
 {
     void resolveThen(int index);

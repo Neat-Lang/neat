@@ -1,5 +1,6 @@
 module hello;
 
+import backend.backend;
 import boilerplate;
 import std.algorithm;
 import std.range;
@@ -15,7 +16,7 @@ interface Symbol
 
 class Type
 {
-    abstract void emit(Data* data);
+    abstract BackendType emit(BackendModule mod);
 
     abstract size_t size() const;
 
@@ -27,9 +28,9 @@ class Type
 
 class Integer : Type
 {
-    override void emit(Data* data)
+    override BackendType emit(BackendModule mod)
     {
-        add_type_int(data);
+        return mod.intType;
     }
 
     override size_t size() const
@@ -50,9 +51,9 @@ class Integer : Type
 
 class Void : Type
 {
-    override void emit(Data* data)
+    override BackendType emit(BackendModule mod)
     {
-        assert(false);
+        return mod.voidType;
     }
 
     override size_t size() const
@@ -75,10 +76,9 @@ class Struct : Type
 {
     Type[] members;
 
-    override void emit(Data* data)
+    override BackendType emit(BackendModule mod)
     {
-        add_type_struct(data, cast(int) this.members.length);
-        this.members.each!(a => a.emit(data));
+        return mod.structType(this.members.map!(a => a.emit(mod)).array);
     }
 
     override size_t size() const
@@ -108,11 +108,10 @@ class Pointer : Type
         return 8;
     }
 
-    override void emit(Data* data)
+    override BackendType emit(BackendModule mod)
     {
         assert(false);
-        // add_type_pointer(data);
-        target.emit(data);
+        // return mod.pointerType(target.emit(mod));
     }
 
     override string toString() const
@@ -121,71 +120,20 @@ class Pointer : Type
     }
 }
 
-extern (C)
-{
-    struct Data
-    {
-        void* ptr;
-        size_t length;
-    }
-
-    struct BytecodeBuilder
-    {
-        Data* data;
-        size_t symbol_offsets_len;
-        size_t* symbol_offsets_ptr;
-    }
-
-    struct DefineSectionState
-    {
-        Data* main_data;
-        // ...
-    }
-
-    Data* alloc_data();
-    BytecodeBuilder* alloc_bc_builder();
-    size_t begin_declare_section(BytecodeBuilder* data);
-    DefineSectionState* begin_define_section(BytecodeBuilder*, size_t index);
-    void end_define_section(BytecodeBuilder* data, DefineSectionState* state);
-    void declare_symbol(BytecodeBuilder* data, int args);
-    void add_string(Data* data, const char* text);
-    void add_type_int(Data* data);
-    void add_type_struct(Data* data, int members);
-    void end_declare_section(Data* data, size_t offset);
-
-    void add_ret_instr(DefineSectionState* state, int reg);
-    int add_tbr_instr(DefineSectionState* state, int reg);
-    int add_literal_instr(DefineSectionState* state, int value);
-    int add_arg_instr(DefineSectionState* state, int index);
-    void tbr_resolve_then(DefineSectionState* state, int tbr_offset, int block);
-    void tbr_resolve_else(DefineSectionState* state, int tbr_offset, int block);
-    int add_br_instr(DefineSectionState* state);
-    void br_resolve(DefineSectionState* state, int br_offset, int block);
-    int start_call_instr(DefineSectionState* state, int offset, int args);
-    void add_store_instr(DefineSectionState* state, int value_reg, int pointer_reg);
-    size_t start_offset_instr(DefineSectionState* state, int reg, size_t index);
-    int end_offset_instr(DefineSectionState* state, size_t offset);
-    int emit_alloc_instr(DefineSectionState* state, size_t size);
-    size_t start_load_instr(DefineSectionState* state, int pointer_reg);
-    int end_load_instr(DefineSectionState* state, size_t offset);
-    void add_call_reg_arg(DefineSectionState* state, int reg);
-    int start_block(DefineSectionState* state);
-}
-
 class Generator
 {
-    BytecodeBuilder* builder;
-    DefineSectionState* defineSectionState;
+    @NonNull
+    BackendModule mod;
 
-    invariant (builder !is null);
+    BackendFunction fun;
 
     int numDeclarations;
 
-    Nullable!int frameReg_;
+    Nullable!Reg frameReg_;
 
-    void frameReg(int i)
+    void frameReg(Reg reg)
     {
-        this.frameReg_ = i;
+        this.frameReg_ = reg;
     }
 
     void resetFrame()
@@ -193,94 +141,49 @@ class Generator
         this.frameReg_.nullify;
     }
 
-    int frameReg()
+    Reg frameReg()
     {
         return this.frameReg_.get;
     }
 
-    this(BytecodeBuilder* builder, DefineSectionState* defineSectionState = null)
+    this(BackendModule mod, BackendFunction fun = null)
     {
-        this.builder = builder;
-        this.defineSectionState = defineSectionState;
+        this.mod = mod;
+        this.fun = fun;
     }
 
-    template opDispatch(string name)
+    void define(Function fun, Namespace module_)
     {
-        auto opDispatch(T...)(T args)
+        assert(this.fun is null);
+        this.fun = this.mod.define(
+            fun.name,
+            fun.ret.emit(this.mod),
+            fun.args.map!(a => a.type.emit(this.mod)).array
+        );
+        auto stackframe = new FunctionScope(module_);
+        auto argscope = new VarDeclScope(stackframe, Yes.frameBase);
+        Statement[] argAssignments;
+        foreach (i, arg; fun.args)
         {
-            static string member()
-            {
-                switch (name)
-                {
-                    case "declare_symbol":
-                        case "begin_declare_section":
-                        return "this.builder";
-                    case "end_declare_section":
-                        case "add_string":
-                        case "add_type_int":
-                        assert(false, "specify data explicitly: may appear in either");
-                    default:
-                        return "this.defineSectionState";
-                }
-            }
+            auto argExpr = new ArgExpr(cast(int) i, arg.type);
 
-            return mixin(name ~ "(" ~ member() ~ ", args)");
+            argAssignments ~= argscope.declare(arg.name, argExpr);
         }
+
+        auto functionBody = fun.statement.compile(argscope);
+
+        frameReg = this.fun.alloca(stackframe.structType.emit(this.mod));
+        scope (success)
+            resetFrame;
+
+        foreach (statement; argAssignments)
+        {
+            statement.emit(this);
+        }
+
+        functionBody.emit(this);
+        this.fun = null;
     }
-}
-
-/*class BytecodeType
-{
-    enum Kind
-    {
-        Int,
-        Void,
-    }
-    Kind kind;
-    mixin(GenerateThis);
-}
-
-class BytecodeBackend : Backend
-{
-    Generator generator;
-
-    int[string] declarations;
-
-    override void declare(string name, BackendType ret, BackendType[] args)
-    in (cast(BytecodeType) ret)
-    in (args.all!(a => cast(BytecodeType) a))
-    {
-        declarations[name] = cast(int) generator.builder.symbol_offsets_len;
-        size_t section = gen.begin_declare_section;
-        gen.declare_symbol(args.length);
-        add_string(gen.builder.data, toStringz(name));
-        // add_type_
-        // Are we really doing this? Just write an interpreter.
-    }
-
-    mixin(GenerateThis);
-}*/
-
-string genIntStub(string op)(Backend backend)
-{
-    auto int_ = backend.getIntType();
-    auto name = "int_" ~ op;
-
-    backend.declare(name, int_, [int_, int_]);
-    return name;
-}
-
-int gen_int_stub(string op)(Generator gen)
-{
-    int offset = cast(int) gen.builder.symbol_offsets_len;
-    size_t section = gen.begin_declare_section;
-    gen.declare_symbol(2);
-    add_string(gen.builder.data, toStringz("int_" ~ op));
-    add_type_int(gen.builder.data); // ret
-    add_type_int(gen.builder.data);
-    add_type_int(gen.builder.data);
-    end_declare_section(gen.builder.data, section);
-    return offset;
 }
 
 class Parser
@@ -449,34 +352,6 @@ class Function : Symbol
     mixin(GenerateToString);
 }
 
-void add_type(Data* data, Type type)
-{
-    if (cast(Integer) type)
-    {
-        add_type_int(data);
-        return;
-    }
-    assert(false);
-}
-
-int declare(Generator output, Function fun)
-{
-    if (fun.decl_offset != -1)
-        return fun.decl_offset;
-    int offset = cast(int) output.builder.symbol_offsets_len;
-    size_t section = output.begin_declare_section;
-    output.declare_symbol(cast(int) fun.args.length);
-    add_string(output.builder.data, fun.name.toStringz);
-    add_type(output.builder.data, fun.ret);
-    foreach (arg; fun.args)
-    {
-        add_type(output.builder.data, arg.type);
-    }
-    end_declare_section(output.builder.data, section);
-    fun.decl_offset = offset;
-    return fun.decl_offset;
-}
-
 interface ASTStatement
 {
     Statement compile(Namespace namespace);
@@ -495,12 +370,12 @@ interface ASTExpression : Symbol
 interface Expression : Symbol
 {
     Type type();
-    int emit(Generator output);
+    Reg emit(Generator output);
 }
 
 interface Reference : Expression
 {
-    int emitLocation(Generator output);
+    Reg emitLocation(Generator output);
 }
 
 Function parseFunction(ref Parser parser)
@@ -604,9 +479,9 @@ class ReturnStatement : Statement
 
     override void emit(Generator output)
     {
-        int reg = this.value.emit(output);
-        output.add_ret_instr(reg);
-        output.start_block;
+        Reg reg = this.value.emit(output);
+
+        output.fun.ret(reg);
     }
 
     mixin(GenerateAll);
@@ -653,16 +528,17 @@ class IfStatement : Statement
 
     override void emit(Generator output)
     {
-        int reg = test.emit(output);
-        int tbr_offset = output.add_tbr_instr(reg);
-        int thenblk = output.start_block;
-        output.tbr_resolve_then(tbr_offset, thenblk);
+        Reg reg = test.emit(output);
+
+        auto tbrRecord = output.fun.testBranch(reg);
+
+        tbrRecord.resolveThen(output.fun.blockIndex);
         then.emit(output);
-        int after_then = output.add_br_instr;
+        auto brRecord = output.fun.branch;
+
         // TODO else blk
-        int afterblk = output.start_block;
-        output.tbr_resolve_else(tbr_offset, afterblk);
-        output.br_resolve(after_then, afterblk);
+        tbrRecord.resolveElse(output.fun.blockIndex);
+        brRecord.resolve(output.fun.blockIndex);
     }
 
     mixin(GenerateThis);
@@ -717,11 +593,10 @@ class AssignStatement : Statement
         assert(targetType == valueType,
                 format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));
 
-        int target_reg = this.target.emitLocation(output);
-        int value_reg = this.value.emit(output);
+        Reg target_reg = this.target.emitLocation(output);
+        Reg value_reg = this.value.emit(output);
 
-        output.add_store_instr(value_reg, target_reg);
-        valueType.emit(output.defineSectionState.main_data);
+        output.fun.store(valueType.emit(output.mod), target_reg, value_reg);
     }
 
     mixin(GenerateAll);
@@ -888,25 +763,22 @@ class ArithmeticOp : Expression
         return new Integer;
     }
 
-    override int emit(Generator output)
+    override Reg emit(Generator output)
     {
-        int leftreg = this.left.emit(output);
-        int rightreg = this.right.emit(output);
-        int offset = {
+        Reg leftreg = this.left.emit(output);
+        Reg rightreg = this.right.emit(output);
+        string name = {
             with (ArithmeticOpType) final switch (this.op)
             {
                 case add:
-                    return gen_int_stub!"add"(output);
+                    return "int_add";
                 case sub:
-                    return gen_int_stub!"sub"(output);
+                    return "int_sub";
                 case eq:
-                    return gen_int_stub!"eq"(output);
+                    return "int_eq";
             }
         }();
-        int callreg = output.start_call_instr(offset, 2);
-        output.add_call_reg_arg(leftreg);
-        output.add_call_reg_arg(rightreg);
-        return callreg;
+        return output.fun.call(name, [leftreg, rightreg]);
     }
 
     mixin(GenerateThis);
@@ -984,20 +856,15 @@ class Call : Expression
         return function_.ret;
     }
 
-    override int emit(Generator output)
+    override Reg emit(Generator output)
     {
-        int fun_offset = declare(output, this.function_);
-        int[] regs;
+
+        Reg[] regs;
         foreach (arg; this.args)
         {
             regs ~= arg.emit(output);
         }
-        int callreg = output.start_call_instr(fun_offset, cast(int) this.args.length);
-        foreach (reg; regs)
-        {
-            output.add_call_reg_arg(reg);
-        }
-        return callreg;
+        return output.fun.call(function_.name, regs);
     }
 
     mixin(GenerateThis);
@@ -1057,9 +924,9 @@ class Literal : Expression
 {
     int value;
 
-    override int emit(Generator output)
+    override Reg emit(Generator output)
     {
-        return output.add_literal_instr(this.value);
+        return output.fun.literal(this.value);
     }
 
     override Type type()
@@ -1083,9 +950,9 @@ class ArgExpr : Expression
 
     Type type_;
 
-    override int emit(Generator output)
+    override Reg emit(Generator output)
     {
-        return output.add_arg_instr(this.index);
+        return output.fun.arg(this.index);
     }
 
     override Type type()
@@ -1115,12 +982,12 @@ class LoadRegExpr : Reference
         return this.targetType;
     }
 
-    override int emit(Generator)
+    override Reg emit(Generator)
     {
         assert(false);
     }
 
-    override int emitLocation(Generator)
+    override Reg emitLocation(Generator)
     {
         return this.reg;
     }
@@ -1144,12 +1011,12 @@ class StackFrame : Reference
         return this.targetType;
     }
 
-    override int emit(Generator generator)
+    override Reg emit(Generator generator)
     {
         assert(false);
     }
 
-    override int emitLocation(Generator generator)
+    override Reg emitLocation(Generator generator)
     {
         return generator.frameReg;
     }
@@ -1176,23 +1043,18 @@ class StructMember : Reference
         return structType.members[this.index];
     }
 
-    override int emit(Generator output)
+    override Reg emit(Generator output)
     {
-        int locationReg = emitLocation(output);
-        size_t offset = output.start_load_instr(locationReg);
-        this.type().emit(output.defineSectionState.main_data);
-        return output.end_load_instr(offset);
+        Reg locationReg = emitLocation(output);
+
+        return output.fun.load(this.type().emit(output.mod), locationReg);
     }
 
-    override int emitLocation(Generator output)
+    override Reg emitLocation(Generator output)
     {
-        int reg = this.base.emitLocation(output);
-        Type type = base.type();
-        auto structType = cast(Struct) type;
-        assert(structType);
-        size_t offset = output.start_offset_instr(reg, this.index);
-        structType.emit(output.defineSectionState.main_data);
-        return output.end_offset_instr(offset);
+        Reg reg = this.base.emitLocation(output);
+
+        return output.fun.fieldOffset(type.emit(output.mod), reg, this.index);
     }
 
     override string toString() const
@@ -1215,12 +1077,11 @@ class Deref : Expression
         return pointerType.target;
     }
 
-    override int emit(Generator output)
+    override Reg emit(Generator output)
     {
-        int reg = this.base.emit(output);
-        size_t offset = output.start_load_instr(reg);
-        this.type().emit(output.defineSectionState.main_data);
-        return output.end_load_instr(offset);
+        Reg reg = this.base.emit(output);
+
+        return output.fun.load(this.type().emit(output.mod), reg);
     }
 
     mixin(GenerateThis);
@@ -1273,24 +1134,21 @@ T find(T)(Namespace namespace)
 
 class FunctionScope : Namespace
 {
-    // union of structs
     @(This.Init!null)
-    Type[][] traces;
+    Type[] variableTypes;
 
-    StructMember addFrameTrace(Type[] types)
+    StructMember declare(Type type)
     {
-        traces ~= types;
+        variableTypes ~= type;
 
-        auto struct_ = new Struct(types);
-
-        return new StructMember(new StackFrame(struct_), cast(int) types.length - 1);
+        return new StructMember(
+            new StackFrame(structType),
+            cast(int) variableTypes.length - 1);
     }
 
-    size_t stackframeSize()
+    Struct structType()
     {
-        return this.traces
-            .map!(a => (new Struct(a)).size)
-            .reduce!max;
+        return new Struct(this.variableTypes);
     }
 
     override Symbol lookup(string name)
@@ -1315,19 +1173,9 @@ class VarDeclScope : Namespace
     @(This.Init!null)
     Variable[] declarations;
 
-    Type[] enumerateDeclaredTypes()
-    {
-        auto myTypes = this.declarations.map!(a => a.value.type).array;
-
-        if (frameBase)
-            return myTypes;
-
-        return parent.find!VarDeclScope.enumerateDeclaredTypes ~ myTypes;
-    }
-
     Statement declare(string name, Expression value)
     {
-        auto member = this.find!FunctionScope.addFrameTrace(enumerateDeclaredTypes ~ value.type());
+        auto member = this.find!FunctionScope.declare(value.type());
 
         declarations ~= Variable(name, member);
         return new AssignStatement(member, value);
@@ -1380,58 +1228,11 @@ class Module : Namespace
     mixin(GenerateThis);
 }
 
-class BytecodeFile
-{
-    Generator generator;
-    this()
-    {
-        this.generator = new Generator(alloc_bc_builder());
-    }
-
-    void define(Function fun, Namespace module_)
-    {
-        int declid = declare(this.generator, fun);
-        assert(this.generator.defineSectionState is null);
-        this.generator.defineSectionState = begin_define_section(this.generator.builder, declid);
-        auto stackframe = new FunctionScope(module_);
-        auto argscope = new VarDeclScope(stackframe, Yes.frameBase);
-        Statement[] argAssignments;
-        foreach (i, arg; fun.args)
-        {
-            auto argExpr = new ArgExpr(cast(int) i, arg.type);
-
-            argAssignments ~= argscope.declare(arg.name, argExpr);
-            arg.type.emit(this.generator.defineSectionState.main_data);
-        }
-
-        auto functionBody = fun.statement.compile(argscope);
-
-        this.generator.start_block;
-        generator.frameReg = generator.emit_alloc_instr(stackframe.stackframeSize);
-        scope (success)
-            generator.resetFrame;
-
-        foreach (statement; argAssignments)
-        {
-            statement.emit(this.generator);
-        }
-
-        functionBody.emit(this.generator);
-        end_define_section(this.generator.builder, this.generator.defineSectionState);
-        this.generator.defineSectionState = null;
-    }
-
-    void writeTo(string filename)
-    {
-        static import std.file;
-
-        std.file.write(filename, (cast(ubyte*) this.generator.builder.data.ptr)[0 .. this
-                .generator.builder.data.length]);
-    }
-}
-
 void main()
 {
+    import backend.interpreter : IpBackend;
+    import backend.value : Value;
+
     string code = "int ack(int m, int n) {
         if (m == 0) { n = n + 1; return n; }
         if (n == 0) { int m1 = m - 1; return ack(m1, 1); }
@@ -1447,7 +1248,34 @@ void main()
     auto toplevel = new Module(null);
 
     toplevel.add("ack", fun);
-    auto output = new BytecodeFile;
+
+    auto backend = new IpBackend;
+    auto interpreter = backend.createModule;
+
+    interpreter.defineCallback("int_add", delegate Value(Value[] args)
+    in (args.length == 2)
+    {
+        return Value.make!int(args[0].as!int + args[1].as!int);
+    });
+    interpreter.defineCallback("int_sub", delegate Value(Value[] args)
+    in (args.length == 2)
+    {
+        return Value.make!int(args[0].as!int - args[1].as!int);
+    });
+    interpreter.defineCallback("int_eq", delegate Value(Value[] args)
+    in (args.length == 2)
+    {
+        return Value.make!int(args[0].as!int == args[1].as!int);
+    });
+
+    auto output = new Generator(interpreter);
+
+
     output.define(fun, toplevel);
-    output.writeTo("ack.bc");
+
+    for (int i = 0; i < 10; i++) {
+        auto result = interpreter.call("ack", Value.make!int(3), Value.make!int(8));
+
+        writefln!"ack(8, 3) = %s"(result.as!int);
+    }
 }

@@ -67,6 +67,7 @@ struct Instr
         Store,
         // block finishers
         Return,
+        Branch,
         TestBranch,
     }
     Kind kind;
@@ -88,6 +89,10 @@ struct Instr
         static struct Literal
         {
             Value value;
+        }
+        static struct Branch
+        {
+            int targetBlock;
         }
         static struct TestBranch
         {
@@ -120,6 +125,7 @@ struct Instr
         Return return_;
         Arg arg;
         Literal literal;
+        Branch branch;
         TestBranch testBranch;
         Alloca alloca;
         FieldOffset fieldOffset;
@@ -133,6 +139,7 @@ private bool isBlockFinisher(Instr.Kind kind)
     with (Instr.Kind) final switch (kind)
     {
         case Return:
+        case Branch:
         case TestBranch:
             return true;
         case Call:
@@ -278,6 +285,23 @@ class IpBackendFunction : BackendFunction
         };
     }
 
+    override BranchRecord branch()
+    {
+        auto instr = Instr(Instr.Kind.Branch);
+        auto block = block;
+
+        block.append(instr);
+
+        assert(block.finished);
+
+        return new class BranchRecord {
+            override void resolve(int index)
+            {
+                block.instrs[$ - 1].branch.targetBlock = index;
+            }
+        };
+    }
+
     int regCount()
     {
         return this.blocks.empty
@@ -355,6 +379,10 @@ class IpBackendModule : BackendModule
                         case Literal:
                             assert(!lastInstr);
                             regs[reg] = instr.literal.value;
+                            break;
+                        case Branch:
+                            assert(lastInstr);
+                            block = instr.branch.targetBlock;
                             break;
                         case TestBranch:
                             assert(lastInstr);

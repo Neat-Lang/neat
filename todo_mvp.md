@@ -1,6 +1,5 @@
 ## for porting bootstrap compiler
 
-- while loop
 - pointers:
     - type syntax
     - referencing

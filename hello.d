@@ -709,6 +709,8 @@ ASTStatement parseStatement(ref Parser parser)
         return stmt;
     if (auto stmt = parser.parseIf)
         return stmt;
+    if (auto stmt = parser.parseWhile)
+        return stmt;
     if (auto stmt = parser.parseScope)
         return stmt;
     if (auto stmt = parser.parseAssignment)
@@ -735,7 +737,9 @@ enum ArithmeticOpType
 {
     add,
     sub,
+    mul,
     eq,
+    gt,
 }
 
 class ASTArithmeticOp : ASTExpression
@@ -774,8 +778,12 @@ class ArithmeticOp : Expression
                     return "int_add";
                 case sub:
                     return "int_sub";
+                case mul:
+                    return "int_mul";
                 case eq:
                     return "int_eq";
+                case gt:
+                    return "int_gt";
             }
         }();
         return output.fun.call(name, [leftreg, rightreg]);
@@ -788,6 +796,11 @@ class ArithmeticOp : Expression
 ASTExpression parseArithmetic(ref Parser parser, size_t level = 0)
 {
     auto left = parser.parseExpressionLeaf;
+
+    if (level <= 2)
+    {
+        parseMul(parser, left);
+    }
     if (level <= 1)
     {
         parseAddSub(parser, left);
@@ -799,19 +812,33 @@ ASTExpression parseArithmetic(ref Parser parser, size_t level = 0)
     return left;
 }
 
+void parseMul(ref Parser parser, ref ASTExpression left)
+{
+    while (true)
+    {
+        if (parser.accept("*"))
+        {
+            auto right = parser.parseExpressionLeaf;
+            left = new ASTArithmeticOp(ArithmeticOpType.mul, left, right);
+            continue;
+        }
+        break;
+    }
+}
+
 void parseAddSub(ref Parser parser, ref ASTExpression left)
 {
     while (true)
     {
         if (parser.accept("+"))
         {
-            auto right = parser.parseExpressionLeaf;
+            auto right = parser.parseArithmetic(2);
             left = new ASTArithmeticOp(ArithmeticOpType.add, left, right);
             continue;
         }
         if (parser.accept("-"))
         {
-            auto right = parser.parseExpressionLeaf;
+            auto right = parser.parseArithmetic(2);
             left = new ASTArithmeticOp(ArithmeticOpType.sub, left, right);
             continue;
         }
@@ -825,6 +852,81 @@ void parseComparison(ref Parser parser, ref ASTExpression left)
     {
         auto right = parser.parseArithmetic(1);
         left = new ASTArithmeticOp(ArithmeticOpType.eq, left, right);
+    }
+    if (parser.accept(">"))
+    {
+        auto right = parser.parseArithmetic(1);
+        left = new ASTArithmeticOp(ArithmeticOpType.gt, left, right);
+    }
+}
+
+class ASTWhile : ASTStatement
+{
+    ASTExpression cond;
+
+    ASTStatement body_;
+
+    override WhileLoop compile(Namespace namespace)
+    {
+        auto subscope = new VarDeclScope(namespace, No.frameBase);
+        auto condExpr = this.cond.compile(subscope);
+        auto bodyStmt = this.body_.compile(subscope);
+
+        return new WhileLoop(condExpr, bodyStmt);
+    }
+
+    mixin(GenerateAll);
+}
+
+class WhileLoop : Statement
+{
+    Expression cond;
+
+    Statement body_;
+
+    override void emit(Generator output)
+    {
+        /**
+         * start:
+         * if (cond) goto body; else goto end;
+         * body:
+         * goto start
+         * end:
+         */
+        auto start = output.fun.branch; // start:
+        auto startIndex = output.fun.blockIndex;
+
+        start.resolve(startIndex);
+
+        auto condReg = cond.emit(output);
+        auto condBranch = output.fun.testBranch(condReg); // if (cond)
+
+        condBranch.resolveThen(output.fun.blockIndex); // goto body
+        body_.emit(output);
+        output.fun.branch().resolve(startIndex); // goto start
+        condBranch.resolveElse(output.fun.blockIndex); // else goto end
+    }
+
+    mixin(GenerateAll);
+}
+
+ASTWhile parseWhile(ref Parser parser)
+{
+    with (parser)
+    {
+        begin;
+        auto stmt = parser.parseIdentifier;
+        if (stmt != "while" || !accept("("))
+        {
+            revert;
+            return null;
+        }
+        ASTExpression cond = parser.parseExpression;
+        expect(")");
+        ASTStatement body_ = parser.parseStatement;
+
+        commit;
+        return new ASTWhile(cond, body_);
     }
 }
 
@@ -858,7 +960,6 @@ class Call : Expression
 
     override Reg emit(Generator output)
     {
-
         Reg[] regs;
         foreach (arg; this.args)
         {
@@ -1230,6 +1331,86 @@ class Module : Namespace
 
 void main()
 {
+    // ackTest;
+    whileTest;
+}
+
+void whileTest()
+{
+    import backend.interpreter : IpBackend;
+    import backend.value : Value;
+
+    string code = "int test(int k) {
+        int i = 1;
+        while (k > 0)
+        {
+            i = i * 2;
+            k = k - 1;
+        }
+        return i;
+    }";
+    auto parser = new Parser(code);
+    auto fun = parser.parseFunction;
+    // assert(parser.eof);
+
+    writefln!"%s"(fun);
+
+    auto toplevel = new Module(null);
+
+    toplevel.add("test", fun);
+
+    auto backend = new IpBackend;
+    auto interpreter = backend.createModule;
+
+    defineRuntime(interpreter);
+
+    auto output = new Generator(interpreter);
+
+    output.define(fun, toplevel);
+
+    for (int i = 0; i < 10; i++) {
+        auto result = interpreter.call("test", Value.make!int(i)).as!int;
+
+        writefln!"test(%s) = %s"(i, result);
+    }
+}
+
+void defineRuntime(BackendModule module_)
+{
+    import backend.interpreter : IpBackendModule;
+    import backend.value : Value;
+
+    auto ipModule = cast(IpBackendModule) module_;
+
+    ipModule.defineCallback("int_add", delegate Value(Value[] args)
+    in (args.length == 2)
+    {
+        return Value.make!int(args[0].as!int + args[1].as!int);
+    });
+    ipModule.defineCallback("int_sub", delegate Value(Value[] args)
+    in (args.length == 2)
+    {
+        return Value.make!int(args[0].as!int - args[1].as!int);
+    });
+    ipModule.defineCallback("int_mul", delegate Value(Value[] args)
+    in (args.length == 2)
+    {
+        return Value.make!int(args[0].as!int * args[1].as!int);
+    });
+    ipModule.defineCallback("int_eq", delegate Value(Value[] args)
+    in (args.length == 2)
+    {
+        return Value.make!int(args[0].as!int == args[1].as!int);
+    });
+    ipModule.defineCallback("int_gt", delegate Value(Value[] args)
+    in (args.length == 2)
+    {
+        return Value.make!int(args[0].as!int > args[1].as!int);
+    });
+}
+
+void ackTest()
+{
     import backend.interpreter : IpBackend;
     import backend.value : Value;
 
@@ -1252,21 +1433,7 @@ void main()
     auto backend = new IpBackend;
     auto interpreter = backend.createModule;
 
-    interpreter.defineCallback("int_add", delegate Value(Value[] args)
-    in (args.length == 2)
-    {
-        return Value.make!int(args[0].as!int + args[1].as!int);
-    });
-    interpreter.defineCallback("int_sub", delegate Value(Value[] args)
-    in (args.length == 2)
-    {
-        return Value.make!int(args[0].as!int - args[1].as!int);
-    });
-    interpreter.defineCallback("int_eq", delegate Value(Value[] args)
-    in (args.length == 2)
-    {
-        return Value.make!int(args[0].as!int == args[1].as!int);
-    });
+    defineRuntime(interpreter);
 
     auto output = new Generator(interpreter);
 

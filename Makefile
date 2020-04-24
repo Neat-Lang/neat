@@ -28,7 +28,7 @@ build/interpret: build/libcx.a interpret.c
 	gcc interpret.c $(CFLAGS) -o $@
 
 build/hello: ${BACKEND_SRC} build/libbackend_deps.a build/libcx.a hello.d
-	ldc2 -g -i -odbuild hello.d -ofbuild/hello -Isrc ${DFLAGS} -O2 -L-Lbuild -L-lcx -L-lbackend_deps ${DSHOULD_INCLUDES}
+	ldc2 -g -i -odbuild hello.d -ofbuild/hello -Isrc ${DFLAGS} -L-Lbuild -L-lcx -L-lbackend_deps ${DSHOULD_INCLUDES}
 
 build/libbackend_deps.a: backend_deps.d
 	ldc2 -g -i -lib -odbuild backend_deps.d -ofbuild/libbackend_deps.a ${DFLAGS} ${DSHOULD_INCLUDES}

@@ -7,6 +7,7 @@ import boilerplate;
 import std.algorithm;
 import std.array;
 import std.format;
+import std.range;
 
 class IpBackend : Backend
 {
@@ -15,19 +16,24 @@ class IpBackend : Backend
 
 class IpBackendType : BackendType
 {
+    abstract override string toString() const;
 }
 
 class IntType : IpBackendType
 {
+    override string toString() const { return "int"; }
 }
 
 class VoidType : IpBackendType
 {
+    override string toString() const { return "void"; }
 }
 
 class StructType : IpBackendType
 {
     IpBackendType[] types;
+
+    override string toString() const { return format!"{%(%s, %)}"(types); }
 
     mixin(GenerateThis);
 }
@@ -49,6 +55,15 @@ class BasicBlock
 
         this.instrs ~= instr;
         return cast(int) (this.instrs.length - 1 + this.regBase);
+    }
+
+    override string toString() const
+    {
+        return instrs.enumerate.map!((pair) {
+            if (pair.index == this.instrs.length - 1)
+                return format!"    %s\n"(pair.value);
+            return format!"    %%%s := %s\n"(this.regBase + pair.index, pair.value);
+        }).join;
     }
 
     mixin(GenerateThis);
@@ -131,6 +146,27 @@ struct Instr
         FieldOffset fieldOffset;
         Load load;
         Store store;
+    }
+
+    string toString() const
+    {
+        with (Kind) final switch (this.kind)
+        {
+            case Call: return format!"%s(%(%%%s, %))"(call.name, call.args);
+            case Arg: return format!"_%s"(arg.index);
+            case Literal: return format!"%s"(literal.value);
+            case Alloca: return format!"alloca %s"(alloca.type);
+            case FieldOffset: return format!"%%%s.%s"(fieldOffset.base, fieldOffset.member);
+            case Load: return format!"*%%%s"(load.target);
+            case Store: return format!"*%%%s = %%%s"(store.target, store.value);
+            case Return: return format!"ret %%%s"(return_.reg);
+            case Branch: return format!"br blk%s"(branch.targetBlock);
+            case TestBranch: return format!"tbr %%%s (then blk%s) (else blk%s)"(
+                    testBranch.test,
+                    testBranch.thenBlock,
+                    testBranch.elseBlock,
+                );
+        }
     }
 }
 
@@ -307,6 +343,16 @@ class IpBackendFunction : BackendFunction
         return this.blocks.empty
             ? 0
             : this.blocks[$ - 1].regBase + cast(int) this.blocks[$ - 1].instrs.length;
+    }
+
+    override string toString() const
+    {
+        return format!"%s %s(%(%s, %)):\n%s"(
+            retType,
+            name,
+            argTypes,
+            blocks.enumerate.map!(pair => format!"  blk%s:\n%s"(pair.index, pair.value)).join,
+        );
     }
 
     mixin(GenerateThis);
@@ -496,6 +542,13 @@ class IpBackendModule : BackendModule
 
         this.functions[name] = fun;
         return fun;
+    }
+
+    override string toString() const
+    {
+        return
+            callbacks.byKey.map!(a => format!"extern %s\n"(a)).join ~
+            functions.byValue.map!(a => format!"%s\n"(a)).join;
     }
 }
 

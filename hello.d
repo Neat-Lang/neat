@@ -1368,6 +1368,8 @@ void whileTest()
 
     output.define(fun, toplevel);
 
+    writefln!"module:\n%s"(interpreter);
+
     for (int i = 0; i < 10; i++) {
         auto result = interpreter.call("test", Value.make!int(i)).as!int;
 

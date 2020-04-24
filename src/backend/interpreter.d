@@ -325,6 +325,53 @@ Value getInitValue(IpBackendType type)
     assert(false, "what is init for " ~ type.toString);
 }
 
+struct ArrayAllocator(T)
+{
+    static assert(T.sizeof >= (T*).sizeof);
+
+    static T*[] pointers = null;
+
+    static T[] allocate(int length)
+    {
+        if (length == 0) return null;
+
+        int slot = findMsb(length - 1);
+        while (slot >= this.pointers.length) this.pointers ~= null;
+        if (this.pointers[slot]) {
+            auto ret = this.pointers[slot][0 .. length];
+            this.pointers[slot] = *cast(T**) this.pointers[slot];
+            return ret;
+        }
+        assert(length <= (1 << slot));
+        return (new T[1 << slot])[0 .. length];
+    }
+
+    static void free(T[] array)
+    {
+        if (array.empty) return;
+
+        int slot = findMsb(cast(int) array.length);
+        *cast(T**) array.ptr = this.pointers[slot];
+        this.pointers[slot] = array.ptr;
+    }
+}
+
+private int findMsb(int size)
+{
+    int bit_ = 0;
+    while (size) {
+        bit_ ++;
+        size >>= 1;
+    }
+    return bit_;
+}
+
+unittest
+{
+    foreach (i, v; [0, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5])
+        assert(findMsb(cast(int) i) == v);
+}
+
 class IpBackendModule : BackendModule
 {
     alias Callable = Value delegate(Value[]);
@@ -345,8 +392,13 @@ class IpBackendModule : BackendModule
             return this.callbacks[name](args);
         }
         auto fun = this.functions[name];
-        auto regs = new Value[fun.regCount];
+        auto regs = ArrayAllocator!Value.allocate(fun.regCount);
         auto allocaRegion = new MemoryRegion;
+
+        scope(success)
+        {
+            ArrayAllocator!Value.free(regs);
+        }
 
         int block = 0;
         while (true)

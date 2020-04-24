@@ -104,7 +104,7 @@ class MemoryRegion
     {
         this.values ~= value;
 
-        return Value.makePointer(PointerValue(this, [cast(int) this.values.length - 1]));
+        return Value.makePointer(PointerValue(this, cast(int) this.values.length - 1));
     }
 
     mixin(GenerateToString);
@@ -116,9 +116,37 @@ struct PointerValue
 
     // the value of the pointer is found by reading the value accessPath[0],
     // then following struct fields at each offset in turn.
-    private int[] accessPath;
+    private const(int)[] accessPathDynamic;
+    private int[4] accessPathStatic; // helper to reduce allocations
+
+    private const(int)[] accessPath() const
+    {
+        if (accessPathDynamic.length <= accessPathStatic.length)
+            return accessPathStatic[0 .. accessPathDynamic.length];
+        return accessPathDynamic;
+    }
 
     invariant (accessPath.length >= 1);
+
+    public this(MemoryRegion base, int append)
+    {
+        this(base, null, append);
+    }
+
+    public this(MemoryRegion base, const int[] path, int append)
+    {
+        this.base = base;
+        if (path.length + 1 <= this.accessPathStatic.length)
+        {
+            this.accessPathStatic[0 .. path.length] = path;
+            this.accessPathStatic[path.length] = append;
+            this.accessPathDynamic = (int*).init[0 .. path.length + 1];
+        }
+        else
+        {
+            this.accessPathDynamic = path ~ append;
+        }
+    }
 
     public Value load()
     {
@@ -135,7 +163,7 @@ struct PointerValue
     in (refValue.kind == Value.Kind.Struct && member < refValue.fields.length,
         format("tried to take invalid offset %s of %s from %s", member, refValue, this))
     {
-        return Value.makePointer(PointerValue(base, accessPath ~ member));
+        return Value.makePointer(PointerValue(base, accessPath, member));
     }
 
     private ref Value refValue()
@@ -150,6 +178,4 @@ struct PointerValue
         }
         return *current_value;
     }
-
-    mixin(GenerateThis);
 }

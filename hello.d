@@ -1270,7 +1270,6 @@ void main()
 
     auto output = new Generator(interpreter);
 
-
     output.define(fun, toplevel);
 
     for (int i = 0; i < 10; i++) {

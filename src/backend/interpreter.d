@@ -228,11 +228,19 @@ class IpBackendFunction : BackendFunction
         return block.append(instr);
     }
 
-    override int literal(int value)
+    override int intLiteral(int value)
     {
         auto instr = Instr(Instr.Kind.Literal);
 
         instr.literal.value = Value.make!int(value);
+        return block.append(instr);
+    }
+
+    override int voidLiteral()
+    {
+        auto instr = Instr(Instr.Kind.Literal);
+
+        instr.literal.value = Value.make!void;
         return block.append(instr);
     }
 
@@ -603,8 +611,8 @@ unittest
     {
         auto m = arg(0);
         auto n = arg(1);
-        auto zero = literal(0);
-        auto one = literal(1);
+        auto zero = intLiteral(0);
+        auto one = intLiteral(1);
 
         auto if1_test_reg = call("int_eq", [m, zero]);
         auto if1_test_jumprecord = testBranch(if1_test_reg);

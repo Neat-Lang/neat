@@ -24,7 +24,8 @@ interface BackendFunction
     int blockIndex();
     Reg arg(int index);
     Reg call(string name, Reg[] args);
-    Reg literal(int value);
+    Reg intLiteral(int value);
+    Reg voidLiteral();
     Reg alloca(BackendType type);
     Reg fieldOffset(BackendType structType, Reg structBase, int member);
     void store(BackendType dataType, Reg target, Reg value);

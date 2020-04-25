@@ -182,6 +182,7 @@ class Generator
         }
 
         functionBody.emit(this);
+        this.fun.ret(this.fun.voidLiteral);
         this.fun = null;
     }
 }
@@ -255,6 +256,19 @@ class Parser
         }
     }
 
+    bool eof()
+    {
+        begin;
+        strip;
+        if (this.text.empty)
+        {
+            commit;
+            return true;
+        }
+        revert;
+        return false;
+    }
+
     void fail(string msg)
     {
         assert(false, format!"at %s: %s"(this.text, msg));
@@ -319,10 +333,18 @@ Type parseType(ref Parser parser)
     {
         begin;
 
-        if (parser.parseIdentifier == "int")
+        auto identifier = parser.parseIdentifier;
+
+        if (identifier == "int")
         {
             commit;
             return new Integer;
+        }
+
+        if (identifier == "void")
+        {
+            commit;
+            return new Void;
         }
 
         return null;
@@ -331,25 +353,30 @@ Type parseType(ref Parser parser)
 
 struct Argument
 {
+    @NonNull
     Type type;
+
     string name;
+
+    mixin(GenerateAll);
 }
 
 class Function : Symbol
 {
     string name;
 
+    @NonNull
     Type ret;
 
     Argument[] args;
 
+    bool declaration;
+
     ASTStatement statement;
 
-    @(This.Init!(-1))
-    int decl_offset;
+    invariant (declaration || statement !is null);
 
-    mixin(GenerateThis);
-    mixin(GenerateToString);
+    mixin(GenerateAll);
 }
 
 interface ASTStatement
@@ -384,6 +411,11 @@ Function parseFunction(ref Parser parser)
     {
         begin;
         auto ret = parser.parseType;
+        if (!ret)
+        {
+            revert;
+            return null;
+        }
         auto name = parser.parseIdentifier;
         expect("(");
         Argument[] args;
@@ -402,7 +434,7 @@ Function parseFunction(ref Parser parser)
         }
         auto stmt = parser.parseStatement;
         commit;
-        return new Function(name, ret, args, stmt);
+        return new Function(name, ret, args, false, stmt);
     }
 }
 
@@ -725,11 +757,6 @@ ASTStatement parseStatement(ref Parser parser)
 
 ASTExpression parseExpression(ref Parser parser)
 {
-    if (auto expr = parser.parseCall)
-    {
-        return expr;
-    }
-
     return parser.parseArithmetic;
 }
 
@@ -939,7 +966,7 @@ class ASTCall : ASTExpression
     override Call compile(Namespace namespace)
     {
         auto function_ = cast(Function) namespace.lookup(this.function_);
-        assert(function_);
+        assert(function_, "unknown call target " ~ this.function_);
         auto args = this.args.map!(a => a.compile(namespace)).array;
         return new Call(function_, args);
     }
@@ -1027,7 +1054,7 @@ class Literal : Expression
 
     override Reg emit(Generator output)
     {
-        return output.fun.literal(this.value);
+        return output.fun.intLiteral(this.value);
     }
 
     override Type type()
@@ -1199,6 +1226,10 @@ ASTExpression parseExpressionLeaf(ref Parser parser)
 {
     with (parser)
     {
+        if (auto expr = parser.parseCall)
+        {
+            return expr;
+        }
         if (auto name = parser.parseIdentifier)
         {
             return new Variable(name);
@@ -1314,6 +1345,17 @@ class Module : Namespace
         this.entries ~= Entry(name, symbol);
     }
 
+    void emit(Generator generator)
+    in (generator.fun is null)
+    {
+        foreach (entry; entries)
+        {
+            if (auto fun = cast(Function) entry.value)
+                if (!fun.declaration)
+                    generator.define(fun, this);
+        }
+    }
+
     override Symbol lookup(string name)
     {
         foreach (entry; this.entries)
@@ -1329,60 +1371,55 @@ class Module : Namespace
     mixin(GenerateThis);
 }
 
-void main()
+Module parseModule(ref Parser parser)
 {
-    // ackTest;
-    whileTest;
+    auto module_ = new Module(null);
+
+    while (!parser.eof)
+    {
+        auto fun = parser.parseFunction;
+
+        if (!fun) parser.fail("couldn't parse function");
+
+        module_.add(fun.name, fun);
+    }
+    return module_;
 }
 
-void whileTest()
+void main()
 {
     import backend.interpreter : IpBackend;
     import backend.value : Value;
+    import std.file : readText;
 
-    string code = "int test(int k) {
-        int i = 1;
-        while (k > 0)
-        {
-            i = i * 2;
-            k = k - 1;
-        }
-        return i;
-    }";
+    string code = readText("hello.cx");
     auto parser = new Parser(code);
-    auto fun = parser.parseFunction;
-    // assert(parser.eof);
-
-    writefln!"%s"(fun);
-
-    auto toplevel = new Module(null);
-
-    toplevel.add("test", fun);
+    auto toplevel = parser.parseModule;
 
     auto backend = new IpBackend;
-    auto interpreter = backend.createModule;
+    auto module_ = backend.createModule;
 
-    defineRuntime(interpreter);
+    defineRuntime(module_, toplevel);
 
-    auto output = new Generator(interpreter);
+    auto output = new Generator(module_);
 
-    output.define(fun, toplevel);
+    toplevel.emit(output);
 
-    writefln!"module:\n%s"(interpreter);
+    writefln!"module:\n%s"(module_);
 
-    for (int i = 0; i < 10; i++) {
-        auto result = interpreter.call("test", Value.make!int(i)).as!int;
-
-        writefln!"test(%s) = %s"(i, result);
-    }
+    module_.call("main");
 }
 
-void defineRuntime(BackendModule module_)
+void defineRuntime(BackendModule backModule, Module frontModule)
 {
     import backend.interpreter : IpBackendModule;
     import backend.value : Value;
 
-    auto ipModule = cast(IpBackendModule) module_;
+    auto assertFun = new Function("assert", new Void, [Argument(new Integer, "")], true, null);
+
+    frontModule.add(assertFun.name, assertFun);
+
+    auto ipModule = cast(IpBackendModule) backModule;
 
     ipModule.defineCallback("int_add", delegate Value(Value[] args)
     in (args.length == 2)
@@ -1409,41 +1446,13 @@ void defineRuntime(BackendModule module_)
     {
         return Value.make!int(args[0].as!int > args[1].as!int);
     });
-}
-
-void ackTest()
-{
-    import backend.interpreter : IpBackend;
-    import backend.value : Value;
-
-    string code = "int ack(int m, int n) {
-        if (m == 0) { n = n + 1; return n; }
-        if (n == 0) { int m1 = m - 1; return ack(m1, 1); }
-        int m1 = m - 1; int n1 = n - 1;
-        return ack(m1, ack(m, n1));
-    }";
-    auto parser = new Parser(code);
-    auto fun = parser.parseFunction;
-    // assert(parser.eof);
-
-    writefln!"%s"(fun);
-
-    auto toplevel = new Module(null);
-
-    toplevel.add("ack", fun);
-
-    auto backend = new IpBackend;
-    auto interpreter = backend.createModule;
-
-    defineRuntime(interpreter);
-
-    auto output = new Generator(interpreter);
-
-    output.define(fun, toplevel);
-
-    for (int i = 0; i < 10; i++) {
-        auto result = interpreter.call("ack", Value.make!int(3), Value.make!int(8));
-
-        writefln!"ack(8, 3) = %s"(result.as!int);
-    }
+    ipModule.defineCallback("assert", delegate Value(Value[] args)
+    in (args.length == 1)
+    {
+        if (args[0].as!int == 0)
+        {
+            assert(false, "Assert failed!");
+        }
+        return Value.make!void;
+    });
 }

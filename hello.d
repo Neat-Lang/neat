@@ -276,7 +276,31 @@ class Parser
 
     void strip()
     {
-        this.text = this.text.strip;
+        while (true)
+        {
+            this.text = this.text.strip;
+            if (!this.text.startsWith("/*")) break;
+            this.text = this.text["/*".length .. $];
+            int commentLevel = 1;
+            while (commentLevel > 0)
+            {
+                import std.algorithm : find;
+
+                auto more = this.text.find("/*"), less = this.text.find("*/");
+
+                if (more.empty && less.empty) fail("comment spans end of file");
+                if (!less.empty && less.length > more.length)
+                {
+                    this.text = less["*/".length .. $];
+                    commentLevel --;
+                }
+                if (!more.empty && more.length > less.length)
+                {
+                    this.text = more["/*".length .. $];
+                    commentLevel ++;
+                }
+            }
+        }
     }
 }
 
@@ -1389,7 +1413,6 @@ Module parseModule(ref Parser parser)
 void main()
 {
     import backend.interpreter : IpBackend;
-    import backend.value : Value;
     import std.file : readText;
 
     string code = readText("hello.cx");

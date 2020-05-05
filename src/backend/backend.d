@@ -23,7 +23,7 @@ interface BackendFunction
 {
     int blockIndex();
     Reg arg(int index);
-    Reg call(string name, Reg[] args);
+    Reg call(BackendType type, string name, Reg[] args);
     Reg intLiteral(int value);
     Reg voidLiteral();
     Reg alloca(BackendType type);

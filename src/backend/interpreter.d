@@ -2,7 +2,6 @@ module backend.interpreter;
 
 import backend_deps;
 import backend.backend;
-import backend.value;
 import boilerplate;
 import std.algorithm;
 import std.array;
@@ -52,6 +51,19 @@ class StructType : IpBackendType
     }
 
     mixin(GenerateThis);
+}
+
+string formatLiteral(const IpBackendType type, const void[] data)
+{
+    if (cast(IntType) type)
+    {
+        return format!"%s"((cast(int[]) data)[0]);
+    }
+    if (cast(VoidType) type)
+    {
+        return "void";
+    }
+    assert(false, "TODO");
 }
 
 class BasicBlock
@@ -106,6 +118,7 @@ struct Instr
     {
         static struct Call
         {
+            IpBackendType type;
             string name;
             Reg[] args;
         }
@@ -119,7 +132,8 @@ struct Instr
         }
         static struct Literal
         {
-            Value value;
+            IpBackendType type;
+            void[] value;
         }
         static struct Branch
         {
@@ -168,9 +182,9 @@ struct Instr
     {
         with (Kind) final switch (this.kind)
         {
-            case Call: return format!"%s(%(%%%s, %))"(call.name, call.args);
+            case Call: return format!"%s %s(%(%%%s, %))"(call.type, call.name, call.args);
             case Arg: return format!"_%s"(arg.index);
-            case Literal: return format!"%s"(literal.value);
+            case Literal: return formatLiteral(literal.type, literal.value);
             case Alloca: return format!"alloca %s"(alloca.type);
             case FieldOffset: return format!"%%%s.%s (%s)"(fieldOffset.base, fieldOffset.member, fieldOffset.structType);
             case Load: return format!"*%%%s"(load.target);
@@ -182,6 +196,28 @@ struct Instr
                     testBranch.thenBlock,
                     testBranch.elseBlock,
                 );
+        }
+    }
+
+    int regSize(IpBackendFunction fun) const
+    {
+        with (Kind) final switch (this.kind)
+        {
+            case Call: return call.type.size;
+            case Arg: return fun.argTypes[arg.index].size;
+            case Literal: return literal.type.size;
+            case Load: return load.targetType.size;
+            // pointers
+            // TODO machine based
+            case Alloca:
+            case FieldOffset:
+                return size_t.sizeof;
+            // no-ops
+            case Store:
+            case Branch:
+            case TestBranch:
+            case Return:
+                return 0;
         }
     }
 }
@@ -248,7 +284,9 @@ class IpBackendFunction : BackendFunction
     {
         auto instr = Instr(Instr.Kind.Literal);
 
-        instr.literal.value = Value.make!int(value);
+        instr.literal.type = new IntType;
+        instr.literal.value = cast(void[]) [value];
+
         return block.append(instr);
     }
 
@@ -256,14 +294,18 @@ class IpBackendFunction : BackendFunction
     {
         auto instr = Instr(Instr.Kind.Literal);
 
-        instr.literal.value = Value.make!void;
+        instr.literal.type = new VoidType;
+        instr.literal.value = null;
+
         return block.append(instr);
     }
 
-    override int call(string name, Reg[] args)
+    override int call(BackendType type, string name, Reg[] args)
     {
+        assert(cast(IpBackendType) type !is null);
         auto instr = Instr(Instr.Kind.Call);
 
+        instr.call.type = cast(IpBackendType) type;
         instr.call.name = name;
         instr.call.args = args.dup;
         return block.append(instr);
@@ -366,13 +408,6 @@ class IpBackendFunction : BackendFunction
         };
     }
 
-    int regCount()
-    {
-        return this.blocks.empty
-            ? 0
-            : this.blocks[$ - 1].regBase + cast(int) this.blocks[$ - 1].instrs.length;
-    }
-
     override string toString() const
     {
         return format!"%s %s(%(%s, %)):\n%s"(
@@ -386,19 +421,21 @@ class IpBackendFunction : BackendFunction
     mixin(GenerateThis);
 }
 
-Value getInitValue(IpBackendType type)
+void setInitValue(IpBackendType type, void* target)
 {
     if (cast(IntType) type)
     {
-        return Value.make!int(0);
+        *cast(int*) target = 0;
+        return;
     }
     if (auto strct = cast(StructType) type)
     {
-        // TODO alignment
-        void[] data;
-        foreach (subdata; strct.types.map!(type => type.getInitValue.data))
-            data ~= subdata;
-        return Value.makeStruct(data);
+        foreach (subtype; strct.types)
+        {
+            setInitValue(subtype, target);
+            target += subtype.size;
+        }
+        return;
     }
     assert(false, "what is init for " ~ type.toString);
 }
@@ -452,7 +489,7 @@ unittest
 
 class IpBackendModule : BackendModule
 {
-    alias Callable = Value delegate(Value[]);
+    alias Callable = void delegate(void[] ret, void[][] args);
     Callable[string] callbacks;
     IpBackendFunction[string] functions;
 
@@ -462,21 +499,27 @@ class IpBackendModule : BackendModule
         callbacks[name] = call;
     }
 
-    Value call(string name, Value[] args...)
+    void call(string name, void[] ret, void[][] args)
     in (name in this.functions || name in this.callbacks, format!"%s not found"(name))
     {
         if (name in this.callbacks)
         {
-            return this.callbacks[name](args);
+            return this.callbacks[name](ret, args);
         }
         auto fun = this.functions[name];
-        auto regs = ArrayAllocator!Value.allocate(fun.regCount);
-        auto allocaRegion = new MemoryRegion;
-
-        scope(success)
+        int regAreaSize = fun.blocks.map!(block => block.instrs.map!(instr => instr.regSize(fun)).sum).sum;
+        auto regData = new void[regAreaSize];
+        void[][] regArrays;
         {
-            ArrayAllocator!Value.free(regs);
+            auto regCurrent = regData;
+            foreach (block; fun.blocks) foreach (instr; block.instrs)
+            {
+                regArrays ~= regCurrent[0 .. instr.regSize(fun)];
+                regCurrent = regCurrent[instr.regSize(fun) .. $];
+            }
+            assert(regCurrent.length == 0);
         }
+        // TODO embed offset in the instrs?
 
         int block = 0;
         while (true)
@@ -495,20 +538,21 @@ class IpBackendModule : BackendModule
                     {
                         case Call:
                             assert(!lastInstr);
-                            Value[] callArgs = instr.call.args.map!(reg => regs[reg]).array;
-                            regs[reg] = call(instr.call.name, callArgs);
+                            void[][] callArgs = instr.call.args.map!(reg => regArrays[reg]).array;
+
+                            call(instr.call.name, regArrays[reg], callArgs);
                             break;
                         case Return:
                             assert(lastInstr);
-                            return regs[instr.return_.reg];
-                            break;
+                            ret[] = regArrays[instr.return_.reg];
+                            return;
                         case Arg:
                             assert(!lastInstr);
-                            regs[reg] = args[instr.arg.index];
+                            regArrays[reg][] = args[instr.arg.index];
                             break;
                         case Literal:
                             assert(!lastInstr);
-                            regs[reg] = instr.literal.value;
+                            regArrays[reg][] = instr.literal.value;
                             break;
                         case Branch:
                             assert(lastInstr);
@@ -516,47 +560,34 @@ class IpBackendModule : BackendModule
                             break;
                         case TestBranch:
                             assert(lastInstr);
-                            Value testValue = regs[instr.testBranch.test];
-                            if (testValue.as!int) {
+                            auto testValue = (cast(int[]) regArrays[instr.testBranch.test])[0];
+
+                            if (testValue) {
                                 block = instr.testBranch.thenBlock;
                             } else {
                                 block = instr.testBranch.elseBlock;
                             }
                             break;
                         case Alloca:
-                            auto value = getInitValue(instr.alloca.type);
-
-                            regs[reg] = allocaRegion.allocate(value);
+                            auto target = new void[instr.alloca.type.size];
+                            setInitValue(instr.alloca.type, target.ptr);
+                            (cast(void*[]) regArrays[reg])[0] = target.ptr;
                             break;
                         case FieldOffset:
-                            // TODO validate type
-                            auto base = regs[instr.fieldOffset.base];
+                            auto base = (cast(void*[]) regArrays[instr.fieldOffset.base])[0];
                             auto offset = instr.fieldOffset.structType.offsetOf(instr.fieldOffset.member);
-                            auto type = instr.fieldOffset.structType.types[instr.fieldOffset.member];
-                            auto kind = {
-                                if (cast(IntType) type)
-                                    return Value.Kind.Int;
-                                if (cast(VoidType) type)
-                                    return Value.Kind.Void;
-                                assert(false, format!"todo %s"(type));
-                            }();
 
-                            assert(base.kind == Value.Kind.Pointer);
-                            regs[reg] = base.asPointer.atOffset(offset, kind);
+                            (cast(void*[]) regArrays[reg])[0] = base + offset;
                             break;
                         case Load:
-                            // TODO validate type
-                            auto target = regs[instr.load.target];
+                            auto target = (cast(void*[]) regArrays[instr.load.target])[0];
 
-                            assert(target.kind == Value.Kind.Pointer);
-                            regs[reg] = target.asPointer.load;
+                            regArrays[reg][] = target[0 .. regArrays[reg].length];
                             break;
                         case Store:
-                            auto target = regs[instr.store.target];
+                            auto target = (cast(void*[]) regArrays[instr.load.target])[0];
 
-                            assert(target.kind == Value.Kind.Pointer);
-                            target.asPointer.store(regs[instr.store.value]);
-                            regs[reg] = Value.make!void;
+                            target[0 .. regArrays[instr.store.value].length] = regArrays[instr.store.value];
                             break;
                     }
                 }
@@ -598,20 +629,23 @@ class IpBackendModule : BackendModule
 unittest
 {
     auto mod = new IpBackendModule;
-    mod.defineCallback("int_mul", delegate Value(Value[] args)
+    mod.defineCallback("int_mul", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        return Value.make!int(args[0].as!int * args[1].as!int);
+        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] * (cast(int[]) args[1])[0];
     });
     auto square = mod.define("square", mod.intType, [mod.intType, mod.intType]);
     with (square) {
         auto arg0 = arg(0);
-        auto reg = call("int_mul", [arg0, arg0]);
+        auto reg = call(mod.intType, "int_mul", [arg0, arg0]);
 
         ret(reg);
     }
 
-    mod.call("square", Value.make!int(5)).should.equal(Value.make!int(25));
+    int arg = 5;
+    int ret;
+    mod.call("square", cast(void[]) (&ret)[0 .. 1], [cast(void[]) (&arg)[0 .. 1]]);
+    ret.should.be(25);
 }
 
 /+
@@ -624,20 +658,20 @@ unittest
 unittest
 {
     auto mod = new IpBackendModule;
-    mod.defineCallback("int_add", delegate Value(Value[] args)
+    mod.defineCallback("int_add", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        return Value.make!int(args[0].as!int + args[1].as!int);
+        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] + (cast(int[]) args[1])[0];
     });
-    mod.defineCallback("int_sub", delegate Value(Value[] args)
+    mod.defineCallback("int_sub", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        return Value.make!int(args[0].as!int - args[1].as!int);
+        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] - (cast(int[]) args[1])[0];
     });
-    mod.defineCallback("int_eq", delegate Value(Value[] args)
+    mod.defineCallback("int_eq", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        return Value.make!int(args[0].as!int == args[1].as!int);
+        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] == (cast(int[]) args[1])[0];
     });
 
     auto ack = mod.define("ack", mod.intType, [mod.intType, mod.intType]);
@@ -649,32 +683,35 @@ unittest
         auto zero = intLiteral(0);
         auto one = intLiteral(1);
 
-        auto if1_test_reg = call("int_eq", [m, zero]);
+        auto if1_test_reg = call(mod.intType, "int_eq", [m, zero]);
         auto if1_test_jumprecord = testBranch(if1_test_reg);
 
         if1_test_jumprecord.resolveThen(blockIndex);
-        auto add = call("int_add", [n, one]);
+        auto add = call(mod.intType, "int_add", [n, one]);
         ret(add);
 
         if1_test_jumprecord.resolveElse(blockIndex);
-        auto if2_test_reg = call("int_eq", [n, zero]);
+        auto if2_test_reg = call(mod.intType, "int_eq", [n, zero]);
         auto if2_test_jumprecord = testBranch(if2_test_reg);
 
         if2_test_jumprecord.resolveThen(blockIndex);
-        auto sub = call("int_sub", [m, one]);
-        auto ackrec = call("ack", [sub, one]);
+        auto sub = call(mod.intType, "int_sub", [m, one]);
+        auto ackrec = call(mod.intType, "ack", [sub, one]);
 
         ret(ackrec);
 
         if2_test_jumprecord.resolveElse(blockIndex);
-        auto n1 = call("int_sub", [n, one]);
-        auto ackrec1 = call("ack", [m, n1]);
-        auto m1 = call("int_sub", [m, one]);
-        auto ackrec2 = call("ack", [m1, ackrec1]);
+        auto n1 = call(mod.intType, "int_sub", [n, one]);
+        auto ackrec1 = call(mod.intType, "ack", [m, n1]);
+        auto m1 = call(mod.intType, "int_sub", [m, one]);
+        auto ackrec2 = call(mod.intType, "ack", [m1, ackrec1]);
         ret(ackrec2);
     }
 
-    mod.call("ack", Value.make!int(3), Value.make!int(8)).should.equal(Value.make!int(2045));
+    int arg_m = 3, arg_n = 8;
+    int ret;
+    mod.call("ack", cast(void[]) (&ret)[0 .. 1], [cast(void[]) (&arg_m)[0 .. 1], cast(void[]) (&arg_n)[0 .. 1]]);
+    ret.should.be(2045);
 }
 
 unittest
@@ -683,10 +720,10 @@ unittest
      * int square(int i) { int k = i; int l = k * k; return l; }
      */
     auto mod = new IpBackendModule;
-    mod.defineCallback("int_mul", delegate Value(Value[] args)
+    mod.defineCallback("int_mul", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        return Value.make!int(args[0].as!int * args[1].as!int);
+        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] * (cast(int[]) args[1])[0];
     });
     auto square = mod.define("square", mod.intType, [mod.intType, mod.intType]);
     auto stackframeType = mod.structType([mod.intType, mod.intType]);
@@ -696,7 +733,7 @@ unittest
         auto var = fieldOffset(stackframeType, stackframe, 0);
         store(mod.intType, var, arg0);
         auto varload = load(mod.intType, var);
-        auto reg = call("int_mul", [varload, varload]);
+        auto reg = call(mod.intType, "int_mul", [varload, varload]);
         auto retvar = fieldOffset(stackframeType, stackframe, 0);
         store(mod.intType, retvar, reg);
 
@@ -704,5 +741,8 @@ unittest
         ret(retreg);
     }
 
-    mod.call("square", Value.make!int(5)).should.equal(Value.make!int(25));
+    int arg = 5;
+    int ret;
+    mod.call("square", cast(void[]) (&ret)[0 .. 1], [cast(void[]) (&arg)[0 .. 1]]);
+    ret.should.be(25);
 }

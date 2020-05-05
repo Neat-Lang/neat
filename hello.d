@@ -813,7 +813,7 @@ class ArithmeticOp : Expression
                     return "int_gt";
             }
         }();
-        return output.fun.call(name, [leftreg, rightreg]);
+        return output.fun.call(output.mod.intType, name, [leftreg, rightreg]);
     }
 
     mixin(GenerateThis);
@@ -992,7 +992,7 @@ class Call : Expression
         {
             regs ~= arg.emit(output);
         }
-        return output.fun.call(function_.name, regs);
+        return output.fun.call(type.emit(output.mod), function_.name, regs);
     }
 
     mixin(GenerateThis);
@@ -1407,51 +1407,46 @@ void main()
 
     writefln!"module:\n%s"(module_);
 
-    module_.call("main");
+    module_.call("main", null, null);
 }
 
 void defineRuntime(BackendModule backModule, Module frontModule)
 {
     import backend.interpreter : IpBackendModule;
-    import backend.value : Value;
 
     frontModule.addFunction(new Function("assert", new Void, [Argument(new Integer, "")], true, null));
 
     auto ipModule = cast(IpBackendModule) backModule;
 
-    ipModule.defineCallback("int_add", delegate Value(Value[] args)
+    ipModule.defineCallback("int_add", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        return Value.make!int(args[0].as!int + args[1].as!int);
+        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] + (cast(int[]) args[1])[0];
     });
-    ipModule.defineCallback("int_sub", delegate Value(Value[] args)
+    ipModule.defineCallback("int_sub", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        return Value.make!int(args[0].as!int - args[1].as!int);
+        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] - (cast(int[]) args[1])[0];
     });
-    ipModule.defineCallback("int_mul", delegate Value(Value[] args)
+    ipModule.defineCallback("int_mul", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        return Value.make!int(args[0].as!int * args[1].as!int);
+        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] * (cast(int[]) args[1])[0];
     });
-    ipModule.defineCallback("int_eq", delegate Value(Value[] args)
+    ipModule.defineCallback("int_eq", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        return Value.make!int(args[0].as!int == args[1].as!int);
+        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] == (cast(int[]) args[1])[0];
     });
-    ipModule.defineCallback("int_gt", delegate Value(Value[] args)
+    ipModule.defineCallback("int_gt", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        return Value.make!int(args[0].as!int > args[1].as!int);
+        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] > (cast(int[]) args[1])[0];
     });
-    ipModule.defineCallback("assert", delegate Value(Value[] args)
+    ipModule.defineCallback("assert", delegate void(void[] ret, void[][] args)
     in (args.length == 1)
     {
-        if (args[0].as!int == 0)
-        {
-            assert(false, "Assert failed!");
-        }
-        return Value.make!void;
+        assert((cast(int[]) args[0])[0], "Assertion failed!");
     });
 }
 

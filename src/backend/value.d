@@ -16,7 +16,7 @@ struct Value
     union
     {
         int int_value;
-        Value[] fields;
+        void[] structData;
         PointerValue pointer_;
     }
 
@@ -32,12 +32,6 @@ struct Value
         return this.pointer_;
     }
 
-    ref Value accessField(int field)
-    in (this.kind == Kind.Struct)
-    {
-        return this.fields[field];
-    }
-
     static Value make(T : int)(int i)
     {
         auto ret = Value(Kind.Int);
@@ -51,11 +45,11 @@ struct Value
         return Value(Kind.Void);
     }
 
-    static Value makeStruct(Value[] values)
+    static Value makeStruct(void[] structData)
     {
         auto ret = Value(Kind.Struct);
 
-        ret.fields = values.dup;
+        ret.structData = structData;
         return ret;
     }
 
@@ -76,6 +70,21 @@ struct Value
         assert(false, "TODO");
     }
 
+    void[] data() return
+    {
+        final switch (this.kind)
+        {
+            case Kind.Int:
+                return cast(void[]) (&this.int_value)[0 .. 1];
+            case Kind.Void:
+                return null;
+            case Kind.Pointer:
+                return cast(void[]) (&this.pointer_)[0 .. 1];
+            case Kind.Struct:
+                return this.structData;
+        }
+    }
+
     string toString() const
     {
         final switch (this.kind)
@@ -87,7 +96,8 @@ struct Value
             case Kind.Pointer:
                 return format!"&%s"(this.pointer_);
             case Kind.Struct:
-                return format!"{%(%s, %)}"(this.fields);
+                // TODO?
+                return format!"{%(%s, %)}"(cast(ubyte[]) this.structData);
         }
     }
 }
@@ -98,13 +108,15 @@ struct Value
  */
 class MemoryRegion
 {
-    Value[] values;
+    void[] data;
 
     Value allocate(Value value)
     {
-        this.values ~= value;
+        auto offset = this.data.length;
+        auto valueData = value.data;
 
-        return Value.makePointer(PointerValue(this, cast(int) this.values.length - 1));
+        this.data ~= valueData;
+        return Value.makePointer(PointerValue(this, value.kind, offset, valueData.length));
     }
 
     mixin(GenerateToString);
@@ -114,68 +126,53 @@ struct PointerValue
 {
     private MemoryRegion base;
 
-    // the value of the pointer is found by reading the value accessPath[0],
-    // then following struct fields at each offset in turn.
-    private const(int)[] accessPathDynamic;
-    private int[4] accessPathStatic; // helper to reduce allocations
+    private Value.Kind kind;
 
-    private const(int)[] accessPath() const
-    {
-        if (accessPathDynamic.length <= accessPathStatic.length)
-            return accessPathStatic[0 .. accessPathDynamic.length];
-        return accessPathDynamic;
-    }
+    private size_t offset;
 
-    invariant (accessPath.length >= 1);
-
-    public this(MemoryRegion base, int append)
-    {
-        this(base, null, append);
-    }
-
-    public this(MemoryRegion base, const int[] path, int append)
-    {
-        this.base = base;
-        if (path.length + 1 <= this.accessPathStatic.length)
-        {
-            this.accessPathStatic[0 .. path.length] = path;
-            this.accessPathStatic[path.length] = append;
-            this.accessPathDynamic = (int*).init[0 .. path.length + 1];
-        }
-        else
-        {
-            this.accessPathDynamic = path ~ append;
-        }
-    }
+    private size_t length;
 
     public Value load()
     {
-        return refValue;
+        with (Value.Kind) final switch (kind)
+        {
+            case Int:
+                return Value.make!int(*cast(int*) (base.data.ptr + offset));
+            case Void:
+                return Value.make!void;
+            case Pointer:
+                return Value.makePointer(*cast(PointerValue*) (base.data.ptr + offset));
+            case Struct:
+                return Value.makeStruct(base.data.ptr[this.offset .. this.offset + this.length]);
+        }
     }
 
     public void store(Value value)
     {
-        refValue.checkSameType(value);
-        refValue = value;
-    }
+        assert(value.kind == this.kind, format!"can't store %s in ptr to %s"(value.kind, this.kind));
 
-    public Value offset(int member)
-    in (refValue.kind == Value.Kind.Struct && member < refValue.fields.length,
-        format("tried to take invalid offset %s of %s from %s", member, refValue, this))
-    {
-        return Value.makePointer(PointerValue(base, accessPath, member));
-    }
-
-    private ref Value refValue()
-    {
-        Value* current_value = &this.base.values[this.accessPath[0]];
-
-        foreach (index; this.accessPath[1 .. $])
+        with (Value.Kind) final switch (value.kind)
         {
-            assert(current_value.kind == Value.Kind.Struct);
+            case Int:
+                *cast(int*) (base.data.ptr + offset) = value.as!int;
+                break;
+            case Void:
+                break;
+            case Pointer:
+                *cast(PointerValue*) (base.data.ptr + offset) = value.asPointer;
+                break;
+            case Struct:
+                assert(this.length == value.structData.length);
 
-            current_value = &current_value.accessField(index);
+                base.data.ptr[this.offset .. this.offset + this.length] = value.data;
+                break;
         }
-        return *current_value;
     }
+
+    public Value atOffset(size_t offset, Value.Kind kind)
+    {
+        return Value.makePointer(PointerValue(base, kind, this.offset + offset, this.length));
+    }
+
+    mixin(GenerateThis);
 }

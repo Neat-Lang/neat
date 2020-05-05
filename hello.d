@@ -1182,7 +1182,7 @@ class StructMember : Reference
     {
         Reg reg = this.base.emitLocation(output);
 
-        return output.fun.fieldOffset(type.emit(output.mod), reg, this.index);
+        return output.fun.fieldOffset(base.type.emit(output.mod), reg, this.index);
     }
 
     override string toString() const
@@ -1415,9 +1415,7 @@ void defineRuntime(BackendModule backModule, Module frontModule)
     import backend.interpreter : IpBackendModule;
     import backend.value : Value;
 
-    auto assertFun = new Function("assert", new Void, [Argument(new Integer, "")], true, null);
-
-    frontModule.add(assertFun.name, assertFun);
+    frontModule.addFunction(new Function("assert", new Void, [Argument(new Integer, "")], true, null));
 
     auto ipModule = cast(IpBackendModule) backModule;
 
@@ -1455,4 +1453,9 @@ void defineRuntime(BackendModule backModule, Module frontModule)
         }
         return Value.make!void;
     });
+}
+
+void addFunction(Module module_, Function function_)
+{
+    module_.add(function_.name, function_);
 }

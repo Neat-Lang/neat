@@ -17,16 +17,22 @@ class IpBackend : Backend
 class IpBackendType : BackendType
 {
     abstract override string toString() const;
+
+    abstract int size() const;
 }
 
 class IntType : IpBackendType
 {
     override string toString() const { return "int"; }
+
+    override int size() const { return 4; }
 }
 
 class VoidType : IpBackendType
 {
     override string toString() const { return "void"; }
+
+    override int size() const { return 0; }
 }
 
 class StructType : IpBackendType
@@ -34,6 +40,16 @@ class StructType : IpBackendType
     IpBackendType[] types;
 
     override string toString() const { return format!"{%(%s, %)}"(types); }
+
+    // TODO alignment
+    override int size() const { return this.types.map!"a.size".sum; }
+
+    public size_t offsetOf(size_t field)
+    in (field < this.types.length)
+    {
+        // TODO alignment
+        return this.types[0 .. field].map!"a.size".sum;
+    }
 
     mixin(GenerateThis);
 }
@@ -156,7 +172,7 @@ struct Instr
             case Arg: return format!"_%s"(arg.index);
             case Literal: return format!"%s"(literal.value);
             case Alloca: return format!"alloca %s"(alloca.type);
-            case FieldOffset: return format!"%%%s.%s"(fieldOffset.base, fieldOffset.member);
+            case FieldOffset: return format!"%%%s.%s (%s)"(fieldOffset.base, fieldOffset.member, fieldOffset.structType);
             case Load: return format!"*%%%s"(load.target);
             case Store: return format!"*%%%s = %%%s"(store.target, store.value);
             case Return: return format!"ret %%%s"(return_.reg);
@@ -262,8 +278,9 @@ class IpBackendFunction : BackendFunction
     }
 
     override int alloca(BackendType type)
-    in (cast(IpBackendType) type)
     {
+        assert(cast(IpBackendType) type !is null);
+
         auto instr = Instr(Instr.Kind.Alloca);
 
         instr.alloca.type = cast(IpBackendType) type;
@@ -271,8 +288,9 @@ class IpBackendFunction : BackendFunction
     }
 
     override Reg fieldOffset(BackendType structType, Reg structBase, int member)
-    in (cast(StructType) structType)
     {
+        assert(cast(StructType) structType !is null);
+
         auto instr = Instr(Instr.Kind.FieldOffset);
 
         instr.fieldOffset.structType = cast(StructType) structType;
@@ -283,8 +301,9 @@ class IpBackendFunction : BackendFunction
     }
 
     override void store(BackendType targetType, Reg target, Reg value)
-    in (cast(IpBackendType) targetType)
     {
+        assert(cast(IpBackendType) targetType !is null);
+
         auto instr = Instr(Instr.Kind.Store);
 
         instr.store.targetType = cast(IpBackendType) targetType;
@@ -295,8 +314,9 @@ class IpBackendFunction : BackendFunction
     }
 
     override Reg load(BackendType targetType, Reg target)
-    in (cast(IpBackendType) targetType)
     {
+        assert(cast(IpBackendType) targetType !is null);
+
         auto instr = Instr(Instr.Kind.Load);
 
         instr.load.targetType = cast(IpBackendType) targetType;
@@ -374,7 +394,11 @@ Value getInitValue(IpBackendType type)
     }
     if (auto strct = cast(StructType) type)
     {
-        return Value.makeStruct(strct.types.map!getInitValue.array);
+        // TODO alignment
+        void[] data;
+        foreach (subdata; strct.types.map!(type => type.getInitValue.data))
+            data ~= subdata;
+        return Value.makeStruct(data);
     }
     assert(false, "what is init for " ~ type.toString);
 }
@@ -507,9 +531,18 @@ class IpBackendModule : BackendModule
                         case FieldOffset:
                             // TODO validate type
                             auto base = regs[instr.fieldOffset.base];
+                            auto offset = instr.fieldOffset.structType.offsetOf(instr.fieldOffset.member);
+                            auto type = instr.fieldOffset.structType.types[instr.fieldOffset.member];
+                            auto kind = {
+                                if (cast(IntType) type)
+                                    return Value.Kind.Int;
+                                if (cast(VoidType) type)
+                                    return Value.Kind.Void;
+                                assert(false, format!"todo %s"(type));
+                            }();
 
                             assert(base.kind == Value.Kind.Pointer);
-                            regs[reg] = base.asPointer.offset(instr.fieldOffset.member);
+                            regs[reg] = base.asPointer.atOffset(offset, kind);
                             break;
                         case Load:
                             // TODO validate type
@@ -536,16 +569,18 @@ class IpBackendModule : BackendModule
     override IpBackendType voidType() { return new VoidType; }
 
     override IpBackendType structType(BackendType[] types)
-    in (types.all!(a => cast(IpBackendType) a))
     {
+        assert(types.all!(a => cast(IpBackendType) a !is null));
+
         return new StructType(types.map!(a => cast(IpBackendType) a).array);
     }
 
     override IpBackendFunction define(string name, BackendType ret, BackendType[] args)
     in (name !in callbacks && name !in functions)
-    in (cast(IpBackendType) ret)
-    in (args.all!(a => cast(IpBackendType) a))
     {
+        assert(cast(IpBackendType) ret);
+        assert(args.all!(a => cast(IpBackendType) a));
+
         auto fun = new IpBackendFunction(name, cast(IpBackendType) ret, args.map!(a => cast(IpBackendType) a).array);
 
         this.functions[name] = fun;

@@ -442,15 +442,13 @@ void setInitValue(IpBackendType type, void* target)
 
 struct ArrayAllocator(T)
 {
-    static assert(T.sizeof >= (T*).sizeof);
-
     static T*[] pointers = null;
 
-    static T[] allocate(int length)
+    static T[] allocate(size_t length)
     {
         if (length == 0) return null;
 
-        int slot = findMsb(length - 1);
+        int slot = findMsb(cast(int) length - 1);
         while (slot >= this.pointers.length) this.pointers ~= null;
         if (this.pointers[slot]) {
             auto ret = this.pointers[slot][0 .. length];
@@ -458,14 +456,18 @@ struct ArrayAllocator(T)
             return ret;
         }
         assert(length <= (1 << slot));
-        return (new T[1 << slot])[0 .. length];
+        auto allocSize = 1 << slot;
+
+        // ensure we have space for the next-pointer
+        while (T[1].sizeof * allocSize < (T*).sizeof) allocSize++;
+        return (new T[allocSize])[0 .. length];
     }
 
     static void free(T[] array)
     {
         if (array.empty) return;
 
-        int slot = findMsb(cast(int) array.length);
+        int slot = findMsb(cast(int) array.length - 1);
         *cast(T**) array.ptr = this.pointers[slot];
         this.pointers[slot] = array.ptr;
     }
@@ -502,24 +504,32 @@ class IpBackendModule : BackendModule
     void call(string name, void[] ret, void[][] args)
     in (name in this.functions || name in this.callbacks, format!"%s not found"(name))
     {
+        import core.stdc.stdlib : alloca;
+
         if (name in this.callbacks)
         {
             return this.callbacks[name](ret, args);
         }
         auto fun = this.functions[name];
+        size_t numRegs = fun.blocks.map!(block => block.instrs.length).sum;
         int regAreaSize = fun.blocks.map!(block => block.instrs.map!(instr => instr.regSize(fun)).sum).sum;
-        auto regData = new void[regAreaSize];
-        void[][] regArrays;
+
+        void[] regData = ArrayAllocator!void.allocate(regAreaSize);
+        scope(success) ArrayAllocator!void.free(regData);
+
+        void[][] regArrays = ArrayAllocator!(void[]).allocate(numRegs);
+        scope(success) ArrayAllocator!(void[]).free(regArrays);
+        // TODO embed offset in the instrs?
         {
             auto regCurrent = regData;
+            int i;
             foreach (block; fun.blocks) foreach (instr; block.instrs)
             {
-                regArrays ~= regCurrent[0 .. instr.regSize(fun)];
+                regArrays[i++] = regCurrent[0 .. instr.regSize(fun)];
                 regCurrent = regCurrent[instr.regSize(fun) .. $];
             }
             assert(regCurrent.length == 0);
         }
-        // TODO embed offset in the instrs?
 
         int block = 0;
         while (true)

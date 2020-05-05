@@ -12,6 +12,7 @@ interface BackendModule
     BackendType intType();
     BackendType voidType();
     BackendType structType(BackendType[] types);
+    BackendType pointerType(BackendType target);
     BackendFunction define(string name, BackendType ret, BackendType[] args);
 }
 

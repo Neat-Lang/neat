@@ -105,18 +105,26 @@ class Pointer : Type
 
     override size_t size() const
     {
-        return 8;
+        return size_t.sizeof;
     }
 
     override BackendType emit(BackendModule mod)
     {
-        assert(false);
-        // return mod.pointerType(target.emit(mod));
+        return mod.pointerType(target.emit(mod));
     }
 
     override string toString() const
     {
         return format!"%s*"(this.target);
+    }
+
+    override bool opEquals(const Object other) const
+    {
+        if (auto otherp = cast(Pointer) other)
+        {
+            return this.target == otherp.target;
+        }
+        return false;
     }
 }
 
@@ -167,7 +175,7 @@ class Generator
         {
             auto argExpr = new ArgExpr(cast(int) i, arg.type);
 
-            argAssignments ~= argscope.declare(arg.name, argExpr);
+            argAssignments ~= argscope.declare(arg.name, arg.type, argExpr);
         }
 
         auto functionBody = fun.statement.compile(argscope);
@@ -352,6 +360,23 @@ string parseIdentifier(ref Parser parser)
 }
 
 Type parseType(ref Parser parser)
+{
+    auto current = parseLeafType(parser);
+
+    if (!current) return null;
+    while (true)
+    {
+        if (parser.accept("*"))
+        {
+            current = new Pointer(current);
+            continue;
+        }
+        break;
+    }
+    return current;
+}
+
+Type parseLeafType(ref Parser parser)
 {
     with (parser)
     {
@@ -663,7 +688,7 @@ ASTAssignStatement parseAssignment(ref Parser parser)
     with (parser)
     {
         begin;
-        auto lhs = parser.parseIdentifier;
+        auto lhs = parser.parseExpressionLeaf;
         if (!lhs || !accept("="))
         {
             revert;
@@ -672,7 +697,7 @@ ASTAssignStatement parseAssignment(ref Parser parser)
         auto expr = parser.parseExpression;
         expect(";");
         commit;
-        return new ASTAssignStatement(new Variable(lhs), expr);
+        return new ASTAssignStatement(lhs, expr);
     }
 }
 
@@ -688,7 +713,7 @@ class ASTVarDeclStatement : ASTStatement
     {
         auto initial = this.initial.compile(namespace);
 
-        return namespace.find!VarDeclScope.declare(this.name, initial);
+        return namespace.find!VarDeclScope.declare(this.name, this.type, initial);
     }
 
     mixin(GenerateAll);
@@ -1217,7 +1242,19 @@ class StructMember : Reference
     mixin(GenerateThis);
 }
 
-class Deref : Expression
+class ASTDereference : ASTExpression
+{
+    ASTExpression base;
+
+    override Dereference compile(Namespace namespace)
+    {
+        return new Dereference(base.compile(namespace));
+    }
+
+    mixin(GenerateThis);
+}
+
+class Dereference : Reference
 {
     Expression base;
 
@@ -1231,9 +1268,19 @@ class Deref : Expression
 
     override Reg emit(Generator output)
     {
-        Reg reg = this.base.emit(output);
+        Reg reg = emitLocation(output);
 
         return output.fun.load(this.type().emit(output.mod), reg);
+    }
+
+    override Reg emitLocation(Generator output)
+    {
+        return this.base.emit(output);
+    }
+
+    override string toString() const
+    {
+        return format!"*%s"(this.base);
     }
 
     mixin(GenerateThis);
@@ -1250,6 +1297,13 @@ ASTExpression parseExpressionLeaf(ref Parser parser)
 {
     with (parser)
     {
+        if (accept("*"))
+        {
+            auto next = parser.parseExpressionLeaf;
+
+            assert(next !is null);
+            return new ASTDereference(next);
+        }
         if (auto expr = parser.parseCall)
         {
             return expr;
@@ -1315,6 +1369,36 @@ class FunctionScope : Namespace
     mixin(GenerateThis);
 }
 
+class PointerCast : Expression
+{
+    Expression value;
+
+    Type target;
+
+    override Type type()
+    {
+        return this.target;
+    }
+
+    override Reg emit(Generator output)
+    {
+        return this.value.emit(output); // pointer's a pointer
+    }
+
+    mixin(GenerateThis);
+}
+
+Expression implicitConvertTo(Expression from, Type to)
+{
+    if (from.type == to) return from;
+    // void* casts to any pointer
+    if (cast(Pointer) to && from.type == new Pointer(new Void))
+    {
+        return new PointerCast(from, to);
+    }
+    assert(false, format!"todo: cast(%s) %s"(to, from.type));
+}
+
 class VarDeclScope : Namespace
 {
     Flag!"frameBase" frameBase; // base of function frame. all variables here are parameters.
@@ -1329,12 +1413,12 @@ class VarDeclScope : Namespace
     @(This.Init!null)
     Variable[] declarations;
 
-    Statement declare(string name, Expression value)
+    Statement declare(string name, Type type, Expression value)
     {
-        auto member = this.find!FunctionScope.declare(value.type());
+        auto member = this.find!FunctionScope.declare(type);
 
         declarations ~= Variable(name, member);
-        return new AssignStatement(member, value);
+        return new AssignStatement(member, value.implicitConvertTo(type));
     }
 
     override Symbol lookup(string name)
@@ -1438,6 +1522,7 @@ void defineRuntime(BackendModule backModule, Module frontModule)
     import backend.interpreter : IpBackendModule;
 
     frontModule.addFunction(new Function("assert", new Void, [Argument(new Integer, "")], true, null));
+    frontModule.addFunction(new Function("malloc", new Pointer(new Void), [Argument(new Integer, "")], true, null));
 
     auto ipModule = cast(IpBackendModule) backModule;
 
@@ -1470,6 +1555,13 @@ void defineRuntime(BackendModule backModule, Module frontModule)
     in (args.length == 1)
     {
         assert((cast(int[]) args[0])[0], "Assertion failed!");
+    });
+    ipModule.defineCallback("malloc", delegate void(void[] ret, void[][] args)
+    in (args.length == 1)
+    {
+        import core.stdc.stdlib : malloc;
+
+        (cast(void*[]) ret)[0] = malloc((cast(int[]) args[0])[0]);
     });
 }
 

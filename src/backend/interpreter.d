@@ -34,6 +34,17 @@ class VoidType : IpBackendType
     override int size() const { return 0; }
 }
 
+class PointerType : IpBackendType
+{
+    IpBackendType target;
+
+    override string toString() const { return this.target.toString ~ "*"; }
+
+    override int size() const { return size_t.sizeof; } // TODO machine
+
+    mixin(GenerateThis);
+}
+
 class StructType : IpBackendType
 {
     IpBackendType[] types;
@@ -437,6 +448,11 @@ void setInitValue(IpBackendType type, void* target)
         }
         return;
     }
+    if (cast(PointerType) type)
+    {
+        *cast(void**) target = null;
+        return;
+    }
     assert(false, "what is init for " ~ type.toString);
 }
 
@@ -614,6 +630,13 @@ class IpBackendModule : BackendModule
         assert(types.all!(a => cast(IpBackendType) a !is null));
 
         return new StructType(types.map!(a => cast(IpBackendType) a).array);
+    }
+
+    override IpBackendType pointerType(BackendType target)
+    {
+        assert(cast(IpBackendType) target);
+
+        return new PointerType(cast(IpBackendType) target);
     }
 
     override IpBackendFunction define(string name, BackendType ret, BackendType[] args)

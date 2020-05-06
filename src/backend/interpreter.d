@@ -36,9 +36,7 @@ class VoidType : IpBackendType
 
 class PointerType : IpBackendType
 {
-    IpBackendType target;
-
-    override string toString() const { return this.target.toString ~ "*"; }
+    override string toString() const { return "ptr"; }
 
     override int size() const { return size_t.sizeof; } // TODO machine
 
@@ -636,7 +634,7 @@ class IpBackendModule : BackendModule
     {
         assert(cast(IpBackendType) target);
 
-        return new PointerType(cast(IpBackendType) target);
+        return new PointerType;
     }
 
     override IpBackendFunction define(string name, BackendType ret, BackendType[] args)

@@ -43,7 +43,7 @@ class Integer : Type
         return "int";
     }
 
-    override bool opEquals(const Object obj)
+    override bool opEquals(const Object obj) const
     {
         return cast(Integer) obj !is null;
     }
@@ -66,7 +66,7 @@ class Void : Type
         return "void";
     }
 
-    override bool opEquals(const Object obj)
+    override bool opEquals(const Object obj) const
     {
         return cast(Void) obj !is null;
     }

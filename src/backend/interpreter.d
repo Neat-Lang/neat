@@ -195,7 +195,8 @@ struct Instr
             case Arg: return format!"_%s"(arg.index);
             case Literal: return formatLiteral(literal.type, literal.value);
             case Alloca: return format!"alloca %s"(alloca.type);
-            case FieldOffset: return format!"%%%s.%s (%s)"(fieldOffset.base, fieldOffset.member, fieldOffset.structType);
+            case FieldOffset: return format!"%%%s.%s (%s)"(
+                fieldOffset.base, fieldOffset.member, fieldOffset.structType);
             case Load: return format!"*%%%s"(load.target);
             case Store: return format!"*%%%s = %%%s"(store.target, store.value);
             case Return: return format!"ret %%%s"(return_.reg);

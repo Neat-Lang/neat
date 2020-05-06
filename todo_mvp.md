@@ -1,13 +1,10 @@
 ## for porting bootstrap compiler
 
-- pointers:
-    - type syntax
-    - referencing
-    - dereferencing
 - structs:
     - type syntax
     - field access
 - string literals
+- classes??
 
 ## for adding macros
 

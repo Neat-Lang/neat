@@ -1286,11 +1286,42 @@ class Dereference : Reference
     mixin(GenerateThis);
 }
 
-struct RegValue
+class ASTReference : ASTExpression
 {
-    int reg;
+    ASTExpression base;
 
-    Type type;
+    override ReferenceExpression compile(Namespace namespace)
+    {
+        auto baseExpression = base.compile(namespace);
+        assert(cast(Reference) baseExpression !is null);
+
+        return new ReferenceExpression(cast(Reference) baseExpression);
+    }
+
+    mixin(GenerateThis);
+}
+
+class ReferenceExpression : Expression
+{
+    Reference base;
+
+    override Type type()
+    {
+        Type superType = this.base.type();
+        return new Pointer(superType);
+    }
+
+    override Reg emit(Generator output)
+    {
+        return base.emitLocation(output);
+    }
+
+    override string toString() const
+    {
+        return format!"&%s"(this.base);
+    }
+
+    mixin(GenerateThis);
 }
 
 ASTExpression parseExpressionLeaf(ref Parser parser)
@@ -1303,6 +1334,13 @@ ASTExpression parseExpressionLeaf(ref Parser parser)
 
             assert(next !is null);
             return new ASTDereference(next);
+        }
+        if (accept("&"))
+        {
+            auto next = parser.parseExpressionLeaf;
+
+            assert(next !is null);
+            return new ASTReference(next);
         }
         if (auto expr = parser.parseCall)
         {

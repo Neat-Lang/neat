@@ -1147,38 +1147,6 @@ class ArgExpr : Expression
     mixin(GenerateThis);
 }
 
-// reg contains pointer to type
-class LoadRegExpr : Reference
-{
-    int reg;
-
-    Type targetType;
-
-    override Type type()
-    {
-        return this.targetType;
-    }
-
-    override Reg emit(Generator)
-    {
-        assert(false);
-    }
-
-    override Reg emitLocation(Generator)
-    {
-        return this.reg;
-    }
-
-    override string toString() const
-    {
-        import std.format : format;
-
-        return format!"%%%s"(this.reg);
-    }
-
-    mixin(GenerateThis);
-}
-
 class StackFrame : Reference
 {
     Type targetType;

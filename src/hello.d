@@ -502,7 +502,7 @@ interface Statement
     void emit(Generator output);
 }
 
-interface ASTExpression : Symbol
+interface ASTExpression
 {
     Expression compile(Namespace namespace);
 }
@@ -1196,29 +1196,6 @@ class Call : Expression
     mixin(GenerateToString);
 }
 
-ASTExpression parseCall(ref Parser parser)
-{
-    with (parser)
-    {
-        begin;
-        auto name = parser.parseIdentifier;
-        if (!name || !accept("("))
-        {
-            revert;
-            return null;
-        }
-        ASTExpression[] args;
-        while (!accept(")"))
-        {
-            if (!args.empty)
-                expect(",");
-            args ~= parser.parseExpression;
-        }
-        commit;
-        return new ASTCall(name, args);
-    }
-}
-
 class Variable : ASTExpression
 {
     string name;
@@ -1440,6 +1417,71 @@ class ReferenceExpression : Expression
     mixin(GenerateThis);
 }
 
+ASTCall parseCall(ref Parser parser, ASTExpression base)
+{
+    with (parser)
+    {
+        begin;
+        if (!accept("("))
+        {
+            revert;
+            return null;
+        }
+        ASTExpression[] args;
+        while (!accept(")"))
+        {
+            if (!args.empty)
+                expect(",");
+            args ~= parser.parseExpression;
+        }
+        commit;
+        // TODO method and pointer calls
+        assert(cast(Variable) base);
+        return new ASTCall((cast(Variable) base).name, args);
+    }
+}
+
+class ASTStructMember : ASTExpression
+{
+    ASTExpression base;
+
+    string member;
+
+    override StructMember compile(Namespace namespace)
+    {
+        auto base = this.base.compile(namespace);
+        while (cast(Pointer) base.type) {
+            base = new Dereference(base);
+        }
+        assert(cast(Reference) base, "TODO struct member of value");
+        auto structType = cast(Struct) base.type;
+        assert(structType, "expected struct type for member");
+        auto memberOffset = structType.members.countUntil!(a => a.name == this.member);
+        assert(memberOffset != -1, "no such member " ~ this.member);
+
+        return new StructMember(cast(Reference) base, cast(int) memberOffset);
+    }
+
+    mixin(GenerateThis);
+}
+
+ASTExpression parseMember(ref Parser parser, ASTExpression base)
+{
+    with (parser)
+    {
+        begin;
+        if (!accept("."))
+        {
+            revert;
+            return null;
+        }
+        auto name = parser.parseIdentifier;
+        assert(name, "member expected");
+        commit;
+        return new ASTStructMember(base, name);
+    }
+}
+
 ASTExpression parseExpressionLeaf(ref Parser parser)
 {
     with (parser)
@@ -1458,22 +1500,39 @@ ASTExpression parseExpressionLeaf(ref Parser parser)
             assert(next !is null);
             return new ASTReference(next);
         }
-        if (auto expr = parser.parseCall)
+        auto currentExpr = parser.parseExpressionBase;
+        assert(currentExpr);
+        while (true)
         {
-            return expr;
+            if (auto expr = parser.parseCall(currentExpr))
+            {
+                currentExpr = expr;
+                continue;
+            }
+            if (auto expr = parser.parseMember(currentExpr))
+            {
+                currentExpr = expr;
+                continue;
+            }
+            break;
         }
-        if (auto name = parser.parseIdentifier)
-        {
-            return new Variable(name);
-        }
-        int i;
-        if (parser.parseNumber(i))
-        {
-            return new ASTLiteral(i);
-        }
-        fail("Expression expected.");
-        assert(false);
+        return currentExpr;
     }
+}
+
+ASTExpression parseExpressionBase(ref Parser parser)
+{
+    if (auto name = parser.parseIdentifier)
+    {
+        return new Variable(name);
+    }
+    int i;
+    if (parser.parseNumber(i))
+    {
+        return new ASTLiteral(i);
+    }
+    parser.fail("Base expression expected.");
+    assert(false);
 }
 
 class Namespace

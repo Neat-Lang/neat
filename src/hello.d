@@ -551,7 +551,7 @@ ASTFunction parseFunction(ref Parser parser)
     }
 }
 
-class ASTStructDecl
+class ASTStructDecl : ASTType
 {
     struct Member
     {
@@ -566,7 +566,7 @@ class ASTStructDecl
 
     Member[] members;
 
-    Struct compile(Namespace namespace)
+    override Struct compile(Namespace namespace)
     {
         // TODO subscope
         return new Struct(name, members.map!(a => Struct.Member(a.name, a.type.compile(namespace))).array);
@@ -859,9 +859,16 @@ class ASTVarDeclStatement : ASTStatement
 
     override Statement compile(Namespace namespace)
     {
-        auto initial = this.initial.compile(namespace);
+        if (this.initial)
+        {
+            auto initial = this.initial.compile(namespace);
 
-        return namespace.find!VarDeclScope.declare(this.name, this.type.compile(namespace), initial);
+            return namespace.find!VarDeclScope.declare(this.name, this.type.compile(namespace), initial);
+        }
+        else
+        {
+            return namespace.find!VarDeclScope.declare(this.name, this.type.compile(namespace));
+        }
     }
 
     mixin(GenerateAll);
@@ -879,12 +886,17 @@ ASTVarDeclStatement parseVarDecl(ref Parser parser)
             return null;
         }
         auto name = parser.parseIdentifier;
-        if (!name || !accept("="))
+        if (!name)
         {
             revert;
             return null;
         }
-        auto initial = parser.parseExpression;
+        ASTExpression initial = null;
+        if (accept("="))
+        {
+            initial = parser.parseExpression;
+            assert(initial);
+        }
         expect(";");
         commit;
         return new ASTVarDeclStatement(name, type, initial);
@@ -1612,6 +1624,13 @@ Expression implicitConvertTo(Expression from, Type to)
     assert(false, format!"todo: cast(%s) %s"(to, from.type));
 }
 
+class NoopStatement : Statement
+{
+    override void emit(Generator)
+    {
+    }
+}
+
 class VarDeclScope : Namespace
 {
     Flag!"frameBase" frameBase; // base of function frame. all variables here are parameters.
@@ -1632,6 +1651,14 @@ class VarDeclScope : Namespace
 
         declarations ~= Variable(name, member);
         return new AssignStatement(member, value.implicitConvertTo(type));
+    }
+
+    Statement declare(string name, Type type)
+    {
+        auto member = this.find!FunctionScope.declare(type);
+
+        declarations ~= Variable(name, member);
+        return new NoopStatement;
     }
 
     override Symbol lookup(string name)

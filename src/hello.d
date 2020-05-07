@@ -359,7 +359,40 @@ string parseIdentifier(ref Parser parser)
     }
 }
 
-Type parseType(ref Parser parser)
+interface ASTType : Symbol
+{
+    Type compile(Namespace namespace);
+}
+
+class ASTInteger : ASTType
+{
+    override Integer compile(Namespace) {
+        return new Integer;
+    }
+}
+
+class ASTVoid : ASTType
+{
+    override Void compile(Namespace) {
+        return new Void;
+    }
+}
+
+class ASTPointer : ASTType
+{
+    ASTType subType;
+
+    override Type compile(Namespace namespace)
+    {
+        auto subType = this.subType.compile(namespace);
+
+        return new Pointer(subType);
+    }
+
+    mixin(GenerateThis);
+}
+
+ASTType parseType(ref Parser parser)
 {
     auto current = parseLeafType(parser);
 
@@ -368,7 +401,7 @@ Type parseType(ref Parser parser)
     {
         if (parser.accept("*"))
         {
-            current = new Pointer(current);
+            current = new ASTPointer(current);
             continue;
         }
         break;
@@ -376,7 +409,7 @@ Type parseType(ref Parser parser)
     return current;
 }
 
-Type parseLeafType(ref Parser parser)
+ASTType parseLeafType(ref Parser parser)
 {
     with (parser)
     {
@@ -387,17 +420,55 @@ Type parseLeafType(ref Parser parser)
         if (identifier == "int")
         {
             commit;
-            return new Integer;
+            return new ASTInteger;
         }
 
         if (identifier == "void")
         {
             commit;
-            return new Void;
+            return new ASTVoid;
         }
 
         return null;
     }
+}
+
+struct ASTArgument
+{
+    @NonNull
+    ASTType type;
+
+    string name;
+
+    mixin(GenerateAll);
+}
+
+class ASTFunction
+{
+    string name;
+
+    @NonNull
+    ASTType ret;
+
+    ASTArgument[] args;
+
+    bool declaration;
+
+    ASTStatement statement;
+
+    invariant (declaration || statement !is null);
+
+    Function compile(Namespace namespace)
+    {
+        return new Function(
+            this.name,
+            this.ret.compile(namespace),
+            this.args.map!(a => Argument(a.type.compile(namespace), a.name)).array,
+            this.declaration,
+            this.statement);
+    }
+
+    mixin(GenerateAll);
 }
 
 struct Argument
@@ -467,7 +538,7 @@ Function parseFunction(ref Parser parser)
         }
         auto name = parser.parseIdentifier;
         expect("(");
-        Argument[] args;
+        ASTArgument[] args;
         while (!accept(")"))
         {
             if (!args.empty)
@@ -479,11 +550,11 @@ Function parseFunction(ref Parser parser)
             }
             auto argtype = parser.parseType;
             auto argname = parser.parseIdentifier;
-            args ~= Argument(argtype, argname);
+            args ~= ASTArgument(argtype, argname);
         }
         auto stmt = parser.parseStatement;
         commit;
-        return new Function(name, ret, args, false, stmt);
+        return new ASTFunction(name, ret, args, false, stmt);
     }
 }
 
@@ -705,7 +776,7 @@ class ASTVarDeclStatement : ASTStatement
 {
     string name;
 
-    Type type;
+    ASTType type;
 
     ASTExpression initial;
 
@@ -713,7 +784,7 @@ class ASTVarDeclStatement : ASTStatement
     {
         auto initial = this.initial.compile(namespace);
 
-        return namespace.find!VarDeclScope.declare(this.name, this.type, initial);
+        return namespace.find!VarDeclScope.declare(this.name, this.type.compile(namespace), initial);
     }
 
     mixin(GenerateAll);
@@ -1495,7 +1566,7 @@ Module parseModule(ref Parser parser)
 
         if (!fun) parser.fail("couldn't parse function");
 
-        module_.add(fun.name, fun);
+        module_.add(fun.name, fun.compile(module_));
     }
     return module_;
 }

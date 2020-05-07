@@ -14,7 +14,12 @@ interface Symbol
 {
 }
 
-class Type
+interface ASTType
+{
+    Type compile(Namespace namespace);
+}
+
+class Type : Symbol
 {
     abstract BackendType emit(BackendModule mod);
 
@@ -70,28 +75,6 @@ class Void : Type
     {
         return cast(Void) obj !is null;
     }
-}
-
-class Struct : Type
-{
-    Type[] members;
-
-    override BackendType emit(BackendModule mod)
-    {
-        return mod.structType(this.members.map!(a => a.emit(mod)).array);
-    }
-
-    override size_t size() const
-    {
-        return members.map!(a => a.size).sum;
-    }
-
-    override string toString() const
-    {
-        return format!"{ %(%s, %) }"(this.members);
-    }
-
-    mixin(GenerateThis);
 }
 
 class Pointer : Type
@@ -359,11 +342,6 @@ string parseIdentifier(ref Parser parser)
     }
 }
 
-interface ASTType : Symbol
-{
-    Type compile(Namespace namespace);
-}
-
 class ASTInteger : ASTType
 {
     override Integer compile(Namespace) {
@@ -409,6 +387,21 @@ ASTType parseType(ref Parser parser)
     return current;
 }
 
+class NamedType : ASTType
+{
+    string name;
+
+    override Type compile(Namespace namespace)
+    {
+        auto target = namespace.lookup(this.name);
+
+        assert(cast(Type) target, format!"target for %s = %s"(this.name, target));
+        return cast(Type) target;
+    }
+
+    mixin(GenerateThis);
+}
+
 ASTType parseLeafType(ref Parser parser)
 {
     with (parser)
@@ -429,7 +422,7 @@ ASTType parseLeafType(ref Parser parser)
             return new ASTVoid;
         }
 
-        return null;
+        return new NamedType(identifier);
     }
 }
 
@@ -525,7 +518,7 @@ interface Reference : Expression
     Reg emitLocation(Generator output);
 }
 
-Function parseFunction(ref Parser parser)
+ASTFunction parseFunction(ref Parser parser)
 {
     with (parser)
     {
@@ -555,6 +548,90 @@ Function parseFunction(ref Parser parser)
         auto stmt = parser.parseStatement;
         commit;
         return new ASTFunction(name, ret, args, false, stmt);
+    }
+}
+
+class ASTStructDecl
+{
+    struct Member
+    {
+        string name;
+
+        ASTType type;
+
+        mixin(GenerateThis);
+    }
+
+    string name;
+
+    Member[] members;
+
+    Struct compile(Namespace namespace)
+    {
+        // TODO subscope
+        return new Struct(name, members.map!(a => Struct.Member(a.name, a.type.compile(namespace))).array);
+    }
+
+    mixin(GenerateThis);
+}
+
+class Struct : Type
+{
+    struct Member
+    {
+        string name;
+
+        Type type;
+
+        mixin(GenerateThis);
+    }
+
+    string name;
+
+    Member[] members;
+
+    override BackendType emit(BackendModule mod)
+    {
+        return mod.structType(this.members.map!(a => a.type.emit(mod)).array);
+    }
+
+    override size_t size() const
+    {
+        return members.map!(a => a.type.size).sum;
+    }
+
+    override string toString() const
+    {
+        return format!"{ %(%s, %) }"(this.members);
+    }
+
+    mixin(GenerateThis);
+}
+
+ASTStructDecl parseStructDecl(ref Parser parser)
+{
+    with (parser)
+    {
+        begin;
+        if (parser.parseIdentifier != "struct")
+        {
+            revert;
+            return null;
+        }
+        auto name = parser.parseIdentifier;
+        ASTStructDecl.Member[] members;
+        expect("{");
+        while (!accept("}"))
+        {
+            auto memberType = parser.parseType;
+            assert(memberType, "expected member type");
+            auto memberName = parser.parseIdentifier;
+            assert(memberName, "expected member name");
+            expect(";");
+            members ~= ASTStructDecl.Member(memberName, memberType);
+        }
+        commit;
+        return new ASTStructDecl(name, members);
     }
 }
 
@@ -1256,7 +1333,7 @@ class StructMember : Reference
         Type type = base.type();
         auto structType = cast(Struct) type;
         assert(structType);
-        return structType.members[this.index];
+        return structType.members[this.index].type;
     }
 
     override Reg emit(Generator output)
@@ -1435,7 +1512,7 @@ class FunctionScope : Namespace
 
     Struct structType()
     {
-        return new Struct(this.variableTypes);
+        return new Struct(null, this.variableTypes.map!(a => Struct.Member(null, a)).array);
     }
 
     override Symbol lookup(string name)
@@ -1562,11 +1639,21 @@ Module parseModule(ref Parser parser)
 
     while (!parser.eof)
     {
+        auto strct = parser.parseStructDecl;
+
+        if (strct) {
+            module_.add(strct.name, strct.compile(module_));
+            continue;
+        }
+
         auto fun = parser.parseFunction;
 
-        if (!fun) parser.fail("couldn't parse function");
+        if (fun) {
+            module_.add(fun.name, fun.compile(module_));
+            continue;
+        }
 
-        module_.add(fun.name, fun.compile(module_));
+        parser.fail("couldn't parse function or struct");
     }
     return module_;
 }

@@ -1693,40 +1693,44 @@ void defineRuntime(BackendModule backModule, Module frontModule)
     ipModule.defineCallback("int_add", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] + (cast(int[]) args[1])[0];
+        ret.as!int = args[0].as!int + args[1].as!int;
     });
     ipModule.defineCallback("int_sub", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] - (cast(int[]) args[1])[0];
+        ret.as!int = args[0].as!int - args[1].as!int;
     });
     ipModule.defineCallback("int_mul", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] * (cast(int[]) args[1])[0];
+        ret.as!int = args[0].as!int * args[1].as!int;
     });
     ipModule.defineCallback("int_eq", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] == (cast(int[]) args[1])[0];
+        ret.as!int = args[0].as!int == args[1].as!int;
     });
     ipModule.defineCallback("int_gt", delegate void(void[] ret, void[][] args)
     in (args.length == 2)
     {
-        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] > (cast(int[]) args[1])[0];
+        ret.as!int = args[0].as!int > args[1].as!int;
     });
     ipModule.defineCallback("assert", delegate void(void[] ret, void[][] args)
     in (args.length == 1)
     {
-        assert((cast(int[]) args[0])[0], "Assertion failed!");
+        assert(args[0].as!int, "Assertion failed!");
     });
     ipModule.defineCallback("malloc", delegate void(void[] ret, void[][] args)
     in (args.length == 1)
     {
         import core.stdc.stdlib : malloc;
 
-        (cast(void*[]) ret)[0] = malloc((cast(int[]) args[0])[0]);
+        ret.as!(void*) = malloc(args[0].as!int);
     });
+}
+
+private template as(T) {
+    ref T as(Arg)(Arg arg) { return (cast(T[]) arg)[0]; }
 }
 
 void addFunction(Module module_, Function function_)

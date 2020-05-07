@@ -3,6 +3,7 @@
 - structs:
     - type syntax
     - field access
+    - methods
 - string literals
 - classes??
 

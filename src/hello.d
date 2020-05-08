@@ -976,6 +976,7 @@ enum ArithmeticOpType
     mul,
     eq,
     gt,
+    lt,
 }
 
 class ASTArithmeticOp : ASTExpression
@@ -1020,6 +1021,8 @@ class ArithmeticOp : Expression
                     return "int_eq";
                 case gt:
                     return "int_gt";
+                case lt:
+                    return "int_lt";
             }
         }();
         return output.fun.call(output.mod.intType, name, [leftreg, rightreg]);
@@ -1093,6 +1096,11 @@ void parseComparison(ref Parser parser, ref ASTExpression left)
     {
         auto right = parser.parseArithmetic(1);
         left = new ASTArithmeticOp(ArithmeticOpType.gt, left, right);
+    }
+    if (parser.accept("<"))
+    {
+        auto right = parser.parseArithmetic(1);
+        left = new ASTArithmeticOp(ArithmeticOpType.lt, left, right);
     }
 }
 
@@ -1494,6 +1502,54 @@ ASTExpression parseMember(ref Parser parser, ASTExpression base)
     }
 }
 
+class ASTIndexAccess : ASTExpression
+{
+    ASTExpression base;
+
+    ASTExpression index;
+
+    override Expression compile(Namespace namespace)
+    {
+        auto base = this.base.compile(namespace);
+        auto index = this.index.compile(namespace);
+
+        assert(cast(Pointer) base.type, "expected pointer for index base");
+        assert(cast(Integer) index.type, "expected int for index value");
+
+        auto int_mul = new Function("int_mul",
+            new Integer,
+            [Argument(new Integer, ""), Argument(new Integer, "")],
+            true, null);
+        auto ptr_offset = new Function("ptr_offset",
+            new Pointer(new Void),
+            [Argument(new Pointer(new Void), ""), Argument(new Integer, "")],
+            true, null);
+        auto offset = new Call(int_mul, [index, new Literal(cast(int) base.type.size)]);
+
+        return new Dereference(new PointerCast(new Call(ptr_offset, [base, offset]), base.type));
+    }
+
+    mixin(GenerateThis);
+}
+
+ASTExpression parseIndex(ref Parser parser, ASTExpression base)
+{
+    with (parser)
+    {
+        begin;
+        if (!accept("["))
+        {
+            revert;
+            return null;
+        }
+        auto index = parser.parseExpression;
+        assert(index, "index expected");
+        expect("]");
+        commit;
+        return new ASTIndexAccess(base, index);
+    }
+}
+
 ASTExpression parseExpressionLeaf(ref Parser parser)
 {
     with (parser)
@@ -1525,6 +1581,11 @@ ASTExpression parseExpressionLeaf(ref Parser parser)
             {
                 currentExpr = expr;
                 continue;
+            }
+            if (auto expr = parser.parseIndex(currentExpr))
+            {
+                currentExpr = expr;
+                break;
             }
             break;
         }
@@ -1801,10 +1862,20 @@ void defineRuntime(BackendModule backModule, Module frontModule)
     {
         ret.as!int = args[0].as!int > args[1].as!int;
     });
+    ipModule.defineCallback("int_lt", delegate void(void[] ret, void[][] args)
+    in (args.length == 2)
+    {
+        ret.as!int = args[0].as!int < args[1].as!int;
+    });
     ipModule.defineCallback("assert", delegate void(void[] ret, void[][] args)
     in (args.length == 1)
     {
         assert(args[0].as!int, "Assertion failed!");
+    });
+    ipModule.defineCallback("ptr_offset", delegate void(void[] ret, void[][] args)
+    in (args.length == 2)
+    {
+        ret.as!(void*) = args[0].as!(void*) + args[1].as!int;
     });
     ipModule.defineCallback("malloc", delegate void(void[] ret, void[][] args)
     in (args.length == 1)

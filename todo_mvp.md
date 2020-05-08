@@ -1,10 +1,9 @@
 ## for porting bootstrap compiler
 
 - structs:
-    - type syntax
-    - field access
     - methods
 - string literals
+- for loops
 - classes??
 
 ## for adding macros

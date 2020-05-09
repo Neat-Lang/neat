@@ -358,13 +358,13 @@ string parseIdentifier(ref Parser parser)
     {
         begin;
         strip;
-        if (text.empty || !text.front.isAlpha)
+        if (text.empty || (!text.front.isAlpha && text.front != '_'))
         {
             revert;
             return null;
         }
         string identifier;
-        while (!text.empty && text.front.isAlphaNum)
+        while (!text.empty && (text.front.isAlphaNum || text.front == '_'))
         {
             identifier ~= text.front;
             text.popFront;
@@ -699,9 +699,9 @@ ASTStructDecl parseStructDecl(ref Parser parser)
         while (!accept("}"))
         {
             auto memberType = parser.parseType;
-            assert(memberType, "expected member type");
+            if (!memberType) parser.fail("expected member type");
             auto memberName = parser.parseIdentifier;
-            assert(memberName, "expected member name");
+            if (!memberName) parser.fail("expected member name");
             expect(";");
             members ~= ASTStructDecl.Member(memberName, memberType);
         }
@@ -1251,13 +1251,19 @@ ASTWhile parseWhile(ref Parser parser)
 
 class ASTCall : ASTExpression
 {
-    string function_;
+    ASTExpression target;
 
     ASTExpression[] args;
 
     override Expression compile(Namespace namespace)
     {
-        auto target = namespace.lookup(this.function_);
+        auto target = {
+            if (auto var = cast(Variable) this.target)
+            {
+                return namespace.lookup(var.name);
+            }
+            return this.target.compile(namespace);
+        }();
         auto expr = cast(Expression) target;
         auto args = this.args.map!(a => a.compile(namespace)).array;
         if (cast(Function) target)
@@ -1269,7 +1275,7 @@ class ASTCall : ASTExpression
         {
             return new FuncPtrCall(expr, args);
         }
-        assert(false, format!"unknown call target %s for %s (%s?)"(target, this.function_, expr.type));
+        assert(false, format!"unknown call target %s for %s (%s?)"(target, this.target, expr.type));
     }
 
     mixin(GenerateAll);
@@ -1595,9 +1601,7 @@ ASTCall parseCall(ref Parser parser, ASTExpression base)
             args ~= parser.parseExpression;
         }
         commit;
-        // TODO method and pointer calls
-        assert(cast(Variable) base);
-        return new ASTCall((cast(Variable) base).name, args);
+        return new ASTCall(base, args);
     }
 }
 
@@ -1615,7 +1619,7 @@ class ASTStructMember : ASTExpression
         }
         assert(cast(Reference) base, "TODO struct member of value");
         auto structType = cast(Struct) base.type;
-        assert(structType, "expected struct type for member");
+        assert(structType, format!"expected struct type for member, not %s of %s"(base, base.type));
         auto memberOffset = structType.members.countUntil!(a => a.name == this.member);
         assert(memberOffset != -1, "no such member " ~ this.member);
 

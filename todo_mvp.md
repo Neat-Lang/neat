@@ -5,7 +5,3 @@
 - string literals
 - for loops
 - classes??
-
-## for adding macros
-
-- function pointers

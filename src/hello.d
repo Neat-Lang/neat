@@ -81,11 +81,6 @@ class Pointer : Type
 {
     Type target;
 
-    this(Type target)
-    {
-        this.target = target;
-    }
-
     override size_t size() const
     {
         return size_t.sizeof;
@@ -109,6 +104,43 @@ class Pointer : Type
         }
         return false;
     }
+
+    mixin(GenerateThis);
+}
+
+class FunctionPointer : Type
+{
+    Type ret;
+
+    Type[] args;
+
+    override size_t size() const
+    {
+        return size_t.sizeof;
+    }
+
+    override BackendType emit(BackendModule mod)
+    {
+        return mod.funcPointerType(
+            ret.emit(mod),
+            args.map!(a => a.emit(mod)).array);
+    }
+
+    override string toString() const
+    {
+        return format!"%s function(%(%s, %))"(this.ret, this.args);
+    }
+
+    override bool opEquals(const Object other) const
+    {
+        if (auto otherp = cast(FunctionPointer) other)
+        {
+            return this.ret == otherp.ret && this.args == otherp.args;
+        }
+        return false;
+    }
+
+    mixin(GenerateThis);
 }
 
 class Generator
@@ -370,6 +402,23 @@ class ASTPointer : ASTType
     mixin(GenerateThis);
 }
 
+class ASTFunctionPointer : ASTType
+{
+    ASTType ret;
+
+    ASTType[] args;
+
+    override Type compile(Namespace namespace)
+    {
+        auto ret = this.ret.compile(namespace);
+        auto args = this.args.map!(a => a.compile(namespace)).array;
+
+        return new FunctionPointer(ret, args);
+    }
+
+    mixin(GenerateThis);
+}
+
 ASTType parseType(ref Parser parser)
 {
     auto current = parseLeafType(parser);
@@ -381,6 +430,32 @@ ASTType parseType(ref Parser parser)
         {
             current = new ASTPointer(current);
             continue;
+        }
+        with (parser)
+        {
+            begin;
+            if (parser.parseIdentifier == "function")
+            {
+                expect("(");
+                ASTType[] args;
+                while (!accept(")"))
+                {
+                    if (!args.empty)
+                    {
+                        if (!accept(","))
+                        {
+                            fail("',' or ')' expected");
+                        }
+                    }
+                    auto argType = parser.parseType;
+                    assert(argType);
+                    args ~= argType;
+                }
+                commit;
+                current = new ASTFunctionPointer(current, args);
+                continue;
+            }
+            revert;
         }
         break;
     }
@@ -1180,12 +1255,21 @@ class ASTCall : ASTExpression
 
     ASTExpression[] args;
 
-    override Call compile(Namespace namespace)
+    override Expression compile(Namespace namespace)
     {
-        auto function_ = cast(Function) namespace.lookup(this.function_);
-        assert(function_, "unknown call target " ~ this.function_);
+        auto target = namespace.lookup(this.function_);
+        auto expr = cast(Expression) target;
         auto args = this.args.map!(a => a.compile(namespace)).array;
-        return new Call(function_, args);
+        if (cast(Function) target)
+        {
+            auto function_ = cast(Function) target;
+            return new Call(function_, args);
+        }
+        if (expr && cast(FunctionPointer) expr.type)
+        {
+            return new FuncPtrCall(expr, args);
+        }
+        assert(false, format!"unknown call target %s for %s (%s?)"(target, this.function_, expr.type));
     }
 
     mixin(GenerateAll);
@@ -1216,6 +1300,32 @@ class Call : Expression
     mixin(GenerateToString);
 }
 
+class FuncPtrCall : Expression
+{
+    Expression funcPtr;
+
+    Expression[] args;
+
+    override Type type()
+    {
+        return (cast(FunctionPointer) funcPtr.type).ret;
+    }
+
+    override Reg emit(Generator output)
+    {
+        Reg[] regs;
+        foreach (arg; this.args)
+        {
+            regs ~= arg.emit(output);
+        }
+        return output.fun.callFuncPtr(
+            type.emit(output.mod), funcPtr.emit(output), regs);
+    }
+
+    mixin(GenerateThis);
+    mixin(GenerateToString);
+}
+
 class Variable : ASTExpression
 {
     string name;
@@ -1223,7 +1333,10 @@ class Variable : ASTExpression
     override Expression compile(Namespace namespace)
     out (result; result !is null)
     {
-        return cast(Expression) namespace.lookup(name);
+        auto ret = namespace.lookup(name);
+        assert(cast(Expression) ret, format!"%s is not an expression (%s)"(
+            name, ret));
+        return cast(Expression) ret;
     }
 
     mixin(GenerateThis);
@@ -1403,12 +1516,39 @@ class ASTReference : ASTExpression
 {
     ASTExpression base;
 
-    override ReferenceExpression compile(Namespace namespace)
+    override Expression compile(Namespace namespace)
     {
+        // &function
+        if (auto var = cast(Variable) base)
+        {
+            auto target = namespace.lookup(var.name);
+
+            if (auto fun = cast(Function) target)
+            {
+                return new FunctionReference(fun);
+            }
+        }
         auto baseExpression = base.compile(namespace);
         assert(cast(Reference) baseExpression !is null);
 
         return new ReferenceExpression(cast(Reference) baseExpression);
+    }
+
+    mixin(GenerateThis);
+}
+
+class FunctionReference : Expression
+{
+    Function fun;
+
+    override FunctionPointer type()
+    {
+        return new FunctionPointer(fun.ret, fun.args.map!(a => a.type).array);
+    }
+
+    override Reg emit(Generator output)
+    {
+        return output.fun.getFuncPtr(this.fun.name);
     }
 
     mixin(GenerateThis);

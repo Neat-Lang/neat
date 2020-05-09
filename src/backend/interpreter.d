@@ -121,6 +121,8 @@ struct Instr
         Return,
         Branch,
         TestBranch,
+        GetFuncPtr,
+        CallFuncPtr,
     }
     Kind kind;
     union
@@ -175,6 +177,16 @@ struct Instr
             Reg target;
             Reg value;
         }
+        static struct GetFuncPtr
+        {
+            string name;
+        }
+        static struct CallFuncPtr
+        {
+            IpBackendType type;
+            Reg funcPtr;
+            Reg[] args;
+        }
         Call call;
         Return return_;
         Arg arg;
@@ -185,6 +197,8 @@ struct Instr
         FieldOffset fieldOffset;
         Load load;
         Store store;
+        GetFuncPtr getFuncPtr;
+        CallFuncPtr callFuncPtr;
     }
 
     string toString() const
@@ -206,6 +220,9 @@ struct Instr
                     testBranch.thenBlock,
                     testBranch.elseBlock,
                 );
+            case GetFuncPtr: return format!"funcptr %s"(getFuncPtr.name);
+            case CallFuncPtr: return format!"%s %%%s(%(%%%s, %))"(
+                callFuncPtr.type, callFuncPtr.funcPtr, callFuncPtr.args);
         }
     }
 
@@ -213,6 +230,7 @@ struct Instr
     {
         with (Kind) final switch (this.kind)
         {
+            case CallFuncPtr: return callFuncPtr.type.size;
             case Call: return call.type.size;
             case Arg: return fun.argTypes[arg.index].size;
             case Literal: return literal.type.size;
@@ -221,6 +239,7 @@ struct Instr
             // TODO machine based
             case Alloca:
             case FieldOffset:
+            case GetFuncPtr:
                 return size_t.sizeof;
             // no-ops
             case Store:
@@ -247,6 +266,8 @@ private bool isBlockFinisher(Instr.Kind kind)
         case FieldOffset:
         case Load:
         case Store:
+        case GetFuncPtr:
+        case CallFuncPtr:
             return false;
     }
 }
@@ -318,6 +339,25 @@ class IpBackendFunction : BackendFunction
         instr.call.type = cast(IpBackendType) type;
         instr.call.name = name;
         instr.call.args = args.dup;
+        return block.append(instr);
+    }
+
+    override int callFuncPtr(BackendType type, Reg funcPtr, Reg[] args)
+    {
+        assert(cast(IpBackendType) type !is null);
+        auto instr = Instr(Instr.Kind.CallFuncPtr);
+
+        instr.callFuncPtr.type = cast(IpBackendType) type;
+        instr.callFuncPtr.funcPtr = funcPtr;
+        instr.callFuncPtr.args = args.dup;
+        return block.append(instr);
+    }
+
+    override int getFuncPtr(string name)
+    {
+        auto instr = Instr(Instr.Kind.GetFuncPtr);
+
+        instr.getFuncPtr.name = name;
         return block.append(instr);
     }
 
@@ -504,6 +544,13 @@ unittest
         assert(findMsb(cast(int) i) == v);
 }
 
+class IpFuncPtr
+{
+    string name;
+
+    mixin(GenerateAll);
+}
+
 class IpBackendModule : BackendModule
 {
     alias Callable = void delegate(void[] ret, void[][] args);
@@ -566,6 +613,18 @@ class IpBackendModule : BackendModule
                             void[][] callArgs = instr.call.args.map!(reg => regArrays[reg]).array;
 
                             call(instr.call.name, regArrays[reg], callArgs);
+                            break;
+                        case CallFuncPtr:
+                            assert(!lastInstr);
+                            auto funcPtr = (cast(IpFuncPtr[]) regArrays[instr.callFuncPtr.funcPtr])[0];
+
+                            void[][] callArgs = instr.callFuncPtr.args.map!(reg => regArrays[reg]).array;
+                            call(funcPtr.name, regArrays[reg], callArgs);
+                            break;
+                        case GetFuncPtr:
+                            assert(!lastInstr);
+                            regArrays[reg][] = [
+                                new IpFuncPtr(instr.getFuncPtr.name)];
                             break;
                         case Return:
                             assert(lastInstr);
@@ -634,6 +693,14 @@ class IpBackendModule : BackendModule
     override IpBackendType pointerType(BackendType target)
     {
         assert(cast(IpBackendType) target);
+
+        return new PointerType;
+    }
+
+    override IpBackendType funcPointerType(BackendType ret, BackendType[] args)
+    {
+        assert(cast(IpBackendType) ret);
+        assert(args.all!(a => cast(IpBackendType) a));
 
         return new PointerType;
     }
@@ -777,4 +844,21 @@ unittest
     int ret;
     mod.call("square", cast(void[]) (&ret)[0 .. 1], [cast(void[]) (&arg)[0 .. 1]]);
     ret.should.be(25);
+}
+
+unittest
+{
+    auto mod = new IpBackendModule;
+    auto fpType = mod.funcPointerType(mod.intType, []);
+    auto callFp = mod.define("callFp", mod.intType, [fpType]);
+    auto retFive = mod.define("retFive", mod.intType, []);
+    auto test = mod.define("test", mod.intType, []);
+
+    callFp.ret(callFp.callFuncPtr(mod.intType, callFp.arg(0), []));
+    retFive.ret(retFive.intLiteral(5));
+    test.ret(test.call(mod.intType, "callFp", [test.getFuncPtr("retFive")]));
+
+    int ret;
+    mod.call("test", cast(void[]) (&ret)[0 .. 1], null);
+    ret.should.be(5);
 }

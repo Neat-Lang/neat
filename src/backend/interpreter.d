@@ -573,6 +573,9 @@ class IpBackendModule : BackendModule
             return this.callbacks[name](ret, args);
         }
         auto fun = this.functions[name];
+        assert(
+            args.length == fun.argTypes.length,
+            format!"%s expected %s arguments, not %s"(name, fun.argTypes.length, args.length));
         size_t numRegs = fun.blocks.map!(block => block.instrs.length).sum;
         int regAreaSize = fun.blocks.map!(block => block.instrs.map!(instr => instr.regSize(fun)).sum).sum;
 

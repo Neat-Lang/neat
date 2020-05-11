@@ -174,40 +174,6 @@ class Generator
         this.mod = mod;
         this.fun = fun;
     }
-
-    void define(Function fun, Namespace module_)
-    {
-        assert(this.fun is null);
-        this.fun = this.mod.define(
-            fun.name,
-            fun.ret.emit(this.mod),
-            fun.args.map!(a => a.type.emit(this.mod)).array
-        );
-        auto stackframe = new FunctionScope(module_);
-        auto argscope = new VarDeclScope(stackframe, Yes.frameBase);
-        Statement[] argAssignments;
-        foreach (i, arg; fun.args)
-        {
-            auto argExpr = new ArgExpr(cast(int) i, arg.type);
-
-            argAssignments ~= argscope.declare(arg.name, arg.type, argExpr);
-        }
-
-        auto functionBody = fun.statement.compile(argscope);
-
-        frameReg = this.fun.alloca(stackframe.structType.emit(this.mod));
-        scope (success)
-            resetFrame;
-
-        foreach (statement; argAssignments)
-        {
-            statement.emit(this);
-        }
-
-        functionBody.emit(this);
-        this.fun.ret(this.fun.voidLiteral);
-        this.fun = null;
-    }
 }
 
 class Parser
@@ -374,6 +340,22 @@ string parseIdentifier(ref Parser parser)
     }
 }
 
+
+bool acceptIdentifier(ref Parser parser, string identifier)
+{
+    with (parser)
+    {
+        begin;
+        if (parser.parseIdentifier != identifier)
+        {
+            revert;
+            return false;
+        }
+        commit;
+        return true;
+    }
+}
+
 class ASTInteger : ASTType
 {
     override Integer compile(Namespace) {
@@ -503,10 +485,10 @@ ASTType parseLeafType(ref Parser parser)
 
 struct ASTArgument
 {
+    string name;
+
     @NonNull
     ASTType type;
-
-    string name;
 
     mixin(GenerateAll);
 }
@@ -531,7 +513,7 @@ class ASTFunction
         return new Function(
             this.name,
             this.ret.compile(namespace),
-            this.args.map!(a => Argument(a.type.compile(namespace), a.name)).array,
+            this.args.map!(a => Argument(a.name, a.type.compile(namespace))).array,
             this.declaration,
             this.statement);
     }
@@ -541,10 +523,10 @@ class ASTFunction
 
 struct Argument
 {
+    string name;
+
     @NonNull
     Type type;
-
-    string name;
 
     mixin(GenerateAll);
 }
@@ -563,6 +545,40 @@ class Function : Symbol
     ASTStatement statement;
 
     invariant (declaration || statement !is null);
+
+    void emit(Generator generator, Namespace module_)
+    {
+        assert(generator.fun is null);
+        generator.fun = generator.mod.define(
+            name,
+            ret.emit(generator.mod),
+            args.map!(a => a.type.emit(generator.mod)).array
+        );
+        auto stackframe = new FunctionScope(module_);
+        auto argscope = new VarDeclScope(stackframe, Yes.frameBase);
+        Statement[] argAssignments;
+        foreach (i, arg; args)
+        {
+            auto argExpr = new ArgExpr(cast(int) i, arg.type);
+
+            argAssignments ~= argscope.declare(arg.name, arg.type, argExpr);
+        }
+
+        auto functionBody = statement.compile(argscope);
+
+        generator.frameReg = generator.fun.alloca(stackframe.structType.emit(generator.mod));
+        scope (success)
+            generator.resetFrame;
+
+        foreach (statement; argAssignments)
+        {
+            statement.emit(generator);
+        }
+
+        functionBody.emit(generator);
+        generator.fun.ret(generator.fun.voidLiteral);
+        generator.fun = null;
+    }
 
     mixin(GenerateAll);
 }
@@ -618,7 +634,7 @@ ASTFunction parseFunction(ref Parser parser)
             }
             auto argtype = parser.parseType;
             auto argname = parser.parseIdentifier;
-            args ~= ASTArgument(argtype, argname);
+            args ~= ASTArgument(argname, argtype);
         }
         auto stmt = parser.parseStatement;
         commit;
@@ -1264,13 +1280,17 @@ class ASTCall : ASTExpression
             }
             return this.target.compile(namespace);
         }();
-        auto expr = cast(Expression) target;
         auto args = this.args.map!(a => a.compile(namespace)).array;
         if (cast(Function) target)
         {
             auto function_ = cast(Function) target;
             return new Call(function_, args);
         }
+        if (auto delegate_ = cast(Delegate) target)
+        {
+            return new FuncPtrCall(delegate_.funcPtr, [delegate_.thisPtr] ~ args);
+        }
+        auto expr = cast(Expression) target;
         if (expr && cast(FunctionPointer) expr.type)
         {
             return new FuncPtrCall(expr, args);
@@ -1605,25 +1625,65 @@ ASTCall parseCall(ref Parser parser, ASTExpression base)
     }
 }
 
-class ASTStructMember : ASTExpression
+class Delegate : Expression
+{
+    Expression funcPtr;
+
+    Expression thisPtr;
+
+    override Type type()
+    {
+        assert(false);
+    }
+
+    override Reg emit(Generator output)
+    {
+        assert(false);
+    }
+
+    mixin(GenerateThis);
+}
+
+class ASTMember : ASTExpression
 {
     ASTExpression base;
 
     string member;
 
-    override StructMember compile(Namespace namespace)
+    override Expression compile(Namespace namespace)
     {
         auto base = this.base.compile(namespace);
         while (cast(Pointer) base.type) {
             base = new Dereference(base);
         }
-        assert(cast(Reference) base, "TODO struct member of value");
-        auto structType = cast(Struct) base.type;
-        assert(structType, format!"expected struct type for member, not %s of %s"(base, base.type));
-        auto memberOffset = structType.members.countUntil!(a => a.name == this.member);
-        assert(memberOffset != -1, "no such member " ~ this.member);
+        if (auto structType = cast(Struct) base.type)
+        {
+            assert(cast(Reference) base, "TODO struct member of value");
+            auto memberOffset = structType.members.countUntil!(a => a.name == this.member);
+            assert(memberOffset != -1, "no such member " ~ this.member);
+            return new StructMember(cast(Reference) base, cast(int) memberOffset);
+        }
+        if (auto classType = cast(Class) base.type)
+        {
+            auto methodOffset = classType.methods.countUntil!(a => a.name == this.member);
+            auto asStructPtr = new PointerCast(new Pointer(classType.dataStruct), base);
+            if (methodOffset != -1)
+            {
+                auto classInfo = new Dereference(new PointerCast(
+                    new Pointer(classType.classInfoStruct), new StructMember(new Dereference(asStructPtr), 0)));
+                // TODO dereference-into-symbol so we can '&' it again
+                auto funcPtr = new StructMember(classInfo, cast(int) methodOffset);
+                return new Delegate(funcPtr, base);
+            }
+            auto memberOffset = classType.members.countUntil!(a => a.name == this.member);
+            assert(memberOffset != -1, "no such member " ~ this.member);
+            return new StructMember(
+                new Dereference(asStructPtr),
+                cast(int) memberOffset + 1, // ignoring vtable ptr
+            );
+        }
 
-        return new StructMember(cast(Reference) base, cast(int) memberOffset);
+        assert(false, format!"expected struct/class type for member, not %s of %s"(base, base.type));
     }
 
     mixin(GenerateThis);
@@ -1642,7 +1702,7 @@ ASTExpression parseMember(ref Parser parser, ASTExpression base)
         auto name = parser.parseIdentifier;
         assert(name, "member expected");
         commit;
-        return new ASTStructMember(base, name);
+        return new ASTMember(base, name);
     }
 }
 
@@ -1662,15 +1722,15 @@ class ASTIndexAccess : ASTExpression
 
         auto int_mul = new Function("int_mul",
             new Integer,
-            [Argument(new Integer, ""), Argument(new Integer, "")],
+            [Argument("", new Integer), Argument("", new Integer)],
             true, null);
         auto ptr_offset = new Function("ptr_offset",
             new Pointer(new Void),
-            [Argument(new Pointer(new Void), ""), Argument(new Integer, "")],
+            [Argument("", new Pointer(new Void)), Argument("", new Integer)],
             true, null);
         auto offset = new Call(int_mul, [index, new Literal(cast(int) base.type.size)]);
 
-        return new Dereference(new PointerCast(new Call(ptr_offset, [base, offset]), base.type));
+        return new Dereference(new PointerCast(base.type, new Call(ptr_offset, [base, offset])));
     }
 
     mixin(GenerateThis);
@@ -1694,6 +1754,56 @@ ASTExpression parseIndex(ref Parser parser, ASTExpression base)
     }
 }
 
+class ASTNewExpression : ASTExpression
+{
+    ASTType type;
+
+    override NewExpression compile(Namespace namespace)
+    {
+        auto type = this.type.compile(namespace);
+        auto classType = cast(Class) type;
+
+        assert(classType, format!"expected new <class>, not %s"(type));
+
+        return new NewExpression(classType);
+    }
+
+    mixin(GenerateThis);
+}
+
+class NewExpression : Expression
+{
+    Class classType;
+
+    override Type type()
+    {
+        return this.classType;
+    }
+
+    Reg emit(Generator output)
+    {
+        // oh boy.
+        auto classInfoStruct = this.classType.classInfoStruct;
+        auto classDataStruct = this.classType.dataStruct;
+        auto voidp = (new Pointer(new Void)).emit(output.mod);
+        auto classInfoPtr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(cast(int) classInfoStruct.size)]);
+        foreach (i, method; classType.methods)
+        {
+            auto funcPtr = method.funcPtrType;
+            auto target = output.fun.fieldOffset(classInfoStruct.emit(output.mod), classInfoPtr, cast(int) i);
+            // TODO mangle
+            auto src = output.fun.getFuncPtr(method.name);
+            output.fun.store(funcPtr.emit(output.mod), target, src);
+        }
+        auto classPtr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(cast(int) classDataStruct.size)]);
+        auto classInfoTarget = output.fun.fieldOffset(classDataStruct.emit(output.mod), classPtr, 0);
+        output.fun.store(voidp, classInfoTarget, classInfoPtr);
+        return classPtr;
+    }
+
+    mixin(GenerateThis);
+}
+
 ASTExpression parseExpressionLeaf(ref Parser parser)
 {
     with (parser)
@@ -1711,6 +1821,12 @@ ASTExpression parseExpressionLeaf(ref Parser parser)
 
             assert(next !is null);
             return new ASTReference(next);
+        }
+        if (parser.acceptIdentifier("new"))
+        {
+            auto type = parser.parseType;
+
+            return new ASTNewExpression(type);
         }
         auto currentExpr = parser.parseExpressionBase;
         assert(currentExpr);
@@ -1801,9 +1917,9 @@ class FunctionScope : Namespace
 
 class PointerCast : Expression
 {
-    Expression value;
-
     Type target;
+
+    Expression value;
 
     override Type type()
     {
@@ -1824,7 +1940,7 @@ Expression implicitConvertTo(Expression from, Type to)
     // void* casts to any pointer
     if (cast(Pointer) to && from.type == new Pointer(new Void))
     {
-        return new PointerCast(from, to);
+        return new PointerCast(to, from);
     }
     assert(false, format!"todo: cast(%s) %s"(to, from.type));
 }
@@ -1833,6 +1949,226 @@ class NoopStatement : Statement
 {
     override void emit(Generator)
     {
+    }
+}
+
+// TODO merge with class Function
+class Method : Symbol
+{
+    string name;
+
+    @NonNull
+    Type ret;
+
+    Argument[] args;
+
+    ASTStatement statement;
+
+    void emit(Generator generator, Namespace module_, Class thisType)
+    {
+        assert(generator.fun is null);
+        auto voidp = new Pointer(new Void);
+        generator.fun = generator.mod.define(
+            name,
+            ret.emit(generator.mod),
+            [voidp.emit(generator.mod)] ~ args.map!(a => a.type.emit(generator.mod)).array
+        );
+        auto stackframe = new FunctionScope(module_);
+        auto argscope = new VarDeclScope(stackframe, Yes.frameBase);
+        Statement[] argAssignments;
+        argAssignments ~= argscope.declare("this", thisType, new PointerCast(thisType, new ArgExpr(0, voidp)));
+        foreach (i, arg; args)
+        {
+            auto argExpr = new ArgExpr(cast(int) i + 1, arg.type);
+
+            argAssignments ~= argscope.declare(arg.name, arg.type, argExpr);
+        }
+
+        auto functionBody = statement.compile(argscope);
+
+        generator.frameReg = generator.fun.alloca(stackframe.structType.emit(generator.mod));
+        scope (success)
+            generator.resetFrame;
+
+        foreach (statement; argAssignments)
+        {
+            statement.emit(generator);
+        }
+
+        functionBody.emit(generator);
+        generator.fun.ret(generator.fun.voidLiteral);
+        generator.fun = null;
+    }
+
+    Type funcPtrType()
+    {
+        return new FunctionPointer(ret, args.map!(arg => arg.type).array);
+    }
+
+    mixin(GenerateAll);
+}
+
+class Class : Type
+{
+    struct Member
+    {
+        string name;
+
+        Type type;
+
+        mixin(GenerateThis);
+    }
+
+    string name;
+
+    Member[] members;
+
+    Method[] methods;
+
+    override BackendType emit(BackendModule mod)
+    {
+        return mod.pointerType(mod.structType(this.members.map!(a => a.type.emit(mod)).array));
+    }
+
+    size_t structSize() const
+    {
+        return members.map!(a => a.type.size).sum;
+    }
+
+    Struct dataStruct()
+    {
+        auto voidp = new Pointer(new Void);
+        return new Struct(
+            null,
+            [Struct.Member("this", voidp)] ~ this.members.map!(a => Struct.Member(a.name, a.type)).array,
+        );
+    }
+
+    Struct classInfoStruct()
+    {
+        return new Struct(
+            null,
+            this.methods.map!(
+                a => Struct.Member(a.name, a.funcPtrType)
+            ).array,
+        );
+    }
+
+    override size_t size() const
+    {
+        return size_t.sizeof;
+    }
+
+    override string toString() const
+    {
+        return format!"classref(%s)"(this.name);
+    }
+
+    mixin(GenerateThis);
+}
+
+class ASTClassDecl : ASTType
+{
+    struct Member
+    {
+        string name;
+
+        ASTType type;
+
+        mixin(GenerateThis);
+    }
+
+    struct Method
+    {
+        string name;
+
+        ASTType ret;
+
+        ASTArgument[] args;
+
+        ASTStatement body_;
+
+        mixin(GenerateThis);
+    }
+
+    string name;
+
+    Member[] members;
+
+    Method[] methods;
+
+    override Class compile(Namespace namespace)
+    {
+        // TODO subscope
+        return new Class(
+            name,
+            members.map!(a => Class.Member(a.name, a.type.compile(namespace))).array,
+            methods.map!(a => new .Method(
+                a.name,
+                a.ret.compile(namespace),
+                a.args.map!(b => Argument(b.name, b.type.compile(namespace))).array,
+                a.body_)).array,
+        );
+    }
+
+    mixin(GenerateThis);
+}
+
+ASTArgument[] parseArglist(ref Parser parser)
+{
+    with (parser)
+    {
+        ASTArgument[] args;
+        while (!accept(")"))
+        {
+            if (!args.empty)
+            {
+                if (!accept(","))
+                {
+                    fail("',' or ')' expected");
+                }
+            }
+            auto argtype = parser.parseType;
+            if (!argtype) fail("argument type expected");
+            auto argname = parser.parseIdentifier;
+            if (!argname) fail("argument name expected");
+            args ~= ASTArgument(argname, argtype);
+        }
+        return args;
+    }
+}
+
+ASTClassDecl parseClassDecl(ref Parser parser)
+{
+    with (parser)
+    {
+        if (!parser.acceptIdentifier("class"))
+        {
+            return null;
+        }
+        auto name = parser.parseIdentifier;
+        ASTClassDecl.Member[] members;
+        ASTClassDecl.Method[] methods;
+        expect("{");
+        while (!accept("}"))
+        {
+            auto memberType = parser.parseType;
+            if (!memberType) parser.fail("expected member type");
+            auto memberName = parser.parseIdentifier;
+            if (!memberName) parser.fail("expected member name");
+            if (accept("(")) // method
+            {
+                ASTArgument[] args = parser.parseArglist;
+                ASTStatement stmt = parser.parseStatement;
+                methods ~= ASTClassDecl.Method(memberName, memberType, args, stmt);
+            }
+            else
+            {
+                expect(";");
+                members ~= ASTClassDecl.Member(memberName, memberType);
+            }
+        }
+        return new ASTClassDecl(name, members, methods);
     }
 }
 
@@ -1905,7 +2241,14 @@ class Module : Namespace
         {
             if (auto fun = cast(Function) entry.value)
                 if (!fun.declaration)
-                    generator.define(fun, this);
+                    fun.emit(generator, this);
+            if (auto class_ = cast(Class) entry.value)
+            {
+                foreach (method; class_.methods)
+                {
+                    method.emit(generator, this, class_);
+                }
+            }
         }
     }
 
@@ -1930,16 +2273,18 @@ Module parseModule(ref Parser parser)
 
     while (!parser.eof)
     {
-        auto strct = parser.parseStructDecl;
-
-        if (strct) {
+        if (auto classDecl = parser.parseClassDecl)
+        {
+            module_.add(classDecl.name, classDecl.compile(module_));
+            continue;
+        }
+        if (auto strct = parser.parseStructDecl)
+        {
             module_.add(strct.name, strct.compile(module_));
             continue;
         }
-
-        auto fun = parser.parseFunction;
-
-        if (fun) {
+        if (auto fun = parser.parseFunction)
+        {
             module_.add(fun.name, fun.compile(module_));
             continue;
         }
@@ -1976,8 +2321,8 @@ void defineRuntime(BackendModule backModule, Module frontModule)
 {
     import backend.interpreter : IpBackendModule;
 
-    frontModule.addFunction(new Function("assert", new Void, [Argument(new Integer, "")], true, null));
-    frontModule.addFunction(new Function("malloc", new Pointer(new Void), [Argument(new Integer, "")], true, null));
+    frontModule.addFunction(new Function("assert", new Void, [Argument("", new Integer)], true, null));
+    frontModule.addFunction(new Function("malloc", new Pointer(new Void), [Argument("", new Integer)], true, null));
 
     auto ipModule = cast(IpBackendModule) backModule;
 

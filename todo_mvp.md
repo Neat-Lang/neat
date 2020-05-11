@@ -1,7 +1,6 @@
 ## for porting bootstrap compiler
 
-- structs:
-    - methods
 - string literals
 - for loops
-- classes??
+- classes
+  - subclassing

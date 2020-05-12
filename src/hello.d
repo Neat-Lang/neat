@@ -1665,7 +1665,7 @@ class ASTMember : ASTExpression
         }
         if (auto classType = cast(Class) base.type)
         {
-            auto methodOffset = classType.methods.countUntil!(a => a.name == this.member);
+            auto methodOffset = classType.vtable.countUntil!(a => a.name == this.member);
             auto asStructPtr = new PointerCast(new Pointer(classType.dataStruct), base);
             if (methodOffset != -1)
             {
@@ -1787,12 +1787,11 @@ class NewExpression : Expression
         auto classDataStruct = this.classType.dataStruct;
         auto voidp = (new Pointer(new Void)).emit(output.mod);
         auto classInfoPtr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(cast(int) classInfoStruct.size)]);
-        foreach (i, method; classType.methods)
+        foreach (i, method; classType.vtable)
         {
             auto funcPtr = method.funcPtrType;
             auto target = output.fun.fieldOffset(classInfoStruct.emit(output.mod), classInfoPtr, cast(int) i);
-            // TODO mangle
-            auto src = output.fun.getFuncPtr(method.name);
+            auto src = output.fun.getFuncPtr(method.mangle);
             output.fun.store(funcPtr.emit(output.mod), target, src);
         }
         auto classPtr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(cast(int) classDataStruct.size)]);
@@ -1942,6 +1941,19 @@ Expression implicitConvertTo(Expression from, Type to)
     {
         return new PointerCast(to, from);
     }
+    if (cast(Class) to && cast(Class) from.type)
+    {
+        auto currentClass = cast(Class) from.type;
+
+        while (currentClass)
+        {
+            if (currentClass is to)
+            {
+                return new PointerCast(to, from);
+            }
+            currentClass = currentClass.superClass;
+        }
+    }
     assert(false, format!"todo: cast(%s) %s"(to, from.type));
 }
 
@@ -1955,6 +1967,8 @@ class NoopStatement : Statement
 // TODO merge with class Function
 class Method : Symbol
 {
+    Class classType;
+
     string name;
 
     @NonNull
@@ -1964,12 +1978,18 @@ class Method : Symbol
 
     ASTStatement statement;
 
+    string mangle()
+    {
+        // TODO mangle types
+        return format!"_%s_%s"(this.classType.name, this.name);
+    }
+
     void emit(Generator generator, Namespace module_, Class thisType)
     {
         assert(generator.fun is null);
         auto voidp = new Pointer(new Void);
         generator.fun = generator.mod.define(
-            name,
+            mangle,
             ret.emit(generator.mod),
             [voidp.emit(generator.mod)] ~ args.map!(a => a.type.emit(generator.mod)).array
         );
@@ -2021,9 +2041,20 @@ class Class : Type
 
     string name;
 
+    Class superClass;
+
     Member[] members;
 
+    @(This.Init!null)
     Method[] methods;
+
+    this(string name, Class superClass, Member[] members)
+    {
+        this.name = name;
+        this.superClass = superClass;
+        this.members = members;
+        this.methods = null;
+    }
 
     override BackendType emit(BackendModule mod)
     {
@@ -2037,10 +2068,16 @@ class Class : Type
 
     Struct dataStruct()
     {
+        static Member[] allMembers(Class class_)
+        {
+            if (class_ is null) return null;
+            return allMembers(class_.superClass) ~ class_.members;
+        }
+
         auto voidp = new Pointer(new Void);
         return new Struct(
             null,
-            [Struct.Member("this", voidp)] ~ this.members.map!(a => Struct.Member(a.name, a.type)).array,
+            [Struct.Member("this", voidp)] ~ allMembers(this).map!(a => Struct.Member(a.name, a.type)).array,
         );
     }
 
@@ -2048,10 +2085,29 @@ class Class : Type
     {
         return new Struct(
             null,
-            this.methods.map!(
-                a => Struct.Member(a.name, a.funcPtrType)
-            ).array,
+            vtable.map!(a => Struct.Member(a.name, a.funcPtrType)).array,
         );
+    }
+
+    Method[] vtable()
+    {
+        auto combinedMethods = superClass ? superClass.vtable : null;
+
+        foreach (method; methods)
+        {
+            // TODO match types
+            alias pred = a => a.name == method.name;
+
+            if (combinedMethods.any!pred)
+            {
+                combinedMethods[combinedMethods.countUntil!pred] = method;
+            }
+            else
+            {
+                combinedMethods ~= method;
+            }
+        }
+        return combinedMethods;
     }
 
     override size_t size() const
@@ -2063,8 +2119,6 @@ class Class : Type
     {
         return format!"classref(%s)"(this.name);
     }
-
-    mixin(GenerateThis);
 }
 
 class ASTClassDecl : ASTType
@@ -2093,22 +2147,35 @@ class ASTClassDecl : ASTType
 
     string name;
 
+    string superClass;
+
     Member[] members;
 
     Method[] methods;
 
     override Class compile(Namespace namespace)
     {
+        Class superClass = null;
+        if (this.superClass)
+        {
+            auto superClassObj = namespace.lookup(this.superClass);
+            assert(superClassObj);
+            superClass = cast(Class) superClassObj;
+            assert(superClass);
+        }
         // TODO subscope
-        return new Class(
+        auto class_ = new Class(
             name,
-            members.map!(a => Class.Member(a.name, a.type.compile(namespace))).array,
-            methods.map!(a => new .Method(
-                a.name,
-                a.ret.compile(namespace),
-                a.args.map!(b => Argument(b.name, b.type.compile(namespace))).array,
-                a.body_)).array,
+            superClass,
+            members.map!(a => Class.Member(a.name, a.type.compile(namespace))).array
         );
+        class_.methods = methods.map!(a => new .Method(
+            class_,
+            a.name,
+            a.ret.compile(namespace),
+            a.args.map!(b => Argument(b.name, b.type.compile(namespace))).array,
+            a.body_)).array;
+        return class_;
     }
 
     mixin(GenerateThis);
@@ -2146,7 +2213,12 @@ ASTClassDecl parseClassDecl(ref Parser parser)
         {
             return null;
         }
-        auto name = parser.parseIdentifier;
+        string name = parser.parseIdentifier;
+        string superClass = null;
+        if (accept(":")) {
+            superClass = parser.parseIdentifier;
+            assert(superClass);
+        }
         ASTClassDecl.Member[] members;
         ASTClassDecl.Method[] methods;
         expect("{");
@@ -2168,7 +2240,7 @@ ASTClassDecl parseClassDecl(ref Parser parser)
                 members ~= ASTClassDecl.Member(memberName, memberType);
             }
         }
-        return new ASTClassDecl(name, members, methods);
+        return new ASTClassDecl(name, superClass, members, methods);
     }
 }
 

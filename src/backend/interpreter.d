@@ -354,6 +354,7 @@ class IpBackendFunction : BackendFunction
     }
 
     override int getFuncPtr(string name)
+    in (!name.empty)
     {
         auto instr = Instr(Instr.Kind.GetFuncPtr);
 
@@ -564,7 +565,7 @@ class IpBackendModule : BackendModule
     }
 
     void call(string name, void[] ret, void[][] args)
-    in (name in this.functions || name in this.callbacks, format!"%s not found"(name))
+    in (name in this.functions || name in this.callbacks, format!"function '%s' not found"(name))
     {
         import core.stdc.stdlib : alloca;
 
@@ -656,23 +657,27 @@ class IpBackendModule : BackendModule
                             }
                             break;
                         case Alloca:
+                            assert(!lastInstr);
                             auto target = new void[instr.alloca.type.size];
                             setInitValue(instr.alloca.type, target.ptr);
                             (cast(void*[]) regArrays[reg])[0] = target.ptr;
                             break;
                         case FieldOffset:
+                            assert(!lastInstr);
                             auto base = (cast(void*[]) regArrays[instr.fieldOffset.base])[0];
                             auto offset = instr.fieldOffset.structType.offsetOf(instr.fieldOffset.member);
 
                             (cast(void*[]) regArrays[reg])[0] = base + offset;
                             break;
                         case Load:
+                            assert(!lastInstr);
                             auto target = (cast(void*[]) regArrays[instr.load.target])[0];
 
                             regArrays[reg][] = target[0 .. regArrays[reg].length];
                             break;
                         case Store:
-                            auto target = (cast(void*[]) regArrays[instr.load.target])[0];
+                            assert(!lastInstr);
+                            auto target = (cast(void*[]) regArrays[instr.store.target])[0];
 
                             target[0 .. regArrays[instr.store.value].length] = regArrays[instr.store.value];
                             break;
@@ -736,7 +741,7 @@ unittest
     {
         (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] * (cast(int[]) args[1])[0];
     });
-    auto square = mod.define("square", mod.intType, [mod.intType, mod.intType]);
+    auto square = mod.define("square", mod.intType, [mod.intType]);
     with (square) {
         auto arg0 = arg(0);
         auto reg = call(mod.intType, "int_mul", [arg0, arg0]);
@@ -827,7 +832,7 @@ unittest
     {
         (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] * (cast(int[]) args[1])[0];
     });
-    auto square = mod.define("square", mod.intType, [mod.intType, mod.intType]);
+    auto square = mod.define("square", mod.intType, [mod.intType]);
     auto stackframeType = mod.structType([mod.intType, mod.intType]);
     with (square) {
         auto stackframe = alloca(stackframeType);

@@ -27,6 +27,13 @@ class IntType : IpBackendType
     override int size() const { return 4; }
 }
 
+class CharType : IpBackendType
+{
+    override string toString() const { return "char"; }
+
+    override int size() const { return 1; }
+}
+
 class VoidType : IpBackendType
 {
     override string toString() const { return "void"; }
@@ -71,6 +78,12 @@ string formatLiteral(const IpBackendType type, const void[] data)
     if (cast(VoidType) type)
     {
         return "void";
+    }
+    if (cast(PointerType) type) // hope it's char*
+    {
+        import std.conv : to;
+
+        return (*cast(char**) data).to!string;
     }
     assert(false, "TODO");
 }
@@ -317,6 +330,18 @@ class IpBackendFunction : BackendFunction
 
         instr.literal.type = new IntType;
         instr.literal.value = cast(void[]) [value];
+
+        return block.append(instr);
+    }
+
+    override Reg stringLiteral(string text)
+    {
+        import std.string : toStringz;
+
+        auto instr = Instr(Instr.Kind.Literal);
+
+        instr.literal.type = new PointerType;
+        instr.literal.value = cast(void[]) [text.toStringz];
 
         return block.append(instr);
     }
@@ -694,7 +719,9 @@ class IpBackendModule : BackendModule
 
     override IntType intType() { return new IntType; }
 
-    override IpBackendType voidType() { return new VoidType; }
+    override VoidType voidType() { return new VoidType; }
+
+    override CharType charType() { return new CharType; }
 
     override IpBackendType structType(BackendType[] types)
     {

@@ -54,6 +54,29 @@ class Integer : Type
     }
 }
 
+class Character : Type
+{
+    override BackendType emit(BackendModule mod)
+    {
+        return mod.charType;
+    }
+
+    override size_t size() const
+    {
+        return 1;
+    }
+
+    override string toString() const
+    {
+        return "char";
+    }
+
+    override bool opEquals(const Object obj) const
+    {
+        return cast(Character) obj !is null;
+    }
+}
+
 class Void : Type
 {
     override BackendType emit(BackendModule mod)
@@ -370,6 +393,13 @@ class ASTVoid : ASTType
     }
 }
 
+class ASTCharType : ASTType
+{
+    override Character compile(Namespace) {
+        return new Character;
+    }
+}
+
 class ASTPointer : ASTType
 {
     ASTType subType;
@@ -477,6 +507,12 @@ ASTType parseLeafType(ref Parser parser)
         {
             commit;
             return new ASTVoid;
+        }
+
+        if (identifier == "char")
+        {
+            commit;
+            return new ASTCharType;
         }
 
         return new NamedType(identifier);
@@ -1358,13 +1394,7 @@ class ASTCall : ASTSymbol
 
     override Expression compile(Namespace namespace)
     {
-        auto target = {
-            if (auto var = cast(Variable) this.target)
-            {
-                return namespace.lookup(var.name);
-            }
-            return this.target.compile(namespace);
-        }();
+        auto target = this.target.compile(namespace);
         auto args = this.args.map!(a => a.compile(namespace).beExpression).array;
         if (auto function_ = cast(Function) target)
         {
@@ -1379,7 +1409,7 @@ class ASTCall : ASTSymbol
         {
             return new FuncPtrCall(expr, args);
         }
-        assert(false, format!"unknown call target %s for %s (%s?)"(target, this.target, expr.type));
+        assert(false, format!"unknown call target %s for %s (%s?)"(target, this.target, expr ? expr.type : null));
     }
 
     mixin(GenerateAll);
@@ -1440,13 +1470,12 @@ class Variable : ASTSymbol
 {
     string name;
 
-    override Expression compile(Namespace namespace)
+    override Symbol compile(Namespace namespace)
     out (result; result !is null)
     {
         auto ret = namespace.lookup(name);
-        assert(cast(Expression) ret, format!"%s is not an expression (%s)"(
-            name, ret));
-        return cast(Expression) ret;
+        assert(ret, format!"%s not found"(name));
+        return ret;
     }
 
     mixin(GenerateThis);
@@ -1889,6 +1918,10 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
 {
     with (parser)
     {
+        if (accept("\""))
+        {
+            return parser.parseStringLiteral("\"");
+        }
         if (accept("*"))
         {
             auto next = parser.parseExpressionLeaf;
@@ -1932,6 +1965,58 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
         }
         return currentExpr;
     }
+}
+
+ASTStringLiteral parseStringLiteral(ref Parser parser, string endMarker)
+{
+    import std.exception : enforce;
+
+    string str;
+    with (parser)
+    {
+        while (!text.startsWith(endMarker))
+        {
+            if (text.empty)
+            {
+                fail("expected end of string, got end of file");
+            }
+
+            str ~= text.front;
+            text.popFront;
+        }
+        accept(endMarker).enforce;
+
+        return new ASTStringLiteral(str);
+    }
+}
+
+class ASTStringLiteral : ASTSymbol
+{
+    string text;
+
+    StringLiteral compile(Namespace)
+    {
+        return new StringLiteral(text);
+    }
+
+    mixin(GenerateThis);
+}
+
+class StringLiteral : Expression
+{
+    string text;
+
+    override Type type()
+    {
+        return new Pointer(new Character);
+    }
+
+    override Reg emit(Generator output)
+    {
+        return output.fun.stringLiteral(this.text);
+    }
+
+    mixin(GenerateThis);
 }
 
 ASTSymbol parseExpressionBase(ref Parser parser)
@@ -2539,6 +2624,11 @@ void defineRuntime(BackendModule backModule, Module frontModule)
         import core.stdc.stdlib : malloc;
 
         return malloc(size);
+    });
+    definePublicCallback("print", (char* text) {
+        import std.conv : to;
+
+        writefln!"%s"(text.to!string);
     });
 }
 

@@ -11,6 +11,7 @@ interface BackendModule
 {
     BackendType intType();
     BackendType voidType();
+    BackendType charType();
     BackendType structType(BackendType[] types);
     BackendType pointerType(BackendType target);
     BackendType funcPointerType(BackendType ret, BackendType[] args);
@@ -27,6 +28,7 @@ interface BackendFunction
     Reg arg(int index);
     Reg call(BackendType type, string name, Reg[] args);
     Reg intLiteral(int value);
+    Reg stringLiteral(string text);
     Reg voidLiteral();
     Reg alloca(BackendType type);
     Reg fieldOffset(BackendType structType, Reg structBase, int member);

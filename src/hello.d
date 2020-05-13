@@ -593,9 +593,18 @@ interface Statement
     void emit(Generator output);
 }
 
-interface ASTExpression
+interface ASTSymbol
 {
-    Expression compile(Namespace namespace);
+    Symbol compile(Namespace namespace);
+}
+
+Expression beExpression(Symbol symbol)
+{
+    if (auto expr = cast(Expression) symbol)
+    {
+        return expr;
+    }
+    assert(false, format!"expected expression, not %s"(symbol));
 }
 
 interface Expression : Symbol
@@ -783,11 +792,11 @@ ASTScopeStatement parseScope(ref Parser parser)
 
 class ASTReturnStatement : ASTStatement
 {
-    ASTExpression value;
+    ASTSymbol value;
 
     override ReturnStatement compile(Namespace namespace)
     {
-        return new ReturnStatement(value.compile(namespace));
+        return new ReturnStatement(value.compile(namespace).beExpression);
     }
 
     mixin(GenerateAll);
@@ -826,7 +835,7 @@ ASTReturnStatement parseReturn(ref Parser parser)
 
 class ASTIfStatement : ASTStatement
 {
-    ASTExpression test;
+    ASTSymbol test;
     ASTStatement then;
 
     override IfStatement compile(Namespace namespace)
@@ -835,7 +844,7 @@ class ASTIfStatement : ASTStatement
         auto test = this.test.compile(ifscope);
         auto then = this.then.compile(ifscope);
 
-        return new IfStatement(test, then);
+        return new IfStatement(test.beExpression, then);
     }
 
     mixin(GenerateAll);
@@ -886,9 +895,9 @@ ASTIfStatement parseIf(ref Parser parser)
 
 class ASTAssignStatement : ASTStatement
 {
-    ASTExpression target;
+    ASTSymbol target;
 
-    ASTExpression value;
+    ASTSymbol value;
 
     override AssignStatement compile(Namespace namespace)
     {
@@ -896,7 +905,7 @@ class ASTAssignStatement : ASTStatement
         auto value = this.value.compile(namespace);
         auto targetref = cast(Reference) target;
         assert(targetref, "target of assignment must be a reference");
-        return new AssignStatement(targetref, value);
+        return new AssignStatement(targetref, value.beExpression);
     }
 
     mixin(GenerateAll);
@@ -946,7 +955,7 @@ class ASTVarDeclStatement : ASTStatement
 
     ASTType type;
 
-    ASTExpression initial;
+    ASTSymbol initial;
 
     override Statement compile(Namespace namespace)
     {
@@ -954,7 +963,7 @@ class ASTVarDeclStatement : ASTStatement
         {
             auto initial = this.initial.compile(namespace);
 
-            return namespace.find!VarDeclScope.declare(this.name, this.type.compile(namespace), initial);
+            return namespace.find!VarDeclScope.declare(this.name, this.type.compile(namespace), initial.beExpression);
         }
         else
         {
@@ -982,7 +991,7 @@ ASTVarDeclStatement parseVarDecl(ref Parser parser)
             revert;
             return null;
         }
-        ASTExpression initial = null;
+        ASTSymbol initial = null;
         if (accept("="))
         {
             initial = parser.parseExpression;
@@ -996,11 +1005,11 @@ ASTVarDeclStatement parseVarDecl(ref Parser parser)
 
 class ASTExprStatement : ASTStatement
 {
-    ASTExpression value;
+    ASTSymbol value;
 
     override Statement compile(Namespace namespace)
     {
-        return new ExprStatement(this.value.compile(namespace));
+        return new ExprStatement(this.value.compile(namespace).beExpression);
     }
 
     mixin(GenerateAll);
@@ -1055,7 +1064,7 @@ ASTStatement parseStatement(ref Parser parser)
     assert(false);
 }
 
-ASTExpression parseExpression(ref Parser parser)
+ASTSymbol parseExpression(ref Parser parser)
 {
     return parser.parseArithmetic;
 }
@@ -1070,15 +1079,15 @@ enum ArithmeticOpType
     lt,
 }
 
-class ASTArithmeticOp : ASTExpression
+class ASTArithmeticOp : ASTSymbol
 {
     ArithmeticOpType op;
-    ASTExpression left;
-    ASTExpression right;
+    ASTSymbol left;
+    ASTSymbol right;
 
     override ArithmeticOp compile(Namespace namespace)
     {
-        return new ArithmeticOp(op, left.compile(namespace), right.compile(namespace));
+        return new ArithmeticOp(op, left.compile(namespace).beExpression, right.compile(namespace).beExpression);
     }
 
     mixin(GenerateAll);
@@ -1123,7 +1132,7 @@ class ArithmeticOp : Expression
     mixin(GenerateToString);
 }
 
-ASTExpression parseArithmetic(ref Parser parser, size_t level = 0)
+ASTSymbol parseArithmetic(ref Parser parser, size_t level = 0)
 {
     auto left = parser.parseExpressionLeaf;
 
@@ -1142,7 +1151,7 @@ ASTExpression parseArithmetic(ref Parser parser, size_t level = 0)
     return left;
 }
 
-void parseMul(ref Parser parser, ref ASTExpression left)
+void parseMul(ref Parser parser, ref ASTSymbol left)
 {
     while (true)
     {
@@ -1156,7 +1165,7 @@ void parseMul(ref Parser parser, ref ASTExpression left)
     }
 }
 
-void parseAddSub(ref Parser parser, ref ASTExpression left)
+void parseAddSub(ref Parser parser, ref ASTSymbol left)
 {
     while (true)
     {
@@ -1176,7 +1185,7 @@ void parseAddSub(ref Parser parser, ref ASTExpression left)
     }
 }
 
-void parseComparison(ref Parser parser, ref ASTExpression left)
+void parseComparison(ref Parser parser, ref ASTSymbol left)
 {
     if (parser.accept("=="))
     {
@@ -1197,7 +1206,7 @@ void parseComparison(ref Parser parser, ref ASTExpression left)
 
 class ASTWhile : ASTStatement
 {
-    ASTExpression cond;
+    ASTSymbol cond;
 
     ASTStatement body_;
 
@@ -1207,7 +1216,7 @@ class ASTWhile : ASTStatement
         auto condExpr = this.cond.compile(subscope);
         auto bodyStmt = this.body_.compile(subscope);
 
-        return new WhileLoop(condExpr, bodyStmt);
+        return new WhileLoop(condExpr.beExpression, bodyStmt);
     }
 
     mixin(GenerateAll);
@@ -1249,27 +1258,24 @@ ASTWhile parseWhile(ref Parser parser)
 {
     with (parser)
     {
-        begin;
-        auto stmt = parser.parseIdentifier;
-        if (stmt != "while" || !accept("("))
+        if (!parser.acceptIdentifier("while"))
         {
-            revert;
             return null;
         }
-        ASTExpression cond = parser.parseExpression;
+        expect("(");
+        ASTSymbol cond = parser.parseExpression;
         expect(")");
         ASTStatement body_ = parser.parseStatement;
 
-        commit;
         return new ASTWhile(cond, body_);
     }
 }
 
-class ASTCall : ASTExpression
+class ASTCall : ASTSymbol
 {
-    ASTExpression target;
+    ASTSymbol target;
 
-    ASTExpression[] args;
+    ASTSymbol[] args;
 
     override Expression compile(Namespace namespace)
     {
@@ -1280,15 +1286,14 @@ class ASTCall : ASTExpression
             }
             return this.target.compile(namespace);
         }();
-        auto args = this.args.map!(a => a.compile(namespace)).array;
-        if (cast(Function) target)
+        auto args = this.args.map!(a => a.compile(namespace).beExpression).array;
+        if (auto function_ = cast(Function) target)
         {
-            auto function_ = cast(Function) target;
             return new Call(function_, args);
         }
-        if (auto delegate_ = cast(Delegate) target)
+        if (auto method = cast(ClassMethod) target)
         {
-            return new FuncPtrCall(delegate_.funcPtr, [delegate_.thisPtr] ~ args);
+            return new FuncPtrCall(method.funcPtr, [method.thisPtr] ~ args);
         }
         auto expr = cast(Expression) target;
         if (expr && cast(FunctionPointer) expr.type)
@@ -1352,7 +1357,7 @@ class FuncPtrCall : Expression
     mixin(GenerateToString);
 }
 
-class Variable : ASTExpression
+class Variable : ASTSymbol
 {
     string name;
 
@@ -1369,7 +1374,7 @@ class Variable : ASTExpression
     mixin(GenerateToString);
 }
 
-class ASTLiteral : ASTExpression
+class ASTLiteral : ASTSymbol
 {
     int value;
 
@@ -1494,13 +1499,13 @@ class StructMember : Reference
     mixin(GenerateThis);
 }
 
-class ASTDereference : ASTExpression
+class ASTDereference : ASTSymbol
 {
-    ASTExpression base;
+    ASTSymbol base;
 
     override Dereference compile(Namespace namespace)
     {
-        return new Dereference(base.compile(namespace));
+        return new Dereference(base.compile(namespace).beExpression);
     }
 
     mixin(GenerateThis);
@@ -1538,9 +1543,9 @@ class Dereference : Reference
     mixin(GenerateThis);
 }
 
-class ASTReference : ASTExpression
+class ASTReference : ASTSymbol
 {
-    ASTExpression base;
+    ASTSymbol base;
 
     override Expression compile(Namespace namespace)
     {
@@ -1603,7 +1608,7 @@ class ReferenceExpression : Expression
     mixin(GenerateThis);
 }
 
-ASTCall parseCall(ref Parser parser, ASTExpression base)
+ASTCall parseCall(ref Parser parser, ASTSymbol base)
 {
     with (parser)
     {
@@ -1613,7 +1618,7 @@ ASTCall parseCall(ref Parser parser, ASTExpression base)
             revert;
             return null;
         }
-        ASTExpression[] args;
+        ASTSymbol[] args;
         while (!accept(")"))
         {
             if (!args.empty)
@@ -1625,71 +1630,67 @@ ASTCall parseCall(ref Parser parser, ASTExpression base)
     }
 }
 
-class Delegate : Expression
+class ClassMethod : Symbol
 {
     Expression funcPtr;
 
     Expression thisPtr;
 
-    override Type type()
-    {
-        assert(false);
-    }
-
-    override Reg emit(Generator output)
-    {
-        assert(false);
-    }
-
     mixin(GenerateThis);
 }
 
-class ASTMember : ASTExpression
+class ASTMember : ASTSymbol
 {
-    ASTExpression base;
+    ASTSymbol base;
 
     string member;
 
-    override Expression compile(Namespace namespace)
+    override Symbol compile(Namespace namespace)
     {
         auto base = this.base.compile(namespace);
-        while (cast(Pointer) base.type) {
-            base = new Dereference(base);
-        }
-        if (auto structType = cast(Struct) base.type)
+        if (cast(Expression) base)
         {
-            assert(cast(Reference) base, "TODO struct member of value");
-            auto memberOffset = structType.members.countUntil!(a => a.name == this.member);
-            assert(memberOffset != -1, "no such member " ~ this.member);
-            return new StructMember(cast(Reference) base, cast(int) memberOffset);
-        }
-        if (auto classType = cast(Class) base.type)
-        {
-            auto methodOffset = classType.vtable.countUntil!(a => a.name == this.member);
-            auto asStructPtr = new PointerCast(new Pointer(classType.dataStruct), base);
-            if (methodOffset != -1)
-            {
-                auto classInfo = new Dereference(new PointerCast(
-                    new Pointer(classType.classInfoStruct), new StructMember(new Dereference(asStructPtr), 0)));
-                // TODO dereference-into-symbol so we can '&' it again
-                auto funcPtr = new StructMember(classInfo, cast(int) methodOffset);
-                return new Delegate(funcPtr, base);
-            }
-            auto memberOffset = classType.members.countUntil!(a => a.name == this.member);
-            assert(memberOffset != -1, "no such member " ~ this.member);
-            return new StructMember(
-                new Dereference(asStructPtr),
-                cast(int) memberOffset + 1, // ignoring vtable ptr
-            );
-        }
+            auto baseExpr = base.beExpression;
 
-        assert(false, format!"expected struct/class type for member, not %s of %s"(base, base.type));
+            while (cast(Pointer) baseExpr.type) {
+                baseExpr = new Dereference(baseExpr);
+            }
+            if (auto structType = cast(Struct) baseExpr.type)
+            {
+                assert(cast(Reference) baseExpr, "TODO struct member of value");
+                auto memberOffset = structType.members.countUntil!(a => a.name == this.member);
+                assert(memberOffset != -1, "no such member " ~ this.member);
+                return new StructMember(cast(Reference) baseExpr, cast(int) memberOffset);
+            }
+            if (auto classType = cast(Class) baseExpr.type)
+            {
+                auto methodOffset = classType.vtable.countUntil!(a => a.name == this.member);
+                auto asStructPtr = new PointerCast(new Pointer(classType.dataStruct), baseExpr);
+                if (methodOffset != -1)
+                {
+                    auto classInfo = new Dereference(new PointerCast(
+                        new Pointer(classType.classInfoStruct), new StructMember(new Dereference(asStructPtr), 0)));
+                    // TODO dereference-into-symbol so we can '&' it again
+                    auto funcPtr = new StructMember(classInfo, cast(int) methodOffset);
+                    return new ClassMethod(funcPtr, baseExpr);
+                }
+                auto memberOffset = classType.members.countUntil!(a => a.name == this.member);
+                assert(memberOffset != -1, "no such member " ~ this.member);
+                return new StructMember(
+                    new Dereference(asStructPtr),
+                    cast(int) memberOffset + 1, // ignoring vtable ptr
+                );
+            }
+
+            assert(false, format!"expected struct/class type for member, not %s of %s"(baseExpr, baseExpr.type));
+        }
+        assert(false, format!"expected expression for member access, not %s"(base));
     }
 
     mixin(GenerateThis);
 }
 
-ASTExpression parseMember(ref Parser parser, ASTExpression base)
+ASTSymbol parseMember(ref Parser parser, ASTSymbol base)
 {
     with (parser)
     {
@@ -1706,16 +1707,16 @@ ASTExpression parseMember(ref Parser parser, ASTExpression base)
     }
 }
 
-class ASTIndexAccess : ASTExpression
+class ASTIndexAccess : ASTSymbol
 {
-    ASTExpression base;
+    ASTSymbol base;
 
-    ASTExpression index;
+    ASTSymbol index;
 
     override Expression compile(Namespace namespace)
     {
-        auto base = this.base.compile(namespace);
-        auto index = this.index.compile(namespace);
+        auto base = this.base.compile(namespace).beExpression;
+        auto index = this.index.compile(namespace).beExpression;
 
         assert(cast(Pointer) base.type, "expected pointer for index base");
         assert(cast(Integer) index.type, "expected int for index value");
@@ -1736,7 +1737,7 @@ class ASTIndexAccess : ASTExpression
     mixin(GenerateThis);
 }
 
-ASTExpression parseIndex(ref Parser parser, ASTExpression base)
+ASTSymbol parseIndex(ref Parser parser, ASTSymbol base)
 {
     with (parser)
     {
@@ -1754,7 +1755,7 @@ ASTExpression parseIndex(ref Parser parser, ASTExpression base)
     }
 }
 
-class ASTNewExpression : ASTExpression
+class ASTNewExpression : ASTSymbol
 {
     ASTType type;
 
@@ -1803,7 +1804,7 @@ class NewExpression : Expression
     mixin(GenerateThis);
 }
 
-ASTExpression parseExpressionLeaf(ref Parser parser)
+ASTSymbol parseExpressionLeaf(ref Parser parser)
 {
     with (parser)
     {
@@ -1852,7 +1853,7 @@ ASTExpression parseExpressionLeaf(ref Parser parser)
     }
 }
 
-ASTExpression parseExpressionBase(ref Parser parser)
+ASTSymbol parseExpressionBase(ref Parser parser)
 {
     if (auto name = parser.parseIdentifier)
     {

@@ -2488,67 +2488,57 @@ void defineRuntime(BackendModule backModule, Module frontModule)
 {
     import backend.interpreter : IpBackendModule;
 
-    frontModule.addFunction(new Function("assert", new Void, [Argument("", new Integer)], true, null));
-    frontModule.addFunction(new Function("malloc", new Pointer(new Void), [Argument("", new Integer)], true, null));
-
     auto ipModule = cast(IpBackendModule) backModule;
 
-    ipModule.defineCallback("int_add", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
+    void defineCallback(R, T...)(string name, R delegate(T) dg)
     {
-        ret.as!int = args[0].as!int + args[1].as!int;
-    });
-    ipModule.defineCallback("int_sub", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
+        ipModule.defineCallback(name, delegate void(void[] ret, void[][] args)
+        in (args.length == T.length)
+        {
+            T typedArgs;
+            static foreach (i, U; T)
+            {
+                typedArgs[i] = args[i].as!U;
+            }
+            static if (is(R == void)) dg(typedArgs);
+            else ret.as!R = dg(typedArgs);
+        });
+    }
+
+    auto languageType(T)()
     {
-        ret.as!int = args[0].as!int - args[1].as!int;
-    });
-    ipModule.defineCallback("int_mul", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
+        static if (is(T == int)) return new Integer;
+        else static if (is(T == char)) return new Character;
+        else static if (is(T == void)) return new Void;
+        else static if (is(T == U*, U)) return new Pointer(languageType!U);
+        else static assert(false, T.stringof);
+    }
+
+    void definePublicCallback(R, T...)(string name, R delegate(T) dg)
     {
-        ret.as!int = args[0].as!int * args[1].as!int;
-    });
-    ipModule.defineCallback("int_eq", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
-    {
-        ret.as!int = args[0].as!int == args[1].as!int;
-    });
-    ipModule.defineCallback("int_gt", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
-    {
-        ret.as!int = args[0].as!int > args[1].as!int;
-    });
-    ipModule.defineCallback("int_lt", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
-    {
-        ret.as!int = args[0].as!int < args[1].as!int;
-    });
-    ipModule.defineCallback("int_ge", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
-    {
-        ret.as!int = args[0].as!int >= args[1].as!int;
-    });
-    ipModule.defineCallback("int_le", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
-    {
-        ret.as!int = args[0].as!int <= args[1].as!int;
-    });
-    ipModule.defineCallback("assert", delegate void(void[] ret, void[][] args)
-    in (args.length == 1)
-    {
-        assert(args[0].as!int, "Assertion failed!");
-    });
-    ipModule.defineCallback("ptr_offset", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
-    {
-        ret.as!(void*) = args[0].as!(void*) + args[1].as!int;
-    });
-    ipModule.defineCallback("malloc", delegate void(void[] ret, void[][] args)
-    in (args.length == 1)
-    {
+        defineCallback(name, dg);
+        Argument[] arguments;
+        static foreach (i, U; T)
+        {
+            arguments ~= Argument("", languageType!U);
+        }
+        frontModule.addFunction(new Function(name, languageType!R, arguments, true, null));
+    }
+
+    defineCallback("int_add", delegate int(int a, int b) => a + b);
+    defineCallback("int_sub", delegate int(int a, int b) => a - b);
+    defineCallback("int_mul", delegate int(int a, int b) => a * b);
+    defineCallback("int_eq", delegate int(int a, int b) => a == b);
+    defineCallback("int_gt", delegate int(int a, int b) => a > b);
+    defineCallback("int_lt", delegate int(int a, int b) => a < b);
+    defineCallback("int_ge", delegate int(int a, int b) => a >= b);
+    defineCallback("int_le", delegate int(int a, int b) => a <= b);
+    definePublicCallback("assert", (int test) { assert(test, "Assertion failed!"); });
+    defineCallback("ptr_offset", delegate void*(void* ptr, int offset) { return ptr + offset; });
+    definePublicCallback("malloc", (int size) {
         import core.stdc.stdlib : malloc;
 
-        ret.as!(void*) = malloc(args[0].as!int);
+        return malloc(size);
     });
 }
 

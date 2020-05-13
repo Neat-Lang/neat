@@ -943,9 +943,21 @@ ASTAssignStatement parseAssignment(ref Parser parser)
             return null;
         }
         auto expr = parser.parseExpression;
-        expect(";");
         commit;
         return new ASTAssignStatement(lhs, expr);
+    }
+}
+
+ASTAssignStatement parseAssignStatement(ref Parser parser)
+{
+    with (parser)
+    {
+        if (auto ret = parser.parseAssignment)
+        {
+            expect(";");
+            return ret;
+        }
+        return null;
     }
 }
 
@@ -1052,9 +1064,11 @@ ASTStatement parseStatement(ref Parser parser)
         return stmt;
     if (auto stmt = parser.parseWhile)
         return stmt;
+    if (auto stmt = parser.parseFor)
+        return stmt;
     if (auto stmt = parser.parseScope)
         return stmt;
-    if (auto stmt = parser.parseAssignment)
+    if (auto stmt = parser.parseAssignStatement)
         return stmt;
     if (auto stmt = parser.parseVarDecl)
         return stmt;
@@ -1077,6 +1091,8 @@ enum ArithmeticOpType
     eq,
     gt,
     lt,
+    ge,
+    le,
 }
 
 class ASTArithmeticOp : ASTSymbol
@@ -1123,6 +1139,10 @@ class ArithmeticOp : Expression
                     return "int_gt";
                 case lt:
                     return "int_lt";
+                case ge:
+                    return "int_ge";
+                case le:
+                    return "int_le";
             }
         }();
         return output.fun.call(output.mod.intType, name, [leftreg, rightreg]);
@@ -1192,10 +1212,20 @@ void parseComparison(ref Parser parser, ref ASTSymbol left)
         auto right = parser.parseArithmetic(1);
         left = new ASTArithmeticOp(ArithmeticOpType.eq, left, right);
     }
+    if (parser.accept(">="))
+    {
+        auto right = parser.parseArithmetic(1);
+        left = new ASTArithmeticOp(ArithmeticOpType.ge, left, right);
+    }
     if (parser.accept(">"))
     {
         auto right = parser.parseArithmetic(1);
         left = new ASTArithmeticOp(ArithmeticOpType.gt, left, right);
+    }
+    if (parser.accept("<="))
+    {
+        auto right = parser.parseArithmetic(1);
+        left = new ASTArithmeticOp(ArithmeticOpType.le, left, right);
     }
     if (parser.accept("<"))
     {
@@ -1268,6 +1298,55 @@ ASTWhile parseWhile(ref Parser parser)
         ASTStatement body_ = parser.parseStatement;
 
         return new ASTWhile(cond, body_);
+    }
+}
+
+class ASTForLoop : ASTStatement
+{
+    ASTVarDeclStatement declareLoopVar;
+
+    ASTSymbol condition;
+
+    ASTStatement step;
+
+    ASTStatement body_;
+
+    Statement compile(Namespace namespace)
+    {
+        /*
+         * hack until break/continue:
+         * for (decl; test; step) body
+         * decl; while (test) { body; step; }
+         */
+        auto forscope = new VarDeclScope(namespace, No.frameBase);
+        auto decl = declareLoopVar.compile(forscope);
+        auto body_ = this.body_.compile(forscope);
+        auto step = this.step.compile(forscope);
+        auto loop = new WhileLoop(condition.compile(forscope).beExpression, new SequenceStatement([body_, step]));
+
+        return new SequenceStatement([decl, loop]);
+    }
+
+    mixin(GenerateThis);
+}
+
+ASTForLoop parseFor(ref Parser parser)
+{
+    with (parser)
+    {
+        if (!parser.acceptIdentifier("for"))
+        {
+            return null;
+        }
+        expect("(");
+        auto varDecl = parser.parseVarDecl;
+        auto condition = parser.parseExpression;
+        expect(";");
+        auto step = parser.parseAssignment;
+        expect(")");
+        auto body_ = parser.parseStatement;
+
+        return new ASTForLoop(varDecl, condition, step, body_);
     }
 }
 
@@ -2428,6 +2507,16 @@ void defineRuntime(BackendModule backModule, Module frontModule)
     in (args.length == 2)
     {
         ret.as!int = args[0].as!int < args[1].as!int;
+    });
+    ipModule.defineCallback("int_ge", delegate void(void[] ret, void[][] args)
+    in (args.length == 2)
+    {
+        ret.as!int = args[0].as!int >= args[1].as!int;
+    });
+    ipModule.defineCallback("int_le", delegate void(void[] ret, void[][] args)
+    in (args.length == 2)
+    {
+        ret.as!int = args[0].as!int <= args[1].as!int;
     });
     ipModule.defineCallback("assert", delegate void(void[] ret, void[][] args)
     in (args.length == 1)

@@ -1810,7 +1810,7 @@ class ASTIndexAccess : ASTSymbol
             new Pointer(new Void),
             [Argument("", new Pointer(new Void)), Argument("", new Integer)],
             true, null);
-        auto offset = new Call(int_mul, [index, new Literal(cast(int) base.type.size)]);
+        auto offset = new Call(int_mul, [index, new Literal(cast(int) (cast(Pointer) base.type).target.size)]);
 
         return new Dereference(new PointerCast(base.type, new Call(ptr_offset, [base, offset])));
     }

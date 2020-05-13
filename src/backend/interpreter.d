@@ -573,6 +573,9 @@ class IpBackendModule : BackendModule
         {
             return this.callbacks[name](ret, args);
         }
+
+        // import std.stdio; writefln!"-------\ncall %s"(name);
+
         auto fun = this.functions[name];
         assert(
             args.length == fun.argTypes.length,
@@ -607,6 +610,8 @@ class IpBackendModule : BackendModule
                 const lastInstr = i == fun.blocks[block].instrs.length - 1;
 
                 int reg = fun.blocks[block].regBase + cast(int) i;
+
+                // import std.stdio : writefln; writefln!"%%%s = %s"(reg, instr);
 
                 with (Instr.Kind)
                 {

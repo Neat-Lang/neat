@@ -1743,6 +1743,8 @@ class ASTMember : ASTSymbol
             }
             if (auto classType = cast(Class) baseExpr.type)
             {
+                import std.algorithm : find;
+
                 auto methodOffset = classType.vtable.countUntil!(a => a.name == this.member);
                 auto asStructPtr = new PointerCast(new Pointer(classType.dataStruct), baseExpr);
                 if (methodOffset != -1)
@@ -1753,11 +1755,11 @@ class ASTMember : ASTSymbol
                     auto funcPtr = new StructMember(classInfo, cast(int) methodOffset);
                     return new ClassMethod(funcPtr, baseExpr);
                 }
-                auto memberOffset = classType.members.countUntil!(a => a.name == this.member);
-                assert(memberOffset != -1, "no such member " ~ this.member);
+                auto memberOffset = classType.visibleMembers.find!(a => a.name == this.member);
+                assert(!memberOffset.empty, "no such member " ~ this.member);
                 return new StructMember(
                     new Dereference(asStructPtr),
-                    cast(int) memberOffset + 1, // ignoring vtable ptr
+                    cast(int) memberOffset.front.index,
                 );
             }
 
@@ -2157,8 +2159,21 @@ class Class : Type
         auto voidp = new Pointer(new Void);
         return new Struct(
             null,
-            [Struct.Member("this", voidp)] ~ allMembers(this).map!(a => Struct.Member(a.name, a.type)).array,
+            [Struct.Member("__classinfo", voidp)] ~ allMembers(this).map!(a => Struct.Member(a.name, a.type)).array,
         );
+    }
+
+    Tuple!(string, "name", size_t, "index")[] visibleMembers()
+    {
+        Tuple!(string, "name", size_t, "index")[] result = superClass ? superClass.visibleMembers : null;
+        const ownMembersOffset = superClass ? superClass.dataStruct.members.length : 1;
+
+        foreach (i, member; members)
+        {
+            result = result.remove!(a => a.name == member.name);
+            result ~= tuple!("name", "index")(member.name, ownMembersOffset + i);
+        }
+        return result;
     }
 
     Struct classInfoStruct()

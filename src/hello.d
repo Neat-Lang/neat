@@ -3,6 +3,7 @@ module hello;
 import backend.backend;
 import boilerplate;
 import std.algorithm;
+import std.conv : to;
 import std.range;
 import std.string;
 import std.stdio;
@@ -318,8 +319,6 @@ class Parser
 
 bool parseNumber(ref Parser parser, out int i)
 {
-    import std.conv : to;
-
     with (parser)
     {
         begin;
@@ -941,7 +940,7 @@ class ASTAssignStatement : ASTStatement
         auto value = this.value.compile(namespace);
         auto targetref = cast(Reference) target;
         assert(targetref, "target of assignment must be a reference");
-        return new AssignStatement(targetref, value.beExpression);
+        return new AssignStatement(targetref, value.beExpression.implicitConvertTo(targetref.type()));
     }
 
     mixin(GenerateAll);
@@ -1510,8 +1509,6 @@ class Literal : Expression
 
     override string toString() const
     {
-        import std.conv : to;
-
         return value.to!string;
     }
 
@@ -2143,6 +2140,11 @@ Expression implicitConvertTo(Expression from, Type to)
     {
         return new PointerCast(to, from);
     }
+    // any pointer casts to void*
+    if (cast(Pointer) from.type && to == new Pointer(new Void))
+    {
+        return new PointerCast(to, from);
+    }
     if (cast(Class) to && cast(Class) from.type)
     {
         auto currentClass = cast(Class) from.type;
@@ -2581,7 +2583,7 @@ Module parseModule(ref Parser parser)
     return module_;
 }
 
-void defineRuntime(BackendModule backModule, Module frontModule)
+void defineRuntime(Backend backend, BackendModule backModule, Module frontModule)
 {
     import backend.interpreter : IpBackendModule;
 
@@ -2590,7 +2592,7 @@ void defineRuntime(BackendModule backModule, Module frontModule)
     void defineCallback(R, T...)(string name, R delegate(T) dg)
     {
         ipModule.defineCallback(name, delegate void(void[] ret, void[][] args)
-        in (args.length == T.length)
+        in (args.length == T.length, format!"%s expected %s parameters but got %s"(name, T.length, args.length))
         {
             T typedArgs;
             static foreach (i, U; T)
@@ -2608,6 +2610,8 @@ void defineRuntime(BackendModule backModule, Module frontModule)
         else static if (is(T == char)) return new Character;
         else static if (is(T == void)) return new Void;
         else static if (is(T == U*, U)) return new Pointer(languageType!U);
+        // take care to match up types!
+        else static if (is(T == class) || is(T == interface)) return new Pointer(new Void);
         else static assert(false, T.stringof);
     }
 
@@ -2630,10 +2634,62 @@ void defineRuntime(BackendModule backModule, Module frontModule)
         return malloc(size);
     });
     definePublicCallback("print", (char* text) {
-        import std.conv : to;
-
         writefln!"%s"(text.to!string);
     });
+
+    definePublicCallback("_backend", delegate Backend() => backend);
+    definePublicCallback("_backend_createModule", delegate BackendModule(Backend backend) => backend.createModule());
+    definePublicCallback("_backendModule_intType", delegate BackendType(BackendModule mod) => mod.intType());
+    definePublicCallback(
+        "_backendModule_define",
+        delegate BackendFunction(BackendModule mod, char* name, BackendType ret, BackendType* args_ptr, int args_len)
+        {
+            return mod.define(name.to!string, ret, args_ptr[0 .. args_len]);
+        }
+    );
+    definePublicCallback(
+        "_backendModule_dump",
+        delegate void(BackendModule mod) { writefln!"(nested) module:\n%s"(mod); },
+    );
+    definePublicCallback(
+        "_backendModule_call",
+        delegate void(BackendModule mod, char* name, void* ret, void** args_ptr, int args_len)
+        {
+            // TODO non-int args
+            // TODO stop hardcoding interpreter backend
+            (cast(IpBackendModule) mod).call(
+                name.to!string,
+                ret[0 .. 4],
+                args_ptr[0 .. args_len].map!(a => a[0 .. 4]).array,
+            );
+        }
+    );
+    definePublicCallback(
+        "_backendFunction_arg",
+        delegate int(BackendFunction fun, int index) => fun.arg(index));
+    definePublicCallback(
+        "_backendFunction_intLiteral",
+        delegate int(BackendFunction fun, int index) => fun.intLiteral(index));
+    definePublicCallback(
+        "_backendFunction_call",
+        delegate int(BackendFunction fun, BackendType ret, char* name, int* args_ptr, int args_len)
+            => fun.call(ret, name.to!string, args_ptr[0 .. args_len]));
+    definePublicCallback(
+        "_backendFunction_ret",
+        delegate void(BackendFunction fun, int value) => fun.ret(value));
+    definePublicCallback(
+        "_backendFunction_testBranch",
+        delegate TestBranchRecord(BackendFunction fun, int reg) => fun.testBranch(reg));
+    definePublicCallback(
+        "_backendFunction_blockIndex",
+        delegate int(BackendFunction fun) => fun.blockIndex);
+
+    definePublicCallback(
+        "_testBranchRecord_resolveThen",
+        delegate void(TestBranchRecord record, int block) => record.resolveThen(block));
+    definePublicCallback(
+        "_testBranchRecord_resolveElse",
+        delegate void(TestBranchRecord record, int block) => record.resolveElse(block));
 }
 
 private template as(T) {
@@ -2664,7 +2720,7 @@ int main(string[] args)
     auto backend = new IpBackend;
     auto module_ = backend.createModule;
 
-    defineRuntime(module_, toplevel);
+    defineRuntime(backend, module_, toplevel);
 
     auto output = new Generator(module_);
 

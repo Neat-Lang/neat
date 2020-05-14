@@ -626,6 +626,7 @@ class IpBackendModule : BackendModule
         }
 
         // import std.stdio; writefln!"-------\ncall %s"(name);
+        // foreach (arg; args) writefln!"  %s"(*cast(int*) arg.ptr);
 
         auto fun = this.functions[name];
         assert(

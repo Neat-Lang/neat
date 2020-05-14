@@ -1164,21 +1164,21 @@ class ArithmeticOp : Expression
             with (ArithmeticOpType) final switch (this.op)
             {
                 case add:
-                    return "int_add";
+                    return "cxruntime_int_add";
                 case sub:
-                    return "int_sub";
+                    return "cxruntime_int_sub";
                 case mul:
-                    return "int_mul";
+                    return "cxruntime_int_mul";
                 case eq:
-                    return "int_eq";
+                    return "cxruntime_int_eq";
                 case gt:
-                    return "int_gt";
+                    return "cxruntime_int_gt";
                 case lt:
-                    return "int_lt";
+                    return "cxruntime_int_lt";
                 case ge:
-                    return "int_ge";
+                    return "cxruntime_int_ge";
                 case le:
-                    return "int_le";
+                    return "cxruntime_int_le";
             }
         }();
         return output.fun.call(output.mod.intType, name, [leftreg, rightreg]);
@@ -1831,7 +1831,7 @@ class ASTIndexAccess : ASTSymbol
         assert(cast(Pointer) base.type, "expected pointer for index base");
         assert(cast(Integer) index.type, "expected int for index value");
 
-        auto int_mul = new Function("int_mul",
+        auto int_mul = new Function("cxruntime_int_mul",
             new Integer,
             [Argument("", new Integer), Argument("", new Integer)],
             true, null);
@@ -1928,7 +1928,7 @@ class ASTAllocPtrExpression : ASTSymbol
             new Pointer(new Void),
             [Argument("", new Integer)],
             true, null);
-        auto int_mul = new Function("int_mul",
+        auto int_mul = new Function("cxruntime_int_mul",
             new Integer,
             [Argument("a", new Integer), Argument("b", new Integer)],
             true, null);
@@ -2622,14 +2622,6 @@ void defineRuntime(BackendModule backModule, Module frontModule)
         frontModule.addFunction(new Function(name, languageType!R, arguments, true, null));
     }
 
-    defineCallback("int_add", delegate int(int a, int b) => a + b);
-    defineCallback("int_sub", delegate int(int a, int b) => a - b);
-    defineCallback("int_mul", delegate int(int a, int b) => a * b);
-    defineCallback("int_eq", delegate int(int a, int b) => a == b);
-    defineCallback("int_gt", delegate int(int a, int b) => a > b);
-    defineCallback("int_lt", delegate int(int a, int b) => a < b);
-    defineCallback("int_ge", delegate int(int a, int b) => a >= b);
-    defineCallback("int_le", delegate int(int a, int b) => a <= b);
     definePublicCallback("assert", (int test) { assert(test, "Assertion failed!"); });
     defineCallback("ptr_offset", delegate void*(void* ptr, int offset) { return ptr + offset; });
     definePublicCallback("malloc", (int size) {

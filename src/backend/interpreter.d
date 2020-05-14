@@ -577,11 +577,37 @@ class IpFuncPtr
     mixin(GenerateAll);
 }
 
+private void defineIntrinsics(IpBackendModule mod)
+{
+    void defineCallback(R, T...)(string name, R delegate(T) dg)
+    {
+        mod.defineCallback(name, delegate void(void[] ret, void[][] args)
+        in (args.length == T.length)
+        {
+            T typedArgs;
+            static foreach (i, U; T)
+                typedArgs[i] = *cast(U*) args[i].ptr;
+            *cast(R*) ret.ptr = dg(typedArgs);
+        });
+    }
+    static foreach (key, op; [
+        "add": "+", "sub": "-", "mul": "*", "div": "/",
+        "eq": "==", "lt": "<", "gt": ">", "le": "<=", "ge": ">="
+    ]) {
+        defineCallback("cxruntime_int_" ~ key, delegate int(int a, int b) => mixin("a " ~ op ~ " b"));
+    }
+}
+
 class IpBackendModule : BackendModule
 {
     alias Callable = void delegate(void[] ret, void[][] args);
     Callable[string] callbacks;
     IpBackendFunction[string] functions;
+
+    this()
+    {
+        defineIntrinsics(this);
+    }
 
     void defineCallback(string name, Callable call)
     in (name !in callbacks && name !in functions)
@@ -768,15 +794,10 @@ class IpBackendModule : BackendModule
 unittest
 {
     auto mod = new IpBackendModule;
-    mod.defineCallback("int_mul", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
-    {
-        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] * (cast(int[]) args[1])[0];
-    });
     auto square = mod.define("square", mod.intType, [mod.intType]);
     with (square) {
         auto arg0 = arg(0);
-        auto reg = call(mod.intType, "int_mul", [arg0, arg0]);
+        auto reg = call(mod.intType, "cxruntime_int_mul", [arg0, arg0]);
 
         ret(reg);
     }
@@ -797,21 +818,6 @@ unittest
 unittest
 {
     auto mod = new IpBackendModule;
-    mod.defineCallback("int_add", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
-    {
-        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] + (cast(int[]) args[1])[0];
-    });
-    mod.defineCallback("int_sub", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
-    {
-        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] - (cast(int[]) args[1])[0];
-    });
-    mod.defineCallback("int_eq", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
-    {
-        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] == (cast(int[]) args[1])[0];
-    });
 
     auto ack = mod.define("ack", mod.intType, [mod.intType, mod.intType]);
 
@@ -822,27 +828,27 @@ unittest
         auto zero = intLiteral(0);
         auto one = intLiteral(1);
 
-        auto if1_test_reg = call(mod.intType, "int_eq", [m, zero]);
+        auto if1_test_reg = call(mod.intType, "cxruntime_int_eq", [m, zero]);
         auto if1_test_jumprecord = testBranch(if1_test_reg);
 
         if1_test_jumprecord.resolveThen(blockIndex);
-        auto add = call(mod.intType, "int_add", [n, one]);
+        auto add = call(mod.intType, "cxruntime_int_add", [n, one]);
         ret(add);
 
         if1_test_jumprecord.resolveElse(blockIndex);
-        auto if2_test_reg = call(mod.intType, "int_eq", [n, zero]);
+        auto if2_test_reg = call(mod.intType, "cxruntime_int_eq", [n, zero]);
         auto if2_test_jumprecord = testBranch(if2_test_reg);
 
         if2_test_jumprecord.resolveThen(blockIndex);
-        auto sub = call(mod.intType, "int_sub", [m, one]);
+        auto sub = call(mod.intType, "cxruntime_int_sub", [m, one]);
         auto ackrec = call(mod.intType, "ack", [sub, one]);
 
         ret(ackrec);
 
         if2_test_jumprecord.resolveElse(blockIndex);
-        auto n1 = call(mod.intType, "int_sub", [n, one]);
+        auto n1 = call(mod.intType, "cxruntime_int_sub", [n, one]);
         auto ackrec1 = call(mod.intType, "ack", [m, n1]);
-        auto m1 = call(mod.intType, "int_sub", [m, one]);
+        auto m1 = call(mod.intType, "cxruntime_int_sub", [m, one]);
         auto ackrec2 = call(mod.intType, "ack", [m1, ackrec1]);
         ret(ackrec2);
     }
@@ -859,11 +865,6 @@ unittest
      * int square(int i) { int k = i; int l = k * k; return l; }
      */
     auto mod = new IpBackendModule;
-    mod.defineCallback("int_mul", delegate void(void[] ret, void[][] args)
-    in (args.length == 2)
-    {
-        (cast(int[]) ret)[0] = (cast(int[]) args[0])[0] * (cast(int[]) args[1])[0];
-    });
     auto square = mod.define("square", mod.intType, [mod.intType]);
     auto stackframeType = mod.structType([mod.intType, mod.intType]);
     with (square) {
@@ -872,7 +873,7 @@ unittest
         auto var = fieldOffset(stackframeType, stackframe, 0);
         store(mod.intType, var, arg0);
         auto varload = load(mod.intType, var);
-        auto reg = call(mod.intType, "int_mul", [varload, varload]);
+        auto reg = call(mod.intType, "cxruntime_int_mul", [varload, varload]);
         auto retvar = fieldOffset(stackframeType, stackframe, 0);
         store(mod.intType, retvar, reg);
 

@@ -2546,29 +2546,6 @@ Module parseModule(ref Parser parser)
     return module_;
 }
 
-void main()
-{
-    import backend.interpreter : IpBackend;
-    import std.file : readText;
-
-    string code = readText("hello.cx");
-    auto parser = new Parser(code);
-    auto toplevel = parser.parseModule;
-
-    auto backend = new IpBackend;
-    auto module_ = backend.createModule;
-
-    defineRuntime(module_, toplevel);
-
-    auto output = new Generator(module_);
-
-    toplevel.emit(output);
-
-    writefln!"module:\n%s"(module_);
-
-    module_.call("main", null, null);
-}
-
 void defineRuntime(BackendModule backModule, Module frontModule)
 {
     import backend.interpreter : IpBackendModule;
@@ -2639,4 +2616,35 @@ private template as(T) {
 void addFunction(Module module_, Function function_)
 {
     module_.add(function_.name, function_);
+}
+
+int main(string[] args)
+{
+    import backend.interpreter : IpBackend;
+    import std.file : readText;
+
+    if (args.length != 2)
+    {
+        import std.stdio : stderr;
+
+        stderr.writefln!"Usage: %s FILE.cx"(args[0]);
+        return 1;
+    }
+    string code = readText(args[1]);
+    auto parser = new Parser(code);
+    auto toplevel = parser.parseModule;
+
+    auto backend = new IpBackend;
+    auto module_ = backend.createModule;
+
+    defineRuntime(module_, toplevel);
+
+    auto output = new Generator(module_);
+
+    toplevel.emit(output);
+
+    writefln!"module:\n%s"(module_);
+
+    module_.call("main", null, null);
+    return 0;
 }

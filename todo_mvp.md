@@ -1,6 +1,3 @@
 ## for porting bootstrap compiler
 
-- string literals
-- for loops
-- classes
-  - subclassing
+- nothing? whatever I'm forgetting? try it and see what's missing

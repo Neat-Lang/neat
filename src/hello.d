@@ -1865,24 +1865,24 @@ ASTSymbol parseIndex(ref Parser parser, ASTSymbol base)
     }
 }
 
-class ASTNewExpression : ASTSymbol
+class ASTNewClassExpression : ASTSymbol
 {
     ASTType type;
 
-    override NewExpression compile(Namespace namespace)
+    override NewClassExpression compile(Namespace namespace)
     {
         auto type = this.type.compile(namespace);
         auto classType = cast(Class) type;
 
         assert(classType, format!"expected new <class>, not %s"(type));
 
-        return new NewExpression(classType);
+        return new NewClassExpression(classType);
     }
 
     mixin(GenerateThis);
 }
 
-class NewExpression : Expression
+class NewClassExpression : Expression
 {
     Class classType;
 
@@ -1914,6 +1914,32 @@ class NewExpression : Expression
     mixin(GenerateThis);
 }
 
+class ASTAllocPtrExpression : ASTSymbol
+{
+    ASTType type;
+
+    ASTSymbol size;
+
+    override Expression compile(Namespace namespace)
+    {
+        auto type = this.type.compile(namespace);
+        auto size = this.size.compile(namespace).beExpression;
+        auto malloc = new Function("malloc",
+            new Pointer(new Void),
+            [Argument("", new Integer)],
+            true, null);
+        auto int_mul = new Function("int_mul",
+            new Integer,
+            [Argument("a", new Integer), Argument("b", new Integer)],
+            true, null);
+        auto bytesize = new Call(int_mul, [size, new Literal(cast(int) type.size)]);
+
+        return new Call(malloc, [bytesize]);
+    }
+
+    mixin(GenerateThis);
+}
+
 ASTSymbol parseExpressionLeaf(ref Parser parser)
 {
     with (parser)
@@ -1940,7 +1966,16 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
         {
             auto type = parser.parseType;
 
-            return new ASTNewExpression(type);
+            return new ASTNewClassExpression(type);
+        }
+        if (parser.acceptIdentifier("_alloc"))
+        {
+            expect("(");
+            auto type = parser.parseType;
+            expect(",");
+            auto size = parser.parseExpression;
+            expect(")");
+            return new ASTAllocPtrExpression(type, size);
         }
         auto currentExpr = parser.parseExpressionBase;
         assert(currentExpr);

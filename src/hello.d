@@ -340,19 +340,19 @@ bool parseNumber(ref Parser parser, out int i)
     }
 }
 
-string parseIdentifier(ref Parser parser)
+string parseIdentifier(ref Parser parser, string additionalCharacters = "")
 {
     with (parser)
     {
         begin;
         strip;
-        if (text.empty || (!text.front.isAlpha && text.front != '_'))
+        if (text.empty || (!text.front.isAlpha && text.front != '_' && !additionalCharacters.canFind(text.front)))
         {
             revert;
             return null;
         }
         string identifier;
-        while (!text.empty && (text.front.isAlphaNum || text.front == '_'))
+        while (!text.empty && (text.front.isAlphaNum || text.front == '_' || additionalCharacters.canFind(text.front)))
         {
             identifier ~= text.front;
             text.popFront;
@@ -2601,8 +2601,26 @@ class VarDeclScope : Namespace
     mixin(GenerateThis);
 }
 
+class ASTImport
+{
+    string name;
+
+    mixin(GenerateThis);
+}
+
+ASTImport parseImport(ref Parser parser)
+{
+    if (!parser.accept("import"))
+        return null;
+    auto modname = parser.parseIdentifier(".");
+    parser.expect(";");
+    return new ASTImport(modname);
+}
+
 class Module : Namespace
 {
+    string name;
+
     struct Entry
     {
         string name;
@@ -2611,11 +2629,19 @@ class Module : Namespace
     }
 
     @(This.Init!null)
+    Module[] imports;
+
+    @(This.Init!null)
     Entry[] entries;
 
     void add(string name, Symbol symbol)
     {
         this.entries ~= Entry(name, symbol);
+    }
+
+    void addImport(Module module_)
+    {
+        imports ~= module_;
     }
 
     void emit(Generator generator)
@@ -2634,14 +2660,30 @@ class Module : Namespace
                 }
             }
         }
+        // TODO each only once!
+        foreach (import_; imports) import_.emit(generator);
     }
 
-    override Symbol lookup(string name)
+    Symbol lookupPublic(string name)
     {
+        // not counting imports (non-transitive)
         foreach (entry; this.entries)
         {
             if (entry.name == name)
                 return entry.value;
+        }
+        return null;
+    }
+
+    override Symbol lookup(string name)
+    {
+        if (auto entry = lookupPublic(name))
+            return entry;
+        foreach (import_; this.imports)
+        {
+            // TODO error on multiple matches
+            if (auto entry = import_.lookupPublic(name))
+                return entry;
         }
         if (this.parent)
             return this.parent.lookup(name);
@@ -2651,12 +2693,31 @@ class Module : Namespace
     mixin(GenerateThis);
 }
 
-Module parseModule(ref Parser parser)
+string moduleToFile(string module_)
 {
-    auto module_ = new Module(null);
+    return module_.replace(".", "/") ~ ".cx";
+}
+
+Module parseModule(string filename)
+{
+    import std.file : readText;
+
+    string code = readText(filename);
+    auto parser = new Parser(code);
+    auto module_ = new Module(null, filename);
+
+    parser.expect("module");
+    auto modname = parser.parseIdentifier(".");
+    parser.expect(";");
 
     while (!parser.eof)
     {
+        if (auto import_ = parser.parseImport)
+        {
+            auto importedModule = parseModule(import_.name.moduleToFile);
+
+            module_.addImport(importedModule);
+        }
         if (auto classDecl = parser.parseClassDecl)
         {
             module_.add(classDecl.name, classDecl.compile(module_));
@@ -2799,7 +2860,6 @@ void addFunction(Module module_, Function function_)
 int main(string[] args)
 {
     import backend.interpreter : IpBackend;
-    import std.file : readText;
 
     if (args.length != 2)
     {
@@ -2808,9 +2868,7 @@ int main(string[] args)
         stderr.writefln!"Usage: %s FILE.cx"(args[0]);
         return 1;
     }
-    string code = readText(args[1]);
-    auto parser = new Parser(code);
-    auto toplevel = parser.parseModule;
+    auto toplevel = parseModule(args[1]);
 
     auto backend = new IpBackend;
     auto module_ = backend.createModule;

@@ -1,6 +1,6 @@
 module backend.interpreter;
 
-import backend_deps;
+import stage1_libs;
 import backend.backend;
 import boilerplate;
 import std.algorithm;

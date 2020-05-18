@@ -1,16 +1,16 @@
-DFLAGS = -Iinclude -Iinclude/boilerplate/src
-BACKEND_SRC = $(shell find src/backend -name \*.d)
+STAGE1_SRC = $(shell find src/stage1 -name \*.d)
 DSHOULD_INCLUDES = $(shell dub fetch dshould 1>&2 && dub build dshould 1>&2 && \
 	dub describe dshould |\
 	jq -r '[[.. |.importPaths? |arrays[]] |unique[] |select(contains(".dub"))] |map("-I"+.) |join(" ")')
+DFLAGS = -g -odbuild -Iinclude -Isrc -Isrc/stage1 -Iinclude/boilerplate/src ${DSHOULD_INCLUDES} -L-Lbuild
 
-default: build/hello build/backend_test
+default: build/stage1 build/stage1_test
 
-build/hello: ${BACKEND_SRC} build/libbackend_deps.a src/hello.d
-	ldc2 -g -i -odbuild src/hello.d -ofbuild/hello -Isrc ${DFLAGS} -L-Lbuild -L-lbackend_deps ${DSHOULD_INCLUDES}
+build/libstage1.a: src/stage1_libs.d
+	ldc2 $< -of$@ ${DFLAGS} ${DSHOULD_INCLUDES} -i -lib
 
-build/libbackend_deps.a: src/backend_deps.d
-	ldc2 -g -i -lib -odbuild src/backend_deps.d -Isrc -ofbuild/libbackend_deps.a ${DFLAGS} ${DSHOULD_INCLUDES}
+build/stage1: ${STAGE1_SRC} build/libstage1.a
+	ldc2 ${STAGE1_SRC} -of$@ ${DFLAGS} -L-lstage1
 
-build/backend_test: ${BACKEND_SRC} build/libbackend_deps.a
-	ldc2 -g -odbuild -Isrc -ofbuild/backend_test -main -unittest ${BACKEND_SRC} -L-Lbuild -L-lbackend_deps ${DFLAGS} ${DSHOULD_INCLUDES}
+build/stage1_test: ${STAGE1_SRC} build/libstage1.a
+	ldc2 ${STAGE1_SRC} -of$@ ${DFLAGS} -L-lstage1 -main -unittest

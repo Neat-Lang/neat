@@ -1,4 +1,4 @@
-module hello;
+module main;
 
 import backend.backend;
 import boilerplate;
@@ -2857,30 +2857,34 @@ void addFunction(Module module_, Function function_)
     module_.add(function_.name, function_);
 }
 
-int main(string[] args)
+version (unittest) { }
+else
 {
-    import backend.interpreter : IpBackend;
-
-    if (args.length != 2)
+    int main(string[] args)
     {
-        import std.stdio : stderr;
+        import backend.interpreter : IpBackend;
 
-        stderr.writefln!"Usage: %s FILE.cx"(args[0]);
-        return 1;
+        if (args.length != 2)
+        {
+            import std.stdio : stderr;
+
+            stderr.writefln!"Usage: %s FILE.cx"(args[0]);
+            return 1;
+        }
+        auto toplevel = parseModule(args[1]);
+
+        auto backend = new IpBackend;
+        auto module_ = backend.createModule;
+
+        defineRuntime(backend, module_, toplevel);
+
+        auto output = new Generator(module_);
+
+        toplevel.emit(output);
+
+        writefln!"module:\n%s"(module_);
+
+        module_.call("main", null, null);
+        return 0;
     }
-    auto toplevel = parseModule(args[1]);
-
-    auto backend = new IpBackend;
-    auto module_ = backend.createModule;
-
-    defineRuntime(backend, module_, toplevel);
-
-    auto output = new Generator(module_);
-
-    toplevel.emit(output);
-
-    writefln!"module:\n%s"(module_);
-
-    module_.call("main", null, null);
-    return 0;
 }

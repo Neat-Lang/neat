@@ -1,4 +1,4 @@
-module backend_deps;
+module stage1_libs;
 
 public import boilerplate;
 public import dshould;

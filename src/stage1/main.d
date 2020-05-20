@@ -1536,7 +1536,7 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
             if (auto expr = parser.parseIndex(currentExpr))
             {
                 currentExpr = expr;
-                break;
+                continue;
             }
             break;
         }

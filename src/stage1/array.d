@@ -105,21 +105,39 @@ class ArrayPointer : Expression
 
 class ASTArrayLiteral : ASTSymbol
 {
-    ASTSymbol[] elements;
+    struct Entry
+    {
+        ASTSymbol symbol;
+
+        bool spread;
+    }
+
+    Entry[] elements;
 
     override ArrayLiteral compile(Namespace namespace)
     {
-        Expression[] expressions;
+        ArrayLiteral.Element[] elements;
         Type elementType;
-        foreach (element; elements)
+        foreach (entry; this.elements)
         {
-            auto newExpression = element.compile(namespace).beExpression;
-            if (!elementType) elementType = newExpression.type;
-            else assert(newExpression.type == elementType);
-            expressions ~= newExpression;
+            auto newExpression = entry.symbol.compile(namespace).beExpression;
+            Type expressionElementType;
+            if (entry.spread)
+            {
+                auto subtype = cast(Array) newExpression.type;
+                assert(subtype, "spread entry must be array");
+                expressionElementType = subtype.elementType;
+            }
+            else
+            {
+                expressionElementType = newExpression.type;
+            }
+            if (!elementType) elementType = expressionElementType;
+            else assert(expressionElementType == elementType);
+            elements ~= ArrayLiteral.Element(newExpression, entry.spread);
         }
         if (!elementType) assert(false, "cannot type empty literal");
-        return new ArrayLiteral(elementType, expressions);
+        return new ArrayLiteral(elementType, elements);
     }
 
     override string toString() const
@@ -132,9 +150,15 @@ class ASTArrayLiteral : ASTSymbol
 
 class ArrayLiteral : Expression
 {
+    struct Element
+    {
+        Expression expression;
+
+        bool spread;
+    }
     Type elementType;
 
-    Expression[] expressions;
+    Element[] elements;
 
     override Type type()
     {
@@ -144,18 +168,58 @@ class ArrayLiteral : Expression
     override Reg emit(Generator output)
     {
         auto voidp = output.mod.pointerType(output.mod.voidType);
-        int memSize = cast(int) elementType.size * cast(int) this.expressions.length; // TODO alignment
+        auto intType = output.mod.intType;
 
-        Reg len = output.fun.intLiteral(cast(int) this.expressions.length);
-        Reg ptr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(memSize)]);
-        foreach (i, expression; expressions)
+        Reg lenPtr = output.fun.alloca(intType); // TODO word type
+        const numNonSpreadElements = this.elements.filter!(a => !a.spread).count;
+        output.fun.store(intType, lenPtr, output.fun.intLiteral(cast(int) numNonSpreadElements));
+
+        // add the lengths of each array element
+        foreach (i, element; this.elements)
         {
-            int ptrOffset = cast(int) elementType.size * cast(int) i;
+            if (element.spread)
+            {
+                Reg len = output.fun.load(intType, lenPtr);
+                // TODO prevent double emit when we can have non-ref struct base
+                Reg addLen = (new ArrayLength(element.expression)).emit(output);
+                Reg sumLen = output.fun.call(intType, "cxruntime_int_add", [len, addLen]);
+                output.fun.store(intType, lenPtr, sumLen);
+            }
+        }
+        Reg memSize = output.fun.call(
+            intType, "cxruntime_int_mul", [
+                output.fun.load(intType, lenPtr),
+                output.fun.intLiteral(cast(int) this.elementType.size)]);
 
-            Reg valueReg = expression.emit(output);
-            Reg ptrOffsetReg = output.fun.call(voidp, "ptr_offset", [ptr, output.fun.intLiteral(ptrOffset)]);
+        Reg ptr = output.fun.call(voidp, "malloc", [memSize]);
+        Reg currentOffsetPtr = output.fun.alloca(intType);
+        output.fun.store(intType, currentOffsetPtr, output.fun.intLiteral(0));
 
-            output.fun.store(elementType.emit(output.mod), ptrOffsetReg, valueReg);
+        foreach (i, element; this.elements)
+        {
+            Reg currentOffset = output.fun.load(intType, currentOffsetPtr);
+            Reg ptrOffsetReg = output.fun.call(voidp, "ptr_offset", [ptr, currentOffset]);
+
+            if (element.spread)
+            {
+                // TODO prevent double emit when we can have non-ref struct base
+                Reg elementLen = (new ArrayLength(element.expression)).emit(output);
+                Reg elementPtr = (new ArrayPointer(this.elementType, element.expression)).emit(output);
+                Reg elementSize = output.fun.call(
+                    intType, "cxruntime_int_mul", [elementLen, output.fun.intLiteral(cast(int) this.elementType.size)]);
+
+                output.fun.call(voidp, "memcpy", [ptrOffsetReg, elementPtr, elementSize]);
+                output.fun.store(intType, currentOffsetPtr, output.fun.call(
+                    intType, "cxruntime_int_add", [currentOffset, elementSize]));
+            }
+            else
+            {
+                output.fun.store(elementType.emit(output.mod), ptrOffsetReg, element.expression.emit(output));
+                output.fun.store(intType, currentOffsetPtr, output.fun.call(
+                    intType, "cxruntime_int_add", [
+                        currentOffset,
+                        output.fun.intLiteral(cast(int) this.elementType.size)]));
+            }
         }
         auto structType = type.emit(output.mod);
         // TODO allocaless
@@ -164,7 +228,7 @@ class ArrayLiteral : Expression
         Reg lenField = output.fun.fieldOffset(structType, structReg, 1);
 
         output.fun.store(voidp, ptrField, ptr);
-        output.fun.store(output.mod.intType, lenField, len);
+        output.fun.store(intType, lenField, output.fun.load(intType, lenPtr));
         return output.fun.load(structType, structReg);
     }
 

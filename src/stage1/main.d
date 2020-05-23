@@ -414,13 +414,14 @@ ASTArrayLiteral parseArrayLiteral(ref Parser parser)
     {
         if (!accept("["))
             return null;
-        ASTSymbol[] fields;
+        ASTArrayLiteral.Entry[] fields;
         while (!accept("]"))
         {
             if (fields.length) expect(",");
+            bool spread = accept("...");
             auto expr = parser.parseExpression;
             assert(expr, "expression expected.");
-            fields ~= expr;
+            fields ~= ASTArrayLiteral.Entry(expr, spread);
         }
         return new ASTArrayLiteral(fields);
     }
@@ -2138,6 +2139,11 @@ void defineRuntime(Backend backend, BackendModule backModule, Module frontModule
 
         return realloc(ptr, size);
     });
+    defineCallback("memcpy", (void* target, void* source, int size) {
+        import core.stdc.string : memcpy;
+
+        return memcpy(target, source, size);
+    });
     definePublicCallback("print", (char* text) {
         writefln!"%s"(text.to!string);
     });
@@ -2200,7 +2206,10 @@ void defineRuntime(Backend backend, BackendModule backModule, Module frontModule
 }
 
 private template as(T) {
-    ref T as(Arg)(Arg arg) { return (cast(T[]) arg)[0]; }
+    ref T as(void[] arg) {
+        assert(arg.length == T.sizeof, format!"arg has invalid size %s for %s"(arg.length, T.sizeof));
+        return (cast(T[]) arg)[0];
+    }
 }
 
 void addFunction(Module module_, Function function_)

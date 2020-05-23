@@ -619,6 +619,9 @@ class IpBackendModule : BackendModule
     in (name in this.functions || name in this.callbacks, format!"function '%s' not found"(name))
     {
         import core.stdc.stdlib : alloca;
+        import std.stdio : writefln;
+
+        scope(failure) writefln!"in %s:"(name);
 
         if (name in this.callbacks)
         {

@@ -1480,12 +1480,21 @@ class StringLiteral : Expression
 
     override Type type()
     {
-        return new Pointer(new Character);
+        return new Array(new Character);
     }
 
     override Reg emit(Generator output)
     {
-        return output.fun.stringLiteral(this.text);
+        auto voidp = output.mod.pointerType(output.mod.voidType);
+        // TODO allocaless
+        auto structType = type.emit(output.mod);
+        Reg structReg = output.fun.alloca(structType);
+        Reg ptrField = output.fun.fieldOffset(structType, structReg, 0);
+        Reg lenField = output.fun.fieldOffset(structType, structReg, 1);
+
+        output.fun.store(voidp, ptrField, output.fun.stringLiteral(this.text));
+        output.fun.store(output.mod.intType, lenField, output.fun.intLiteral(cast(int)  this.text.length));
+        return output.fun.load(structType, structReg);
     }
 
     mixin(GenerateThis);
@@ -2108,9 +2117,10 @@ void defineRuntime(Backend backend, BackendModule backModule, Module frontModule
     auto languageType(T)()
     {
         static if (is(T == int)) return new Integer;
-        else static if (is(T == char)) return new Character;
+        else static if (is(typeof(cast() T.init) == char)) return new Character;
         else static if (is(T == void)) return new Void;
         else static if (is(T == U*, U)) return new Pointer(languageType!U);
+        else static if (is(T == U[], U)) return new Array(languageType!U);
         // take care to match up types!
         else static if (is(T == class) || is(T == interface)) return new Pointer(new Void);
         else static assert(false, T.stringof);
@@ -2144,8 +2154,8 @@ void defineRuntime(Backend backend, BackendModule backModule, Module frontModule
 
         return memcpy(target, source, size);
     });
-    definePublicCallback("print", (char* text) {
-        writefln!"%s"(text.to!string);
+    definePublicCallback("print", (string text) {
+        writefln!"%s"(text.ptr[0 .. text.length]);
     });
     definePublicCallback("strlen", (char* text) { return cast(int) text.to!string.length; });
     definePublicCallback("strncmp", (char* text, char* cmp, int limit) { return int(text[0 .. limit] == cmp[0 .. limit]); });
@@ -2206,9 +2216,20 @@ void defineRuntime(Backend backend, BackendModule backModule, Module frontModule
 }
 
 private template as(T) {
-    ref T as(void[] arg) {
-        assert(arg.length == T.sizeof, format!"arg has invalid size %s for %s"(arg.length, T.sizeof));
-        return (cast(T[]) arg)[0];
+    static if (is(T == U[], U))
+    {
+        T as(void[] arg) {
+            struct ArrayHack { align(4) U* ptr; int length; }
+            auto arrayVal = arg.as!ArrayHack;
+            return arrayVal.ptr[0 .. arrayVal.length];
+        }
+    }
+    else
+    {
+        ref T as(void[] arg) {
+            assert(arg.length == T.sizeof, format!"arg has invalid size %s for %s"(arg.length, T.sizeof));
+            return (cast(T[]) arg)[0];
+        }
     }
 }
 

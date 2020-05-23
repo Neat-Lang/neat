@@ -203,12 +203,13 @@ class FunctionPointer : Type
 class NamedType : ASTType
 {
     string name;
+    invariant(name.length);
 
     override Type compile(Namespace namespace)
     {
         auto target = namespace.lookup(this.name);
 
-        assert(cast(Type) target, format!"target for %s = %s"(this.name, target));
+        assert(cast(Type) target, format!"target for '%s' = %s"(this.name, target));
         return cast(Type) target;
     }
 
@@ -265,6 +266,11 @@ ASTType parseLeafType(ref Parser parser)
         begin;
 
         auto identifier = parser.parseIdentifier;
+        if (!identifier)
+        {
+            revert;
+            return null;
+        }
 
         if (identifier == "int")
         {

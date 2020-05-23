@@ -572,9 +572,9 @@ ASTStatement parseStatement(ref Parser parser)
         return stmt;
     if (auto stmt = parser.parseScope)
         return stmt;
-    if (auto stmt = parser.parseAssignStatement)
-        return stmt;
     if (auto stmt = parser.parseVarDecl)
+        return stmt;
+    if (auto stmt = parser.parseAssignStatement)
         return stmt;
     if (auto stmt = parser.parseExprStatement)
         return stmt;
@@ -662,26 +662,26 @@ ASTSymbol parseArithmetic(ref Parser parser, size_t level = 0)
 
     if (level <= 2)
     {
-        parseMul(parser, left);
+        parseMul(parser, left, 2);
     }
     if (level <= 1)
     {
-        parseAddSub(parser, left);
+        parseAddSub(parser, left, 1);
     }
     if (level == 0)
     {
-        parseComparison(parser, left);
+        parseComparison(parser, left, 0);
     }
     return left;
 }
 
-void parseMul(ref Parser parser, ref ASTSymbol left)
+void parseMul(ref Parser parser, ref ASTSymbol left, int myLevel)
 {
     while (true)
     {
         if (parser.accept("*"))
         {
-            auto right = parser.parseExpressionLeaf;
+            auto right = parser.parseArithmetic(myLevel + 1);
             left = new ASTArithmeticOp(ArithmeticOpType.mul, left, right);
             continue;
         }
@@ -689,19 +689,19 @@ void parseMul(ref Parser parser, ref ASTSymbol left)
     }
 }
 
-void parseAddSub(ref Parser parser, ref ASTSymbol left)
+void parseAddSub(ref Parser parser, ref ASTSymbol left, int myLevel)
 {
     while (true)
     {
         if (parser.accept("+"))
         {
-            auto right = parser.parseArithmetic(2);
+            auto right = parser.parseArithmetic(myLevel + 1);
             left = new ASTArithmeticOp(ArithmeticOpType.add, left, right);
             continue;
         }
         if (parser.accept("-"))
         {
-            auto right = parser.parseArithmetic(2);
+            auto right = parser.parseArithmetic(myLevel + 1);
             left = new ASTArithmeticOp(ArithmeticOpType.sub, left, right);
             continue;
         }
@@ -709,31 +709,31 @@ void parseAddSub(ref Parser parser, ref ASTSymbol left)
     }
 }
 
-void parseComparison(ref Parser parser, ref ASTSymbol left)
+void parseComparison(ref Parser parser, ref ASTSymbol left, int myLevel)
 {
     if (parser.accept("=="))
     {
-        auto right = parser.parseArithmetic(1);
+        auto right = parser.parseArithmetic(myLevel + 1);
         left = new ASTArithmeticOp(ArithmeticOpType.eq, left, right);
     }
     if (parser.accept(">="))
     {
-        auto right = parser.parseArithmetic(1);
+        auto right = parser.parseArithmetic(myLevel + 1);
         left = new ASTArithmeticOp(ArithmeticOpType.ge, left, right);
     }
     if (parser.accept(">"))
     {
-        auto right = parser.parseArithmetic(1);
+        auto right = parser.parseArithmetic(myLevel + 1);
         left = new ASTArithmeticOp(ArithmeticOpType.gt, left, right);
     }
     if (parser.accept("<="))
     {
-        auto right = parser.parseArithmetic(1);
+        auto right = parser.parseArithmetic(myLevel + 1);
         left = new ASTArithmeticOp(ArithmeticOpType.le, left, right);
     }
     if (parser.accept("<"))
     {
-        auto right = parser.parseArithmetic(1);
+        auto right = parser.parseArithmetic(myLevel + 1);
         left = new ASTArithmeticOp(ArithmeticOpType.lt, left, right);
     }
 }
@@ -1376,25 +1376,6 @@ class ASTNewClassExpression : ASTSymbol
     mixin(GenerateThis);
 }
 
-class RegExpr : Expression
-{
-    Type type_;
-
-    Reg reg;
-
-    override Type type()
-    {
-        return this.type_;
-    }
-
-    override Reg emit(Generator output)
-    {
-        return this.reg;
-    }
-
-    mixin(GenerateThis);
-}
-
 class CallCtorExpression : Expression
 {
     Expression classptr;
@@ -1606,6 +1587,12 @@ ASTSymbol parseExpressionBase(ref Parser parser)
     if (parser.parseNumber(i))
     {
         return new ASTLiteral(i);
+    }
+    if (parser.accept("("))
+    {
+        auto result = parser.parseExpression;
+        parser.expect(")");
+        return result;
     }
     parser.fail("Base expression expected.");
     assert(false);

@@ -57,6 +57,25 @@ interface Reference : Expression
     Reg emitLocation(Generator output);
 }
 
+class RegExpr : Expression
+{
+    Type type_;
+
+    Reg reg;
+
+    override Type type()
+    {
+        return this.type_;
+    }
+
+    override Reg emit(Generator output)
+    {
+        return this.reg;
+    }
+
+    mixin(GenerateThis);
+}
+
 class Namespace
 {
     Namespace parent; // lexical parent

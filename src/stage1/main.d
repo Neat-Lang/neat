@@ -11,6 +11,7 @@ import std.string;
 import std.stdio;
 import std.typecons;
 import std.uni;
+import struct_;
 import types;
 
 struct ASTArgument
@@ -152,90 +153,6 @@ ASTFunction parseFunction(ref Parser parser)
         auto stmt = parser.parseStatement;
         commit;
         return new ASTFunction(name, ret, args, false, stmt);
-    }
-}
-
-class ASTStructDecl : ASTType
-{
-    struct Member
-    {
-        string name;
-
-        ASTType type;
-
-        mixin(GenerateThis);
-    }
-
-    string name;
-
-    Member[] members;
-
-    override Struct compile(Namespace namespace)
-    {
-        // TODO subscope
-        return new Struct(name, members.map!(a => Struct.Member(a.name, a.type.compile(namespace))).array);
-    }
-
-    mixin(GenerateThis);
-}
-
-class Struct : Type
-{
-    struct Member
-    {
-        string name;
-
-        Type type;
-
-        mixin(GenerateThis);
-    }
-
-    string name;
-
-    Member[] members;
-
-    override BackendType emit(BackendModule mod)
-    {
-        return mod.structType(this.members.map!(a => a.type.emit(mod)).array);
-    }
-
-    override size_t size() const
-    {
-        return members.map!(a => a.type.size).sum;
-    }
-
-    override string toString() const
-    {
-        return format!"{ %(%s, %) }"(this.members);
-    }
-
-    mixin(GenerateThis);
-}
-
-ASTStructDecl parseStructDecl(ref Parser parser)
-{
-    with (parser)
-    {
-        begin;
-        if (parser.parseIdentifier != "struct")
-        {
-            revert;
-            return null;
-        }
-        auto name = parser.parseIdentifier;
-        ASTStructDecl.Member[] members;
-        expect("{");
-        while (!accept("}"))
-        {
-            auto memberType = parser.parseType;
-            if (!memberType) parser.fail("expected member type");
-            auto memberName = parser.parseIdentifier;
-            if (!memberName) parser.fail("expected member name");
-            expect(";");
-            members ~= ASTStructDecl.Member(memberName, memberType);
-        }
-        commit;
-        return new ASTStructDecl(name, members);
     }
 }
 
@@ -1043,42 +960,6 @@ class StackFrame : Reference
     mixin(GenerateThis);
 }
 
-class StructMember : Reference
-{
-    Reference base;
-
-    int index;
-
-    override Type type()
-    {
-        Type type = base.type();
-        auto structType = cast(Struct) type;
-        assert(structType);
-        return structType.members[this.index].type;
-    }
-
-    override Reg emit(Generator output)
-    {
-        Reg locationReg = emitLocation(output);
-
-        return output.fun.load(this.type().emit(output.mod), locationReg);
-    }
-
-    override Reg emitLocation(Generator output)
-    {
-        Reg reg = this.base.emitLocation(output);
-
-        return output.fun.fieldOffset(base.type.emit(output.mod), reg, this.index);
-    }
-
-    override string toString() const
-    {
-        return format!"%s._%s"(this.base, this.index);
-    }
-
-    mixin(GenerateThis);
-}
-
 class ASTDereference : ASTSymbol
 {
     ASTSymbol base;
@@ -1279,7 +1160,14 @@ class ASTMember : ASTSymbol
 
     override Symbol compile(Namespace namespace)
     {
+        import array : Array, ArrayLength;
+
         auto base = this.base.compile(namespace);
+
+        if (cast(Expression) base && cast(Array) (cast(Expression) base).type && member == "length")
+        {
+            return new ArrayLength(cast(Expression) base);
+        }
 
         return base.accessMember(this.member);
     }
@@ -2216,9 +2104,16 @@ void defineRuntime(Backend backend, BackendModule backModule, Module frontModule
 
         return malloc(size);
     });
+    definePublicCallback("realloc", (void* ptr, int size) {
+        import core.stdc.stdlib : realloc;
+
+        return realloc(ptr, size);
+    });
     definePublicCallback("print", (char* text) {
         writefln!"%s"(text.to!string);
     });
+    definePublicCallback("strlen", (char* text) { return cast(int) text.to!string.length; });
+    definePublicCallback("strncmp", (char* text, char* cmp, int limit) { return int(text[0 .. limit] == cmp[0 .. limit]); });
 
     definePublicCallback("_backend", delegate Backend() => backend);
     definePublicCallback("_backend_createModule", delegate BackendModule(Backend backend) => backend.createModule());

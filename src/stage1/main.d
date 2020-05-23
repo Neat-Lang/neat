@@ -1,5 +1,6 @@
 module main;
 
+import array : Array, ArrayPointer, ASTArrayLiteral;
 import backend.backend;
 import base;
 import boilerplate;
@@ -405,6 +406,24 @@ class ASTVarDeclStatement : ASTStatement
     }
 
     mixin(GenerateAll);
+}
+
+ASTArrayLiteral parseArrayLiteral(ref Parser parser)
+{
+    with (parser)
+    {
+        if (!accept("["))
+            return null;
+        ASTSymbol[] fields;
+        while (!accept("]"))
+        {
+            if (fields.length) expect(",");
+            auto expr = parser.parseExpression;
+            assert(expr, "expression expected.");
+            fields ~= expr;
+        }
+        return new ASTArrayLiteral(fields);
+    }
 }
 
 ASTVarDeclStatement parseVarDecl(ref Parser parser)
@@ -1203,6 +1222,12 @@ class ASTIndexAccess : ASTSymbol
         auto base = this.base.compile(namespace).beExpression;
         auto index = this.index.compile(namespace).beExpression;
 
+        if (auto array_ = cast(Array) base.type)
+        {
+            // TODO bounds check
+            base = new ArrayPointer(array_.elementType, base);
+        }
+
         assert(cast(Pointer) base.type, "expected pointer for index base");
         assert(cast(Integer) index.type, "expected int for index value");
 
@@ -1481,6 +1506,10 @@ ASTSymbol parseExpressionBase(ref Parser parser)
         auto result = parser.parseExpression;
         parser.expect(")");
         return result;
+    }
+    if (auto arrayLiteral = parser.parseArrayLiteral)
+    {
+        return arrayLiteral;
     }
     parser.fail("Base expression expected.");
     assert(false);

@@ -31,6 +31,7 @@ interface BackendFunction
     Reg stringLiteral(string text);
     Reg voidLiteral();
     Reg alloca(BackendType type);
+    Reg field(BackendType structType, Reg structValue, int member);
     Reg fieldOffset(BackendType structType, Reg structBase, int member);
     void store(BackendType dataType, Reg target, Reg value);
     Reg load(BackendType dataType, Reg target);

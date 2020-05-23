@@ -127,6 +127,7 @@ struct Instr
         Arg,
         Literal,
         Alloca,
+        GetField,
         FieldOffset,
         Load,
         Store,
@@ -173,6 +174,12 @@ struct Instr
         {
             IpBackendType type;
         }
+        static struct GetField
+        {
+            StructType structType;
+            Reg base;
+            int member;
+        }
         static struct FieldOffset
         {
             StructType structType;
@@ -207,6 +214,7 @@ struct Instr
         Branch branch;
         TestBranch testBranch;
         Alloca alloca;
+        GetField getField;
         FieldOffset fieldOffset;
         Load load;
         Store store;
@@ -222,6 +230,8 @@ struct Instr
             case Arg: return format!"_%s"(arg.index);
             case Literal: return formatLiteral(literal.type, literal.value);
             case Alloca: return format!"alloca %s"(alloca.type);
+            case GetField: return format!"%%%s.%s (%s)"(
+                getField.base, getField.member, getField.structType);
             case FieldOffset: return format!"%%%s.%s (%s)"(
                 fieldOffset.base, fieldOffset.member, fieldOffset.structType);
             case Load: return format!"*%%%s"(load.target);
@@ -248,6 +258,8 @@ struct Instr
             case Arg: return fun.argTypes[arg.index].size;
             case Literal: return literal.type.size;
             case Load: return load.targetType.size;
+            case GetField:
+                return getField.structType.types[getField.member].size;
             // pointers
             // TODO machine based
             case Alloca:
@@ -276,6 +288,7 @@ private bool isBlockFinisher(Instr.Kind kind)
         case Arg:
         case Literal:
         case Alloca:
+        case GetField:
         case FieldOffset:
         case Load:
         case Store:
@@ -402,6 +415,19 @@ class IpBackendFunction : BackendFunction
         auto instr = Instr(Instr.Kind.Alloca);
 
         instr.alloca.type = cast(IpBackendType) type;
+        return block.append(instr);
+    }
+
+    override Reg field(BackendType structType, Reg structBase, int member)
+    {
+        assert(cast(StructType) structType !is null);
+
+        auto instr = Instr(Instr.Kind.GetField);
+
+        instr.getField.structType = cast(StructType) structType;
+        instr.getField.base = structBase;
+        instr.getField.member = member;
+
         return block.append(instr);
     }
 
@@ -728,6 +754,14 @@ class IpBackendModule : BackendModule
                             auto offset = instr.fieldOffset.structType.offsetOf(instr.fieldOffset.member);
 
                             (cast(void*[]) regArrays[reg])[0] = base + offset;
+                            break;
+                        case GetField:
+                            assert(!lastInstr);
+                            auto value = cast(ubyte[]) regArrays[instr.fieldOffset.base];
+                            auto size = instr.getField.structType.types[instr.getField.member].size;
+                            auto offset = instr.getField.structType.offsetOf(instr.getField.member);
+
+                            (cast(ubyte[]) regArrays[reg])[] = value[offset .. offset + size];
                             break;
                         case Load:
                             assert(!lastInstr);

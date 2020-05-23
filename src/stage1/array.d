@@ -72,10 +72,8 @@ class ArrayLength : Expression
 
     override Reg emit(Generator output)
     {
-        assert(cast(Reference) this.arrayValue, "TODO");
-        auto arrayReg = (cast(Reference) this.arrayValue).emitLocation(output);
-        auto lengthPtr = output.fun.fieldOffset(arrayValue.type.emit(output.mod), arrayReg, 1);
-        return output.fun.load(type.emit(output.mod), lengthPtr);
+        auto arrayReg = this.arrayValue.emit(output);
+        return output.fun.field(arrayValue.type.emit(output.mod), arrayReg, 1);
     }
 
     mixin(GenerateThis);
@@ -94,10 +92,8 @@ class ArrayPointer : Expression
 
     override Reg emit(Generator output)
     {
-        assert(cast(Reference) this.arrayValue, "TODO");
-        auto arrayReg = (cast(Reference) this.arrayValue).emitLocation(output);
-        auto ptrPtr = output.fun.fieldOffset(arrayValue.type.emit(output.mod), arrayReg, 0);
-        return output.fun.load(type.emit(output.mod), ptrPtr);
+        auto arrayReg = this.arrayValue.emit(output);
+        return output.fun.field(arrayValue.type.emit(output.mod), arrayReg, 0);
     }
 
     mixin(GenerateThis);

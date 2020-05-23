@@ -1,6 +1,6 @@
 module main;
 
-import array : Array, ArrayPointer, ASTArrayLiteral;
+import array : Array, ArrayLength, ArrayPointer, ASTArrayLiteral;
 import backend.backend;
 import base;
 import boilerplate;
@@ -563,6 +563,25 @@ class ArithmeticOp : Expression
 
     override Reg emit(Generator output)
     {
+        if (op == ArithmeticOpType.eq)
+        {
+            auto leftArray = cast(Array) this.left.type;
+            auto rightArray = cast(Array) this.right.type;
+            if (leftArray && rightArray)
+            {
+                // TODO temp expr once array properties work on nonreferences
+                assert(leftArray == rightArray);
+                auto leftLen = (new ArrayLength(this.left)).emit(output);
+                auto rightLen = (new ArrayLength(this.right)).emit(output);
+                auto leftPtr = (new ArrayPointer(leftArray.elementType, this.left)).emit(output);
+                auto rightPtr = (new ArrayPointer(rightArray.elementType, this.right)).emit(output);
+                return output.fun.call(output.mod.intType, "_arraycmp", [
+                    leftPtr, rightPtr, leftLen, rightLen,
+                    output.fun.intLiteral(cast(int) leftArray.elementType.size)]);
+            }
+        }
+        assert(this.left.type == new Integer, format!"expected integer, not %s"(this.left.type));
+        assert(this.right.type == new Integer, format!"expected integer, not %s"(this.right.type));
         Reg leftreg = this.left.emit(output);
         Reg rightreg = this.right.emit(output);
         string name = {
@@ -2170,6 +2189,13 @@ void defineRuntime(Backend backend, BackendModule backModule, Module frontModule
             return mod.define(name.to!string, ret, args_ptr[0 .. args_len]);
         }
     );
+    defineCallback("_arraycmp", (void* left, void* right, int leftlen, int rightlen, int elemsize)
+    {
+        if (leftlen != rightlen) return 0;
+        auto leftArray = (cast(ubyte*) left)[0 .. leftlen * elemsize];
+        auto rightArray = (cast(ubyte*) right)[0 .. rightlen * elemsize];
+        return leftArray == rightArray ? 1 : 0;
+    });
     definePublicCallback(
         "_backendModule_dump",
         delegate void(BackendModule mod) { writefln!"(nested) module:\n%s"(mod); },

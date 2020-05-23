@@ -253,6 +253,16 @@ ASTType parseType(ref Parser parser)
                 continue;
             }
             revert;
+
+            begin;
+            if (accept("[") && accept("]"))
+            {
+                commit;
+                import array : ASTArray;
+                current = new ASTArray(current);
+                continue;
+            }
+            revert;
         }
         break;
     }

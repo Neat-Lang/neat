@@ -1420,6 +1420,38 @@ class ASTAllocPtrExpression : ASTSymbol
     mixin(GenerateThis);
 }
 
+class ASTNegation : ASTSymbol
+{
+    ASTSymbol next;
+
+    override Negation compile(Namespace namespace)
+    {
+        auto next = this.next.compile(namespace).beExpression;
+        assert(next.type == new Integer);
+        return new Negation(next);
+    }
+
+    mixin(GenerateThis);
+}
+
+class Negation : Expression
+{
+    Expression next;
+
+    override Type type()
+    {
+        return new Integer;
+    }
+
+    override Reg emit(Generator output)
+    {
+        auto next = this.next.emit(output);
+        return output.fun.call(output.mod.intType, "cxruntime_int_negate", [next]);
+    }
+
+    mixin(GenerateThis);
+}
+
 ASTSymbol parseExpressionLeaf(ref Parser parser)
 {
     with (parser)
@@ -1448,6 +1480,13 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
             }
 
             return new ASTNewClassExpression(type, args);
+        }
+        if (accept("!"))
+        {
+            auto next = parser.parseExpressionLeaf;
+
+            assert(next !is null);
+            return new ASTNegation(next);
         }
         if (parser.acceptIdentifier("_alloc"))
         {

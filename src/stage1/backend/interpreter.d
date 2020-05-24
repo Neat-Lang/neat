@@ -622,6 +622,7 @@ private void defineIntrinsics(IpBackendModule mod)
     ]) {
         defineCallback("cxruntime_int_" ~ key, delegate int(int a, int b) => mixin("a " ~ op ~ " b"));
     }
+    defineCallback("cxruntime_int_negate", delegate int(int a) => !a);
 }
 
 class IpBackendModule : BackendModule

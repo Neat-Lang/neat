@@ -134,6 +134,11 @@ bool parseNumber(ref Parser parser, out int i)
     with (parser)
     {
         begin;
+        bool negative = false;
+        if (accept("-"))
+        {
+            negative = true;
+        }
         strip;
         if (text.empty || !text.front.isNumber)
         {
@@ -148,6 +153,7 @@ bool parseNumber(ref Parser parser, out int i)
         }
         commit;
         i = number.to!int;
+        if (negative) i = -i;
         return true;
     }
 }

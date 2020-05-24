@@ -1,0 +1,215 @@
+module parser;
+
+class Parser
+{
+    char[][] stack;
+
+    int level;
+
+    this(char[] text)
+    {
+        this.stack = [text];
+        this.level = 0;
+    }
+
+    void verify()
+    {
+        assert(this.stack.length > 0);
+        assert(this.level <= this.stack.length);
+    }
+
+    char[]* textp()
+    {
+        this.verify();
+        return &this.stack[this.level];
+    }
+
+    char[] text()
+    {
+        return *this.textp();
+    }
+
+    void begin()
+    {
+        this.verify();
+        if (this.level == this.stack.length - 1)
+        {
+            this.stack = [...this.stack, this.text()];
+        }
+        else
+        {
+            this.stack[this.level + 1] = this.text();
+        }
+        this.level = this.level + 1;
+    }
+
+    void commit()
+    {
+        this.verify();
+        this.stack[this.level - 1] = this.text();
+        this.stack = this.stack[0 .. this.stack.length - 1];
+    }
+
+    void revert()
+    {
+        this.verify();
+        this.level = this.level - 1;
+    }
+
+    int accept(char[] match)
+    {
+        this.begin();
+        this.strip();
+        if (this.text().length < match.length) return 0;
+        if (this.text()[0 .. match.length] == match)
+        {
+            (*this.textp()) = this.text()[match.length .. this.text().length];
+            this.commit();
+            return 1;
+        }
+        this.revert();
+        return 0;
+    }
+
+    void expect(char[] match)
+    {
+        if (!this.accept(match))
+        {
+            /* this.fail(format("'%s' expected.", match)); */
+            this.fail("something expected");
+        }
+    }
+
+    int eof()
+    {
+        this.begin();
+        this.strip();
+        if (this.text().length == 0)
+        {
+            this.commit();
+            return 1;
+        }
+        this.revert();
+        return 0;
+    }
+
+    void strip()
+    {
+        while (1)
+        {
+            /* this.text = this.text.strip; */
+            while (this.text().length > 0 && this.text()[0 .. 1] == " ")
+            {
+                *this.textp() = this.text()[1 .. this.text().length];
+            }
+            if (!startsWith(this.text(), "/*")) return;
+            *this.textp() = this.text()["/*".length .. this.text().length];
+            int commentLevel = 1;
+            while (commentLevel > 0)
+            {
+                int more = find(this.text(), "/*");
+                int less = find(this.text(), "*/");
+
+                if (more == -1 && less == -1) this.fail("comment spans end of file");
+                if (less != -1 && (more == -1 || less < more))
+                {
+                    *this.textp() = this.text()[less + "*/".length .. this.text().length];
+                    commentLevel = commentLevel - 1;
+                }
+                if (more != -1 && (less == -1 || more < less))
+                {
+                    *this.textp() = this.text()[more + "/*".length .. this.text().length];
+                    commentLevel = commentLevel + 1;
+                }
+            }
+        }
+    }
+
+    void fail(char[] message)
+    {
+        /* assert(false, format!"at %s: %s"(this.text, msg)); */
+        assert(0); /* TODO */
+    }
+}
+
+int startsWith(char[] haystack, char[] needle)
+{
+    return haystack.length >= needle.length && haystack[0 .. needle.length] == needle;
+}
+
+int find(char[] haystack, char[] needle)
+{
+    for (int i = 0; i <= haystack.length - needle.length; i = i + 1)
+    {
+        if (haystack[i .. i + needle.length] == needle) return i;
+    }
+    return -1;
+}
+
+int parseNumber(Parser parser, int* ip)
+{
+    parser.begin();
+    parser.strip();
+    if (parser.eof() || !isNumber(parser.text()[0 .. 1]))
+    {
+        parser.revert();
+        return 0;
+    }
+    char[] number;
+    while (!parser.eof() && isNumber(parser.text()[0 .. 1]))
+    {
+        number = [...number, ...parser.text()[0 .. 1]];
+        *parser.textp() = parser.text()[1 .. parser.text().length];
+    }
+    parser.commit();
+    *ip = atoi(number);
+    return 1;
+}
+
+int isNumber(char[] s)
+{
+    assert(s.length == 1);
+    return find("0123456789", s) != -1;
+}
+
+int isAlpha(char[] s)
+{
+    assert(s.length == 1);
+    return find("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", s) != -1;
+}
+
+int isAlnum(char[] s)
+{
+    return isAlpha(s) || isNumber(s);
+}
+
+char[] parseIdentifier(Parser parser)
+{
+    parser.begin();
+    parser.strip();
+    if (parser.text().length == 0 || (!isAlpha(parser.text()[0 .. 1]) && parser.text()[0 .. 1] != "_"))
+    {
+        parser.revert();
+        return "";
+    }
+    char[] identifier;
+    while (parser.text().length > 0 && (isAlnum(parser.text()[0 .. 1]) || parser.text()[0 .. 1] == "_"))
+    {
+        identifier = [...identifier, ...parser.text()[0 .. 1]];
+        *parser.textp() = parser.text()[1 .. parser.text().length];
+    }
+    parser.commit();
+    return identifier;
+}
+
+int acceptIdentifier(Parser parser, char[] identifier)
+{
+    parser.begin();
+    if (parseIdentifier(parser) != identifier)
+    {
+        parser.revert();
+        return 0;
+    }
+    parser.commit();
+    return 1;
+}

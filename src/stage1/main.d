@@ -2289,23 +2289,40 @@ string moduleToFile(string module_)
     return module_.replace(".", "/") ~ ".cx";
 }
 
-Module parseModule(string filename)
+Module parseModule(string filename, string[] includes)
 {
-    import std.file : readText;
+    import std.file : exists, readText;
+    import std.path : chainPath;
 
-    string code = readText(filename);
-    auto parser = new Parser(filename, code);
-    auto module_ = new Module(null, filename);
+    string path = filename;
+    if (!path.exists)
+    {
+        foreach (includePath; includes)
+        {
+            if (includePath.chainPath(filename).exists)
+            {
+                path = includePath.chainPath(filename).array;
+                break;
+            }
+        }
+        assert(path.exists, format!"cannot find file '%s'"(filename));
+    }
+    string code = readText(path);
+    auto parser = new Parser(path, code);
 
     parser.expect("module");
     auto modname = parser.parseIdentifier(".");
     parser.expect(";");
 
+    assert(filename == modname.moduleToFile);
+    auto module_ = new Module(null, modname);
+
     while (!parser.eof)
     {
         if (auto import_ = parser.parseImport)
         {
-            auto importedModule = parseModule(import_.name.moduleToFile);
+            auto importedModule = parseModule(
+                import_.name.moduleToFile, includes);
 
             module_.addImport(importedModule);
         }
@@ -2489,14 +2506,24 @@ else
     {
         import backend.interpreter : IpBackend;
 
+        string[] includes;
+        foreach (arg; args)
+        {
+            if (arg.startsWith("-I"))
+            {
+                includes ~= arg[2 .. $];
+            }
+        }
+        args = args.filter!(a => !a.startsWith("-I")).array;
+
         if (args.length != 2)
         {
             import std.stdio : stderr;
 
-            stderr.writefln!"Usage: %s FILE.cx"(args[0]);
+            stderr.writefln!"Usage: %s [-Iincludepath]* FILE.cx"(args[0]);
             return 1;
         }
-        auto toplevel = parseModule(args[1]);
+        auto toplevel = parseModule(args[1], includes);
 
         auto backend = new IpBackend;
         auto module_ = backend.createModule;

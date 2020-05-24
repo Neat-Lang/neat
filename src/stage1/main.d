@@ -1,6 +1,6 @@
 module main;
 
-import array : Array, ArrayLength, ArrayPointer, ASTArrayLiteral;
+import array : Array, ArrayLength, ArrayPointer, ASTArrayLiteral, ASTArraySlice;
 import backend.backend;
 import base;
 import boilerplate;
@@ -1219,7 +1219,7 @@ ASTSymbol parseMember(ref Parser parser, ASTSymbol base)
     with (parser)
     {
         begin;
-        if (!accept("."))
+        if (accept("..") || !accept(".")) // don't accept '..'
         {
             revert;
             return null;
@@ -1279,6 +1279,13 @@ ASTSymbol parseIndex(ref Parser parser, ASTSymbol base)
         }
         auto index = parser.parseExpression;
         assert(index, "index expected");
+        if (accept(".."))
+        {
+            auto lower = index, upper = parser.parseExpression;
+            assert(upper, "slice upper bound expected");
+            expect("]");
+            return new ASTArraySlice(base, lower, upper);
+        }
         expect("]");
         commit;
         return new ASTIndexAccess(base, index);
@@ -1395,10 +1402,6 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
 {
     with (parser)
     {
-        if (accept("\""))
-        {
-            return parser.parseStringLiteral("\"");
-        }
         if (accept("*"))
         {
             auto next = parser.parseExpressionLeaf;
@@ -1529,6 +1532,10 @@ ASTSymbol parseExpressionBase(ref Parser parser)
     if (parser.parseNumber(i))
     {
         return new ASTLiteral(i);
+    }
+    if (parser.accept("\""))
+    {
+        return parser.parseStringLiteral("\"");
     }
     if (parser.accept("("))
     {

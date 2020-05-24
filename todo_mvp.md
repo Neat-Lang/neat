@@ -1,4 +1,3 @@
 ## for porting bootstrap compiler
 
-- module system
-- slices
+ - some stuff I'm forgetting

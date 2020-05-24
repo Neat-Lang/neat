@@ -79,6 +79,11 @@ class ArrayLength : Expression
     mixin(GenerateThis);
 }
 
+Reg getArrayPointer(Generator output, Type arrayType, Reg arrayReg)
+{
+    return output.fun.field(arrayType.emit(output.mod), arrayReg, 0);
+}
+
 class ArrayPointer : Expression
 {
     Type elementType;
@@ -93,7 +98,7 @@ class ArrayPointer : Expression
     override Reg emit(Generator output)
     {
         auto arrayReg = this.arrayValue.emit(output);
-        return output.fun.field(arrayValue.type.emit(output.mod), arrayReg, 0);
+        return getArrayPointer(output, this.arrayValue.type, arrayReg);
     }
 
     mixin(GenerateThis);
@@ -225,6 +230,75 @@ class ArrayLiteral : Expression
 
         output.fun.store(voidp, ptrField, ptr);
         output.fun.store(intType, lenField, output.fun.load(intType, lenPtr));
+        return output.fun.load(structType, structReg);
+    }
+
+    mixin(GenerateThis);
+}
+
+class ASTArraySlice : ASTSymbol
+{
+    ASTSymbol array;
+
+    ASTSymbol lower;
+
+    ASTSymbol upper;
+
+    override ArraySlice compile(Namespace namespace)
+    {
+        return new ArraySlice(
+            this.array.compile(namespace).beExpression,
+            this.lower.compile(namespace).beExpression,
+            this.upper.compile(namespace).beExpression);
+    }
+
+    override string toString() const
+    {
+        return format!"%s[%s .. %s]"(array, lower, upper);
+    }
+
+    mixin(GenerateThis);
+}
+
+class ArraySlice : Expression
+{
+    Expression array;
+
+    Expression lower;
+
+    Expression upper;
+
+    override Type type() { return this.array.type; }
+
+    override Reg emit(Generator output)
+    {
+        auto voidp = output.mod.pointerType(output.mod.voidType);
+        auto intType = output.mod.intType;
+
+        auto arrayType = cast(Array) this.array.type;
+        assert(arrayType, "slice of non-array");
+
+        auto arrayReg = this.array.emit(output);
+        auto lowerReg = this.lower.emit(output);
+        auto upperReg = this.upper.emit(output);
+        auto ptr = getArrayPointer(output, arrayType, arrayReg);
+        // ptr = ptr + lower
+        Reg lowerOffset = output.fun.call(
+            intType, "cxruntime_int_mul", [
+                lowerReg,
+                output.fun.intLiteral(cast(int) arrayType.elementType.size)]);
+        Reg newPtr = output.fun.call(voidp, "ptr_offset", [ptr, lowerOffset]);
+        // len = upper - lower
+        Reg newLen = output.fun.call(intType, "cxruntime_int_sub", [upperReg, lowerReg]);
+
+        // TODO allocaless
+        auto structType = arrayType.emit(output.mod);
+        Reg structReg = output.fun.alloca(structType);
+        Reg ptrField = output.fun.fieldOffset(structType, structReg, 0);
+        Reg lenField = output.fun.fieldOffset(structType, structReg, 1);
+
+        output.fun.store(voidp, ptrField, newPtr);
+        output.fun.store(intType, lenField, newLen);
         return output.fun.load(structType, structReg);
     }
 

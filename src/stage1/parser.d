@@ -1,5 +1,6 @@
 module parser;
 
+import linenr;
 import std.algorithm;
 import std.conv;
 import std.format;
@@ -16,6 +17,15 @@ class Parser
     size_t level;
 
     invariant (this.level <= this.stack.length);
+
+    LineNumberRegistry lineNumbers;
+
+    this(string filename, string text)
+    {
+        this.stack ~= text;
+        this.lineNumbers = new LineNumberRegistry;
+        this.lineNumbers.register(filename, text);
+    }
 
     @property ref string text()
     {
@@ -46,11 +56,6 @@ class Parser
     in (this.level > 0)
     {
         this.level--;
-    }
-
-    this(string text)
-    {
-        this.stack ~= text;
     }
 
     bool accept(string match)
@@ -91,7 +96,7 @@ class Parser
 
     void fail(string msg)
     {
-        assert(false, format!"at %s: %s"(this.text, msg));
+        assert(false, format!"at %s: %s"(this.lineNumbers.at(this.text), msg));
     }
 
     void strip()

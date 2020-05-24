@@ -2105,7 +2105,7 @@ Module parseModule(string filename)
     import std.file : readText;
 
     string code = readText(filename);
-    auto parser = new Parser(code);
+    auto parser = new Parser(filename, code);
     auto module_ = new Module(null, filename);
 
     parser.expect("module");

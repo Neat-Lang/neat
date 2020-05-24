@@ -238,6 +238,20 @@ class ReturnStatement : Statement
     mixin(GenerateAll);
 }
 
+class ASTVoidExpression : ASTSymbol
+{
+    override Expression compile(Namespace) { return new VoidExpression; }
+}
+
+class VoidExpression : Expression
+{
+    override Type type() { return new Void; }
+    override Reg emit(Generator generator)
+    {
+        return generator.fun.voidLiteral;
+    }
+}
+
 ASTReturnStatement parseReturn(ref Parser parser)
 {
     with (parser)
@@ -248,8 +262,16 @@ ASTReturnStatement parseReturn(ref Parser parser)
             revert;
             return null;
         }
-        auto expr = parser.parseExpression;
-        expect(";");
+        ASTSymbol expr;
+        if (accept(";")) // return;
+        {
+            expr = new ASTVoidExpression;
+        }
+        else
+        {
+            expr = parser.parseExpression;
+            expect(";");
+        }
         commit;
         return new ASTReturnStatement(expr);
     }

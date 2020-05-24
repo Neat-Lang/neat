@@ -546,7 +546,7 @@ ASTSymbol parseExpression(ref Parser parser)
     return parser.parseArithmetic;
 }
 
-enum ArithmeticOpType
+enum BinaryOpType
 {
     add,
     sub,
@@ -556,26 +556,110 @@ enum ArithmeticOpType
     lt,
     ge,
     le,
+    boolAnd,
+    boolOr,
 }
 
-class ASTArithmeticOp : ASTSymbol
+class ASTBinaryOp : ASTSymbol
 {
-    ArithmeticOpType op;
+    BinaryOpType op;
+
     ASTSymbol left;
+
     ASTSymbol right;
 
-    override ArithmeticOp compile(Namespace namespace)
+    override Expression compile(Namespace namespace)
     {
-        return new ArithmeticOp(op, left.compile(namespace).beExpression, right.compile(namespace).beExpression);
+        auto left = this.left.compile(namespace).beExpression;
+        auto right = this.right.compile(namespace).beExpression;
+        if (op == BinaryOpType.boolAnd)
+            return new BoolAnd(left, right);
+        if (op == BinaryOpType.boolOr)
+            return new BoolOr(left, right);
+        return new BinaryOp(op, left, right);
     }
 
     mixin(GenerateAll);
 }
 
-class ArithmeticOp : Expression
+class BoolOr : Expression
 {
-    ArithmeticOpType op;
     Expression left;
+
+    Expression right;
+
+    override Type type() { return new Integer; }
+
+    override Reg emit(Generator output)
+    {
+        /**
+         * result = left;
+         * if (left) goto past;
+         * result = right;
+         * past:
+         */
+        Reg result = output.fun.alloca(output.mod.intType);
+
+        Reg leftValue = this.left.emit(output);
+        output.fun.store(output.mod.intType, result, leftValue);
+
+        auto condBranch = output.fun.testBranch(leftValue); // if (left)
+        condBranch.resolveElse(output.fun.blockIndex);
+
+        Reg rightValue = this.right.emit(output);
+        output.fun.store(output.mod.intType, result, rightValue);
+
+        auto exitBranch = output.fun.branch;
+        condBranch.resolveThen(output.fun.blockIndex);
+        exitBranch.resolve(output.fun.blockIndex);
+
+        return output.fun.load(output.mod.intType, result);
+    }
+
+    mixin(GenerateThis);
+}
+
+class BoolAnd : Expression
+{
+    Expression left;
+
+    Expression right;
+
+    override Type type() { return new Integer; }
+
+    override Reg emit(Generator output)
+    {
+        /**
+         * result = left;
+         * if (left) result = right;
+         */
+        Reg result = output.fun.alloca(output.mod.intType);
+
+        Reg leftValue = this.left.emit(output);
+        output.fun.store(output.mod.intType, result, leftValue);
+
+        auto condBranch = output.fun.testBranch(leftValue); // if (left)
+        condBranch.resolveThen(output.fun.blockIndex);
+
+        Reg rightValue = this.right.emit(output);
+        output.fun.store(output.mod.intType, result, rightValue);
+
+        auto exitBranch = output.fun.branch;
+        condBranch.resolveElse(output.fun.blockIndex);
+        exitBranch.resolve(output.fun.blockIndex);
+
+        return output.fun.load(output.mod.intType, result);
+    }
+
+    mixin(GenerateThis);
+}
+
+class BinaryOp : Expression
+{
+    BinaryOpType op;
+
+    Expression left;
+
     Expression right;
 
     override Type type()
@@ -585,7 +669,7 @@ class ArithmeticOp : Expression
 
     override Reg emit(Generator output)
     {
-        if (op == ArithmeticOpType.eq)
+        if (op == BinaryOpType.eq)
         {
             auto leftArray = cast(Array) this.left.type;
             auto rightArray = cast(Array) this.right.type;
@@ -607,7 +691,7 @@ class ArithmeticOp : Expression
         Reg leftreg = this.left.emit(output);
         Reg rightreg = this.right.emit(output);
         string name = {
-            with (ArithmeticOpType) final switch (this.op)
+            with (BinaryOpType) final switch (this.op)
             {
                 case add:
                     return "cxruntime_int_add";
@@ -625,6 +709,9 @@ class ArithmeticOp : Expression
                     return "cxruntime_int_ge";
                 case le:
                     return "cxruntime_int_le";
+                case boolAnd:
+                case boolOr:
+                    assert(false, "should be handled separately");
             }
         }();
         return output.fun.call(output.mod.intType, name, [leftreg, rightreg]);
@@ -638,17 +725,25 @@ ASTSymbol parseArithmetic(ref Parser parser, size_t level = 0)
 {
     auto left = parser.parseExpressionLeaf;
 
+    if (level <= 4)
+    {
+        parseMul(parser, left, 4);
+    }
+    if (level <= 3)
+    {
+        parseAddSub(parser, left, 3);
+    }
     if (level <= 2)
     {
-        parseMul(parser, left, 2);
+        parseComparison(parser, left, 2);
     }
     if (level <= 1)
     {
-        parseAddSub(parser, left, 1);
+        parseBoolAnd(parser, left, 1);
     }
-    if (level == 0)
+    if (level <= 0)
     {
-        parseComparison(parser, left, 0);
+        parseBoolOr(parser, left, 0);
     }
     return left;
 }
@@ -660,7 +755,35 @@ void parseMul(ref Parser parser, ref ASTSymbol left, int myLevel)
         if (parser.accept("*"))
         {
             auto right = parser.parseArithmetic(myLevel + 1);
-            left = new ASTArithmeticOp(ArithmeticOpType.mul, left, right);
+            left = new ASTBinaryOp(BinaryOpType.mul, left, right);
+            continue;
+        }
+        break;
+    }
+}
+
+void parseBoolAnd(ref Parser parser, ref ASTSymbol left, int myLevel)
+{
+    while (true)
+    {
+        if (parser.accept("&&"))
+        {
+            auto right = parser.parseArithmetic(myLevel + 1);
+            left = new ASTBinaryOp(BinaryOpType.boolAnd, left, right);
+            continue;
+        }
+        break;
+    }
+}
+
+void parseBoolOr(ref Parser parser, ref ASTSymbol left, int myLevel)
+{
+    while (true)
+    {
+        if (parser.accept("||"))
+        {
+            auto right = parser.parseArithmetic(myLevel + 1);
+            left = new ASTBinaryOp(BinaryOpType.boolOr, left, right);
             continue;
         }
         break;
@@ -674,13 +797,13 @@ void parseAddSub(ref Parser parser, ref ASTSymbol left, int myLevel)
         if (parser.accept("+"))
         {
             auto right = parser.parseArithmetic(myLevel + 1);
-            left = new ASTArithmeticOp(ArithmeticOpType.add, left, right);
+            left = new ASTBinaryOp(BinaryOpType.add, left, right);
             continue;
         }
         if (parser.accept("-"))
         {
             auto right = parser.parseArithmetic(myLevel + 1);
-            left = new ASTArithmeticOp(ArithmeticOpType.sub, left, right);
+            left = new ASTBinaryOp(BinaryOpType.sub, left, right);
             continue;
         }
         break;
@@ -692,27 +815,27 @@ void parseComparison(ref Parser parser, ref ASTSymbol left, int myLevel)
     if (parser.accept("=="))
     {
         auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTArithmeticOp(ArithmeticOpType.eq, left, right);
+        left = new ASTBinaryOp(BinaryOpType.eq, left, right);
     }
     if (parser.accept(">="))
     {
         auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTArithmeticOp(ArithmeticOpType.ge, left, right);
+        left = new ASTBinaryOp(BinaryOpType.ge, left, right);
     }
     if (parser.accept(">"))
     {
         auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTArithmeticOp(ArithmeticOpType.gt, left, right);
+        left = new ASTBinaryOp(BinaryOpType.gt, left, right);
     }
     if (parser.accept("<="))
     {
         auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTArithmeticOp(ArithmeticOpType.le, left, right);
+        left = new ASTBinaryOp(BinaryOpType.le, left, right);
     }
     if (parser.accept("<"))
     {
         auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTArithmeticOp(ArithmeticOpType.lt, left, right);
+        left = new ASTBinaryOp(BinaryOpType.lt, left, right);
     }
 }
 

@@ -258,15 +258,23 @@ ASTReturnStatement parseReturn(ref Parser parser)
 class ASTIfStatement : ASTStatement
 {
     ASTSymbol test;
+
     ASTStatement then;
+
+    ASTStatement else_;
 
     override IfStatement compile(Namespace namespace)
     {
         auto ifscope = new VarDeclScope(namespace, No.frameBase);
         auto test = this.test.compile(ifscope);
         auto then = this.then.compile(ifscope);
+        Statement else_;
+        if (this.else_) {
+            auto elsescope = new VarDeclScope(namespace, No.frameBase);
+            else_ = this.else_.compile(elsescope);
+        }
 
-        return new IfStatement(test.beExpression, then);
+        return new IfStatement(test.beExpression, then, else_);
     }
 
     mixin(GenerateAll);
@@ -275,7 +283,10 @@ class ASTIfStatement : ASTStatement
 class IfStatement : Statement
 {
     Expression test;
+
     Statement then;
+
+    Statement else_;
 
     override void emit(Generator output)
     {
@@ -286,9 +297,15 @@ class IfStatement : Statement
         tbrRecord.resolveThen(output.fun.blockIndex);
         then.emit(output);
         auto brRecord = output.fun.branch;
-
-        // TODO else blk
         tbrRecord.resolveElse(output.fun.blockIndex);
+
+        if (this.else_)
+        {
+            else_.emit(output);
+            auto elseBrRecord = output.fun.branch;
+
+            elseBrRecord.resolve(output.fun.blockIndex);
+        }
         brRecord.resolve(output.fun.blockIndex);
     }
 
@@ -310,8 +327,13 @@ ASTIfStatement parseIf(ref Parser parser)
         auto expr = parser.parseExpression;
         parser.expect(")");
         auto thenStmt = parser.parseStatement;
+        ASTStatement elseStatement;
+        if (parser.accept("else"))
+        {
+            elseStatement = parser.parseStatement;
+        }
         commit;
-        return new ASTIfStatement(expr, thenStmt);
+        return new ASTIfStatement(expr, thenStmt, elseStatement);
     }
 }
 

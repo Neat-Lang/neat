@@ -839,6 +839,11 @@ void parseComparison(ref Parser parser, ref ASTSymbol left, int myLevel)
         auto right = parser.parseArithmetic(myLevel + 1);
         left = new ASTBinaryOp(BinaryOpType.eq, left, right);
     }
+    if (parser.accept("!=")) // same as !(a == b)
+    {
+        auto right = parser.parseArithmetic(myLevel + 1);
+        left = new ASTNegation(new ASTBinaryOp(BinaryOpType.eq, left, right));
+    }
     if (parser.accept(">="))
     {
         auto right = parser.parseArithmetic(myLevel + 1);

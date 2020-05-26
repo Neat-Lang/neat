@@ -1,6 +1,8 @@
 module array;
 
 import backend.backend;
+import backend.platform;
+import backend.types;
 import base;
 import boilerplate;
 import parser;
@@ -14,9 +16,9 @@ class ASTArray : ASTType
 {
     ASTType elementType;
 
-    override Type compile(Namespace namespace)
+    override Type compile(Context context)
     {
-        return new Array(this.elementType.compile(namespace));
+        return new Array(this.elementType.compile(context));
     }
 
     override string toString() const
@@ -32,17 +34,11 @@ class Array : Type
 {
     Type elementType;
 
-    // TODO remove; grab size from backend type!
-    override size_t size() const
+    override BackendType emit(Platform platform)
     {
-        return 16;
-    }
-
-    override BackendType emit(BackendModule mod)
-    {
-        return mod.structType([
-            mod.pointerType(this.elementType.emit(mod)),
-            mod.intType]); // TODO mod.wordType / mod.wordSize
+        return new BackendStructType([
+            cast(BackendType) new BackendPointerType(this.elementType.emit(platform)),
+            cast(BackendType) new BackendIntType]); // TODO mod.wordType / mod.wordSize
     }
 
     override string toString() const
@@ -73,7 +69,7 @@ class ArrayLength : Expression
     override Reg emit(Generator output)
     {
         auto arrayReg = this.arrayValue.emit(output);
-        return output.fun.field(arrayValue.type.emit(output.mod), arrayReg, 1);
+        return output.fun.field(arrayValue.type.emit(output.platform), arrayReg, 1);
     }
 
     mixin(GenerateThis);
@@ -81,7 +77,7 @@ class ArrayLength : Expression
 
 Reg getArrayPointer(Generator output, Type arrayType, Reg arrayReg)
 {
-    return output.fun.field(arrayType.emit(output.mod), arrayReg, 0);
+    return output.fun.field(arrayType.emit(output.platform), arrayReg, 0);
 }
 
 class ArrayPointer : Expression
@@ -115,13 +111,13 @@ class ASTArrayLiteral : ASTSymbol
 
     Entry[] elements;
 
-    override ArrayLiteral compile(Namespace namespace)
+    override ArrayLiteral compile(Context context)
     {
         ArrayLiteral.Element[] elements;
         Type elementType;
         foreach (entry; this.elements)
         {
-            auto newExpression = entry.symbol.compile(namespace).beExpression;
+            auto newExpression = entry.symbol.compile(context).beExpression;
             Type expressionElementType;
             if (entry.spread)
             {
@@ -159,6 +155,7 @@ class ArrayLiteral : Expression
     }
     Type elementType;
 
+    // TODO rename to Component
     Element[] elements;
 
     override Type type()
@@ -168,8 +165,8 @@ class ArrayLiteral : Expression
 
     override Reg emit(Generator output)
     {
-        auto voidp = output.mod.pointerType(output.mod.voidType);
-        auto intType = output.mod.intType;
+        auto voidp = new BackendPointerType(new BackendVoidType);
+        auto intType = new BackendIntType;
 
         Reg lenPtr = output.fun.alloca(intType); // TODO word type
         const numNonSpreadElements = this.elements.filter!(a => !a.spread).count;
@@ -187,10 +184,11 @@ class ArrayLiteral : Expression
                 output.fun.store(intType, lenPtr, sumLen);
             }
         }
+        const int arrayElementSize = output.platform.size(this.elementType.emit(output.platform));
         Reg memSize = output.fun.call(
             intType, "cxruntime_int_mul", [
                 output.fun.load(intType, lenPtr),
-                output.fun.intLiteral(cast(int) this.elementType.size)]);
+                output.fun.intLiteral(arrayElementSize)]);
 
         Reg ptr = output.fun.call(voidp, "malloc", [memSize]);
         Reg currentOffsetPtr = output.fun.alloca(intType);
@@ -207,7 +205,7 @@ class ArrayLiteral : Expression
                 Reg elementLen = (new ArrayLength(element.expression)).emit(output);
                 Reg elementPtr = (new ArrayPointer(this.elementType, element.expression)).emit(output);
                 Reg elementSize = output.fun.call(
-                    intType, "cxruntime_int_mul", [elementLen, output.fun.intLiteral(cast(int) this.elementType.size)]);
+                    intType, "cxruntime_int_mul", [elementLen, output.fun.intLiteral(arrayElementSize)]);
 
                 output.fun.call(voidp, "memcpy", [ptrOffsetReg, elementPtr, elementSize]);
                 output.fun.store(intType, currentOffsetPtr, output.fun.call(
@@ -215,14 +213,14 @@ class ArrayLiteral : Expression
             }
             else
             {
-                output.fun.store(elementType.emit(output.mod), ptrOffsetReg, element.expression.emit(output));
+                output.fun.store(elementType.emit(output.platform), ptrOffsetReg, element.expression.emit(output));
                 output.fun.store(intType, currentOffsetPtr, output.fun.call(
                     intType, "cxruntime_int_add", [
                         currentOffset,
-                        output.fun.intLiteral(cast(int) this.elementType.size)]));
+                        output.fun.intLiteral(arrayElementSize)]));
             }
         }
-        auto structType = type.emit(output.mod);
+        auto structType = type.emit(output.platform);
         // TODO allocaless
         Reg structReg = output.fun.alloca(structType);
         Reg ptrField = output.fun.fieldOffset(structType, structReg, 0);
@@ -244,12 +242,12 @@ class ASTArraySlice : ASTSymbol
 
     ASTSymbol upper;
 
-    override ArraySlice compile(Namespace namespace)
+    override ArraySlice compile(Context context)
     {
         return new ArraySlice(
-            this.array.compile(namespace).beExpression,
-            this.lower.compile(namespace).beExpression,
-            this.upper.compile(namespace).beExpression);
+            this.array.compile(context).beExpression,
+            this.lower.compile(context).beExpression,
+            this.upper.compile(context).beExpression);
     }
 
     override string toString() const
@@ -272,11 +270,12 @@ class ArraySlice : Expression
 
     override Reg emit(Generator output)
     {
-        auto voidp = output.mod.pointerType(output.mod.voidType);
-        auto intType = output.mod.intType;
+        auto voidp = new BackendPointerType(new BackendVoidType);
+        auto intType = new BackendIntType;
 
         auto arrayType = cast(Array) this.array.type;
         assert(arrayType, "slice of non-array");
+        const int elementSize = output.platform.size(arrayType.elementType.emit(output.platform));
 
         auto arrayReg = this.array.emit(output);
         auto lowerReg = this.lower.emit(output);
@@ -286,13 +285,13 @@ class ArraySlice : Expression
         Reg lowerOffset = output.fun.call(
             intType, "cxruntime_int_mul", [
                 lowerReg,
-                output.fun.intLiteral(cast(int) arrayType.elementType.size)]);
+                output.fun.intLiteral(elementSize)]);
         Reg newPtr = output.fun.call(voidp, "ptr_offset", [ptr, lowerOffset]);
         // len = upper - lower
         Reg newLen = output.fun.call(intType, "cxruntime_int_sub", [upperReg, lowerReg]);
 
         // TODO allocaless
-        auto structType = arrayType.emit(output.mod);
+        auto structType = arrayType.emit(output.platform);
         Reg structReg = output.fun.alloca(structType);
         Reg ptrField = output.fun.fieldOffset(structType, structReg, 0);
         Reg lenField = output.fun.fieldOffset(structType, structReg, 1);

@@ -1,13 +1,27 @@
 module base;
 
 import backend.backend;
+import backend.platform;
+import backend.types;
 import boilerplate;
 import std.format;
 import std.typecons;
 
+struct Context
+{
+    Platform platform;
+
+    Namespace namespace;
+
+    Context withNamespace(Namespace namespace)
+    {
+        return Context(platform, namespace);
+    }
+}
+
 interface ASTSymbol
 {
-    Symbol compile(Namespace namespace);
+    Symbol compile(Context context);
 }
 
 // something that can be referenced by a name
@@ -17,7 +31,7 @@ interface Symbol
 
 interface ASTStatement
 {
-    Statement compile(Namespace namespace);
+    Statement compile(Context context);
 }
 
 interface Statement
@@ -36,9 +50,7 @@ Expression beExpression(Symbol symbol)
 
 class Type : Symbol
 {
-    abstract BackendType emit(BackendModule mod);
-
-    abstract size_t size() const;
+    abstract BackendType emit(Platform);
 
     override string toString() const
     {
@@ -103,6 +115,9 @@ class Generator
 
     BackendFunction fun;
 
+    @NonNull
+    Platform platform;
+
     int numDeclarations;
 
     Nullable!Reg frameReg_;
@@ -122,8 +137,9 @@ class Generator
         return this.frameReg_.get;
     }
 
-    this(BackendModule mod, BackendFunction fun = null)
+    this(Platform platform, BackendModule mod, BackendFunction fun = null)
     {
+        this.platform = platform;
         this.mod = mod;
         this.fun = fun;
     }

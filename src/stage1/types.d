@@ -1,6 +1,8 @@
 module types;
 
 import backend.backend;
+import backend.platform;
+import backend.types;
 import base;
 import boilerplate;
 import parser;
@@ -10,26 +12,21 @@ import std.range;
 
 interface ASTType
 {
-    Type compile(Namespace namespace);
+    Type compile(Context context);
 }
 
 class ASTInteger : ASTType
 {
-    override Integer compile(Namespace) {
+    override Integer compile(Context) {
         return new Integer;
     }
 }
 
 class Integer : Type
 {
-    override BackendType emit(BackendModule mod)
+    override BackendType emit(Platform)
     {
-        return mod.intType;
-    }
-
-    override size_t size() const
-    {
-        return 4;
+        return new BackendIntType;
     }
 
     override string toString() const
@@ -45,21 +42,16 @@ class Integer : Type
 
 class ASTCharType : ASTType
 {
-    override Character compile(Namespace) {
+    override Character compile(Context) {
         return new Character;
     }
 }
 
 class Character : Type
 {
-    override BackendType emit(BackendModule mod)
+    override BackendType emit(Platform)
     {
-        return mod.charType;
-    }
-
-    override size_t size() const
-    {
-        return 1;
+        return new BackendCharType;
     }
 
     override string toString() const
@@ -75,21 +67,16 @@ class Character : Type
 
 class ASTVoid : ASTType
 {
-    override Void compile(Namespace) {
+    override Void compile(Context) {
         return new Void;
     }
 }
 
 class Void : Type
 {
-    override BackendType emit(BackendModule mod)
+    override BackendType emit(Platform)
     {
-        return mod.voidType;
-    }
-
-    override size_t size() const
-    {
-        return 0;
+        return new BackendVoidType;
     }
 
     override string toString() const
@@ -107,9 +94,9 @@ class ASTPointer : ASTType
 {
     ASTType subType;
 
-    override Type compile(Namespace namespace)
+    override Type compile(Context context)
     {
-        auto subType = this.subType.compile(namespace);
+        auto subType = this.subType.compile(context);
 
         return new Pointer(subType);
     }
@@ -121,14 +108,9 @@ class Pointer : Type
 {
     Type target;
 
-    override size_t size() const
+    override BackendType emit(Platform platform)
     {
-        return size_t.sizeof;
-    }
-
-    override BackendType emit(BackendModule mod)
-    {
-        return mod.pointerType(target.emit(mod));
+        return new BackendPointerType(target.emit(platform));
     }
 
     override string toString() const
@@ -154,10 +136,10 @@ class ASTFunctionPointer : ASTType
 
     ASTType[] args;
 
-    override Type compile(Namespace namespace)
+    override Type compile(Context context)
     {
-        auto ret = this.ret.compile(namespace);
-        auto args = this.args.map!(a => a.compile(namespace)).array;
+        auto ret = this.ret.compile(context);
+        auto args = this.args.map!(a => a.compile(context)).array;
 
         return new FunctionPointer(ret, args);
     }
@@ -171,16 +153,11 @@ class FunctionPointer : Type
 
     Type[] args;
 
-    override size_t size() const
+    override BackendType emit(Platform platform)
     {
-        return size_t.sizeof;
-    }
-
-    override BackendType emit(BackendModule mod)
-    {
-        return mod.funcPointerType(
-            ret.emit(mod),
-            args.map!(a => a.emit(mod)).array);
+        return new BackendFunctionPointerType(
+            ret.emit(platform),
+            args.map!(a => a.emit(platform)).array);
     }
 
     override string toString() const
@@ -205,9 +182,9 @@ class NamedType : ASTType
     string name;
     invariant(name.length);
 
-    override Type compile(Namespace namespace)
+    override Type compile(Context context)
     {
-        auto target = namespace.lookup(this.name);
+        auto target = context.namespace.lookup(this.name);
 
         assert(cast(Type) target, format!"target for '%s' = %s"(this.name, target));
         return cast(Type) target;

@@ -1,5 +1,8 @@
 module backend.backend;
 
+import backend.types;
+import boilerplate;
+
 alias Reg = int;
 
 interface Backend
@@ -9,17 +12,7 @@ interface Backend
 
 interface BackendModule
 {
-    BackendType intType();
-    BackendType voidType();
-    BackendType charType();
-    BackendType structType(BackendType[] types);
-    BackendType pointerType(BackendType target);
-    BackendType funcPointerType(BackendType ret, BackendType[] args);
     BackendFunction define(string name, BackendType ret, BackendType[] args);
-}
-
-interface BackendType
-{
 }
 
 interface BackendFunction

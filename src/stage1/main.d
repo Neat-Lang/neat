@@ -2,6 +2,8 @@ module main;
 
 import array : Array, ArrayLength, ArrayPointer, ASTArrayLiteral, ASTArraySlice;
 import backend.backend;
+import backend.platform;
+import backend.types;
 import base;
 import boilerplate;
 import parser;
@@ -40,12 +42,12 @@ class ASTFunction
 
     invariant (declaration || statement !is null);
 
-    Function compile(Namespace namespace)
+    Function compile(Context context)
     {
         return new Function(
             this.name,
-            this.ret.compile(namespace),
-            this.args.map!(a => Argument(a.name, a.type.compile(namespace))).array,
+            this.ret.compile(context),
+            this.args.map!(a => Argument(a.name, a.type.compile(context))).array,
             this.declaration,
             this.statement);
     }
@@ -78,15 +80,15 @@ class Function : Symbol
 
     invariant (declaration || statement !is null);
 
-    void emit(Generator generator, Namespace module_)
+    void emit(Generator generator, Context module_)
     {
         assert(generator.fun is null);
         generator.fun = generator.mod.define(
             name,
-            ret.emit(generator.mod),
-            args.map!(a => a.type.emit(generator.mod)).array
+            ret.emit(module_.platform),
+            args.map!(a => a.type.emit(module_.platform)).array
         );
-        auto stackframe = new FunctionScope(module_);
+        auto stackframe = new FunctionScope(module_.namespace);
         auto argscope = new VarDeclScope(stackframe, Yes.frameBase);
         Statement[] argAssignments;
         foreach (i, arg; args)
@@ -96,9 +98,9 @@ class Function : Symbol
             argAssignments ~= argscope.declare(arg.name, arg.type, argExpr);
         }
 
-        auto functionBody = statement.compile(argscope);
+        auto functionBody = statement.compile(module_.withNamespace(argscope));
 
-        generator.frameReg = generator.fun.alloca(stackframe.structType.emit(generator.mod));
+        generator.frameReg = generator.fun.alloca(stackframe.structType.emit(module_.platform));
         scope (success)
             generator.resetFrame;
 
@@ -162,12 +164,12 @@ class ASTScopeStatement : ASTStatement
     @AllNonNull
     ASTStatement[] statements;
 
-    override Statement compile(Namespace namespace)
+    override Statement compile(Context context)
     {
-        auto subscope = new VarDeclScope(namespace, No.frameBase);
+        auto subscope = new VarDeclScope(context.namespace, No.frameBase);
 
         return new SequenceStatement(
-                statements.map!(a => a.compile(subscope)).array
+                statements.map!(a => a.compile(Context(context.platform, subscope))).array
         );
     }
 
@@ -216,9 +218,9 @@ class ASTReturnStatement : ASTStatement
 {
     ASTSymbol value;
 
-    override ReturnStatement compile(Namespace namespace)
+    override ReturnStatement compile(Context context)
     {
-        return new ReturnStatement(value.compile(namespace).beExpression);
+        return new ReturnStatement(value.compile(context).beExpression);
     }
 
     mixin(GenerateAll);
@@ -240,7 +242,7 @@ class ReturnStatement : Statement
 
 class ASTVoidExpression : ASTSymbol
 {
-    override Expression compile(Namespace) { return new VoidExpression; }
+    override Expression compile(Context) { return new VoidExpression; }
 }
 
 class VoidExpression : Expression
@@ -285,15 +287,15 @@ class ASTIfStatement : ASTStatement
 
     ASTStatement else_;
 
-    override IfStatement compile(Namespace namespace)
+    override IfStatement compile(Context context)
     {
-        auto ifscope = new VarDeclScope(namespace, No.frameBase);
-        auto test = this.test.compile(ifscope);
-        auto then = this.then.compile(ifscope);
+        auto ifscope = new VarDeclScope(context.namespace, No.frameBase);
+        auto test = this.test.compile(context.withNamespace(ifscope));
+        auto then = this.then.compile(context.withNamespace(ifscope));
         Statement else_;
         if (this.else_) {
-            auto elsescope = new VarDeclScope(namespace, No.frameBase);
-            else_ = this.else_.compile(elsescope);
+            auto elsescope = new VarDeclScope(context.namespace, No.frameBase);
+            else_ = this.else_.compile(context.withNamespace(elsescope));
         }
 
         return new IfStatement(test.beExpression, then, else_);
@@ -365,10 +367,10 @@ class ASTAssignStatement : ASTStatement
 
     ASTSymbol value;
 
-    override AssignStatement compile(Namespace namespace)
+    override AssignStatement compile(Context context)
     {
-        auto target = this.target.compile(namespace);
-        auto value = this.value.compile(namespace);
+        auto target = this.target.compile(context);
+        auto value = this.value.compile(context);
         auto targetref = cast(Reference) target;
         assert(targetref, "target of assignment must be a reference");
         return new AssignStatement(targetref, value.beExpression.implicitConvertTo(targetref.type()));
@@ -391,7 +393,7 @@ class AssignStatement : Statement
         Reg target_reg = this.target.emitLocation(output);
         Reg value_reg = this.value.emit(output);
 
-        output.fun.store(valueType.emit(output.mod), target_reg, value_reg);
+        output.fun.store(valueType.emit(output.platform), target_reg, value_reg);
     }
 
     mixin(GenerateAll);
@@ -435,17 +437,17 @@ class ASTVarDeclStatement : ASTStatement
 
     ASTSymbol initial;
 
-    override Statement compile(Namespace namespace)
+    override Statement compile(Context context)
     {
         if (this.initial)
         {
-            auto initial = this.initial.compile(namespace);
+            auto initial = this.initial.compile(context);
 
-            return namespace.find!VarDeclScope.declare(this.name, this.type.compile(namespace), initial.beExpression);
+            return context.namespace.find!VarDeclScope.declare(this.name, this.type.compile(context), initial.beExpression);
         }
         else
         {
-            return namespace.find!VarDeclScope.declare(this.name, this.type.compile(namespace));
+            return context.namespace.find!VarDeclScope.declare(this.name, this.type.compile(context));
         }
     }
 
@@ -504,9 +506,9 @@ class ASTExprStatement : ASTStatement
 {
     ASTSymbol value;
 
-    override Statement compile(Namespace namespace)
+    override Statement compile(Context context)
     {
-        return new ExprStatement(this.value.compile(namespace).beExpression);
+        return new ExprStatement(this.value.compile(context).beExpression);
     }
 
     mixin(GenerateAll);
@@ -590,10 +592,10 @@ class ASTBinaryOp : ASTSymbol
 
     ASTSymbol right;
 
-    override Expression compile(Namespace namespace)
+    override Expression compile(Context context)
     {
-        auto left = this.left.compile(namespace).beExpression;
-        auto right = this.right.compile(namespace).beExpression;
+        auto left = this.left.compile(context).beExpression;
+        auto right = this.right.compile(context).beExpression;
         if (op == BinaryOpType.boolAnd)
             return new BoolAnd(left, right);
         if (op == BinaryOpType.boolOr)
@@ -620,22 +622,22 @@ class BoolOr : Expression
          * result = right;
          * past:
          */
-        Reg result = output.fun.alloca(output.mod.intType);
+        Reg result = output.fun.alloca(new BackendIntType);
 
         Reg leftValue = this.left.emit(output);
-        output.fun.store(output.mod.intType, result, leftValue);
+        output.fun.store(new BackendIntType, result, leftValue);
 
         auto condBranch = output.fun.testBranch(leftValue); // if (left)
         condBranch.resolveElse(output.fun.blockIndex);
 
         Reg rightValue = this.right.emit(output);
-        output.fun.store(output.mod.intType, result, rightValue);
+        output.fun.store(new BackendIntType, result, rightValue);
 
         auto exitBranch = output.fun.branch;
         condBranch.resolveThen(output.fun.blockIndex);
         exitBranch.resolve(output.fun.blockIndex);
 
-        return output.fun.load(output.mod.intType, result);
+        return output.fun.load(new BackendIntType, result);
     }
 
     mixin(GenerateThis);
@@ -655,22 +657,22 @@ class BoolAnd : Expression
          * result = left;
          * if (left) result = right;
          */
-        Reg result = output.fun.alloca(output.mod.intType);
+        Reg result = output.fun.alloca(new BackendIntType);
 
         Reg leftValue = this.left.emit(output);
-        output.fun.store(output.mod.intType, result, leftValue);
+        output.fun.store(new BackendIntType, result, leftValue);
 
         auto condBranch = output.fun.testBranch(leftValue); // if (left)
         condBranch.resolveThen(output.fun.blockIndex);
 
         Reg rightValue = this.right.emit(output);
-        output.fun.store(output.mod.intType, result, rightValue);
+        output.fun.store(new BackendIntType, result, rightValue);
 
         auto exitBranch = output.fun.branch;
         condBranch.resolveElse(output.fun.blockIndex);
         exitBranch.resolve(output.fun.blockIndex);
 
-        return output.fun.load(output.mod.intType, result);
+        return output.fun.load(new BackendIntType, result);
     }
 
     mixin(GenerateThis);
@@ -703,9 +705,10 @@ class BinaryOp : Expression
                 auto rightLen = (new ArrayLength(this.right)).emit(output);
                 auto leftPtr = (new ArrayPointer(leftArray.elementType, this.left)).emit(output);
                 auto rightPtr = (new ArrayPointer(rightArray.elementType, this.right)).emit(output);
-                return output.fun.call(output.mod.intType, "_arraycmp", [
+                const leftSize = output.platform.size(leftArray.elementType.emit(output.platform));
+                return output.fun.call(new BackendIntType, "_arraycmp", [
                     leftPtr, rightPtr, leftLen, rightLen,
-                    output.fun.intLiteral(cast(int) leftArray.elementType.size)]);
+                    output.fun.intLiteral(leftSize)]);
             }
         }
         assert(this.left.type == new Integer, format!"expected integer, not %s"(this.left.type));
@@ -736,7 +739,7 @@ class BinaryOp : Expression
                     assert(false, "should be handled separately");
             }
         }();
-        return output.fun.call(output.mod.intType, name, [leftreg, rightreg]);
+        return output.fun.call(new BackendIntType, name, [leftreg, rightreg]);
     }
 
     mixin(GenerateThis);
@@ -872,11 +875,11 @@ class ASTWhile : ASTStatement
 
     ASTStatement body_;
 
-    override WhileLoop compile(Namespace namespace)
+    override WhileLoop compile(Context context)
     {
-        auto subscope = new VarDeclScope(namespace, No.frameBase);
-        auto condExpr = this.cond.compile(subscope);
-        auto bodyStmt = this.body_.compile(subscope);
+        auto subscope = new VarDeclScope(context.namespace, No.frameBase);
+        auto condExpr = this.cond.compile(context.withNamespace(subscope));
+        auto bodyStmt = this.body_.compile(context.withNamespace(subscope));
 
         return new WhileLoop(condExpr.beExpression, bodyStmt);
     }
@@ -943,14 +946,14 @@ class ASTForLoop : ASTStatement
 
     ASTStatement body_;
 
-    Statement compile(Namespace namespace)
+    Statement compile(Context context)
     {
         /*
          * hack until break/continue:
          * for (decl; test; step) body
          * decl; while (test) { body; step; }
          */
-        auto forscope = new VarDeclScope(namespace, No.frameBase);
+        auto forscope = context.withNamespace(new VarDeclScope(context.namespace, No.frameBase));
         auto decl = declareLoopVar.compile(forscope);
         auto body_ = this.body_.compile(forscope);
         auto step = this.step.compile(forscope);
@@ -1006,10 +1009,10 @@ class ASTCall : ASTSymbol
 
     ASTSymbol[] args;
 
-    override Expression compile(Namespace namespace)
+    override Expression compile(Context context)
     {
-        auto target = this.target.compile(namespace);
-        auto args = this.args.map!(a => a.compile(namespace).beExpression).array;
+        auto target = this.target.compile(context);
+        auto args = this.args.map!(a => a.compile(context).beExpression).array;
 
         return target.call(args);
     }
@@ -1035,7 +1038,7 @@ class Call : Expression
         {
             regs ~= arg.emit(output);
         }
-        return output.fun.call(type.emit(output.mod), function_.name, regs);
+        return output.fun.call(type.emit(output.platform), function_.name, regs);
     }
 
     mixin(GenerateThis);
@@ -1061,7 +1064,7 @@ class FuncPtrCall : Expression
             regs ~= arg.emit(output);
         }
         return output.fun.callFuncPtr(
-            type.emit(output.mod), funcPtr.emit(output), regs);
+            type.emit(output.platform), funcPtr.emit(output), regs);
     }
 
     mixin(GenerateThis);
@@ -1072,10 +1075,10 @@ class Variable : ASTSymbol
 {
     string name;
 
-    override Symbol compile(Namespace namespace)
+    override Symbol compile(Context context)
     out (result; result !is null)
     {
-        auto ret = namespace.lookup(name);
+        auto ret = context.namespace.lookup(name);
         assert(ret, format!"%s not found"(name));
         return ret;
     }
@@ -1088,7 +1091,7 @@ class ASTLiteral : ASTSymbol
 {
     int value;
 
-    override Literal compile(Namespace)
+    override Literal compile(Context)
     {
         return new Literal(this.value);
     }
@@ -1175,9 +1178,9 @@ class ASTDereference : ASTSymbol
 {
     ASTSymbol base;
 
-    override Dereference compile(Namespace namespace)
+    override Dereference compile(Context context)
     {
-        return new Dereference(base.compile(namespace).beExpression);
+        return new Dereference(base.compile(context).beExpression);
     }
 
     mixin(GenerateThis);
@@ -1199,7 +1202,7 @@ class Dereference : Reference
     {
         Reg reg = emitLocation(output);
 
-        return output.fun.load(this.type().emit(output.mod), reg);
+        return output.fun.load(this.type().emit(output.platform), reg);
     }
 
     override Reg emitLocation(Generator output)
@@ -1219,19 +1222,19 @@ class ASTReference : ASTSymbol
 {
     ASTSymbol base;
 
-    override Expression compile(Namespace namespace)
+    override Expression compile(Context context)
     {
         // &function
         if (auto var = cast(Variable) base)
         {
-            auto target = namespace.lookup(var.name);
+            auto target = context.namespace.lookup(var.name);
 
             if (auto fun = cast(Function) target)
             {
                 return new FunctionReference(fun);
             }
         }
-        auto baseExpression = base.compile(namespace);
+        auto baseExpression = base.compile(context);
         assert(cast(Reference) baseExpression !is null);
 
         return new ReferenceExpression(cast(Reference) baseExpression);
@@ -1369,11 +1372,11 @@ class ASTMember : ASTSymbol
 
     string member;
 
-    override Symbol compile(Namespace namespace)
+    override Symbol compile(Context context)
     {
         import array : Array, ArrayLength;
 
-        auto base = this.base.compile(namespace);
+        auto base = this.base.compile(context);
 
         if (cast(Expression) base && cast(Array) (cast(Expression) base).type && member == "length")
         {
@@ -1409,10 +1412,10 @@ class ASTIndexAccess : ASTSymbol
 
     ASTSymbol index;
 
-    override Expression compile(Namespace namespace)
+    override Expression compile(Context context)
     {
-        auto base = this.base.compile(namespace).beExpression;
-        auto index = this.index.compile(namespace).beExpression;
+        auto base = this.base.compile(context).beExpression;
+        auto index = this.index.compile(context).beExpression;
 
         if (auto array_ = cast(Array) base.type)
         {
@@ -1431,7 +1434,8 @@ class ASTIndexAccess : ASTSymbol
             new Pointer(new Void),
             [Argument("", new Pointer(new Void)), Argument("", new Integer)],
             true, null);
-        auto offset = new Call(int_mul, [index, new Literal(cast(int) (cast(Pointer) base.type).target.size)]);
+        int size = context.platform.size((cast(Pointer) base.type).target.emit(context.platform));
+        auto offset = new Call(int_mul, [index, new Literal(size)]);
 
         return new Dereference(new PointerCast(base.type, new Call(ptr_offset, [base, offset])));
     }
@@ -1470,9 +1474,9 @@ class ASTNewClassExpression : ASTSymbol
 
     Nullable!(ASTSymbol[]) args;
 
-    override Expression compile(Namespace namespace)
+    override Expression compile(Context context)
     {
-        auto type = this.type.compile(namespace);
+        auto type = this.type.compile(context);
         auto classType = cast(Class) type;
         auto classptr = new NewClassExpression(classType);
 
@@ -1480,7 +1484,7 @@ class ASTNewClassExpression : ASTSymbol
         {
             return classptr;
         }
-        Expression[] argExpressions = this.args.get.map!(a => a.compile(namespace).beExpression).array;
+        Expression[] argExpressions = this.args.get.map!(a => a.compile(context).beExpression).array;
         assert(classType, format!"expected new <class>, not %s"(type));
         return new CallCtorExpression(classptr, argExpressions);
     }
@@ -1525,17 +1529,19 @@ class NewClassExpression : Expression
         // oh boy.
         auto classInfoStruct = this.classType.classInfoStruct;
         auto classDataStruct = this.classType.dataStruct;
-        auto voidp = (new Pointer(new Void)).emit(output.mod);
-        auto classInfoPtr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(cast(int) classInfoStruct.size)]);
+        auto voidp = (new Pointer(new Void)).emit(output.platform);
+        int classInfoSize = output.platform.size(classInfoStruct.emit(output.platform));
+        auto classInfoPtr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(classInfoSize)]);
         foreach (i, method; classType.vtable)
         {
             auto funcPtr = method.funcPtrType;
-            auto target = output.fun.fieldOffset(classInfoStruct.emit(output.mod), classInfoPtr, cast(int) i);
+            auto target = output.fun.fieldOffset(classInfoStruct.emit(output.platform), classInfoPtr, cast(int) i);
             auto src = output.fun.getFuncPtr(method.mangle);
-            output.fun.store(funcPtr.emit(output.mod), target, src);
+            output.fun.store(funcPtr.emit(output.platform), target, src);
         }
-        auto classPtr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(cast(int) classDataStruct.size)]);
-        auto classInfoTarget = output.fun.fieldOffset(classDataStruct.emit(output.mod), classPtr, 0);
+        int classDataSize = output.platform.size(classDataStruct.emit(output.platform));
+        auto classPtr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(classDataSize)]);
+        auto classInfoTarget = output.fun.fieldOffset(classDataStruct.emit(output.platform), classPtr, 0);
         output.fun.store(voidp, classInfoTarget, classInfoPtr);
 
         return classPtr;
@@ -1550,10 +1556,10 @@ class ASTAllocPtrExpression : ASTSymbol
 
     ASTSymbol size;
 
-    override Expression compile(Namespace namespace)
+    override Expression compile(Context context)
     {
-        auto type = this.type.compile(namespace);
-        auto size = this.size.compile(namespace).beExpression;
+        auto type = this.type.compile(context);
+        auto size = this.size.compile(context).beExpression;
         auto malloc = new Function("malloc",
             new Pointer(new Void),
             [Argument("", new Integer)],
@@ -1562,7 +1568,7 @@ class ASTAllocPtrExpression : ASTSymbol
             new Integer,
             [Argument("a", new Integer), Argument("b", new Integer)],
             true, null);
-        auto bytesize = new Call(int_mul, [size, new Literal(cast(int) type.size)]);
+        auto bytesize = new Call(int_mul, [size, new Literal(context.platform.size(type.emit(context.platform)))]);
 
         return new Call(malloc, [bytesize]);
     }
@@ -1574,9 +1580,9 @@ class ASTNegation : ASTSymbol
 {
     ASTSymbol next;
 
-    override Negation compile(Namespace namespace)
+    override Negation compile(Context context)
     {
-        auto next = this.next.compile(namespace).beExpression;
+        auto next = this.next.compile(context).beExpression;
         assert(next.type == new Integer);
         return new Negation(next);
     }
@@ -1596,7 +1602,7 @@ class Negation : Expression
     override Reg emit(Generator output)
     {
         auto next = this.next.emit(output);
-        return output.fun.call(output.mod.intType, "cxruntime_int_negate", [next]);
+        return output.fun.call(new BackendIntType, "cxruntime_int_negate", [next]);
     }
 
     mixin(GenerateThis);
@@ -1699,7 +1705,7 @@ class ASTStringLiteral : ASTSymbol
 {
     string text;
 
-    StringLiteral compile(Namespace)
+    StringLiteral compile(Context)
     {
         return new StringLiteral(text);
     }
@@ -1718,15 +1724,15 @@ class StringLiteral : Expression
 
     override Reg emit(Generator output)
     {
-        auto voidp = output.mod.pointerType(output.mod.voidType);
+        auto voidp = new BackendPointerType(new BackendVoidType);
         // TODO allocaless
-        auto structType = type.emit(output.mod);
+        auto structType = type.emit(output.platform);
         Reg structReg = output.fun.alloca(structType);
         Reg ptrField = output.fun.fieldOffset(structType, structReg, 0);
         Reg lenField = output.fun.fieldOffset(structType, structReg, 1);
 
         output.fun.store(voidp, ptrField, output.fun.stringLiteral(this.text));
-        output.fun.store(output.mod.intType, lenField, output.fun.intLiteral(cast(int)  this.text.length));
+        output.fun.store(new BackendIntType, lenField, output.fun.intLiteral(cast(int)  this.text.length));
         return output.fun.load(structType, structReg);
     }
 
@@ -1870,8 +1876,8 @@ class Method : Symbol
         auto voidp = new Pointer(new Void);
         generator.fun = generator.mod.define(
             mangle,
-            ret.emit(generator.mod),
-            [voidp.emit(generator.mod)] ~ args.map!(a => a.type.emit(generator.mod)).array
+            ret.emit(generator.platform),
+            [voidp.emit(generator.platform)] ~ args.map!(a => a.type.emit(generator.platform)).array
         );
         auto stackframe = new FunctionScope(module_);
         auto argscope = new VarDeclScope(stackframe, Yes.frameBase);
@@ -1884,9 +1890,9 @@ class Method : Symbol
             argAssignments ~= argscope.declare(arg.name, arg.type, argExpr);
         }
 
-        auto functionBody = statement.compile(argscope);
+        auto functionBody = statement.compile(Context(generator.platform, argscope));
 
-        generator.frameReg = generator.fun.alloca(stackframe.structType.emit(generator.mod));
+        generator.frameReg = generator.fun.alloca(stackframe.structType.emit(generator.platform));
         scope (success)
             generator.resetFrame;
 
@@ -1936,14 +1942,10 @@ class Class : Type
         this.methods = null;
     }
 
-    override BackendType emit(BackendModule mod)
+    override BackendType emit(Platform platform)
     {
-        return mod.pointerType(mod.structType(this.members.map!(a => a.type.emit(mod)).array));
-    }
-
-    size_t structSize() const
-    {
-        return members.map!(a => a.type.size).sum;
+        return new BackendPointerType(
+            new BackendStructType(this.members.map!(a => a.type.emit(platform)).array));
     }
 
     Struct dataStruct()
@@ -2003,11 +2005,6 @@ class Class : Type
         return combinedMethods;
     }
 
-    override size_t size() const
-    {
-        return size_t.sizeof;
-    }
-
     override string toString() const
     {
         return format!"classref(%s)"(this.name);
@@ -2046,12 +2043,12 @@ class ASTClassDecl : ASTType
 
     Method[] methods;
 
-    override Class compile(Namespace namespace)
+    override Class compile(Context context)
     {
         Class superClass = null;
         if (this.superClass)
         {
-            auto superClassObj = namespace.lookup(this.superClass);
+            auto superClassObj = context.namespace.lookup(this.superClass);
             assert(superClassObj);
             superClass = cast(Class) superClassObj;
             assert(superClass);
@@ -2060,13 +2057,13 @@ class ASTClassDecl : ASTType
         auto class_ = new Class(
             name,
             superClass,
-            members.map!(a => Class.Member(a.name, a.type.compile(namespace))).array
+            members.map!(a => Class.Member(a.name, a.type.compile(context))).array
         );
         class_.methods = methods.map!(a => new .Method(
             class_,
             a.name,
-            a.ret.compile(namespace),
-            a.args.map!(b => Argument(b.name, b.type.compile(namespace))).array,
+            a.ret.compile(context),
+            a.args.map!(b => Argument(b.name, b.type.compile(context))).array,
             a.body_)).array;
         return class_;
     }
@@ -2242,7 +2239,7 @@ class Module : Namespace
         {
             if (auto fun = cast(Function) entry.value)
                 if (!fun.declaration)
-                    fun.emit(generator, this);
+                    fun.emit(generator, Context(generator.platform, this));
             if (auto class_ = cast(Class) entry.value)
             {
                 foreach (method; class_.methods)
@@ -2289,7 +2286,7 @@ string moduleToFile(string module_)
     return module_.replace(".", "/") ~ ".cx";
 }
 
-Module parseModule(string filename, string[] includes)
+Module parseModule(string filename, string[] includes, Platform platform)
 {
     import std.file : exists, readText;
     import std.path : chainPath;
@@ -2316,29 +2313,30 @@ Module parseModule(string filename, string[] includes)
 
     assert(filename == modname.moduleToFile);
     auto module_ = new Module(null, modname);
+    auto context = Context(platform, module_);
 
     while (!parser.eof)
     {
         if (auto import_ = parser.parseImport)
         {
             auto importedModule = parseModule(
-                import_.name.moduleToFile, includes);
+                import_.name.moduleToFile, includes, platform);
 
             module_.addImport(importedModule);
         }
         if (auto classDecl = parser.parseClassDecl)
         {
-            module_.add(classDecl.name, classDecl.compile(module_));
+            module_.add(classDecl.name, classDecl.compile(context));
             continue;
         }
         if (auto strct = parser.parseStructDecl)
         {
-            module_.add(strct.name, strct.compile(module_));
+            module_.add(strct.name, strct.compile(context));
             continue;
         }
         if (auto fun = parser.parseFunction)
         {
-            module_.add(fun.name, fun.compile(module_));
+            module_.add(fun.name, fun.compile(context));
             continue;
         }
 
@@ -2347,7 +2345,7 @@ Module parseModule(string filename, string[] includes)
     return module_;
 }
 
-void defineRuntime(Backend backend, BackendModule backModule, Module frontModule)
+void defineRuntime(Backend backendObj, BackendModule backModule, Module frontModule)
 {
     import backend.interpreter : IpBackendModule;
 
@@ -2414,12 +2412,14 @@ void defineRuntime(Backend backend, BackendModule backModule, Module frontModule
     definePublicCallback("strlen", (char* text) { return cast(int) text.to!string.length; });
     definePublicCallback("strncmp", (char* text, char* cmp, int limit) { return int(text[0 .. limit] == cmp[0 .. limit]); });
 
-    definePublicCallback("_backend", delegate Backend() => backend);
+    definePublicCallback("_backend", delegate Backend() => backendObj);
     definePublicCallback("_backend_createModule", delegate BackendModule(Backend backend) => backend.createModule());
-    definePublicCallback("_backendModule_intType", delegate BackendType(BackendModule mod) => mod.intType());
+    definePublicCallback("_backendModule_intType", delegate BackendType(BackendModule mod) =>
+        new BackendIntType);
     definePublicCallback(
         "_backendModule_define",
-        delegate BackendFunction(BackendModule mod, char* name, BackendType ret, BackendType* args_ptr, int args_len)
+        delegate BackendFunction(
+            BackendModule mod, char* name, BackendType ret, BackendType* args_ptr, int args_len)
         {
             return mod.define(name.to!string, ret, args_ptr[0 .. args_len]);
         }
@@ -2523,14 +2523,15 @@ else
             stderr.writefln!"Usage: %s [-Iincludepath]* FILE.cx"(args[0]);
             return 1;
         }
-        auto toplevel = parseModule(args[1], includes);
+        auto defaultPlatform = new DefaultPlatform;
+        auto toplevel = parseModule(args[1], includes, defaultPlatform);
 
-        auto backend = new IpBackend;
+        auto backend = new IpBackend(defaultPlatform);
         auto module_ = backend.createModule;
 
         defineRuntime(backend, module_, toplevel);
 
-        auto output = new Generator(module_);
+        auto output = new Generator(defaultPlatform, module_);
 
         toplevel.emit(output);
 

@@ -1,6 +1,8 @@
 module struct_;
 
 import backend.backend;
+import backend.platform;
+import backend.types;
 import base;
 import boilerplate;
 import parser;
@@ -24,10 +26,10 @@ class ASTStructDecl : ASTType
 
     Member[] members;
 
-    override Struct compile(Namespace namespace)
+    override Struct compile(Context context)
     {
         // TODO subscope
-        return new Struct(name, members.map!(a => Struct.Member(a.name, a.type.compile(namespace))).array);
+        return new Struct(name, members.map!(a => Struct.Member(a.name, a.type.compile(context))).array);
     }
 
     mixin(GenerateThis);
@@ -48,14 +50,9 @@ class Struct : Type
 
     Member[] members;
 
-    override BackendType emit(BackendModule mod)
+    override BackendType emit(Platform platform)
     {
-        return mod.structType(this.members.map!(a => a.type.emit(mod)).array);
-    }
-
-    override size_t size() const
-    {
-        return members.map!(a => a.type.size).sum;
+        return new BackendStructType(this.members.map!(a => a.type.emit(platform)).array);
     }
 
     override string toString() const
@@ -111,14 +108,14 @@ class StructMember : Reference
     {
         Reg locationReg = emitLocation(output);
 
-        return output.fun.load(this.type().emit(output.mod), locationReg);
+        return output.fun.load(this.type().emit(output.platform), locationReg);
     }
 
     override Reg emitLocation(Generator output)
     {
         Reg reg = this.base.emitLocation(output);
 
-        return output.fun.fieldOffset(base.type.emit(output.mod), reg, this.index);
+        return output.fun.fieldOffset(base.type.emit(output.platform), reg, this.index);
     }
 
     override string toString() const

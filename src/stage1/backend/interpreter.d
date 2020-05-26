@@ -2,6 +2,8 @@ module backend.interpreter;
 
 import stage1_libs;
 import backend.backend;
+import backend.platform;
+import backend.types;
 import boilerplate;
 import std.algorithm;
 import std.array;
@@ -10,76 +12,24 @@ import std.range;
 
 class IpBackend : Backend
 {
-    override IpBackendModule createModule() { return new IpBackendModule; }
-}
+    Platform platform;
 
-class IpBackendType : BackendType
-{
-    abstract override string toString() const;
-
-    abstract int size() const;
-}
-
-class IntType : IpBackendType
-{
-    override string toString() const { return "int"; }
-
-    override int size() const { return 4; }
-}
-
-class CharType : IpBackendType
-{
-    override string toString() const { return "char"; }
-
-    override int size() const { return 1; }
-}
-
-class VoidType : IpBackendType
-{
-    override string toString() const { return "void"; }
-
-    override int size() const { return 0; }
-}
-
-class PointerType : IpBackendType
-{
-    override string toString() const { return "ptr"; }
-
-    override int size() const { return size_t.sizeof; } // TODO machine
+    override IpBackendModule createModule() { return new IpBackendModule(this.platform); }
 
     mixin(GenerateThis);
 }
 
-class StructType : IpBackendType
+string formatLiteral(const BackendType type, const void[] data)
 {
-    IpBackendType[] types;
-
-    override string toString() const { return format!"{%(%s, %)}"(types); }
-
-    // TODO alignment
-    override int size() const { return this.types.map!"a.size".sum; }
-
-    public size_t offsetOf(size_t field)
-    in (field < this.types.length)
-    {
-        // TODO alignment
-        return this.types[0 .. field].map!"a.size".sum;
-    }
-
-    mixin(GenerateThis);
-}
-
-string formatLiteral(const IpBackendType type, const void[] data)
-{
-    if (cast(IntType) type)
+    if (cast(BackendIntType) type)
     {
         return format!"%s"((cast(int[]) data)[0]);
     }
-    if (cast(VoidType) type)
+    if (cast(BackendVoidType) type)
     {
         return "void";
     }
-    if (cast(PointerType) type) // hope it's char*
+    if (cast(BackendPointerType) type) // hope it's char*
     {
         import std.conv : to;
 
@@ -143,7 +93,7 @@ struct Instr
     {
         static struct Call
         {
-            IpBackendType type;
+            BackendType type;
             string name;
             Reg[] args;
         }
@@ -157,7 +107,7 @@ struct Instr
         }
         static struct Literal
         {
-            IpBackendType type;
+            BackendType type;
             void[] value;
         }
         static struct Branch
@@ -172,28 +122,28 @@ struct Instr
         }
         static struct Alloca
         {
-            IpBackendType type;
+            BackendType type;
         }
         static struct GetField
         {
-            StructType structType;
+            BackendStructType structType;
             Reg base;
             int member;
         }
         static struct FieldOffset
         {
-            StructType structType;
+            BackendStructType structType;
             Reg base;
             int member;
         }
         static struct Load
         {
-            IpBackendType targetType;
+            BackendType targetType;
             Reg target;
         }
         static struct Store
         {
-            IpBackendType targetType;
+            BackendType targetType;
             Reg target;
             Reg value;
         }
@@ -203,7 +153,7 @@ struct Instr
         }
         static struct CallFuncPtr
         {
-            IpBackendType type;
+            BackendType type;
             Reg funcPtr;
             Reg[] args;
         }
@@ -249,23 +199,22 @@ struct Instr
         }
     }
 
-    int regSize(IpBackendFunction fun) const
+    int regSize(IpBackendFunction fun, Platform platform) const
     {
         with (Kind) final switch (this.kind)
         {
-            case CallFuncPtr: return callFuncPtr.type.size;
-            case Call: return call.type.size;
-            case Arg: return fun.argTypes[arg.index].size;
-            case Literal: return literal.type.size;
-            case Load: return load.targetType.size;
+            case CallFuncPtr: return platform.size(callFuncPtr.type);
+            case Call: return platform.size(call.type);
+            case Arg: return platform.size(fun.argTypes[arg.index]);
+            case Literal: return platform.size(literal.type);
+            case Load: return platform.size(load.targetType);
             case GetField:
-                return getField.structType.types[getField.member].size;
+                return platform.size(getField.structType.members[getField.member]);
             // pointers
-            // TODO machine based
             case Alloca:
             case FieldOffset:
             case GetFuncPtr:
-                return size_t.sizeof;
+                return platform.nativeWordSize;
             // no-ops
             case Store:
             case Branch:
@@ -302,9 +251,9 @@ class IpBackendFunction : BackendFunction
 {
     string name;
 
-    IpBackendType retType;
+    BackendType retType;
 
-    IpBackendType[] argTypes;
+    BackendType[] argTypes;
 
     @(This.Init!null)
     BasicBlock[] blocks;
@@ -341,7 +290,7 @@ class IpBackendFunction : BackendFunction
     {
         auto instr = Instr(Instr.Kind.Literal);
 
-        instr.literal.type = new IntType;
+        instr.literal.type = new BackendIntType;
         instr.literal.value = cast(void[]) [value];
 
         return block.append(instr);
@@ -353,7 +302,7 @@ class IpBackendFunction : BackendFunction
 
         auto instr = Instr(Instr.Kind.Literal);
 
-        instr.literal.type = new PointerType;
+        instr.literal.type = new BackendPointerType(new BackendCharType);
         instr.literal.value = cast(void[]) [text.toStringz];
 
         return block.append(instr);
@@ -363,7 +312,7 @@ class IpBackendFunction : BackendFunction
     {
         auto instr = Instr(Instr.Kind.Literal);
 
-        instr.literal.type = new VoidType;
+        instr.literal.type = new BackendVoidType;
         instr.literal.value = null;
 
         return block.append(instr);
@@ -371,10 +320,10 @@ class IpBackendFunction : BackendFunction
 
     override int call(BackendType type, string name, Reg[] args)
     {
-        assert(cast(IpBackendType) type !is null);
+        assert(cast(BackendType) type !is null);
         auto instr = Instr(Instr.Kind.Call);
 
-        instr.call.type = cast(IpBackendType) type;
+        instr.call.type = cast(BackendType) type;
         instr.call.name = name;
         instr.call.args = args.dup;
         return block.append(instr);
@@ -382,10 +331,10 @@ class IpBackendFunction : BackendFunction
 
     override int callFuncPtr(BackendType type, Reg funcPtr, Reg[] args)
     {
-        assert(cast(IpBackendType) type !is null);
+        assert(cast(BackendType) type !is null);
         auto instr = Instr(Instr.Kind.CallFuncPtr);
 
-        instr.callFuncPtr.type = cast(IpBackendType) type;
+        instr.callFuncPtr.type = cast(BackendType) type;
         instr.callFuncPtr.funcPtr = funcPtr;
         instr.callFuncPtr.args = args.dup;
         return block.append(instr);
@@ -410,21 +359,21 @@ class IpBackendFunction : BackendFunction
 
     override int alloca(BackendType type)
     {
-        assert(cast(IpBackendType) type !is null);
+        assert(cast(BackendType) type !is null);
 
         auto instr = Instr(Instr.Kind.Alloca);
 
-        instr.alloca.type = cast(IpBackendType) type;
+        instr.alloca.type = cast(BackendType) type;
         return block.append(instr);
     }
 
     override Reg field(BackendType structType, Reg structBase, int member)
     {
-        assert(cast(StructType) structType !is null);
+        assert(cast(BackendStructType) structType !is null);
 
         auto instr = Instr(Instr.Kind.GetField);
 
-        instr.getField.structType = cast(StructType) structType;
+        instr.getField.structType = cast(BackendStructType) structType;
         instr.getField.base = structBase;
         instr.getField.member = member;
 
@@ -433,11 +382,11 @@ class IpBackendFunction : BackendFunction
 
     override Reg fieldOffset(BackendType structType, Reg structBase, int member)
     {
-        assert(cast(StructType) structType !is null);
+        assert(cast(BackendStructType) structType !is null);
 
         auto instr = Instr(Instr.Kind.FieldOffset);
 
-        instr.fieldOffset.structType = cast(StructType) structType;
+        instr.fieldOffset.structType = cast(BackendStructType) structType;
         instr.fieldOffset.base = structBase;
         instr.fieldOffset.member = member;
 
@@ -446,11 +395,11 @@ class IpBackendFunction : BackendFunction
 
     override void store(BackendType targetType, Reg target, Reg value)
     {
-        assert(cast(IpBackendType) targetType !is null);
+        assert(cast(BackendType) targetType !is null);
 
         auto instr = Instr(Instr.Kind.Store);
 
-        instr.store.targetType = cast(IpBackendType) targetType;
+        instr.store.targetType = cast(BackendType) targetType;
         instr.store.target = target;
         instr.store.value = value;
 
@@ -459,11 +408,11 @@ class IpBackendFunction : BackendFunction
 
     override Reg load(BackendType targetType, Reg target)
     {
-        assert(cast(IpBackendType) targetType !is null);
+        assert(cast(BackendType) targetType !is null);
 
         auto instr = Instr(Instr.Kind.Load);
 
-        instr.load.targetType = cast(IpBackendType) targetType;
+        instr.load.targetType = cast(BackendType) targetType;
         instr.load.target = target;
 
         return block.append(instr);
@@ -523,28 +472,29 @@ class IpBackendFunction : BackendFunction
     mixin(GenerateThis);
 }
 
-void setInitValue(IpBackendType type, void* target)
+void setInitValue(BackendType type, void* target, Platform platform)
 {
-    if (cast(IntType) type)
+    if (cast(BackendIntType) type)
     {
         *cast(int*) target = 0;
         return;
     }
-    if (auto strct = cast(StructType) type)
+    if (auto strct = cast(BackendStructType) type)
     {
-        foreach (subtype; strct.types)
+        foreach (subtype; strct.members)
         {
-            setInitValue(subtype, target);
-            target += subtype.size;
+            setInitValue(subtype, target, platform);
+            // TODO alignment
+            target += platform.size(subtype);
         }
         return;
     }
-    if (cast(PointerType) type)
+    if (cast(BackendPointerType) type || cast(BackendFunctionPointerType) type)
     {
         *cast(void**) target = null;
         return;
     }
-    assert(false, "what is init for " ~ type.toString);
+    assert(false, format!"what is init for %s"(type));
 }
 
 struct ArrayAllocator(T)
@@ -627,12 +577,17 @@ private void defineIntrinsics(IpBackendModule mod)
 
 class IpBackendModule : BackendModule
 {
+    Platform platform;
+
     alias Callable = void delegate(void[] ret, void[][] args);
+
     Callable[string] callbacks;
+
     IpBackendFunction[string] functions;
 
-    this()
+    this(Platform platform)
     {
+        this.platform = platform;
         defineIntrinsics(this);
     }
 
@@ -663,7 +618,9 @@ class IpBackendModule : BackendModule
             args.length == fun.argTypes.length,
             format!"%s expected %s arguments, not %s"(name, fun.argTypes.length, args.length));
         size_t numRegs = fun.blocks.map!(block => block.instrs.length).sum;
-        int regAreaSize = fun.blocks.map!(block => block.instrs.map!(instr => instr.regSize(fun)).sum).sum;
+        int regAreaSize = fun.blocks.map!(block => block.instrs.map!(
+            instr => instr.regSize(fun, this.platform)
+        ).sum).sum;
 
         void[] regData = ArrayAllocator!void.allocate(regAreaSize);
         scope(success) ArrayAllocator!void.free(regData);
@@ -676,8 +633,8 @@ class IpBackendModule : BackendModule
             int i;
             foreach (block; fun.blocks) foreach (instr; block.instrs)
             {
-                regArrays[i++] = regCurrent[0 .. instr.regSize(fun)];
-                regCurrent = regCurrent[instr.regSize(fun) .. $];
+                regArrays[i++] = regCurrent[0 .. instr.regSize(fun, platform)];
+                regCurrent = regCurrent[instr.regSize(fun, platform) .. $];
             }
             assert(regCurrent.length == 0);
         }
@@ -745,22 +702,22 @@ class IpBackendModule : BackendModule
                             break;
                         case Alloca:
                             assert(!lastInstr);
-                            auto target = new void[instr.alloca.type.size];
-                            setInitValue(instr.alloca.type, target.ptr);
+                            auto target = new void[this.platform.size(instr.alloca.type)];
+                            setInitValue(instr.alloca.type, target.ptr, this.platform);
                             (cast(void*[]) regArrays[reg])[0] = target.ptr;
                             break;
                         case FieldOffset:
                             assert(!lastInstr);
                             auto base = (cast(void*[]) regArrays[instr.fieldOffset.base])[0];
-                            auto offset = instr.fieldOffset.structType.offsetOf(instr.fieldOffset.member);
+                            auto offset = this.platform.offsetOf(instr.fieldOffset.structType, instr.fieldOffset.member);
 
                             (cast(void*[]) regArrays[reg])[0] = base + offset;
                             break;
                         case GetField:
                             assert(!lastInstr);
                             auto value = cast(ubyte[]) regArrays[instr.fieldOffset.base];
-                            auto size = instr.getField.structType.types[instr.getField.member].size;
-                            auto offset = instr.getField.structType.offsetOf(instr.getField.member);
+                            auto size = this.platform.size(instr.getField.structType.members[instr.getField.member]);
+                            auto offset = this.platform.offsetOf(instr.getField.structType, instr.getField.member);
 
                             (cast(ubyte[]) regArrays[reg])[] = value[offset .. offset + size];
                             break;
@@ -782,41 +739,13 @@ class IpBackendModule : BackendModule
         }
     }
 
-    override IntType intType() { return new IntType; }
-
-    override VoidType voidType() { return new VoidType; }
-
-    override CharType charType() { return new CharType; }
-
-    override IpBackendType structType(BackendType[] types)
-    {
-        assert(types.all!(a => cast(IpBackendType) a !is null));
-
-        return new StructType(types.map!(a => cast(IpBackendType) a).array);
-    }
-
-    override IpBackendType pointerType(BackendType target)
-    {
-        assert(cast(IpBackendType) target);
-
-        return new PointerType;
-    }
-
-    override IpBackendType funcPointerType(BackendType ret, BackendType[] args)
-    {
-        assert(cast(IpBackendType) ret);
-        assert(args.all!(a => cast(IpBackendType) a));
-
-        return new PointerType;
-    }
-
     override IpBackendFunction define(string name, BackendType ret, BackendType[] args)
     in (name !in callbacks && name !in functions)
     {
-        assert(cast(IpBackendType) ret);
-        assert(args.all!(a => cast(IpBackendType) a));
+        assert(cast(BackendType) ret);
+        assert(args.all!(a => cast(BackendType) a));
 
-        auto fun = new IpBackendFunction(name, cast(IpBackendType) ret, args.map!(a => cast(IpBackendType) a).array);
+        auto fun = new IpBackendFunction(name, cast(BackendType) ret, args.map!(a => cast(BackendType) a).array);
 
         this.functions[name] = fun;
         return fun;
@@ -832,11 +761,11 @@ class IpBackendModule : BackendModule
 
 unittest
 {
-    auto mod = new IpBackendModule;
-    auto square = mod.define("square", mod.intType, [mod.intType]);
+    auto mod = new IpBackendModule(new DefaultPlatform);
+    auto square = mod.define("square", new BackendIntType, [new BackendIntType]);
     with (square) {
         auto arg0 = arg(0);
-        auto reg = call(mod.intType, "cxruntime_int_mul", [arg0, arg0]);
+        auto reg = call(new BackendIntType, "cxruntime_int_mul", [arg0, arg0]);
 
         ret(reg);
     }
@@ -856,9 +785,9 @@ unittest
 +/
 unittest
 {
-    auto mod = new IpBackendModule;
+    auto mod = new IpBackendModule(new DefaultPlatform);
 
-    auto ack = mod.define("ack", mod.intType, [mod.intType, mod.intType]);
+    auto ack = mod.define("ack", new BackendIntType, [new BackendIntType, new BackendIntType]);
 
     with (ack)
     {
@@ -867,28 +796,28 @@ unittest
         auto zero = intLiteral(0);
         auto one = intLiteral(1);
 
-        auto if1_test_reg = call(mod.intType, "cxruntime_int_eq", [m, zero]);
+        auto if1_test_reg = call(new BackendIntType, "cxruntime_int_eq", [m, zero]);
         auto if1_test_jumprecord = testBranch(if1_test_reg);
 
         if1_test_jumprecord.resolveThen(blockIndex);
-        auto add = call(mod.intType, "cxruntime_int_add", [n, one]);
+        auto add = call(new BackendIntType, "cxruntime_int_add", [n, one]);
         ret(add);
 
         if1_test_jumprecord.resolveElse(blockIndex);
-        auto if2_test_reg = call(mod.intType, "cxruntime_int_eq", [n, zero]);
+        auto if2_test_reg = call(new BackendIntType, "cxruntime_int_eq", [n, zero]);
         auto if2_test_jumprecord = testBranch(if2_test_reg);
 
         if2_test_jumprecord.resolveThen(blockIndex);
-        auto sub = call(mod.intType, "cxruntime_int_sub", [m, one]);
-        auto ackrec = call(mod.intType, "ack", [sub, one]);
+        auto sub = call(new BackendIntType, "cxruntime_int_sub", [m, one]);
+        auto ackrec = call(new BackendIntType, "ack", [sub, one]);
 
         ret(ackrec);
 
         if2_test_jumprecord.resolveElse(blockIndex);
-        auto n1 = call(mod.intType, "cxruntime_int_sub", [n, one]);
-        auto ackrec1 = call(mod.intType, "ack", [m, n1]);
-        auto m1 = call(mod.intType, "cxruntime_int_sub", [m, one]);
-        auto ackrec2 = call(mod.intType, "ack", [m1, ackrec1]);
+        auto n1 = call(new BackendIntType, "cxruntime_int_sub", [n, one]);
+        auto ackrec1 = call(new BackendIntType, "ack", [m, n1]);
+        auto m1 = call(new BackendIntType, "cxruntime_int_sub", [m, one]);
+        auto ackrec2 = call(new BackendIntType, "ack", [m1, ackrec1]);
         ret(ackrec2);
     }
 
@@ -903,20 +832,20 @@ unittest
     /*
      * int square(int i) { int k = i; int l = k * k; return l; }
      */
-    auto mod = new IpBackendModule;
-    auto square = mod.define("square", mod.intType, [mod.intType]);
-    auto stackframeType = mod.structType([mod.intType, mod.intType]);
+    auto mod = new IpBackendModule(new DefaultPlatform);
+    auto square = mod.define("square", new BackendIntType, [new BackendIntType]);
+    auto stackframeType = new BackendStructType([new BackendIntType, new BackendIntType]);
     with (square) {
         auto stackframe = alloca(stackframeType);
         auto arg0 = arg(0);
         auto var = fieldOffset(stackframeType, stackframe, 0);
-        store(mod.intType, var, arg0);
-        auto varload = load(mod.intType, var);
-        auto reg = call(mod.intType, "cxruntime_int_mul", [varload, varload]);
+        store(new BackendIntType, var, arg0);
+        auto varload = load(new BackendIntType, var);
+        auto reg = call(new BackendIntType, "cxruntime_int_mul", [varload, varload]);
         auto retvar = fieldOffset(stackframeType, stackframe, 0);
-        store(mod.intType, retvar, reg);
+        store(new BackendIntType, retvar, reg);
 
-        auto retreg = load(mod.intType, retvar);
+        auto retreg = load(new BackendIntType, retvar);
         ret(retreg);
     }
 
@@ -928,15 +857,15 @@ unittest
 
 unittest
 {
-    auto mod = new IpBackendModule;
-    auto fpType = mod.funcPointerType(mod.intType, []);
-    auto callFp = mod.define("callFp", mod.intType, [fpType]);
-    auto retFive = mod.define("retFive", mod.intType, []);
-    auto test = mod.define("test", mod.intType, []);
+    auto mod = new IpBackendModule(new DefaultPlatform);
+    auto fpType = new BackendFunctionPointerType(new BackendIntType, []);
+    auto callFp = mod.define("callFp", new BackendIntType, [fpType]);
+    auto retFive = mod.define("retFive", new BackendIntType, []);
+    auto test = mod.define("test", new BackendIntType, []);
 
-    callFp.ret(callFp.callFuncPtr(mod.intType, callFp.arg(0), []));
+    callFp.ret(callFp.callFuncPtr(new BackendIntType, callFp.arg(0), []));
     retFive.ret(retFive.intLiteral(5));
-    test.ret(test.call(mod.intType, "callFp", [test.getFuncPtr("retFive")]));
+    test.ret(test.call(new BackendIntType, "callFp", [test.getFuncPtr("retFive")]));
 
     int ret;
     mod.call("test", cast(void[]) (&ret)[0 .. 1], null);

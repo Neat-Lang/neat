@@ -1556,32 +1556,6 @@ class NewClassExpression : Expression
     mixin(GenerateThis);
 }
 
-class ASTAllocPtrExpression : ASTSymbol
-{
-    ASTType type;
-
-    ASTSymbol size;
-
-    override Expression compile(Context context)
-    {
-        auto type = this.type.compile(context);
-        auto size = this.size.compile(context).beExpression;
-        auto malloc = new Function("malloc",
-            new Pointer(new Void),
-            [Argument("", new Integer)],
-            true, null);
-        auto int_mul = new Function("cxruntime_int_mul",
-            new Integer,
-            [Argument("a", new Integer), Argument("b", new Integer)],
-            true, null);
-        auto bytesize = new Call(int_mul, [size, new Literal(context.platform.size(type.emit(context.platform)))]);
-
-        return new Call(malloc, [bytesize]);
-    }
-
-    mixin(GenerateThis);
-}
-
 class ASTNegation : ASTSymbol
 {
     ASTSymbol next;
@@ -1649,15 +1623,6 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
 
             assert(next !is null);
             return new ASTNegation(next);
-        }
-        if (parser.acceptIdentifier("_alloc"))
-        {
-            expect("(");
-            auto type = parser.parseType;
-            expect(",");
-            auto size = parser.parseExpression;
-            expect(")");
-            return new ASTAllocPtrExpression(type, size);
         }
         auto currentExpr = parser.parseExpressionBase;
         assert(currentExpr);

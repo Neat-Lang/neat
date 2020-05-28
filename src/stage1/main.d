@@ -2395,6 +2395,11 @@ void defineRuntime(Backend backendObj, BackendModule backModule, Module frontMod
     });
     definePublicCallback("strlen", (char* text) { return cast(int) text.to!string.length; });
     definePublicCallback("strncmp", (char* text, char* cmp, int limit) { return int(text[0 .. limit] == cmp[0 .. limit]); });
+    definePublicCallback("atoi", (char[] text) {
+        import std.conv : parse;
+
+        return parse!int(text);
+    });
 
     definePublicCallback("_backend", delegate Backend() => backendObj);
     definePublicCallback("_backend_createModule", delegate BackendModule(Backend backend) => backend.createModule());

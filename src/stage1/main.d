@@ -2263,7 +2263,7 @@ string moduleToFile(string module_)
     return module_.replace(".", "/") ~ ".cx";
 }
 
-Module parseModule(string filename, string[] includes, Platform platform)
+Module parseModule(string filename, string[] includes, Platform platform, Module[] defaultImports)
 {
     import std.file : exists, readText;
     import std.path : chainPath;
@@ -2292,12 +2292,14 @@ Module parseModule(string filename, string[] includes, Platform platform)
     auto module_ = new Module(null, modname);
     auto context = Context(platform, module_);
 
+    defaultImports.each!(a => module_.addImport(a));
+
     while (!parser.eof)
     {
         if (auto import_ = parser.parseImport)
         {
             auto importedModule = parseModule(
-                import_.name.moduleToFile, includes, platform);
+                import_.name.moduleToFile, includes, platform, defaultImports);
 
             module_.addImport(importedModule);
         }
@@ -2501,12 +2503,13 @@ else
             return 1;
         }
         auto defaultPlatform = new DefaultPlatform;
-        auto toplevel = parseModule(args[1], includes, defaultPlatform);
-
+        auto builtins = new Module(null, null);
         auto backend = new IpBackend(defaultPlatform);
         auto module_ = backend.createModule;
 
-        defineRuntime(backend, module_, toplevel);
+        defineRuntime(backend, module_, builtins);
+
+        auto toplevel = parseModule(args[1], includes, defaultPlatform, [builtins]);
 
         auto output = new Generator(defaultPlatform, module_);
 

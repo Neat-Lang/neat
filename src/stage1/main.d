@@ -1377,10 +1377,16 @@ class ASTMember : ASTSymbol
         import array : Array, ArrayLength;
 
         auto base = this.base.compile(context);
+        auto expr = cast(Expression) base;
 
-        if (cast(Expression) base && cast(Array) (cast(Expression) base).type && member == "length")
+        if (expr && cast(Array) expr.type && member == "length")
         {
-            return new ArrayLength(cast(Expression) base);
+            return new ArrayLength(expr);
+        }
+
+        if (expr && cast(Array) expr.type && member == "ptr")
+        {
+            return new ArrayPointer((cast(Array) expr.type).elementType, expr);
         }
 
         return base.accessMember(this.member);
@@ -2419,9 +2425,9 @@ void defineRuntime(Backend backendObj, BackendModule backModule, Module frontMod
     definePublicCallback(
         "_backendModule_define",
         delegate BackendFunction(
-            BackendModule mod, char* name, BackendType ret, BackendType* args_ptr, int args_len)
+            BackendModule mod, char[] name, BackendType ret, BackendType* args_ptr, int args_len)
         {
-            return mod.define(name.to!string, ret, args_ptr[0 .. args_len]);
+            return mod.define(name.dup, ret, args_ptr[0 .. args_len]);
         }
     );
     defineCallback("_arraycmp", (void* left, void* right, int leftlen, int rightlen, int elemsize)
@@ -2437,12 +2443,12 @@ void defineRuntime(Backend backendObj, BackendModule backModule, Module frontMod
     );
     definePublicCallback(
         "_backendModule_call",
-        delegate void(BackendModule mod, char* name, void* ret, void** args_ptr, int args_len)
+        delegate void(BackendModule mod, void* ret, char[] name, void** args_ptr, int args_len)
         {
             // TODO non-int args
             // TODO stop hardcoding interpreter backend
             (cast(IpBackendModule) mod).call(
-                name.to!string,
+                name.dup,
                 ret[0 .. 4],
                 args_ptr[0 .. args_len].map!(a => a[0 .. 4]).array,
             );
@@ -2456,8 +2462,8 @@ void defineRuntime(Backend backendObj, BackendModule backModule, Module frontMod
         delegate int(BackendFunction fun, int index) => fun.intLiteral(index));
     definePublicCallback(
         "_backendFunction_call",
-        delegate int(BackendFunction fun, BackendType ret, char* name, int* args_ptr, int args_len)
-            => fun.call(ret, name.to!string, args_ptr[0 .. args_len]));
+        delegate int(BackendFunction fun, BackendType ret, char[] name, int* args_ptr, int args_len)
+            => fun.call(ret, name.dup, args_ptr[0 .. args_len]));
     definePublicCallback(
         "_backendFunction_ret",
         delegate void(BackendFunction fun, int value) => fun.ret(value));

@@ -637,6 +637,7 @@ class IpBackendModule : BackendModule
                 regCurrent = regCurrent[instr.regSize(fun, platform) .. $];
             }
             assert(regCurrent.length == 0);
+            assert(i == numRegs);
         }
 
         int block = 0;
@@ -679,7 +680,12 @@ class IpBackendModule : BackendModule
                             ret[] = regArrays[instr.return_.reg];
                             return;
                         case Arg:
+                            assert(regArrays[reg].ptr);
                             assert(!lastInstr);
+                            assert(
+                                regArrays[reg].length == args[instr.arg.index].length,
+                                format!"load arg %s: expected sz %s, but got %s"(
+                                    instr.arg.index, regArrays[reg].length, args[instr.arg.index].length));
                             regArrays[reg][] = args[instr.arg.index];
                             break;
                         case Literal:

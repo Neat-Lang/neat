@@ -1028,7 +1028,12 @@ class Call : Expression
 
     this(Function function_, Expression[] args)
     {
-        assert(function_.args.map!"a.type".array == args.map!"a.type".array);
+        assert(function_.args.length == args.length, format!"'%s' expected %s args, not %s"(
+            function_.name, function_.args.length, args.length));
+        foreach (i, ref arg; args)
+        {
+            arg = arg.implicitConvertTo(function_.args[i].type);
+        }
         this.function_ = function_;
         this.args = args.dup;
     }

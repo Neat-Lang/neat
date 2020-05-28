@@ -1026,6 +1026,13 @@ class Call : Expression
 
     Expression[] args;
 
+    this(Function function_, Expression[] args)
+    {
+        assert(function_.args.map!"a.type".array == args.map!"a.type".array);
+        this.function_ = function_;
+        this.args = args.dup;
+    }
+
     override Type type()
     {
         return function_.ret;
@@ -1041,7 +1048,6 @@ class Call : Expression
         return output.fun.call(type.emit(output.platform), function_.name, regs);
     }
 
-    mixin(GenerateThis);
     mixin(GenerateToString);
 }
 

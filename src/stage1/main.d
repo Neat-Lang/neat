@@ -310,6 +310,7 @@ class IfStatement : Statement
 
     Statement then;
 
+    @(This.Default!null)
     Statement else_;
 
     override void emit(Generator output)
@@ -1032,6 +1033,11 @@ class Call : Expression
             function_.name, function_.args.length, args.length));
         foreach (i, ref arg; args)
         {
+            import std.stdio : stderr;
+
+            scope(failure)
+                stderr.writefln!"While converting arg %s of %s to %s:"(
+                    i, function_.name, function_.args[i].type);
             arg = arg.implicitConvertTo(function_.args[i].type);
         }
         this.function_ = function_;
@@ -1573,9 +1579,11 @@ class ASTNegation : ASTSymbol
 
     override Negation compile(Context context)
     {
-        auto next = this.next.compile(context).beExpression;
-        assert(next.type == new Integer);
-        return new Negation(next);
+        return new Negation(
+            this.next
+                .compile(context)
+                .beExpression
+                .implicitConvertTo(new Integer));
     }
 
     mixin(GenerateThis);
@@ -1822,6 +1830,16 @@ Expression implicitConvertTo(Expression from, Type to)
             currentClass = currentClass.superClass;
         }
     }
+    // TODO bool
+    if (cast(Integer) to && cast(Pointer) from.type)
+    {
+        auto voidp = new Pointer(new Void);
+        auto rt_ptr_test = new Function("cxruntime_ptr_test",
+            new Integer,
+            [Argument("", voidp)],
+            true, null);
+        return new Call(rt_ptr_test, [new PointerCast(voidp, from)]);
+    }
     assert(false, format!"todo: cast(%s) %s"(to, from.type));
 }
 
@@ -1830,6 +1848,28 @@ class NoopStatement : Statement
     override void emit(Generator)
     {
     }
+}
+
+class NullExpr : Expression
+{
+    private Type type_;
+
+    override Type type()
+    {
+        return this.type_;
+    }
+
+    override Reg emit(Generator generator)
+    {
+        // TODO allocaless
+        // exploit that alloca are zero initialized
+        auto type = this.type.emit(generator.platform);
+        auto reg = generator.fun.alloca(type);
+
+        return generator.fun.load(type, reg);
+    }
+
+    mixin(GenerateThis);
 }
 
 // TODO merge with class Function
@@ -1846,6 +1886,9 @@ class Method : Symbol
 
     ASTStatement statement;
 
+    @(This.Default!null)
+    Statement compiledStatement;
+
     string mangle()
     {
         // TODO mangle types
@@ -1861,31 +1904,39 @@ class Method : Symbol
             ret.emit(generator.platform),
             [voidp.emit(generator.platform)] ~ args.map!(a => a.type.emit(generator.platform)).array
         );
-        auto stackframe = new FunctionScope(module_);
-        auto argscope = new VarDeclScope(stackframe, Yes.frameBase);
-        Statement[] argAssignments;
-        argAssignments ~= argscope.declare("this", thisType, new PointerCast(thisType, new ArgExpr(0, voidp)));
-        foreach (i, arg; args)
-        {
-            auto argExpr = new ArgExpr(cast(int) i + 1, arg.type);
 
-            argAssignments ~= argscope.declare(arg.name, arg.type, argExpr);
+        if (!compiledStatement)
+        {
+            Statement[] argAssignments;
+            auto stackframe = new FunctionScope(module_);
+
+            auto argscope = new VarDeclScope(stackframe, Yes.frameBase);
+            argAssignments ~= argscope.declare("this", thisType, new PointerCast(thisType, new ArgExpr(0, voidp)));
+            foreach (i, arg; args)
+            {
+                auto argExpr = new ArgExpr(cast(int) i + 1, arg.type);
+
+                argAssignments ~= argscope.declare(arg.name, arg.type, argExpr);
+            }
+
+            this.compiledStatement = this.statement.compile(Context(generator.platform, argscope));
+
+            generator.frameReg = generator.fun.alloca(stackframe.structType.emit(generator.platform));
+
+            foreach (statement; argAssignments)
+            {
+                statement.emit(generator);
+            }
         }
 
-        auto functionBody = statement.compile(Context(generator.platform, argscope));
-
-        generator.frameReg = generator.fun.alloca(stackframe.structType.emit(generator.platform));
         scope (success)
-            generator.resetFrame;
-
-        foreach (statement; argAssignments)
         {
-            statement.emit(generator);
+            generator.resetFrame;
+            generator.fun = null;
         }
 
-        functionBody.emit(generator);
+        this.compiledStatement.emit(generator);
         generator.fun.ret(generator.fun.voidLiteral);
-        generator.fun = null;
     }
 
     Type funcPtrType()
@@ -1987,6 +2038,30 @@ class Class : Type
         return combinedMethods;
     }
 
+    void genInstanceofMethod()
+    {
+        auto voidp = new Pointer(new Void);
+        auto strng = new Array(new Character);
+
+        Statement[] castStmts;
+        auto thisptr = new ArgExpr(0, voidp);
+        auto target = new ArgExpr(1, strng);
+        auto nullptr = new NullExpr(voidp);
+        auto current = this;
+        while (current)
+        {
+            auto test = new BinaryOp(BinaryOpType.eq, target, new StringLiteral(current.name));
+
+            castStmts ~= new IfStatement(test, new ReturnStatement(thisptr));
+            current = current.superClass;
+        }
+        castStmts ~= new ReturnStatement(nullptr);
+
+        auto stmt = new SequenceStatement(castStmts);
+
+        methods ~= new Method(this, "__instanceof", voidp, [Argument("target", strng)], null, stmt);
+    }
+
     override string toString() const
     {
         return format!"classref(%s)"(this.name);
@@ -2047,6 +2122,7 @@ class ASTClassDecl : ASTType
             a.ret.compile(context),
             a.args.map!(b => Argument(b.name, b.type.compile(context))).array,
             a.body_)).array;
+        class_.genInstanceofMethod;
         return class_;
     }
 

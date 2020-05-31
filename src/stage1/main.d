@@ -1962,23 +1962,28 @@ class Class : Type
 
     Class superClass;
 
+    @(This.Init!null)
     Member[] members;
 
     @(This.Init!null)
     Method[] methods;
 
-    this(string name, Class superClass, Member[] members)
+    this(string name, Class superClass)
     {
         this.name = name;
         this.superClass = superClass;
-        this.members = members;
+        this.members = null;
         this.methods = null;
     }
 
     override BackendType emit(Platform platform)
     {
-        return new BackendPointerType(
-            new BackendStructType(this.members.map!(a => a.type.emit(platform)).array));
+        return new BackendPointerType(new BackendVoidType);
+        /**
+         * Class A { A a; } wouldn't work
+         */
+        /*return new BackendPointerType(
+            new BackendStructType(this.members.map!(a => a.type.emit(platform)).array));*/
     }
 
     Struct dataStruct()
@@ -2068,6 +2073,22 @@ class Class : Type
     }
 }
 
+class ClassScope : Namespace
+{
+    Class class_;
+
+    override Symbol lookup(string name)
+    {
+        if (name == this.class_.name)
+        {
+            return this.class_;
+        }
+        return parent.lookup(name);
+    }
+
+    mixin(GenerateThis);
+}
+
 class ASTClassDecl : ASTType
 {
     struct Member
@@ -2110,17 +2131,19 @@ class ASTClassDecl : ASTType
             superClass = cast(Class) superClassObj;
             assert(superClass);
         }
-        // TODO subscope
-        auto class_ = new Class(
-            name,
-            superClass,
-            members.map!(a => Class.Member(a.name, a.type.compile(context))).array
-        );
+        // FIXME proxy type
+        auto class_ = new Class(name, superClass);
+        auto classScope = new ClassScope(context.namespace, class_);
+        auto classContext = context.withNamespace(classScope);
+
+        class_.members = this.members
+            .map!(a => Class.Member(a.name, a.type.compile(classContext)))
+            .array;
         class_.methods = methods.map!(a => new .Method(
             class_,
             a.name,
-            a.ret.compile(context),
-            a.args.map!(b => Argument(b.name, b.type.compile(context))).array,
+            a.ret.compile(classContext),
+            a.args.map!(b => Argument(b.name, b.type.compile(classContext))).array,
             a.body_)).array;
         class_.genInstanceofMethod;
         return class_;

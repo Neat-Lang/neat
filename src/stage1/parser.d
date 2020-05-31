@@ -104,6 +104,11 @@ class Parser
         while (true)
         {
             this.text = this.text.strip;
+            if (this.text.startsWith("//"))
+            {
+                this.text = this.text.find("\n");
+                continue;
+            }
             if (!this.text.startsWith("/*")) break;
             this.text = this.text["/*".length .. $];
             int commentLevel = 1;

@@ -1687,8 +1687,41 @@ ASTStringLiteral parseStringLiteral(ref Parser parser, string endMarker)
         }
         accept(endMarker).enforce;
 
-        return new ASTStringLiteral(str);
+        return new ASTStringLiteral(str.replaceEscapes);
     }
+}
+
+string replaceEscapes(string text)
+{
+    string result;
+    int i;
+    while (i < text.length)
+    {
+        char ch = text[i++];
+        if (ch == '\\')
+        {
+            char ctl = text[i++];
+            switch (ctl)
+            {
+                case 'r':
+                    result ~= '\r';
+                    break;
+                case 'n':
+                    result ~= '\n';
+                    break;
+                case 't':
+                    result ~= '\t';
+                    break;
+                default:
+                    assert(false, format!"Unknown control sequence \\%s"(ctl));
+            }
+        }
+        else
+        {
+            result ~= ch;
+        }
+    }
+    return result;
 }
 
 class ASTStringLiteral : ASTSymbol

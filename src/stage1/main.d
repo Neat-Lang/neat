@@ -2617,6 +2617,9 @@ else
         auto module_ = backend.createModule;
 
         defineRuntime(backend, module_, builtins);
+        builtins.add("string", new Array(new Character));
+        builtins.add("true", new Literal(1));
+        builtins.add("false", new Literal(0));
 
         auto toplevel = parseModule(args[1], includes, defaultPlatform, [builtins]);
 

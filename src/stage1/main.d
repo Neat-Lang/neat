@@ -1906,8 +1906,12 @@ Expression implicitConvertTo(Expression from, Type to)
             currentClass = currentClass.superClass;
         }
     }
+    if (cast(Class) to && cast(NullExpr) from)
+    {
+        return new PointerCast(to, from);
+    }
     // TODO bool
-    if (cast(Integer) to && cast(Pointer) from.type)
+    if (cast(Integer) to && (cast(Pointer) from.type || cast(Class) from.type))
     {
         auto voidp = new Pointer(new Void);
         auto rt_ptr_test = new Function("cxruntime_ptr_test",
@@ -2694,8 +2698,10 @@ else
 
         defineRuntime(backend, module_, builtins);
         builtins.add("string", new Array(new Character));
+        builtins.add("bool", new Integer);
         builtins.add("true", new Literal(1));
         builtins.add("false", new Literal(0));
+        builtins.add("null", new NullExpr(new Pointer(new Void)));
 
         auto toplevel = parseModule(args[1], includes, defaultPlatform, [builtins]);
 

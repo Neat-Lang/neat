@@ -1,5 +1,7 @@
 module parser;
 
+import backend.proxy;
+
 class Parser
 {
     string[] stack;
@@ -56,19 +58,23 @@ class Parser
         this.level = this.level - 1;
     }
 
-    int accept(string match)
+    bool accept(string match)
     {
         this.begin();
         this.strip();
-        if (this.text().length < match.length) return 0;
+        if (this.text().length < match.length)
+        {
+            this.revert();
+            return false;
+        }
         if (this.text()[0 .. match.length] == match)
         {
             (*this.textp()) = this.text()[match.length .. this.text().length];
             this.commit();
-            return 1;
+            return true;
         }
         this.revert();
-        return 0;
+        return true;
     }
 
     void expect(string match)
@@ -80,25 +86,25 @@ class Parser
         }
     }
 
-    int eof()
+    bool eof()
     {
         this.begin();
         this.strip();
         if (this.text().length == 0)
         {
             this.commit();
-            return 1;
+            return true;
         }
         this.revert();
-        return 0;
+        return false;
     }
 
     void strip()
     {
-        while (1)
+        while (true)
         {
             /* this.text = this.text.strip; */
-            while (this.text().length > 0 && this.text()[0 .. 1] == " ")
+            while (this.text().length > 0 && isWhitespace(this.text()[0 .. 1]))
             {
                 *this.textp() = this.text()[1 .. this.text().length];
             }
@@ -132,7 +138,7 @@ class Parser
     }
 }
 
-int startsWith(string haystack, string needle)
+bool startsWith(string haystack, string needle)
 {
     return haystack.length >= needle.length && haystack[0 .. needle.length] == needle;
 }
@@ -146,14 +152,14 @@ int find(string haystack, string needle)
     return -1;
 }
 
-int parseNumber(Parser parser, int* ip)
+bool parseNumber(Parser parser, int* ip)
 {
     parser.begin();
     parser.strip();
     if (parser.eof() || !isNumber(parser.text()[0 .. 1]))
     {
         parser.revert();
-        return 0;
+        return false;
     }
     string number;
     while (!parser.eof() && isNumber(parser.text()[0 .. 1]))
@@ -163,24 +169,29 @@ int parseNumber(Parser parser, int* ip)
     }
     parser.commit();
     *ip = atoi(number);
-    return 1;
+    return true;
 }
 
-int isNumber(string s)
+bool isNumber(string s)
 {
     assert(s.length == 1);
     return find("0123456789", s) != -1;
 }
 
-int isAlpha(string s)
+bool isAlpha(string s)
 {
     assert(s.length == 1);
     return find("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", s) != -1;
 }
 
-int isAlnum(string s)
+bool isAlnum(string s)
 {
     return isAlpha(s) || isNumber(s);
+}
+
+bool isWhitespace(string s)
+{
+    return s == " " || s == "\t" || s == "\r" || s == "\n";
 }
 
 string parseIdentifier(Parser parser)
@@ -202,18 +213,19 @@ string parseIdentifier(Parser parser)
     return identifier;
 }
 
-int acceptIdentifier(Parser parser, string identifier)
+bool acceptIdentifier(Parser parser, string identifier)
 {
     parser.begin();
     if (parseIdentifier(parser) != identifier)
     {
         parser.revert();
-        return 0;
+        return false;
     }
     parser.commit();
-    return 1;
+    return true;
 }
 
+// something that can be referenced by a name
 class Symbol
 {
 }
@@ -242,6 +254,11 @@ class Context
     }
 }
 
+class ASTSymbol
+{
+    Symbol compile(Context context) { assert(false); }
+}
+
 class Type
 {
 }
@@ -249,6 +266,302 @@ class Type
 class ASTType
 {
     Type compile(Context context) { assert(false); }
+}
+
+class Integer : Type
+{
+}
+
+class ASTInteger : ASTType
+{
+    Type compile(Context context) {
+        return new Integer;
+    }
+}
+
+ASTType parseLeafType(Parser parser)
+{
+    parser.begin();
+
+    string identifier = parseIdentifier(parser);
+
+    if (!identifier.length)
+    {
+        parser.revert();
+        return null;
+    }
+
+    if (identifier == "int")
+    {
+        parser.commit();
+        return new ASTInteger;
+    }
+
+    assert(false);
+}
+
+class ASTType
+{
+    Type compile(Context context) { assert(false); }
+}
+
+ASTType parseType(Parser parser)
+{
+    ASTType current = parseLeafType(parser);
+    return current;
+}
+
+class ASTArgument
+{
+    string name;
+
+    ASTType type;
+
+    this(string name, ASTType type)
+    {
+        this.name = name;
+        this.type = type;
+    }
+}
+
+class Generator
+{
+    BackendModule mod;
+
+    BackendFunction fun;
+
+    // Platform platform;
+
+    int frameReg;
+
+    this(/*Platform platform, */BackendModule mod)
+    {
+        // this.platform = platform;
+        this.mod = mod;
+        this.fun = null;
+    }
+}
+
+class Statement
+{
+    void emit(Generator output) { assert(false); }
+}
+
+class ASTStatement
+{
+    Statement compile(Context context) { assert(false); }
+}
+
+class Argument
+{
+    string name;
+
+    Type type;
+
+    this(string name, Type type)
+    {
+        this.name = name;
+        this.type = type;
+    }
+}
+
+class Function : Symbol
+{
+    string name;
+
+    Type ret;
+
+    Argument[] args;
+
+    bool declaration;
+
+    ASTStatement statement;
+
+    this(string name, Type ret, Argument[] args, bool declaration, ASTStatement statement)
+    {
+        this.name = name;
+        this.ret = ret;
+        this.args = [...args];
+        this.declaration = declaration;
+        this.statement = statement;
+    }
+
+    void emit(Generator generator, Context module_)
+    {
+        assert(!generator.fun);
+        assert(false);
+        /*generator.fun = generator.mod.define(
+            name,
+            ret.emit(module_.platform),
+            args.map!(a => a.type.emit(module_.platform)).array
+        );
+        auto stackframe = new FunctionScope(module_.namespace);
+        auto argscope = new VarDeclScope(stackframe, Yes.frameBase);
+        Statement[] argAssignments;
+        foreach (i, arg; args)
+        {
+            auto argExpr = new ArgExpr(cast(int) i, arg.type);
+
+            argAssignments ~= argscope.declare(arg.name, arg.type, argExpr);
+        }
+
+        auto functionBody = statement.compile(module_.withNamespace(argscope));
+
+        generator.frameReg = generator.fun.alloca(stackframe.structType.emit(module_.platform));
+        scope (success)
+            generator.resetFrame;
+
+        foreach (statement; argAssignments)
+        {
+            statement.emit(generator);
+        }
+
+        functionBody.emit(generator);
+        generator.fun.ret(generator.fun.voidLiteral);
+        generator.fun = null;*/
+    }
+}
+
+class ASTFunction
+{
+    string name;
+
+    ASTType ret;
+
+    ASTArgument[] args;
+
+    bool isDeclaration;
+
+    ASTStatement statement;
+
+    this(string name, ASTType ret, ASTArgument[] args, bool isDeclaration, ASTStatement statement)
+    {
+        this.name = name;
+        this.ret = ret;
+        this.args = [...args];
+        this.isDeclaration = isDeclaration;
+        this.statement = statement;
+    }
+
+    Function compile(Context context)
+    {
+        Argument[] arguments;
+        for (int i = 0; i < this.args.length; i = i + 1)
+        {
+            ASTArgument arg = this.args[i];
+            arguments = [...arguments, new Argument(arg.name, arg.type.compile(context))];
+        }
+
+        return new Function(
+            this.name,
+            this.ret.compile(context),
+            arguments,
+            this.isDeclaration,
+            this.statement);
+    }
+}
+
+ASTArgument[] parseIdentifierList(Parser parser)
+{
+    ASTArgument[] args;
+    while (!parser.accept(")"))
+    {
+        if (args.length)
+        {
+            if (!parser.accept(","))
+            {
+                parser.fail("',' or ')' expected");
+            }
+        }
+        ASTType argtype = parseType(parser);
+        string argname = parseIdentifier(parser);
+        args = [...args, new ASTArgument(argname, argtype)];
+    }
+    return args;
+}
+
+class Expression : Symbol
+{
+    Type type() { assert(false); }
+    int emit(Generator output) { assert(false); }
+}
+
+Expression beExpression(Symbol symbol)
+{
+    Expression expr = symbol.instanceOf(Expression);
+    assert(expr);
+    return expr;
+}
+
+class ASTReturnStatement : ASTStatement
+{
+    ASTSymbol value;
+
+    this(ASTSymbol value) { this.value = value; }
+
+    Statement compile(Context context)
+    {
+        Expression expr = beExpression(this.value.compile(context));
+
+        return new ReturnStatement(expr);
+    }
+}
+
+ASTReturnStatement parseReturn(Parser parser)
+{
+    parser.begin();
+    if (parseIdentifier(parser) != "return")
+    {
+        parser.revert();
+        return null;
+    }
+    ASTSymbol expr;
+    /*if (parser.accept(";")) // return;
+    {
+        expr = new ASTVoidExpression;
+    }
+    else
+    {*/
+        expr = parseExpression(parser);
+        parser.expect(";");
+    //}
+    parser.commit();
+    return new ASTReturnStatement(expr);
+}
+
+ASTStatement parseStatement(Parser parser)
+{
+    {
+        Statement stmt = parseReturn(parser);
+        if (stmt) return stmt;
+    }
+    {
+        Statement stmt = parseIf(parser);
+        if (stmt) return stmt;
+    }
+    {
+        Statement stmt = parseScope(parser);
+        if (stmt) return stmt;
+    }
+    parser.fail("statement expected");
+    assert(false);
+}
+
+ASTFunction parseFunction(Parser parser)
+{
+    parser.begin();
+    ASTType ret = parseType(parser);
+    if (!ret)
+    {
+        parser.revert();
+        return null;
+    }
+    string name = parseIdentifier(parser);
+    parser.expect("(");
+    ASTArgument[] args = parseIdentifierList(parser);
+    ASTStatement stmt = parseStatement(parser);
+    parser.commit();
+    return new ASTFunction(name, ret, args, false, stmt);
 }
 
 void main() {
@@ -261,4 +574,7 @@ void main() {
     ";
 
     Parser parser = new Parser(src);
+    print("--------");
+    ASTType returnType = parseLeafType(parser);
+    assert(returnType);
 }

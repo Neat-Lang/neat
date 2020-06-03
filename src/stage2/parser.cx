@@ -12,6 +12,7 @@ class Parser
     {
         this.stack = [text];
         this.level = 0;
+        this.verify();
     }
 
     void verify()
@@ -47,9 +48,11 @@ class Parser
 
     void commit()
     {
+        assert(this.level > 0);
         this.verify();
         this.stack[this.level - 1] = this.text();
-        this.stack = this.stack[0 .. this.stack.length - 1];
+        this.level = this.level - 1;
+        this.verify();
     }
 
     void revert()
@@ -74,15 +77,14 @@ class Parser
             return true;
         }
         this.revert();
-        return true;
+        return false;
     }
 
     void expect(string match)
     {
         if (!this.accept(match))
         {
-            /* this.fail(format("'%s' expected.", match)); */
-            this.fail("something expected");
+            this.fail([..."'", ... match, ..."' expected"]);
         }
     }
 
@@ -133,6 +135,9 @@ class Parser
 
     void fail(string message)
     {
+        print("failing:");
+        print(message);
+        print(this.text());
         /* assert(false, format!"at %s: %s"(this.text, msg)); */
         assert(false); /* TODO */
     }
@@ -241,16 +246,15 @@ class Namespace
 
 class Context
 {
-    /* Platform platform; */
+    void* platform;
 
     Namespace namespace;
 
-    this(Namespace namespace) { this.namespace = namespace; }
+    this(void* platform, Namespace namespace) { this.platform = platform; this.namespace = namespace; }
 
     Context withNamespace(Namespace namespace)
     {
-        /* return new Context(this.platform, namespace); */
-        return new Context(namespace);
+        return new Context(this.platform, namespace);
     }
 }
 
@@ -261,6 +265,7 @@ class ASTSymbol
 
 class Type
 {
+    void* emit(void* platform) { assert(false); }
 }
 
 class ASTType
@@ -270,6 +275,10 @@ class ASTType
 
 class Integer : Type
 {
+    void* emit(Platform platform)
+    {
+        return platform.intType();
+    }
 }
 
 class ASTInteger : ASTType
@@ -330,13 +339,13 @@ class Generator
 
     BackendFunction fun;
 
-    // Platform platform;
+    Platform platform;
 
     int frameReg;
 
-    this(/*Platform platform, */BackendModule mod)
+    this(Platform platform, BackendModule mod)
     {
-        // this.platform = platform;
+        this.platform = platform;
         this.mod = mod;
         this.fun = null;
     }
@@ -389,36 +398,41 @@ class Function : Symbol
     void emit(Generator generator, Context module_)
     {
         assert(!generator.fun);
-        assert(false);
-        /*generator.fun = generator.mod.define(
-            name,
-            ret.emit(module_.platform),
-            args.map!(a => a.type.emit(module_.platform)).array
-        );
-        auto stackframe = new FunctionScope(module_.namespace);
-        auto argscope = new VarDeclScope(stackframe, Yes.frameBase);
-        Statement[] argAssignments;
-        foreach (i, arg; args)
+        void*[] argTypes;
+        for (int i = 0; i < this.args.length; i = i + 1)
         {
-            auto argExpr = new ArgExpr(cast(int) i, arg.type);
+            argTypes = [...argTypes, this.args[i].type.emit(module_.platform)];
+        }
+        assert(module_);
+        generator.fun = generator.mod.define(
+            this.name,
+            this.ret.emit(module_.platform),
+            argTypes
+        );
+        FunctionScope stackframe = new FunctionScope(module_.namespace);
+        VarDeclScope argscope = new VarDeclScope(stackframe, true);
+        Statement[] argAssignments;
+        for (int i = 0; i < this.args.length; i = i + 1)
+        {
+            Argument arg = this.args[i];
+            ArgExpr argExpr = new ArgExpr(i, arg.type);
 
-            argAssignments ~= argscope.declare(arg.name, arg.type, argExpr);
+            argAssignments = [...argAssignments, argscope.declare(arg.name, arg.type, argExpr)];
         }
 
-        auto functionBody = statement.compile(module_.withNamespace(argscope));
+        Statement functionBody = this.statement.compile(module_.withNamespace(argscope));
 
-        generator.frameReg = generator.fun.alloca(stackframe.structType.emit(module_.platform));
-        scope (success)
-            generator.resetFrame;
+        generator.frameReg = generator.fun.alloca(stackframe.structType().emit(module_.platform));
 
-        foreach (statement; argAssignments)
+        for (int i = 0; i < argAssignments.length; i = i + 1)
         {
-            statement.emit(generator);
+            argAssignments[i].emit(generator);
         }
 
         functionBody.emit(generator);
-        generator.fun.ret(generator.fun.voidLiteral);
-        generator.fun = null;*/
+        generator.fun.ret(generator.fun.voidLiteral());
+        generator.fun = null;
+        generator.frameReg = 0;
     }
 }
 
@@ -449,7 +463,8 @@ class ASTFunction
         for (int i = 0; i < this.args.length; i = i + 1)
         {
             ASTArgument arg = this.args[i];
-            arguments = [...arguments, new Argument(arg.name, arg.type.compile(context))];
+            Type type = arg.type.compile(context);
+            arguments = [...arguments, new Argument(arg.name, type)];
         }
 
         return new Function(
@@ -493,6 +508,452 @@ Expression beExpression(Symbol symbol)
     return expr;
 }
 
+class Reference : Expression
+{
+    int emitLocation(Generator output) { assert(false); }
+}
+
+class BinaryOp : Expression
+{
+    string op;
+
+    Expression left;
+
+    Expression right;
+
+    this(string op, Expression left, Expression right)
+    {
+        this.op = op;
+        this.left = left;
+        this.right = right;
+    }
+
+    Type type()
+    {
+        return new Integer;
+    }
+
+    int emit(Generator output)
+    {
+        assert(this.left.type().instanceOf(Integer));
+        assert(this.right.type().instanceOf(Integer));
+        int leftreg = this.left.emit(output);
+        int rightreg = this.right.emit(output);
+        string name;
+        if (this.op == "add") name = "cxruntime_int_add";
+        else if (this.op == "sub") name = "cxruntime_int_sub";
+        else if (this.op == "eq") name = "cxruntime_int_eq";
+        else { print(this.op); assert(false); }
+        return output.fun.call(output.platform.intType(), name, [leftreg, rightreg]);
+    }
+}
+
+class ArgExpr : Expression
+{
+    int index;
+
+    Type type_;
+
+    this(int index, Type type_) { this.index = index; this.type_ = type_; }
+
+    int emit(Generator output)
+    {
+        return output.fun.arg(this.index);
+    }
+
+    Type type()
+    {
+        return this.type_;
+    }
+}
+
+class Call : Expression
+{
+    Function function_;
+
+    Expression[] args;
+
+    this(Function function_, Expression[] args)
+    {
+        /*assert(function_.args.length == args.length, format!"'%s' expected %s args, not %s"(
+            function_.name, function_.args.length, args.length));*/
+        assert(function_.args.length == args.length);
+
+        /*foreach (i, ref arg; args)
+        {
+            import std.stdio : stderr;
+
+            scope(failure)
+                stderr.writefln!"While converting arg %s of %s to %s:"(
+                    i, function_.name, function_.args[i].type);
+            arg = arg.implicitConvertTo(function_.args[i].type);
+        }*/
+        this.function_ = function_;
+        this.args = [...args];
+    }
+
+    Type type()
+    {
+        return this.function_.ret;
+    }
+
+    int emit(Generator output)
+    {
+        int[] regs;
+        for (int i = 0; i < this.args.length; i = i + 1) {
+            regs = [...regs, this.args[i].emit(output)];
+        }
+        return output.fun.call(this.type().emit(output.platform), this.function_.name, regs);
+    }
+}
+
+Expression call(Symbol target, Expression[] args)
+{
+    if (target.instanceOf(Function))
+    {
+        return new Call(target.instanceOf(Function), args);
+    }
+    /*if (auto method = cast(ClassMethod) target)
+    {
+        return new FuncPtrCall(method.funcPtr, [method.thisPtr] ~ args);
+    }
+    auto expr = cast(Expression) target;
+    if (expr && cast(FunctionPointer) expr.type)
+    {
+        return new FuncPtrCall(expr, args);
+    }*/
+    // assert(false, format!"unknown call target %s (%s?)"(target, expr ? expr.type : null));
+    assert(false);
+}
+
+class ASTCall : ASTSymbol
+{
+    ASTSymbol target;
+
+    ASTSymbol[] args;
+
+    this(ASTSymbol target, ASTSymbol[] args)
+    {
+        this.target = target;
+        this.args = [...args];
+    }
+
+    Expression compile(Context context)
+    {
+        Symbol target = this.target.compile(context);
+        Expression[] args;
+        for (int i = 0; i < this.args.length; i = i + 1)
+        {
+            args = [...args, beExpression(this.args[i].compile(context))];
+        }
+        return call(target, args);
+    }
+}
+
+ASTSymbol[] parseSymbolList(Parser parser)
+{
+    ASTSymbol[] args;
+    while (!parser.accept(")"))
+    {
+        if (args.length > 0)
+            parser.expect(",");
+        args = [...args, parseExpression(parser)];
+    }
+    return args;
+}
+
+ASTCall parseCall(Parser parser, ASTSymbol base)
+{
+    parser.begin();
+    if (!parser.accept("("))
+    {
+        parser.revert();
+        return null;
+    }
+    ASTSymbol[] args = parseSymbolList(parser);
+    parser.commit();
+    return new ASTCall(base, args);
+}
+
+ASTSymbol parseProperties(Parser parser, ASTSymbol current)
+{
+    while (true)
+    {
+        bool any = false;
+        {
+            ASTSymbol expr = parseCall(parser, current);
+            if (expr)
+            {
+                any = true;
+                current = expr;
+            }
+        }
+        if (!any) return current;
+        /*if (auto expr = parser.parseInstanceOf(current))
+        {
+            current = expr;
+            continue;
+        }
+        if (auto expr = parser.parseCall(current))
+        {
+            current = expr;
+            continue;
+        }
+        if (auto expr = parser.parseMember(current))
+        {
+            current = expr;
+            continue;
+        }
+        if (auto expr = parser.parseIndex(current))
+        {
+            current = expr;
+            continue;
+        }
+        break;*/
+    }
+}
+
+ASTSymbol parseExpressionLeaf(Parser parser)
+{
+    /*if (accept("*"))
+    {
+        auto next = parser.parseExpressionLeaf;
+
+        assert(next !is null);
+        return new ASTDereference(next);
+    }
+    if (accept("&"))
+    {
+        auto next = parser.parseExpressionLeaf;
+
+        assert(next !is null);
+        return new ASTReference(next);
+    }
+    if (parser.acceptIdentifier("new"))
+    {
+        auto type = parser.parseType;
+        Nullable!(ASTSymbol[]) args;
+        if (accept("("))
+        {
+            args = parser.parseSymbolList;
+        }
+
+        return new ASTNewClassExpression(type, args);
+    }
+    if (accept("!"))
+    {
+        auto next = parser.parseExpressionLeaf;
+
+        assert(next !is null);
+        return new ASTNegation(next);
+    }*/
+    ASTSymbol currentExpr = parseExpressionBase(parser);
+    assert(currentExpr);
+    return parseProperties(parser, currentExpr);
+}
+
+class Variable : ASTSymbol
+{
+    string name;
+
+    this(string name) { this.name = name; }
+
+    Symbol compile(Context context)
+    {
+        Symbol symbol = context.namespace.lookup(this.name);
+        assert(symbol);
+        return symbol;
+    }
+}
+
+class ASTLiteral : ASTSymbol
+{
+    int value;
+
+    this(int value) { this.value = value; }
+
+    Symbol compile(Context context)
+    {
+        return new Literal(this.value);
+    }
+}
+
+class Literal : Expression
+{
+    int value;
+
+    this(int value) { this.value = value; }
+
+    Type type()
+    {
+        return new Integer;
+    }
+
+    int emit(Generator output)
+    {
+        return output.fun.intLiteral(this.value);
+    }
+}
+
+ASTSymbol parseExpressionBase(Parser parser)
+{
+    string name = parseIdentifier(parser);
+    if (name.length)
+    {
+        return new Variable(name);
+    }
+    int i;
+    if (parseNumber(parser, &i))
+    {
+        return new ASTLiteral(i);
+    }
+    /*if (parser.accept("\""))
+    {
+        return parser.parseStringLiteral("\"");
+    }
+    if (parser.accept("("))
+    {
+        auto result = parser.parseExpression;
+        parser.expect(")");
+        return result;
+    }
+    if (auto arrayLiteral = parser.parseArrayLiteral)
+    {
+        return arrayLiteral;
+    }*/
+    parser.fail("Base expression expected.");
+    assert(false);
+}
+
+class ASTBinaryOp : ASTSymbol
+{
+    string op;
+
+    ASTSymbol left;
+
+    ASTSymbol right;
+
+    this(string op, ASTSymbol left, ASTSymbol right) { this.op = op; this.left = left; this.right = right; }
+
+    Expression compile(Context context)
+    {
+        Expression left = beExpression(this.left.compile(context));
+        Expression right = beExpression(this.right.compile(context));
+
+        return new BinaryOp(this.op, left, right);
+    }
+}
+
+ASTSymbol parseAddSub(Parser parser, ASTSymbol left, int myLevel)
+{
+    while (true)
+    {
+        if (parser.accept("+"))
+        {
+            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+            left = new ASTBinaryOp("add", left, right);
+        }
+        else if (parser.accept("-"))
+        {
+            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+            left = new ASTBinaryOp("sub", left, right);
+        } else return left;
+    }
+}
+
+ASTSymbol parseComparison(Parser parser, ASTSymbol left, int myLevel)
+{
+    if (parser.accept("=="))
+    {
+        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+        return new ASTBinaryOp("eq", left, right);
+    }
+    return left;
+    /*
+    if (parser.accept("!=")) // same as !(a == b)
+    {
+        auto right = parser.parseArithmetic(myLevel + 1);
+        left = new ASTNegation(new ASTBinaryOp(BinaryOpType.eq, left, right));
+    }
+    if (parser.accept(">="))
+    {
+        auto right = parser.parseArithmetic(myLevel + 1);
+        left = new ASTBinaryOp(BinaryOpType.ge, left, right);
+    }
+    if (parser.accept(">"))
+    {
+        auto right = parser.parseArithmetic(myLevel + 1);
+        left = new ASTBinaryOp(BinaryOpType.gt, left, right);
+    }
+    if (parser.accept("<="))
+    {
+        auto right = parser.parseArithmetic(myLevel + 1);
+        left = new ASTBinaryOp(BinaryOpType.le, left, right);
+    }
+    if (parser.accept("<"))
+    {
+        auto right = parser.parseArithmetic(myLevel + 1);
+        left = new ASTBinaryOp(BinaryOpType.lt, left, right);
+    }*/
+}
+
+ASTSymbol parseArithmetic(Parser parser, int level)
+{
+    ASTSymbol left = parseExpressionLeaf(parser);
+
+    if (level <= 1)
+    {
+        left = parseAddSub(parser, left, 1);
+    }
+    if (level <= 0)
+    {
+        left = parseComparison(parser, left, 0);
+    }
+    /*if (level <= 4)
+    {
+        left = parseMul(parser, left, 4);
+    }
+    if (level <= 3)
+    {
+        left = parseAddSub(parser, left, 3);
+    }
+    if (level <= 2)
+    {
+        left = parseComparison(parser, left, 2);
+    }
+    if (level <= 1)
+    {
+        left = parseBoolAnd(parser, left, 1);
+    }
+    if (level <= 0)
+    {
+        left = parseBoolOr(parser, left, 0);
+    }*/
+    return left;
+}
+
+ASTSymbol parseExpression(Parser parser)
+{
+    return parseArithmetic(parser, 0);
+}
+
+class ReturnStatement : Statement
+{
+    Expression value;
+
+    this(Expression value) { this.value = value; }
+
+    void emit(Generator output)
+    {
+        int reg = this.value.emit(output);
+
+        output.fun.ret(reg);
+    }
+}
+
 class ASTReturnStatement : ASTStatement
 {
     ASTSymbol value;
@@ -510,7 +971,8 @@ class ASTReturnStatement : ASTStatement
 ASTReturnStatement parseReturn(Parser parser)
 {
     parser.begin();
-    if (parseIdentifier(parser) != "return")
+    string identifier = parseIdentifier(parser);
+    if (identifier != "return")
     {
         parser.revert();
         return null;
@@ -529,18 +991,371 @@ ASTReturnStatement parseReturn(Parser parser)
     return new ASTReturnStatement(expr);
 }
 
+class StructMemberDeclaration
+{
+    string name;
+
+    Type type;
+
+    this(string name, Type type)
+    {
+        this.name = name;
+        this.type = type;
+    }
+}
+
+class Struct : Type
+{
+    string name;
+
+    StructMemberDeclaration[] members;
+
+    this(string name, StructMemberDeclaration[] members)
+    {
+        this.name = name;
+        this.members = [...members];
+    }
+
+    void* emit(Platform platform)
+    {
+        void*[] memberTypes;
+        for (int i = 0; i < this.members.length; i = i + 1)
+        {
+            memberTypes = [...memberTypes, this.members[i].type.emit(platform)];
+        }
+        return platform.structType(memberTypes);
+    }
+}
+
+class StructMember : Reference
+{
+    Reference base;
+
+    int index;
+
+    this(Reference base, int index)
+    {
+        this.base = base;
+        this.index = index;
+    }
+
+    Type type()
+    {
+        Type type = this.base.type();
+        Struct structType = type.instanceOf(Struct);
+        assert(structType);
+        return structType.members[this.index].type;
+    }
+
+    int emit(Generator output)
+    {
+        int locationReg = this.emitLocation(output);
+
+        return output.fun.load(this.type().emit(output.platform), locationReg);
+    }
+
+    int emitLocation(Generator output)
+    {
+        int reg = this.base.emitLocation(output);
+
+        return output.fun.fieldOffset(this.base.type().emit(output.platform), reg, this.index);
+    }
+}
+
+class StackFrame : Reference
+{
+    Type targetType;
+
+    this(Type targetType) { this.targetType = targetType; }
+
+    Type type()
+    {
+        return this.targetType;
+    }
+
+    int emit(Generator generator)
+    {
+        assert(false);
+    }
+
+    int emitLocation(Generator generator)
+    {
+        return generator.frameReg;
+    }
+}
+
+class FunctionScope : Namespace
+{
+    Type[] variableTypes;
+
+    this(Namespace parent) { this.parent = parent; }
+
+    StructMember declare(Type type)
+    {
+        this.variableTypes = [...this.variableTypes, type];
+
+        return new StructMember(
+            new StackFrame(this.structType()),
+            this.variableTypes.length - 1);
+    }
+
+    Struct structType()
+    {
+        StructMemberDeclaration[] members;
+        for (int i = 0; i < this.variableTypes.length; i = i + 1)
+        {
+            members = [...members, new StructMemberDeclaration("", this.variableTypes[i])];
+        }
+        return new Struct("", members);
+    }
+
+    Symbol lookup(string name)
+    {
+        assert(this.parent);
+        return this.parent.lookup(name);
+    }
+}
+
+FunctionScope findFunctionScope(Namespace namespace)
+{
+    FunctionScope functionScope = namespace.instanceOf(FunctionScope);
+    if (functionScope) return functionScope;
+    assert(namespace.parent);
+    return findFunctionScope(namespace.parent);
+}
+
+class AssignStatement : Statement
+{
+    Reference target;
+
+    Expression value;
+
+    this(Reference target, Expression value) { this.target = target; this.value = value; }
+
+    void emit(Generator output)
+    {
+        Type targetType = this.target.type();
+        Type valueType = this.value.type();
+        /*assert(targetType == valueType,
+                format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
+
+        int target_reg = this.target.emitLocation(output);
+        int value_reg = this.value.emit(output);
+
+        output.fun.store(valueType.emit(output.platform), target_reg, value_reg);
+    }
+}
+
+class NoopStatement : Statement
+{
+    void emit(Generator generator)
+    {
+    }
+}
+
+class DeclaredVariable
+{
+    string name;
+
+    Expression value;
+
+    this(string name, Expression value) { this.name = name; this.value = value; }
+}
+
+class VarDeclScope : Namespace
+{
+    DeclaredVariable[] declarations;
+
+    bool frameBase; // base of function frame. all variables here are parameters.
+
+    this(Namespace parent, bool frameBase)
+    {
+        this.parent = parent;
+        this.frameBase = frameBase;
+    }
+
+    Statement declare(string name, Type type, Expression value)
+    {
+        StructMember member = findFunctionScope(this).declare(type);
+
+        this.declarations = [...this.declarations, new DeclaredVariable(name, member)];
+        // return new AssignStatement(member, implicitConvertTo(value, type));
+        return new AssignStatement(member, value);
+    }
+
+    Statement declareType(string name, Type type)
+    {
+        StructMember member = findFunctionScope(this).declare(type);
+
+        this.declarations = [...this.declarations, new DeclaredVariable(name, member)];
+        return new NoopStatement;
+    }
+
+    Symbol lookup(string name)
+    {
+        for (int i = 0; i < this.declarations.length; i = i + 1)
+        {
+            if (this.declarations[i].name == name)
+            {
+                return this.declarations[i].value;
+            }
+        }
+        if (this.parent)
+            return this.parent.lookup(name);
+        return null;
+    }
+}
+
+class ASTIfStatement : ASTStatement
+{
+    ASTSymbol test;
+
+    ASTStatement then;
+
+    ASTStatement else_;
+
+    this(ASTSymbol test, ASTStatement then, ASTStatement else_)
+    {
+        this.test = test;
+        this.then = then;
+        this.else_ = else_;
+    }
+
+    Statement compile(Context context)
+    {
+        VarDeclScope ifscope = new VarDeclScope(context.namespace, false);
+        Symbol test = this.test.compile(context.withNamespace(ifscope));
+        Statement then = this.then.compile(context.withNamespace(ifscope));
+        Statement else_;
+        if (this.else_) {
+            VarDeclScope elsescope = new VarDeclScope(context.namespace, false);
+            else_ = this.else_.compile(context.withNamespace(elsescope));
+        }
+
+        return new IfStatement(beExpression(test), then, else_);
+    }
+}
+
+class IfStatement : Statement
+{
+    Expression test;
+
+    Statement then;
+
+    Statement else_;
+
+    this(Expression test, Statement then, Statement else_)
+    {
+        this.test = test;
+        this.then = then;
+        this.else_ = else_;
+    }
+
+    void emit(Generator output)
+    {
+        int reg = this.test.emit(output);
+
+        TestBranchRecord tbrRecord = output.fun.testBranch(reg);
+
+        tbrRecord.resolveThen(output.fun.blockIndex());
+        this.then.emit(output);
+        BranchRecord brRecord = output.fun.branch();
+        tbrRecord.resolveElse(output.fun.blockIndex());
+
+        if (this.else_)
+        {
+            this.else_.emit(output);
+            BranchRecord elseBrRecord = output.fun.branch();
+
+            elseBrRecord.resolve(output.fun.blockIndex());
+        }
+        brRecord.resolve(output.fun.blockIndex());
+    }
+}
+
+ASTIfStatement parseIf(Parser parser)
+{
+    parser.begin();
+    string identifier = parseIdentifier(parser);
+    if (identifier != "if")
+    {
+        parser.revert();
+        return null;
+    }
+    parser.expect("(");
+    ASTSymbol expr = parseExpression(parser);
+    parser.expect(")");
+    ASTStatement thenStmt = parseStatement(parser);
+    ASTStatement elseStatement;
+    if (parser.accept("else"))
+    {
+        elseStatement = parseStatement(parser);
+    }
+    parser.commit();
+    return new ASTIfStatement(expr, thenStmt, elseStatement);
+}
+
+class ASTScopeStatement : ASTStatement
+{
+    ASTStatement[] statements;
+
+    this(ASTStatement[] statements) { this.statements = [...statements]; }
+
+    Statement compile(Context context)
+    {
+        VarDeclScope subscope = new VarDeclScope(context.namespace, false);
+
+        Statement[] statements;
+        for (int i = 0; i < this.statements.length; i = i + 1)
+        {
+            statements = [...statements, this.statements[i].compile(context.withNamespace(subscope))];
+        }
+        return new SequenceStatement(statements);
+    }
+}
+
+class SequenceStatement : Statement
+{
+    Statement[] statements;
+
+    this(Statement[] statements) { this.statements = [...statements]; }
+
+    void emit(Generator output)
+    {
+        for (int i = 0; i < this.statements.length; i = i + 1)
+        {
+            this.statements[i].emit(output);
+        }
+    }
+}
+
+ASTScopeStatement parseScope(Parser parser)
+{
+    if (!parser.accept("{"))
+    {
+        return null;
+    }
+    ASTStatement[] statements;
+    while (!parser.accept("}"))
+    {
+        ASTStatement stmt = parseStatement(parser);
+        statements = [...statements, stmt];
+    }
+    return new ASTScopeStatement(statements);
+}
+
 ASTStatement parseStatement(Parser parser)
 {
     {
-        Statement stmt = parseReturn(parser);
+        ASTStatement stmt = parseReturn(parser);
         if (stmt) return stmt;
     }
     {
-        Statement stmt = parseIf(parser);
+        ASTStatement stmt = parseIf(parser);
         if (stmt) return stmt;
     }
     {
-        Statement stmt = parseScope(parser);
+        ASTStatement stmt = parseScope(parser);
         if (stmt) return stmt;
     }
     parser.fail("statement expected");
@@ -564,6 +1379,88 @@ ASTFunction parseFunction(Parser parser)
     return new ASTFunction(name, ret, args, false, stmt);
 }
 
+class ModuleEntry
+{
+    string name;
+
+    Symbol value;
+
+    this(string name, Symbol value) { this.name = name; this.value = value; }
+}
+
+class Module : Namespace
+{
+    string name;
+
+    this(string name)
+    {
+        this.parent = null;
+        this.name = name;
+    }
+
+    // Module[] imports;
+
+    ModuleEntry[] entries;
+
+    void add(string name, Symbol symbol)
+    {
+        this.entries = [...this.entries, new ModuleEntry(name, symbol)];
+    }
+
+    /*
+    void addImport(Module module_)
+    {
+        imports ~= module_;
+    }
+
+    void emit(Generator generator)
+    in (generator.fun is null)
+    {
+        foreach (entry; entries)
+        {
+            if (auto fun = cast(Function) entry.value)
+                if (!fun.declaration)
+                    fun.emit(generator, Context(generator.platform, this));
+            if (auto class_ = cast(Class) entry.value)
+            {
+                foreach (method; class_.methods)
+                {
+                    method.emit(generator, this, class_);
+                }
+            }
+        }
+        // TODO each only once!
+        foreach (import_; imports) import_.emit(generator);
+    }
+    */
+
+    Symbol lookupPublic(string name)
+    {
+        // not counting imports (non-transitive)
+        for (int i = 0; i < this.entries.length; i = i + 1)
+        {
+            if (this.entries[i].name == name)
+                return this.entries[i].value;
+        }
+        return null;
+    }
+
+    Symbol lookup(string name)
+    {
+        Symbol public_ = this.lookupPublic(name);
+        if (public_) return public_;
+        /*foreach (import_; this.imports)
+        {
+            // TODO error on multiple matches
+            if (auto entry = import_.lookupPublic(name))
+                return entry;
+        }*/
+        if (this.parent)
+            return this.parent.lookup(name);
+        return null;
+    }
+}
+
 void main() {
     string src = "
         int ack(int m, int n) {
@@ -574,7 +1471,23 @@ void main() {
     ";
 
     Parser parser = new Parser(src);
+    Backend backend = new Backend();
     print("--------");
-    ASTType returnType = parseLeafType(parser);
-    assert(returnType);
+    ASTFunction astFun = parseFunction(parser);
+    assert(astFun);
+    Module module_ = new Module("ack");
+    BackendModule backendModule_ = backend.createModule();
+    Generator generator = new Generator(new Platform(), backendModule_);
+    Function fun = astFun.compile(generator);
+    module_.add(fun.name, fun);
+    Context context = new Context(generator.platform, module_);
+    assert(fun);
+    fun.emit(generator, context);
+    int m = 3;
+    int n = 8;
+    void* mp = &m;
+    void* np = &n;
+    int ret;
+    backendModule_.call(&ret, "ack", [mp, np]);
+    assert(ret == 2045);
 }

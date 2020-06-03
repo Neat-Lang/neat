@@ -34,7 +34,9 @@ class DefaultPlatform : Platform
         if (auto structType = cast(BackendStructType) type)
         {
             // TODO alignment
-            return structType.members.map!(a => size(a)).sum;
+            int sum;
+            foreach (member; structType.members) sum += size(member);
+            return sum;
         }
         if (cast(BackendVoidType) type) return 0;
         if (cast(BackendCharType) type) return 1;
@@ -51,6 +53,8 @@ class DefaultPlatform : Platform
     override int offsetOf(const BackendStructType structType, int member)
     {
         // TODO alignment
-        return structType.members[0 .. member].map!(a => size(a)).sum;
+        int sum;
+        foreach (structMember; structType.members[0 .. member]) sum += size(structMember);
+        return sum;
     }
 }

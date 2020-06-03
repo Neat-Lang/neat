@@ -1555,10 +1555,11 @@ class NewClassExpression : Expression
         auto voidp = (new Pointer(new Void)).emit(output.platform);
         int classInfoSize = output.platform.size(classInfoStruct.emit(output.platform));
         auto classInfoPtr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(classInfoSize)]);
+        auto backendStructType = classInfoStruct.emit(output.platform);
         foreach (i, method; classType.vtable)
         {
             auto funcPtr = method.funcPtrType;
-            auto target = output.fun.fieldOffset(classInfoStruct.emit(output.platform), classInfoPtr, cast(int) i);
+            auto target = output.fun.fieldOffset(backendStructType, classInfoPtr, cast(int) i);
             auto src = output.fun.getFuncPtr(method.mangle);
             output.fun.store(funcPtr.emit(output.platform), target, src);
         }
@@ -1690,7 +1691,7 @@ class ASTInstanceOf : ASTSymbol
         assert(cast(Class) base.type);
         auto target = cast(Class) this.target.compile(context);
         assert(target);
-        return base.accessMember("__instanceof").call([new StringLiteral(target.name)]);
+        return new PointerCast(target, base.accessMember("__instanceof").call([new StringLiteral(target.name)]));
     }
 
     mixin(GenerateThis);
@@ -2508,7 +2509,7 @@ Module parseModule(string filename, string[] includes, Platform platform, Module
     return module_;
 }
 
-void defineRuntime(Backend backendObj, BackendModule backModule, Module frontModule)
+void defineRuntime(Backend backendObj, Platform platform, BackendModule backModule, Module frontModule)
 {
     import backend.interpreter : IpBackendModule;
 
@@ -2553,16 +2554,10 @@ void defineRuntime(Backend backendObj, BackendModule backModule, Module frontMod
     }
 
     definePublicCallback("assert", (int test) { assert(test, "Assertion failed!"); });
-    defineCallback("ptr_offset", delegate void*(void* ptr, int offset) { return ptr + offset; });
+    defineCallback("ptr_offset", delegate void*(void* ptr, int offset) { assert(offset >= 0); return ptr + offset; });
     definePublicCallback("malloc", (int size) {
-        import core.stdc.stdlib : malloc;
-
-        return malloc(size);
-    });
-    definePublicCallback("realloc", (void* ptr, int size) {
-        import core.stdc.stdlib : realloc;
-
-        return realloc(ptr, size);
+        assert(size >= 0 && size < 1048576);
+        return (new void[size]).ptr;
     });
     defineCallback("memcpy", (void* target, void* source, int size) {
         import core.stdc.string : memcpy;
@@ -2581,9 +2576,11 @@ void defineRuntime(Backend backendObj, BackendModule backModule, Module frontMod
     });
 
     definePublicCallback("_backend", delegate Backend() => backendObj);
+    definePublicCallback("_platform", delegate Platform() => platform);
     definePublicCallback("_backend_createModule", delegate BackendModule(Backend backend) => backend.createModule());
-    definePublicCallback("_backendModule_intType", delegate BackendType(BackendModule mod) =>
-        new BackendIntType);
+    definePublicCallback("_backend_intType", delegate BackendType() => new BackendIntType);
+    definePublicCallback("_backend_structType", delegate BackendType(BackendType[] members)
+        => new BackendStructType(members.dup));
     definePublicCallback(
         "_backendModule_define",
         delegate BackendFunction(
@@ -2623,18 +2620,42 @@ void defineRuntime(Backend backendObj, BackendModule backModule, Module frontMod
         "_backendFunction_intLiteral",
         delegate int(BackendFunction fun, int index) => fun.intLiteral(index));
     definePublicCallback(
+        "_backendFunction_voidLiteral",
+        delegate int(BackendFunction fun) => fun.voidLiteral);
+    definePublicCallback(
         "_backendFunction_call",
         delegate int(BackendFunction fun, BackendType ret, char[] name, int* args_ptr, int args_len)
             => fun.call(ret, name.dup, args_ptr[0 .. args_len]));
     definePublicCallback(
+        "_backendFunction_alloca",
+        delegate int(BackendFunction fun, BackendType type)
+            => fun.alloca(type));
+    definePublicCallback(
+        "_backendFunction_load",
+        delegate int(BackendFunction fun, BackendType dataType, int target) => fun.load(dataType, target));
+    definePublicCallback(
+        "_backendFunction_fieldOffset",
+        delegate int(BackendFunction fun, BackendType structType, int structBase, int member)
+            => fun.fieldOffset(structType, structBase, member));
+    definePublicCallback(
+        "_backendFunction_store",
+        delegate void(BackendFunction fun, BackendType dataType, int target, int value) => fun.store(dataType, target, value));
+    definePublicCallback(
         "_backendFunction_ret",
         delegate void(BackendFunction fun, int value) => fun.ret(value));
+    definePublicCallback(
+        "_backendFunction_branch",
+        delegate BranchRecord(BackendFunction fun) => fun.branch);
     definePublicCallback(
         "_backendFunction_testBranch",
         delegate TestBranchRecord(BackendFunction fun, int reg) => fun.testBranch(reg));
     definePublicCallback(
         "_backendFunction_blockIndex",
         delegate int(BackendFunction fun) => fun.blockIndex);
+
+    definePublicCallback(
+        "_branchRecord_resolve",
+        delegate void(BranchRecord record, int block) => record.resolve(block));
 
     definePublicCallback(
         "_testBranchRecord_resolveThen",
@@ -2673,6 +2694,10 @@ else
     int main(string[] args)
     {
         import backend.interpreter : IpBackend;
+        import core.memory : GC;
+
+        // turn on if you get random crashes
+        // GC.disable;
 
         string[] includes;
         foreach (arg; args)
@@ -2696,7 +2721,7 @@ else
         auto backend = new IpBackend(defaultPlatform);
         auto module_ = backend.createModule;
 
-        defineRuntime(backend, module_, builtins);
+        defineRuntime(backend, defaultPlatform, module_, builtins);
         builtins.add("string", new Array(new Character));
         builtins.add("bool", new Integer);
         builtins.add("true", new Literal(1));
@@ -2709,7 +2734,7 @@ else
 
         toplevel.emit(output);
 
-        writefln!"module:\n%s"(module_);
+        // writefln!"module:\n%s"(module_);
 
         module_.call("main", null, null);
         return 0;

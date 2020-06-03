@@ -618,10 +618,10 @@ class IpBackendModule : BackendModule
         assert(
             args.length == fun.argTypes.length,
             format!"%s expected %s arguments, not %s"(name, fun.argTypes.length, args.length));
-        size_t numRegs = fun.blocks.map!(block => block.instrs.length).sum;
-        int regAreaSize = fun.blocks.map!(block => block.instrs.map!(
-            instr => instr.regSize(fun, this.platform)
-        ).sum).sum;
+        size_t numRegs;
+        foreach (block; fun.blocks) numRegs += block.instrs.length;
+        int regAreaSize;
+        foreach (block; fun.blocks) foreach (instr; block.instrs) regAreaSize += instr.regSize(fun, this.platform);
 
         void[] regData = ArrayAllocator!void.allocate(regAreaSize);
         scope(success) ArrayAllocator!void.free(regData);
@@ -660,15 +660,20 @@ class IpBackendModule : BackendModule
                     {
                         case Call:
                             assert(!lastInstr);
-                            void[][] callArgs = instr.call.args.map!(reg => regArrays[reg]).array;
+                            int len = cast(int) instr.call.args.length;
+                            void[][] callArgs = (cast(void[]*) alloca(len * (void[]).sizeof))[0 .. len];
+                            foreach (k, argReg; instr.call.args) callArgs[k] = regArrays[argReg];
 
                             call(instr.call.name, regArrays[reg], callArgs);
                             break;
                         case CallFuncPtr:
                             assert(!lastInstr);
-                            auto funcPtr = (cast(IpFuncPtr[]) regArrays[instr.callFuncPtr.funcPtr])[0];
+                            IpFuncPtr funcPtr = (cast(IpFuncPtr[]) regArrays[instr.callFuncPtr.funcPtr])[0];
+                            int len = cast(int) instr.callFuncPtr.args.length;
+                            void[][] callArgs = (cast(void[]*) alloca(len * (void[]).sizeof))[0 .. len];
+                            foreach (k, argReg; instr.callFuncPtr.args)
+                                callArgs[k] = regArrays[argReg];
 
-                            void[][] callArgs = instr.callFuncPtr.args.map!(reg => regArrays[reg]).array;
                             call(funcPtr.name, regArrays[reg], callArgs);
                             break;
                         case GetFuncPtr:
@@ -722,21 +727,24 @@ class IpBackendModule : BackendModule
                             break;
                         case GetField:
                             assert(!lastInstr);
-                            auto value = cast(ubyte[]) regArrays[instr.fieldOffset.base];
+                            auto value = cast(void[]) regArrays[instr.fieldOffset.base];
                             auto size = this.platform.size(instr.getField.structType.members[instr.getField.member]);
                             auto offset = this.platform.offsetOf(instr.getField.structType, instr.getField.member);
 
-                            (cast(ubyte[]) regArrays[reg])[] = value[offset .. offset + size];
+                            (cast(void[]) regArrays[reg])[] = value[offset .. offset + size];
                             break;
                         case Load:
                             assert(!lastInstr);
                             auto target = (cast(void*[]) regArrays[instr.load.target])[0];
+                            assert(regArrays[reg]);
+                            assert(target);
 
                             regArrays[reg][] = target[0 .. regArrays[reg].length];
                             break;
                         case Store:
-                            assert(!lastInstr);
                             auto target = (cast(void*[]) regArrays[instr.store.target])[0];
+                            assert(regArrays[instr.store.value]);
+                            assert(target);
 
                             target[0 .. regArrays[instr.store.value].length] = regArrays[instr.store.value];
                             break;

@@ -118,8 +118,6 @@ class Generator
     @NonNull
     Platform platform;
 
-    int numDeclarations;
-
     Nullable!Reg frameReg_;
 
     void frameReg(Reg reg)

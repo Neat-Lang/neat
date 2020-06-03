@@ -1645,27 +1645,70 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
         }
         auto currentExpr = parser.parseExpressionBase;
         assert(currentExpr);
-        while (true)
-        {
-            if (auto expr = parser.parseCall(currentExpr))
-            {
-                currentExpr = expr;
-                continue;
-            }
-            if (auto expr = parser.parseMember(currentExpr))
-            {
-                currentExpr = expr;
-                continue;
-            }
-            if (auto expr = parser.parseIndex(currentExpr))
-            {
-                currentExpr = expr;
-                continue;
-            }
-            break;
-        }
-        return currentExpr;
+        return parser.parseProperties(currentExpr);
     }
+}
+
+ASTSymbol parseProperties(ref Parser parser, ASTSymbol current)
+{
+    while (true)
+    {
+        if (auto expr = parser.parseInstanceOf(current))
+        {
+            current = expr;
+            continue;
+        }
+        if (auto expr = parser.parseCall(current))
+        {
+            current = expr;
+            continue;
+        }
+        if (auto expr = parser.parseMember(current))
+        {
+            current = expr;
+            continue;
+        }
+        if (auto expr = parser.parseIndex(current))
+        {
+            current = expr;
+            continue;
+        }
+        break;
+    }
+    return current;
+}
+
+class ASTInstanceOf : ASTSymbol
+{
+    ASTSymbol base;
+
+    ASTType target;
+
+    override Symbol compile(Context context)
+    {
+        auto base = this.base.compile(context).beExpression;
+        assert(cast(Class) base.type);
+        auto target = cast(Class) this.target.compile(context);
+        assert(target);
+        return base.accessMember("__instanceof").call([new StringLiteral(target.name)]);
+    }
+
+    mixin(GenerateThis);
+}
+
+ASTSymbol parseInstanceOf(ref Parser parser, ASTSymbol left)
+{
+    parser.begin;
+    if (!(parser.accept(".") && parser.accept("instanceOf")))
+    {
+        parser.revert;
+        return null;
+    }
+    parser.expect("(");
+    auto type = parser.parseType;
+    parser.expect(")");
+    parser.commit;
+    return new ASTInstanceOf(left, type);
 }
 
 ASTStringLiteral parseStringLiteral(ref Parser parser, string endMarker)

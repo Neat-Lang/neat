@@ -22,7 +22,7 @@ class LineNumberRegistry
             {
                 foreach (i, line; file.text.splitter("\n").enumerate)
                 {
-                    if (where.ptr >= line.ptr && where.ptr < line.ptr + line.length)
+                    if (where.ptr >= line.ptr && where.ptr <= line.ptr + line.length)
                     {
                         return format!"%s:%s:%s"(file.name, i + 1, where.ptr - line.ptr + 1);
                     }

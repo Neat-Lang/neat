@@ -76,6 +76,7 @@ struct Instr
         Call,
         Arg,
         Literal,
+        BinOp,
         Alloca,
         GetField,
         FieldOffset,
@@ -109,6 +110,13 @@ struct Instr
         {
             BackendType type;
             void[] value;
+        }
+        static struct BinOp
+        {
+            /// ops: + - * / % & | ^ < > <= >= ==
+            string op;
+            Reg left;
+            Reg right;
         }
         static struct Branch
         {
@@ -160,6 +168,7 @@ struct Instr
         Call call;
         Return return_;
         Arg arg;
+        BinOp binop;
         Literal literal;
         Branch branch;
         TestBranch testBranch;
@@ -179,6 +188,7 @@ struct Instr
             case Call: return format!"%s %s(%(%%%s, %))"(call.type, call.name, call.args);
             case Arg: return format!"_%s"(arg.index);
             case Literal: return formatLiteral(literal.type, literal.value);
+            case BinOp: return format!"%%%s %s %%%s"(binop.left, binop.op, binop.right);
             case Alloca: return format!"alloca %s"(alloca.type);
             case GetField: return format!"%%%s.%s (%s)"(
                 getField.base, getField.member, getField.structType);
@@ -201,11 +211,14 @@ struct Instr
 
     int regSize(IpBackendFunction fun, Platform platform) const
     {
+        static BackendType intType;
+        if (!intType) intType = new BackendIntType;
         with (Kind) final switch (this.kind)
         {
             case CallFuncPtr: return platform.size(callFuncPtr.type);
             case Call: return platform.size(call.type);
             case Arg: return platform.size(fun.argTypes[arg.index]);
+            case BinOp: return platform.size(intType);
             case Literal: return platform.size(literal.type);
             case Load: return platform.size(load.targetType);
             case GetField:
@@ -235,6 +248,7 @@ private bool isBlockFinisher(Instr.Kind kind)
             return true;
         case Call:
         case Arg:
+        case BinOp:
         case Literal:
         case Alloca:
         case GetField:
@@ -355,6 +369,16 @@ class IpBackendFunction : BackendFunction
 
         instr.return_.reg = reg;
         block.append(instr);
+    }
+
+    override Reg binop(string op, Reg left, Reg right)
+    {
+        auto instr = Instr(Instr.Kind.BinOp);
+
+        instr.binop.op = op;
+        instr.binop.left = left;
+        instr.binop.right = right;
+        return block.append(instr);
     }
 
     override int alloca(BackendType type)
@@ -566,12 +590,6 @@ private void defineIntrinsics(IpBackendModule mod)
             *cast(R*) ret.ptr = dg(typedArgs);
         });
     }
-    static foreach (key, op; [
-        "add": "+", "sub": "-", "mul": "*", "div": "/",
-        "eq": "==", "lt": "<", "gt": ">", "le": "<=", "ge": ">="
-    ]) {
-        defineCallback("cxruntime_int_" ~ key, delegate int(int a, int b) => mixin("a " ~ op ~ " b"));
-    }
     defineCallback("cxruntime_int_negate", delegate int(int a) => !a);
     defineCallback("cxruntime_ptr_test", delegate int(void* p) => !!p);
 }
@@ -656,7 +674,7 @@ class IpBackendModule : BackendModule
 
                 with (Instr.Kind)
                 {
-                    final switch (instr.kind)
+                    outer: final switch (instr.kind)
                     {
                         case Call:
                             assert(!lastInstr);
@@ -694,6 +712,20 @@ class IpBackendModule : BackendModule
                                     instr.arg.index, regArrays[reg].length, args[instr.arg.index].length));
                             regArrays[reg][] = args[instr.arg.index];
                             break;
+                        case BinOp:
+                            int left = (cast(int[]) regArrays[instr.binop.left])[0];
+                            int right = (cast(int[]) regArrays[instr.binop.right])[0];
+                            final switch (instr.binop.op)
+                            {
+                                static foreach (op;
+                                    ["+", "-", "*", "/", "%", "&", "|", "^", "<", ">", "<=", ">=", "=="])
+                                {
+                                    case op:
+                                        (cast(int[]) regArrays[reg])[0] = mixin("left " ~ op ~ " right");
+                                        break outer;
+                                }
+                            }
+                            assert(false);
                         case Literal:
                             assert(!lastInstr);
                             regArrays[reg][] = instr.literal.value;
@@ -780,7 +812,7 @@ unittest
     auto square = mod.define("square", new BackendIntType, [new BackendIntType]);
     with (square) {
         auto arg0 = arg(0);
-        auto reg = call(new BackendIntType, "cxruntime_int_mul", [arg0, arg0]);
+        auto reg = binop("*", arg0, arg0);
 
         ret(reg);
     }
@@ -811,35 +843,35 @@ unittest
         auto zero = intLiteral(0);
         auto one = intLiteral(1);
 
-        auto if1_test_reg = call(new BackendIntType, "cxruntime_int_eq", [m, zero]);
+        auto if1_test_reg = binop("==", m, zero);
         auto if1_test_jumprecord = testBranch(if1_test_reg);
 
         if1_test_jumprecord.resolveThen(blockIndex);
-        auto add = call(new BackendIntType, "cxruntime_int_add", [n, one]);
+        auto add = binop("+", n, one);
         ret(add);
 
         if1_test_jumprecord.resolveElse(blockIndex);
-        auto if2_test_reg = call(new BackendIntType, "cxruntime_int_eq", [n, zero]);
+        auto if2_test_reg = binop("==", n, zero);
         auto if2_test_jumprecord = testBranch(if2_test_reg);
 
         if2_test_jumprecord.resolveThen(blockIndex);
-        auto sub = call(new BackendIntType, "cxruntime_int_sub", [m, one]);
+        auto sub = binop("-", m, one);
         auto ackrec = call(new BackendIntType, "ack", [sub, one]);
 
         ret(ackrec);
 
         if2_test_jumprecord.resolveElse(blockIndex);
-        auto n1 = call(new BackendIntType, "cxruntime_int_sub", [n, one]);
+        auto n1 = binop("-", n, one);
         auto ackrec1 = call(new BackendIntType, "ack", [m, n1]);
-        auto m1 = call(new BackendIntType, "cxruntime_int_sub", [m, one]);
+        auto m1 = binop("-", m, one);
         auto ackrec2 = call(new BackendIntType, "ack", [m1, ackrec1]);
         ret(ackrec2);
     }
 
-    int arg_m = 3, arg_n = 8;
+    int arg_m = 3, arg_n = 6;
     int ret;
     mod.call("ack", cast(void[]) (&ret)[0 .. 1], [cast(void[]) (&arg_m)[0 .. 1], cast(void[]) (&arg_n)[0 .. 1]]);
-    ret.should.be(2045);
+    ret.should.be(509);
 }
 
 unittest
@@ -856,7 +888,7 @@ unittest
         auto var = fieldOffset(stackframeType, stackframe, 0);
         store(new BackendIntType, var, arg0);
         auto varload = load(new BackendIntType, var);
-        auto reg = call(new BackendIntType, "cxruntime_int_mul", [varload, varload]);
+        auto reg = binop("*", varload, varload);
         auto retvar = fieldOffset(stackframeType, stackframe, 0);
         store(new BackendIntType, retvar, reg);
 

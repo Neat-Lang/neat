@@ -180,15 +180,12 @@ class ArrayLiteral : Expression
                 Reg len = output.fun.load(intType, lenPtr);
                 // TODO prevent double emit when we can have non-ref struct base
                 Reg addLen = (new ArrayLength(element.expression)).emit(output);
-                Reg sumLen = output.fun.call(intType, "cxruntime_int_add", [len, addLen]);
+                Reg sumLen = output.fun.binop("+", len, addLen);
                 output.fun.store(intType, lenPtr, sumLen);
             }
         }
         const int arrayElementSize = output.platform.size(this.elementType.emit(output.platform));
-        Reg memSize = output.fun.call(
-            intType, "cxruntime_int_mul", [
-                output.fun.load(intType, lenPtr),
-                output.fun.intLiteral(arrayElementSize)]);
+        Reg memSize = output.fun.binop("*", output.fun.load(intType, lenPtr), output.fun.intLiteral(arrayElementSize));
 
         Reg ptr = output.fun.call(voidp, "malloc", [memSize]);
         Reg currentOffsetPtr = output.fun.alloca(intType);
@@ -204,20 +201,17 @@ class ArrayLiteral : Expression
                 // TODO prevent double emit when we can have non-ref struct base
                 Reg elementLen = (new ArrayLength(element.expression)).emit(output);
                 Reg elementPtr = (new ArrayPointer(this.elementType, element.expression)).emit(output);
-                Reg elementSize = output.fun.call(
-                    intType, "cxruntime_int_mul", [elementLen, output.fun.intLiteral(arrayElementSize)]);
+                Reg elementSize = output.fun.binop("*", elementLen, output.fun.intLiteral(arrayElementSize));
 
                 output.fun.call(voidp, "memcpy", [ptrOffsetReg, elementPtr, elementSize]);
-                output.fun.store(intType, currentOffsetPtr, output.fun.call(
-                    intType, "cxruntime_int_add", [currentOffset, elementSize]));
+                output.fun.store(intType, currentOffsetPtr,
+                    output.fun.binop("+", currentOffset, elementSize));
             }
             else
             {
                 output.fun.store(elementType.emit(output.platform), ptrOffsetReg, element.expression.emit(output));
-                output.fun.store(intType, currentOffsetPtr, output.fun.call(
-                    intType, "cxruntime_int_add", [
-                        currentOffset,
-                        output.fun.intLiteral(arrayElementSize)]));
+                output.fun.store(intType, currentOffsetPtr,
+                    output.fun.binop("+", currentOffset, output.fun.intLiteral(arrayElementSize)));
             }
         }
         auto structType = type.emit(output.platform);
@@ -282,13 +276,10 @@ class ArraySlice : Expression
         auto upperReg = this.upper.emit(output);
         auto ptr = getArrayPointer(output, arrayType, arrayReg);
         // ptr = ptr + lower
-        Reg lowerOffset = output.fun.call(
-            intType, "cxruntime_int_mul", [
-                lowerReg,
-                output.fun.intLiteral(elementSize)]);
+        Reg lowerOffset = output.fun.binop("*", lowerReg, output.fun.intLiteral(elementSize));
         Reg newPtr = output.fun.call(voidp, "ptr_offset", [ptr, lowerOffset]);
         // len = upper - lower
-        Reg newLen = output.fun.call(intType, "cxruntime_int_sub", [upperReg, lowerReg]);
+        Reg newLen = output.fun.binop("-", upperReg, lowerReg);
 
         // TODO allocaless
         auto structType = arrayType.emit(output.platform);

@@ -716,31 +716,31 @@ class BinaryOp : Expression
         assert(this.right.type == new Integer, format!"expected integer, not %s"(this.right.type));
         Reg leftreg = this.left.emit(output);
         Reg rightreg = this.right.emit(output);
-        string name = {
+        string op = {
             with (BinaryOpType) final switch (this.op)
             {
                 case add:
-                    return "cxruntime_int_add";
+                    return "+";
                 case sub:
-                    return "cxruntime_int_sub";
+                    return "-";
                 case mul:
-                    return "cxruntime_int_mul";
+                    return "*";
                 case eq:
-                    return "cxruntime_int_eq";
+                    return "==";
                 case gt:
-                    return "cxruntime_int_gt";
+                    return ">";
                 case lt:
-                    return "cxruntime_int_lt";
+                    return "<";
                 case ge:
-                    return "cxruntime_int_ge";
+                    return ">=";
                 case le:
-                    return "cxruntime_int_le";
+                    return "<=";
                 case boolAnd:
                 case boolOr:
                     assert(false, "should be handled separately");
             }
         }();
-        return output.fun.call(new BackendIntType, name, [leftreg, rightreg]);
+        return output.fun.binop(op, leftreg, rightreg);
     }
 
     mixin(GenerateThis);
@@ -1449,16 +1449,12 @@ class ASTIndexAccess : ASTSymbol
         assert(cast(Pointer) base.type, "expected pointer for index base");
         assert(cast(Integer) index.type, "expected int for index value");
 
-        auto int_mul = new Function("cxruntime_int_mul",
-            new Integer,
-            [Argument("", new Integer), Argument("", new Integer)],
-            true, null);
         auto ptr_offset = new Function("ptr_offset",
             new Pointer(new Void),
             [Argument("", new Pointer(new Void)), Argument("", new Integer)],
             true, null);
         int size = context.platform.size((cast(Pointer) base.type).target.emit(context.platform));
-        auto offset = new Call(int_mul, [index, new Literal(size)]);
+        auto offset = new BinaryOp(BinaryOpType.mul, index, new Literal(size));
 
         return new Dereference(new PointerCast(base.type, new Call(ptr_offset, [base, offset])));
     }
@@ -2626,6 +2622,10 @@ void defineRuntime(Backend backendObj, Platform platform, BackendModule backModu
         "_backendFunction_call",
         delegate int(BackendFunction fun, BackendType ret, char[] name, int* args_ptr, int args_len)
             => fun.call(ret, name.dup, args_ptr[0 .. args_len]));
+    definePublicCallback(
+        "_backendFunction_binop",
+        delegate int(BackendFunction fun, char[] op, int left, int right)
+            => fun.binop(op.idup, left, right));
     definePublicCallback(
         "_backendFunction_alloca",
         delegate int(BackendFunction fun, BackendType type)

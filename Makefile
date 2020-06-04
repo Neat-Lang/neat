@@ -17,7 +17,8 @@ build/stage1: ${STAGE1_SRC} build/libstage1.a
 build/stage1_test: ${STAGE1_SRC} build/libstage1.a
 	ldc2 ${STAGE1_SRC} -of$@ ${DFLAGS} -L-lstage1 -main -unittest
 
-test: build/stage1
+test: build/stage1 build/stage1_test
+	build/stage1_test
 	build/stage1 -Isrc/stage2 hello.cx
 	build/stage1 -Isrc/stage2 parser.cx
 	build/stage1 -Isrc/stage2 ack.cx

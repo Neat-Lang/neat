@@ -2570,7 +2570,7 @@ else
         import core.memory : GC;
 
         // turn on if you get random crashes
-        // GC.disable;
+        GC.disable;
 
         string[] includes;
         foreach (arg; args)

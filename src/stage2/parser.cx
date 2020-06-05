@@ -225,7 +225,10 @@ string parseIdentifier(Parser parser)
 bool acceptIdentifier(Parser parser, string identifier)
 {
     parser.begin();
-    if (parseIdentifier(parser) != identifier)
+
+    string nextIdent = parseIdentifier(parser);
+
+    if (nextIdent != identifier)
     {
         parser.revert();
         return false;
@@ -286,6 +289,16 @@ class Integer : Type
     }
 
     bool same(Type other) { return !!other.instanceOf(Integer); }
+}
+
+class Void : Type
+{
+    void* emit(Platform platform)
+    {
+        return platform.voidType();
+    }
+
+    bool same(Type other) { return !!other.instanceOf(Void); }
 }
 
 class ASTInteger : ASTType
@@ -928,6 +941,40 @@ ASTSymbol parseAddSub(Parser parser, ASTSymbol left, int myLevel)
     }
 }
 
+class ASTNegation : ASTSymbol
+{
+    ASTSymbol next;
+
+    this(ASTSymbol next) { this.next = next; }
+
+    Expression compile(Context context)
+    {
+        return new Negation(
+            implicitConvertTo(
+                beExpression(this.next.compile(context)),
+                new Integer));
+    }
+}
+
+class Negation : Expression
+{
+    Expression next;
+
+    this(Expression next) { this.next = next; }
+
+    Type type()
+    {
+        return new Integer;
+    }
+
+    int emit(Generator output)
+    {
+        int next = this.next.emit(output);
+
+        return output.fun.call(output.platform.intType(), "cxruntime_int_negate", [next]);
+    }
+}
+
 ASTSymbol parseComparison(Parser parser, ASTSymbol left, int myLevel)
 {
     if (parser.accept("=="))
@@ -936,13 +983,14 @@ ASTSymbol parseComparison(Parser parser, ASTSymbol left, int myLevel)
 
         return new ASTBinaryOp("eq", left, right);
     }
-    return left;
-    /*
     if (parser.accept("!=")) // same as !(a == b)
     {
-        auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTNegation(new ASTBinaryOp(BinaryOpType.eq, left, right));
+        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+        return new ASTNegation(new ASTBinaryOp("eq", left, right));
     }
+    return left;
+    /*
     if (parser.accept(">="))
     {
         auto right = parser.parseArithmetic(myLevel + 1);
@@ -1560,6 +1608,108 @@ ASTVarDeclStatement parseVarDecl(Parser parser)
     return new ASTVarDeclStatement(name, type, initial);
 }
 
+class ASTWhile : ASTStatement
+{
+    ASTSymbol cond;
+
+    ASTStatement body_;
+
+    this(ASTSymbol cond, ASTStatement body_) { this.cond = cond; this.body_ = body_; }
+
+    Statement compile(Context context)
+    {
+        VarDeclScope subscope = new VarDeclScope(context.namespace, false);
+        Expression condExpr = beExpression(this.cond.compile(context.withNamespace(subscope)));
+        Statement bodyStmt = this.body_.compile(context.withNamespace(subscope));
+
+        return new WhileLoop(condExpr, bodyStmt);
+    }
+}
+
+class WhileLoop : Statement
+{
+    Expression cond;
+
+    Statement body_;
+
+    this(Expression cond, Statement body_) { this.cond = cond; this.body_ = body_; }
+
+    void emit(Generator output)
+    {
+        /**
+         * start:
+         * if (cond) goto body; else goto end;
+         * body:
+         * goto start
+         * end:
+         */
+        BranchRecord start = output.fun.branch(); // start:
+        int startIndex = output.fun.blockIndex();
+
+        start.resolve(startIndex);
+
+        int condReg = this.cond.emit(output);
+        TestBranchRecord condBranch = output.fun.testBranch(condReg); // if (cond)
+
+        condBranch.resolveThen(output.fun.blockIndex()); // goto body
+        this.body_.emit(output);
+        output.fun.branch().resolve(startIndex); // goto start
+        condBranch.resolveElse(output.fun.blockIndex()); // else goto end
+    }
+}
+
+ASTWhile parseWhile(Parser parser)
+{
+    if (!acceptIdentifier(parser, "while"))
+    {
+        return null;
+    }
+    parser.expect("(");
+    ASTSymbol cond = parseExpression(parser);
+    parser.expect(")");
+    ASTStatement body_ = parseStatement(parser);
+
+    return new ASTWhile(cond, body_);
+}
+
+class ASTExprStatement : ASTStatement
+{
+    ASTSymbol value;
+
+    this(ASTSymbol value) { this.value = value; }
+
+    Statement compile(Context context)
+    {
+        return new ExprStatement(beExpression(this.value.compile(context)));
+    }
+}
+
+class ExprStatement : Statement
+{
+    Expression value;
+
+    this(Expression value) { this.value = value; }
+
+    void emit(Generator output)
+    {
+        this.value.emit(output); // discard reg
+    }
+}
+
+ASTExprStatement parseExprStatement(Parser parser)
+{
+    parser.begin();
+    ASTSymbol value = parseExpression(parser);
+    if (!value)
+    {
+        parser.revert();
+        return null;
+    }
+    parser.expect(";");
+    parser.commit();
+    return new ASTExprStatement(value);
+}
+
 ASTStatement parseStatement(Parser parser)
 {
     {
@@ -1570,7 +1720,10 @@ ASTStatement parseStatement(Parser parser)
         ASTStatement stmt = parseIf(parser);
         if (stmt) return stmt;
     }
-    // if (auto stmt = parser.parseWhile) return stmt;
+    {
+        ASTStatement stmt = parseWhile(parser);
+        if (stmt) return stmt;
+    }
     // if (auto stmt = parser.parseFor) return stmt;
     {
         ASTStatement stmt = parseScope(parser);
@@ -1584,7 +1737,10 @@ ASTStatement parseStatement(Parser parser)
         ASTStatement stmt = parseAssignStatement(parser);
         if (stmt) return stmt;
     }
-    // if (auto stmt = parser.parseExprStatement) return stmt;
+    {
+        ASTStatement stmt = parseExprStatement(parser);
+        if (stmt) return stmt;
+    }
     parser.fail("statement expected");
     assert(false);
 }
@@ -1707,6 +1863,7 @@ void main() {
     Generator generator = new Generator(new Platform(), backendModule_);
     Function fun = astFun.compile(generator);
     module_.add(fun.name, fun);
+    module_.add("assert", new Function("assert", new Void, [new Argument("", new Integer)], true, null));
     Context context = new Context(generator.platform, module_);
     assert(fun);
     fun.emit(generator, context);

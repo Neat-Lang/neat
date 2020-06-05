@@ -402,6 +402,7 @@ class AssignStatement : Statement
 
 ASTAssignStatement parseAssignment(ref Parser parser)
 {
+    mixin(ParserGuard!());
     with (parser)
     {
         begin;
@@ -568,6 +569,7 @@ ASTStatement parseStatement(ref Parser parser)
 
 ASTSymbol parseExpression(ref Parser parser)
 {
+    mixin(ParserGuard!());
     return parser.parseArithmetic;
 }
 
@@ -1302,6 +1304,7 @@ class ReferenceExpression : Expression
 
 ASTSymbol[] parseSymbolList(ref Parser parser)
 {
+    mixin(ParserGuard!());
     with (parser)
     {
         ASTSymbol[] args;
@@ -1317,6 +1320,7 @@ ASTSymbol[] parseSymbolList(ref Parser parser)
 
 ASTCall parseCall(ref Parser parser, ASTSymbol base)
 {
+    mixin(ParserGuard!());
     with (parser)
     {
         begin;
@@ -1414,6 +1418,7 @@ class ASTMember : ASTSymbol
 
 ASTSymbol parseMember(ref Parser parser, ASTSymbol base)
 {
+    mixin(ParserGuard!());
     with (parser)
     {
         begin;
@@ -1464,6 +1469,7 @@ class ASTIndexAccess : ASTSymbol
 
 ASTSymbol parseIndex(ref Parser parser, ASTSymbol base)
 {
+    mixin(ParserGuard!());
     with (parser)
     {
         begin;
@@ -1479,6 +1485,7 @@ ASTSymbol parseIndex(ref Parser parser, ASTSymbol base)
             auto lower = index, upper = parser.parseExpression;
             assert(upper, "slice upper bound expected");
             expect("]");
+            commit;
             return new ASTArraySlice(base, lower, upper);
         }
         expect("]");
@@ -1610,6 +1617,7 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
     {
         if (accept("*"))
         {
+            mixin(ParserGuard!());
             auto next = parser.parseExpressionLeaf;
 
             assert(next !is null);
@@ -1617,6 +1625,7 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
         }
         if (accept("&"))
         {
+            mixin(ParserGuard!());
             auto next = parser.parseExpressionLeaf;
 
             assert(next !is null);
@@ -1624,6 +1633,7 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
         }
         if (parser.acceptIdentifier("new"))
         {
+            mixin(ParserGuard!());
             auto type = parser.parseType;
             Nullable!(ASTSymbol[]) args;
             if (accept("("))
@@ -1635,11 +1645,13 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
         }
         if (accept("!"))
         {
+            mixin(ParserGuard!());
             auto next = parser.parseExpressionLeaf;
 
             assert(next !is null);
             return new ASTNegation(next);
         }
+        mixin(ParserGuard!());
         auto currentExpr = parser.parseExpressionBase;
         assert(currentExpr);
         return parser.parseProperties(currentExpr);
@@ -1650,6 +1662,7 @@ ASTSymbol parseProperties(ref Parser parser, ASTSymbol current)
 {
     while (true)
     {
+        mixin(ParserGuard!());
         if (auto expr = parser.parseInstanceOf(current))
         {
             current = expr;
@@ -1695,6 +1708,7 @@ class ASTInstanceOf : ASTSymbol
 
 ASTSymbol parseInstanceOf(ref Parser parser, ASTSymbol left)
 {
+    mixin(ParserGuard!());
     parser.begin;
     if (!(parser.accept(".") && parser.accept("instanceOf")))
     {
@@ -1804,6 +1818,7 @@ class StringLiteral : Expression
 
 ASTSymbol parseExpressionBase(ref Parser parser)
 {
+    mixin(ParserGuard!());
     if (auto name = parser.parseIdentifier)
     {
         return new Variable(name);

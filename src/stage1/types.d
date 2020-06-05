@@ -195,6 +195,7 @@ class NamedType : ASTType
 
 ASTType parseType(ref Parser parser)
 {
+    mixin(ParserGuard!());
     auto current = parseLeafType(parser);
 
     if (!current) return null;
@@ -248,6 +249,7 @@ ASTType parseType(ref Parser parser)
 
 ASTType parseLeafType(ref Parser parser)
 {
+    mixin(ParserGuard!());
     with (parser)
     {
         begin;
@@ -277,6 +279,7 @@ ASTType parseLeafType(ref Parser parser)
             return new ASTCharType;
         }
 
+        commit;
         return new NamedType(identifier);
     }
 }

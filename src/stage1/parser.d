@@ -134,6 +134,19 @@ class Parser
     }
 }
 
+enum ParserGuard(string file = __FILE__, size_t line = __LINE__) = format!q{
+    const _guard = parser.level;
+    scope(success) {
+        import core.exception : AssertError;
+        import std.format : format;
+
+        if (parser.level != _guard) {
+            const msg = format!"parser level expected %%s, but got %%s"(_guard, parser.level);
+            throw new AssertError(msg, "%s", %s);
+        }
+    }
+}(file, line);
+
 bool parseNumber(ref Parser parser, out int i)
 {
     with (parser)

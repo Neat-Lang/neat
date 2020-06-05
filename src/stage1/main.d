@@ -2439,6 +2439,42 @@ class Module : Namespace
     mixin(GenerateThis);
 }
 
+class ASTExtern
+{
+    string name;
+
+    ASTType ret;
+
+    ASTArgument[] args;
+
+    Function compile(Context context)
+    {
+        auto args = this.args.map!(a => Argument(a.name, a.type.compile(context))).array;
+
+        return new Function(name, this.ret.compile(context), args, true, null);
+    }
+
+    mixin(GenerateThis);
+}
+
+ASTExtern parseExtern(ref Parser parser)
+{
+    if (parser.accept("extern"))
+    {
+        parser.expect("(");
+        parser.expect("C");
+        parser.expect(")");
+        ASTType ret = parser.parseType;
+        string name = parser.parseIdentifier;
+        if (!name) parser.fail("identifier expected");
+        parser.expect("(");
+        ASTArgument[] args = parser.parseIdentifierList;
+        parser.expect(";");
+        return new ASTExtern(name, ret, args);
+    }
+    return null;
+}
+
 string moduleToFile(string module_)
 {
     return module_.replace(".", "/") ~ ".cx";
@@ -2489,6 +2525,11 @@ Module parseModule(string filename, string[] includes, Platform platform, Module
             module_.add(classDecl.name, classDecl.compile(context));
             continue;
         }
+        if (auto extern_ = parser.parseExtern)
+        {
+            module_.add(extern_.name, extern_.compile(context));
+            continue;
+        }
         if (auto strct = parser.parseStructDecl)
         {
             module_.add(strct.name, strct.compile(context));
@@ -2503,189 +2544,6 @@ Module parseModule(string filename, string[] includes, Platform platform, Module
         parser.fail("couldn't parse function or struct");
     }
     return module_;
-}
-
-void defineRuntime(Backend backendObj, Platform platform, BackendModule backModule, Module frontModule)
-{
-    import backend.interpreter : IpBackendModule;
-
-    auto ipModule = cast(IpBackendModule) backModule;
-
-    void defineCallback(R, T...)(string name, R delegate(T) dg)
-    {
-        ipModule.defineCallback(name, delegate void(void[] ret, void[][] args)
-        in (args.length == T.length, format!"%s expected %s parameters but got %s"(name, T.length, args.length))
-        {
-            T typedArgs;
-            static foreach (i, U; T)
-            {
-                typedArgs[i] = args[i].as!U;
-            }
-            static if (is(R == void)) dg(typedArgs);
-            else ret.as!R = dg(typedArgs);
-        });
-    }
-
-    auto languageType(T)()
-    {
-        static if (is(T == int)) return new Integer;
-        else static if (is(typeof(cast() T.init) == char)) return new Character;
-        else static if (is(T == void)) return new Void;
-        else static if (is(T == U*, U)) return new Pointer(languageType!U);
-        else static if (is(T == U[], U)) return new Array(languageType!U);
-        // take care to match up types!
-        else static if (is(T == class) || is(T == interface)) return new Pointer(new Void);
-        else static assert(false, T.stringof);
-    }
-
-    void definePublicCallback(R, T...)(string name, R delegate(T) dg)
-    {
-        defineCallback(name, dg);
-        Argument[] arguments;
-        static foreach (i, U; T)
-        {
-            arguments ~= Argument("", languageType!U);
-        }
-        frontModule.addFunction(new Function(name, languageType!R, arguments, true, null));
-    }
-
-    definePublicCallback("assert", (int test) { assert(test, "Assertion failed!"); });
-    defineCallback("ptr_offset", delegate void*(void* ptr, int offset) { assert(offset >= 0); return ptr + offset; });
-    definePublicCallback("malloc", (int size) {
-        assert(size >= 0 && size < 1048576);
-        return (new void[size]).ptr;
-    });
-    defineCallback("memcpy", (void* target, void* source, int size) {
-        import core.stdc.string : memcpy;
-
-        return memcpy(target, source, size);
-    });
-    definePublicCallback("print", (string text) {
-        writefln!"%s"(text.ptr[0 .. text.length]);
-    });
-    definePublicCallback("strlen", (char* text) { return cast(int) text.to!string.length; });
-    definePublicCallback("strncmp", (char* text, char* cmp, int limit) { return int(text[0 .. limit] == cmp[0 .. limit]); });
-    definePublicCallback("atoi", (char[] text) {
-        import std.conv : parse;
-
-        return parse!int(text);
-    });
-
-    definePublicCallback("_backend", delegate Backend() => backendObj);
-    definePublicCallback("_platform", delegate Platform() => platform);
-    definePublicCallback("_backend_createModule", delegate BackendModule(Backend backend) => backend.createModule());
-    definePublicCallback("_backend_intType", delegate BackendType() => new BackendIntType);
-    definePublicCallback("_backend_structType", delegate BackendType(BackendType[] members)
-        => new BackendStructType(members.dup));
-    definePublicCallback(
-        "_backendModule_define",
-        delegate BackendFunction(
-            BackendModule mod, char[] name, BackendType ret, BackendType* args_ptr, int args_len)
-        {
-            return mod.define(name.dup, ret, args_ptr[0 .. args_len]);
-        }
-    );
-    defineCallback("_arraycmp", (void* left, void* right, int leftlen, int rightlen, int elemsize)
-    {
-        if (leftlen != rightlen) return 0;
-        auto leftArray = (cast(ubyte*) left)[0 .. leftlen * elemsize];
-        auto rightArray = (cast(ubyte*) right)[0 .. rightlen * elemsize];
-        return leftArray == rightArray ? 1 : 0;
-    });
-    definePublicCallback(
-        "_backendModule_dump",
-        delegate void(BackendModule mod) { writefln!"(nested) module:\n%s"(mod); },
-    );
-    definePublicCallback(
-        "_backendModule_call",
-        delegate void(BackendModule mod, void* ret, char[] name, void** args_ptr, int args_len)
-        {
-            // TODO non-int args
-            // TODO stop hardcoding interpreter backend
-            (cast(IpBackendModule) mod).call(
-                name.dup,
-                ret[0 .. 4],
-                args_ptr[0 .. args_len].map!(a => a[0 .. 4]).array,
-            );
-        }
-    );
-    definePublicCallback(
-        "_backendFunction_arg",
-        delegate int(BackendFunction fun, int index) => fun.arg(index));
-    definePublicCallback(
-        "_backendFunction_intLiteral",
-        delegate int(BackendFunction fun, int index) => fun.intLiteral(index));
-    definePublicCallback(
-        "_backendFunction_voidLiteral",
-        delegate int(BackendFunction fun) => fun.voidLiteral);
-    definePublicCallback(
-        "_backendFunction_call",
-        delegate int(BackendFunction fun, BackendType ret, char[] name, int* args_ptr, int args_len)
-            => fun.call(ret, name.dup, args_ptr[0 .. args_len]));
-    definePublicCallback(
-        "_backendFunction_binop",
-        delegate int(BackendFunction fun, char[] op, int left, int right)
-            => fun.binop(op.idup, left, right));
-    definePublicCallback(
-        "_backendFunction_alloca",
-        delegate int(BackendFunction fun, BackendType type)
-            => fun.alloca(type));
-    definePublicCallback(
-        "_backendFunction_load",
-        delegate int(BackendFunction fun, BackendType dataType, int target) => fun.load(dataType, target));
-    definePublicCallback(
-        "_backendFunction_fieldOffset",
-        delegate int(BackendFunction fun, BackendType structType, int structBase, int member)
-            => fun.fieldOffset(structType, structBase, member));
-    definePublicCallback(
-        "_backendFunction_store",
-        delegate void(BackendFunction fun, BackendType dataType, int target, int value) => fun.store(dataType, target, value));
-    definePublicCallback(
-        "_backendFunction_ret",
-        delegate void(BackendFunction fun, int value) => fun.ret(value));
-    definePublicCallback(
-        "_backendFunction_branch",
-        delegate BranchRecord(BackendFunction fun) => fun.branch);
-    definePublicCallback(
-        "_backendFunction_testBranch",
-        delegate TestBranchRecord(BackendFunction fun, int reg) => fun.testBranch(reg));
-    definePublicCallback(
-        "_backendFunction_blockIndex",
-        delegate int(BackendFunction fun) => fun.blockIndex);
-
-    definePublicCallback(
-        "_branchRecord_resolve",
-        delegate void(BranchRecord record, int block) => record.resolve(block));
-
-    definePublicCallback(
-        "_testBranchRecord_resolveThen",
-        delegate void(TestBranchRecord record, int block) => record.resolveThen(block));
-    definePublicCallback(
-        "_testBranchRecord_resolveElse",
-        delegate void(TestBranchRecord record, int block) => record.resolveElse(block));
-}
-
-private template as(T) {
-    static if (is(T == U[], U))
-    {
-        T as(void[] arg) {
-            struct ArrayHack { align(4) U* ptr; int length; }
-            auto arrayVal = arg.as!ArrayHack;
-            return arrayVal.ptr[0 .. arrayVal.length];
-        }
-    }
-    else
-    {
-        ref T as(void[] arg) {
-            assert(arg.length == T.sizeof, format!"arg has invalid size %s for %s"(arg.length, T.sizeof));
-            return (cast(T[]) arg)[0];
-        }
-    }
-}
-
-void addFunction(Module module_, Function function_)
-{
-    module_.add(function_.name, function_);
 }
 
 version (unittest) { }
@@ -2718,10 +2576,9 @@ else
         }
         auto defaultPlatform = new DefaultPlatform;
         auto builtins = new Module(null, null);
-        auto backend = new IpBackend(defaultPlatform);
-        auto module_ = backend.createModule;
+        auto backend = new IpBackend;
+        auto module_ = backend.createModule(defaultPlatform);
 
-        defineRuntime(backend, defaultPlatform, module_, builtins);
         builtins.add("string", new Array(new Character));
         builtins.add("bool", new Integer);
         builtins.add("true", new Literal(1));

@@ -12,9 +12,7 @@ import std.range;
 
 class IpBackend : Backend
 {
-    Platform platform;
-
-    override IpBackendModule createModule() { return new IpBackendModule(this.platform); }
+    override IpBackendModule createModule(Platform platform) { return new IpBackendModule(this, platform); }
 
     mixin(GenerateThis);
 }
@@ -582,21 +580,175 @@ private void defineIntrinsics(IpBackendModule mod)
     void defineCallback(R, T...)(string name, R delegate(T) dg)
     {
         mod.defineCallback(name, delegate void(void[] ret, void[][] args)
-        in (args.length == T.length)
+        in (args.length == T.length, "error calling " ~ name)
         {
             T typedArgs;
             static foreach (i, U; T)
-                typedArgs[i] = *cast(U*) args[i].ptr;
-            *cast(R*) ret.ptr = dg(typedArgs);
+                typedArgs[i] = args[i].as!U;
+            static if (is(typeof(dg(typedArgs)) == void))
+            {
+                dg(typedArgs);
+            }
+            else
+            {
+                *cast(R*) ret.ptr = dg(typedArgs);
+            }
         });
     }
+    defineCallback("_backendModule", delegate BackendModule() => mod);
     defineCallback("cxruntime_int_negate", delegate int(int a) => !a);
     defineCallback("cxruntime_ptr_test", delegate int(void* p) => !!p);
+    defineCallback("assert", (int test) { assert(test, "Assertion failed!"); });
+    defineCallback("ptr_offset", delegate void*(void* ptr, int offset) { assert(offset >= 0); return ptr + offset; });
+    defineCallback("malloc", (int size) {
+        assert(size >= 0 && size < 1048576);
+        return (new void[size]).ptr;
+    });
+    defineCallback("memcpy", (void* target, void* source, int size) {
+        import core.stdc.string : memcpy;
+
+        return memcpy(target, source, size);
+    });
+    defineCallback("print", (string text) {
+        import std.stdio : writefln;
+
+        writefln!"%s"(text);
+    });
+    defineCallback("strlen", (char* text) {
+        import std.conv : to;
+
+        return cast(int) text.to!string.length;
+    });
+    defineCallback("strncmp", (char* text, char* cmp, int limit) { return int(text[0 .. limit] == cmp[0 .. limit]); });
+    defineCallback("atoi", (char[] text) {
+        import std.conv : parse;
+
+        return parse!int(text);
+    });
+
+    defineCallback("_backend_createModule", delegate BackendModule(Backend backend, Platform platform)
+        => backend.createModule(platform));
+    defineCallback("_backend_intType", delegate BackendType() => new BackendIntType);
+    defineCallback("_backend_structType", delegate BackendType(BackendType[] members)
+        => new BackendStructType(members.dup));
+    defineCallback(
+        "_backendModule_define",
+        delegate BackendFunction(
+            BackendModule mod, char[] name, BackendType ret, BackendType[] args)
+        {
+            return mod.define(name.dup, ret, args);
+        }
+    );
+    defineCallback("_backendModule_backend",
+        delegate Backend(BackendModule mod) { return mod.backend; });
+    defineCallback("_backendModule_platform",
+        delegate Platform(BackendModule mod) { return mod.platform; });
+    defineCallback("_arraycmp", (void* left, void* right, int leftlen, int rightlen, int elemsize)
+    {
+        if (leftlen != rightlen) return 0;
+        auto leftArray = (cast(ubyte*) left)[0 .. leftlen * elemsize];
+        auto rightArray = (cast(ubyte*) right)[0 .. rightlen * elemsize];
+        return leftArray == rightArray ? 1 : 0;
+    });
+    defineCallback("_backendModule_dump", delegate void(BackendModule mod)
+    {
+        import std.stdio : writefln;
+
+        writefln!"(nested) module:\n%s"(mod);
+    });
+    defineCallback(
+        "_backendModule_call",
+        delegate void(BackendModule mod, void* ret, char[] name, void*[] args)
+        {
+            // TODO non-int args, ret
+            // TODO hardcode interpreter backend in target environment
+            (cast(IpBackendModule) mod).call(
+                name.dup,
+                ret[0 .. 4],
+                args.map!(a => a[0 .. 4]).array,
+            );
+        }
+    );
+    defineCallback(
+        "_backendFunction_arg",
+        delegate int(BackendFunction fun, int index) => fun.arg(index));
+    defineCallback(
+        "_backendFunction_intLiteral",
+        delegate int(BackendFunction fun, int index) => fun.intLiteral(index));
+    defineCallback(
+        "_backendFunction_voidLiteral",
+        delegate int(BackendFunction fun) => fun.voidLiteral);
+    defineCallback(
+        "_backendFunction_call",
+        delegate int(BackendFunction fun, BackendType ret, char[] name, int[] args)
+            => fun.call(ret, name.idup, args));
+    defineCallback(
+        "_backendFunction_binop",
+        delegate int(BackendFunction fun, char[] op, int left, int right)
+            => fun.binop(op.idup, left, right));
+    defineCallback(
+        "_backendFunction_alloca",
+        delegate int(BackendFunction fun, BackendType type)
+            => fun.alloca(type));
+    defineCallback(
+        "_backendFunction_load",
+        delegate int(BackendFunction fun, BackendType dataType, int target) => fun.load(dataType, target));
+    defineCallback(
+        "_backendFunction_fieldOffset",
+        delegate int(BackendFunction fun, BackendType structType, int structBase, int member)
+            => fun.fieldOffset(structType, structBase, member));
+    defineCallback(
+        "_backendFunction_store",
+        delegate void(BackendFunction fun, BackendType dataType, int target, int value) => fun.store(dataType, target, value));
+    defineCallback(
+        "_backendFunction_ret",
+        delegate void(BackendFunction fun, int value) => fun.ret(value));
+    defineCallback(
+        "_backendFunction_branch",
+        delegate BranchRecord(BackendFunction fun) => fun.branch);
+    defineCallback(
+        "_backendFunction_testBranch",
+        delegate TestBranchRecord(BackendFunction fun, int reg) => fun.testBranch(reg));
+    defineCallback(
+        "_backendFunction_blockIndex",
+        delegate int(BackendFunction fun) => fun.blockIndex);
+
+    defineCallback(
+        "_branchRecord_resolve",
+        delegate void(BranchRecord record, int block) => record.resolve(block));
+
+    defineCallback(
+        "_testBranchRecord_resolveThen",
+        delegate void(TestBranchRecord record, int block) => record.resolveThen(block));
+    defineCallback(
+        "_testBranchRecord_resolveElse",
+        delegate void(TestBranchRecord record, int block) => record.resolveElse(block));
+
+}
+
+private template as(T) {
+    static if (is(T == U[], U))
+    {
+        T as(void[] arg) {
+            struct ArrayHack { align(4) U* ptr; int length; }
+            auto arrayVal = arg.as!ArrayHack;
+            return arrayVal.ptr[0 .. arrayVal.length];
+        }
+    }
+    else
+    {
+        ref T as(void[] arg) {
+            assert(arg.length == T.sizeof, format!"arg has invalid size %s for %s"(arg.length, T.sizeof));
+            return (cast(T[]) arg)[0];
+        }
+    }
 }
 
 class IpBackendModule : BackendModule
 {
-    Platform platform;
+    IpBackend backend_;
+
+    Platform platform_;
 
     alias Callable = void delegate(void[] ret, void[][] args);
 
@@ -604,11 +756,16 @@ class IpBackendModule : BackendModule
 
     IpBackendFunction[string] functions;
 
-    this(Platform platform)
+    this(IpBackend backend, Platform platform)
     {
-        this.platform = platform;
+        this.backend_ = backend;
+        this.platform_ = platform;
         defineIntrinsics(this);
     }
+
+    public override Backend backend() { return this.backend_; }
+
+    public override Platform platform() { return this.platform_; }
 
     void defineCallback(string name, Callable call)
     in (name !in callbacks && name !in functions)
@@ -808,7 +965,7 @@ class IpBackendModule : BackendModule
 
 unittest
 {
-    auto mod = new IpBackendModule(new DefaultPlatform);
+    auto mod = new IpBackendModule(new IpBackend, new DefaultPlatform);
     auto square = mod.define("square", new BackendIntType, [new BackendIntType]);
     with (square) {
         auto arg0 = arg(0);
@@ -832,7 +989,7 @@ unittest
 +/
 unittest
 {
-    auto mod = new IpBackendModule(new DefaultPlatform);
+    auto mod = new IpBackendModule(new IpBackend, new DefaultPlatform);
 
     auto ack = mod.define("ack", new BackendIntType, [new BackendIntType, new BackendIntType]);
 
@@ -879,7 +1036,7 @@ unittest
     /*
      * int square(int i) { int k = i; int l = k * k; return l; }
      */
-    auto mod = new IpBackendModule(new DefaultPlatform);
+    auto mod = new IpBackendModule(new IpBackend, new DefaultPlatform);
     auto square = mod.define("square", new BackendIntType, [new BackendIntType]);
     auto stackframeType = new BackendStructType([new BackendIntType, new BackendIntType]);
     with (square) {
@@ -904,7 +1061,7 @@ unittest
 
 unittest
 {
-    auto mod = new IpBackendModule(new DefaultPlatform);
+    auto mod = new IpBackendModule(new IpBackend, new DefaultPlatform);
     auto fpType = new BackendFunctionPointerType(new BackendIntType, []);
     auto callFp = mod.define("callFp", new BackendIntType, [fpType]);
     auto retFive = mod.define("retFive", new BackendIntType, []);

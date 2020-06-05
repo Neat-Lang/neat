@@ -7,12 +7,21 @@ alias Reg = int;
 
 interface Backend
 {
-    BackendModule createModule();
+    BackendModule createModule(Platform platform);
+}
+
+interface Platform
+{
+    int nativeWordSize();
+    int size(const BackendType type);
+    int offsetOf(const BackendStructType type, int member);
 }
 
 interface BackendModule
 {
     BackendFunction define(string name, BackendType ret, BackendType[] args);
+    Backend backend();
+    Platform platform();
 }
 
 interface BackendFunction

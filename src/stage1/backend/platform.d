@@ -1,14 +1,8 @@
 module backend.platform;
 
+import backend.backend;
 import backend.types;
 import std.algorithm;
-
-interface Platform
-{
-    int nativeWordSize();
-    int size(const BackendType type);
-    int offsetOf(const BackendStructType type, int member);
-}
 
 // size_t
 BackendType sizeType(Platform platform)

@@ -578,12 +578,7 @@ class BinaryOp : Expression
         assert(this.right.type().instanceOf(Integer));
         int leftreg = this.left.emit(output);
         int rightreg = this.right.emit(output);
-        string op;
-        if (this.op == "add") op = "+";
-        else if (this.op == "sub") op = "-";
-        else if (this.op == "eq") op = "==";
-        else { print(this.op); assert(false); }
-        return output.fun.binop(op, leftreg, rightreg);
+        return output.fun.binop(this.op, leftreg, rightreg);
     }
 }
 
@@ -930,13 +925,13 @@ ASTSymbol parseAddSub(Parser parser, ASTSymbol left, int myLevel)
         {
             ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-            left = new ASTBinaryOp("add", left, right);
+            left = new ASTBinaryOp("+", left, right);
         }
         else if (parser.accept("-"))
         {
             ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-            left = new ASTBinaryOp("sub", left, right);
+            left = new ASTBinaryOp("-", left, right);
         } else return left;
     }
 }
@@ -981,36 +976,39 @@ ASTSymbol parseComparison(Parser parser, ASTSymbol left, int myLevel)
     {
         ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-        return new ASTBinaryOp("eq", left, right);
+        return new ASTBinaryOp("==", left, right);
     }
     if (parser.accept("!=")) // same as !(a == b)
     {
         ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-        return new ASTNegation(new ASTBinaryOp("eq", left, right));
+        return new ASTNegation(new ASTBinaryOp("==", left, right));
     }
-    return left;
-    /*
     if (parser.accept(">="))
     {
-        auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTBinaryOp(BinaryOpType.ge, left, right);
+        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+        return new ASTBinaryOp(">=", left, right);
     }
-    if (parser.accept(">"))
+    if (parser.accept(">")) // same as !(a == b)
     {
-        auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTBinaryOp(BinaryOpType.gt, left, right);
+        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+        return new ASTBinaryOp(">", left, right);
     }
-    if (parser.accept("<="))
+    if (parser.accept("<=")) // same as !(a == b)
     {
-        auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTBinaryOp(BinaryOpType.le, left, right);
+        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+        return new ASTBinaryOp("<=", left, right);
     }
-    if (parser.accept("<"))
+    if (parser.accept("<")) // same as !(a == b)
     {
-        auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTBinaryOp(BinaryOpType.lt, left, right);
-    }*/
+        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+        return new ASTBinaryOp("<", left, right);
+    }
+    return left;
 }
 
 ASTSymbol parseArithmetic(Parser parser, int level)
@@ -1302,11 +1300,10 @@ class VarDeclScope : Namespace
         StructMember member = findFunctionScope(this).declare(type);
 
         this.declarations = [...this.declarations, new DeclaredVariable(name, member)];
-        // return new AssignStatement(member, implicitConvertTo(value, type));
-        return new AssignStatement(member, value);
+        return new AssignStatement(member, implicitConvertTo(value, type));
     }
 
-    Statement declareType(string name, Type type)
+    Statement declareZeroInit(string name, Type type)
     {
         StructMember member = findFunctionScope(this).declare(type);
 
@@ -1576,7 +1573,7 @@ class ASTVarDeclStatement : ASTStatement
         }
         else
         {
-            return findVarDeclScope(context.namespace).declare(
+            return findVarDeclScope(context.namespace).declareZeroInit(
                 this.name, this.type.compile(context));
         }
     }
@@ -1710,6 +1707,60 @@ ASTExprStatement parseExprStatement(Parser parser)
     return new ASTExprStatement(value);
 }
 
+class ASTForLoop : ASTStatement
+{
+    ASTVarDeclStatement declareLoopVar;
+
+    ASTSymbol condition;
+
+    ASTStatement step;
+
+    ASTStatement body_;
+
+    this(ASTVarDeclStatement declareLoopVar, ASTSymbol condition, ASTStatement step, ASTStatement body_)
+    {
+        this.declareLoopVar = declareLoopVar;
+        this.condition = condition;
+        this.step = step;
+        this.body_ = body_;
+    }
+
+    Statement compile(Context context)
+    {
+        /*
+         * hack until break/continue:
+         * for (decl; test; step) body
+         * decl; while (test) { body; step; }
+         */
+        Context forscope = context.withNamespace(new VarDeclScope(context.namespace, false));
+
+        Statement decl = this.declareLoopVar.compile(forscope);
+        Expression condition = beExpression(this.condition.compile(forscope));
+        Statement body_ = this.body_.compile(forscope);
+        Statement step = this.step.compile(forscope);
+        Statement loop = new WhileLoop(condition, new SequenceStatement([body_, step]));
+
+        return new SequenceStatement([decl, loop]);
+    }
+}
+
+ASTForLoop parseFor(Parser parser)
+{
+    if (!acceptIdentifier(parser, "for"))
+    {
+        return null;
+    }
+    parser.expect("(");
+    ASTVarDeclStatement varDecl = parseVarDecl(parser);
+    ASTSymbol condition = parseExpression(parser);
+    parser.expect(";");
+    ASTStatement step = parseAssignment(parser);
+    parser.expect(")");
+    ASTStatement body_ = parseStatement(parser);
+
+    return new ASTForLoop(varDecl, condition, step, body_);
+}
+
 ASTStatement parseStatement(Parser parser)
 {
     {
@@ -1724,7 +1775,10 @@ ASTStatement parseStatement(Parser parser)
         ASTStatement stmt = parseWhile(parser);
         if (stmt) return stmt;
     }
-    // if (auto stmt = parser.parseFor) return stmt;
+    {
+        ASTStatement stmt = parseFor(parser);
+        if (stmt) return stmt;
+    }
     {
         ASTStatement stmt = parseScope(parser);
         if (stmt) return stmt;
@@ -1742,7 +1796,6 @@ ASTStatement parseStatement(Parser parser)
         if (stmt) return stmt;
     }
     parser.fail("statement expected");
-    assert(false);
 }
 
 ASTFunction parseFunction(Parser parser)

@@ -430,6 +430,25 @@ ASTAssignStatement parseAssignStatement(ref Parser parser)
     }
 }
 
+ASTArrayLiteral parseArrayLiteral(ref Parser parser)
+{
+    with (parser)
+    {
+        if (!accept("["))
+            return null;
+        ASTArrayLiteral.Entry[] fields;
+        while (!accept("]"))
+        {
+            if (fields.length) expect(",");
+            bool spread = accept("...");
+            auto expr = parser.parseExpression;
+            assert(expr, "expression expected.");
+            fields ~= ASTArrayLiteral.Entry(expr, spread);
+        }
+        return new ASTArrayLiteral(fields);
+    }
+}
+
 class ASTVarDeclStatement : ASTStatement
 {
     string name;
@@ -453,25 +472,6 @@ class ASTVarDeclStatement : ASTStatement
     }
 
     mixin(GenerateAll);
-}
-
-ASTArrayLiteral parseArrayLiteral(ref Parser parser)
-{
-    with (parser)
-    {
-        if (!accept("["))
-            return null;
-        ASTArrayLiteral.Entry[] fields;
-        while (!accept("]"))
-        {
-            if (fields.length) expect(",");
-            bool spread = accept("...");
-            auto expr = parser.parseExpression;
-            assert(expr, "expression expected.");
-            fields ~= ASTArrayLiteral.Entry(expr, spread);
-        }
-        return new ASTArrayLiteral(fields);
-    }
 }
 
 ASTVarDeclStatement parseVarDecl(ref Parser parser)

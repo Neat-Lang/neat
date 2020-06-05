@@ -270,6 +270,7 @@ class ASTSymbol
 class Type
 {
     void* emit(void* platform) { assert(false); }
+    bool same(Type type) { return false; }
 }
 
 class ASTType
@@ -283,12 +284,32 @@ class Integer : Type
     {
         return platform.intType();
     }
+
+    bool same(Type other) { return !!other.instanceOf(Integer); }
 }
 
 class ASTInteger : ASTType
 {
     Type compile(Context context) {
         return new Integer;
+    }
+}
+
+class NamedType : ASTType
+{
+    string name;
+
+    this(string name) { assert(name.length > 0); this.name = name; }
+
+    Type compile(Context context)
+    {
+        Symbol target = context.namespace.lookup(this.name);
+
+        if (!target || !target.instanceOf(Type)) {
+            print([...this.name, ..." is not a type"]);
+            assert(false);
+        }
+        return target.instanceOf(Type);
     }
 }
 
@@ -310,7 +331,7 @@ ASTType parseLeafType(Parser parser)
         return new ASTInteger;
     }
 
-    assert(false);
+    return new NamedType(identifier);
 }
 
 class ASTType
@@ -571,6 +592,50 @@ class ArgExpr : Expression
     }
 }
 
+Expression implicitConvertTo(Expression from, Type to)
+{
+    if (from.type().same(to)) return from;
+    // void* casts to any pointer
+    /*if (to.instanceOf(Pointer) && from.type().same(new Pointer(new Void)))
+    {
+        return new PointerCast(to, from);
+    }
+    // any pointer casts to void*
+    if (from.type().instanceOf(Pointer) && to.same(new Pointer(new Void)))
+    {
+        return new PointerCast(to, from);
+    }
+    if (to.instanceOf(Class) && from.type().instanceOf(Class))
+    {
+        Class currentClass = from.type().instanceOf(Class);
+
+        while (currentClass)
+        {
+            if (currentClass.same(to))
+            {
+                return new PointerCast(to, from);
+            }
+            currentClass = currentClass.superClass;
+        }
+    }
+    if (cast(Class) to && cast(NullExpr) from)
+    {
+        return new PointerCast(to, from);
+    }
+    // TODO bool
+    if (cast(Integer) to && (cast(Pointer) from.type || cast(Class) from.type))
+    {
+        auto voidp = new Pointer(new Void);
+        auto rt_ptr_test = new Function("cxruntime_ptr_test",
+            new Integer,
+            [Argument("", voidp)],
+            true, null);
+        return new Call(rt_ptr_test, [new PointerCast(voidp, from)]);
+    }*/
+    print("todo: cast error");
+    assert(false);
+}
+
 class Call : Expression
 {
     Function function_;
@@ -583,15 +648,10 @@ class Call : Expression
             function_.name, function_.args.length, args.length));*/
         assert(function_.args.length == args.length);
 
-        /*foreach (i, ref arg; args)
+        for (int i = 0; i < args.length; i = i + 1)
         {
-            import std.stdio : stderr;
-
-            scope(failure)
-                stderr.writefln!"While converting arg %s of %s to %s:"(
-                    i, function_.name, function_.args[i].type);
-            arg = arg.implicitConvertTo(function_.args[i].type);
-        }*/
+            args[i] = implicitConvertTo(args[i], function_.args[i].type);
+        }
         this.function_ = function_;
         this.args = [...args];
     }
@@ -1020,6 +1080,16 @@ class Struct : Type
         this.members = [...members];
     }
 
+    bool same(Type other) {
+        Struct otherStruct = other.instanceOf(Struct);
+        if (!otherStruct || otherStruct.members.length != this.members.length) return false;
+        for (int i = 0; i < this.members.length; i = i + 1)
+        {
+            if (!this.members[i].type.same(otherStruct.members[i].type)) return false;
+        }
+        return true;
+    }
+
     void* emit(Platform platform)
     {
         void*[] memberTypes;
@@ -1210,6 +1280,14 @@ class VarDeclScope : Namespace
     }
 }
 
+VarDeclScope findVarDeclScope(Namespace namespace)
+{
+    VarDeclScope varDeclScope = namespace.instanceOf(VarDeclScope);
+    if (varDeclScope) return varDeclScope;
+    assert(namespace.parent);
+    return findVarDeclScope(namespace.parent);
+}
+
 class ASTIfStatement : ASTStatement
 {
     ASTSymbol test;
@@ -1348,6 +1426,139 @@ ASTScopeStatement parseScope(Parser parser)
     return new ASTScopeStatement(statements);
 }
 
+class ASTAssignStatement : ASTStatement
+{
+    ASTSymbol target;
+
+    ASTSymbol value;
+
+    this(ASTSymbol target, ASTSymbol value)
+    {
+        this.target = target;
+        this.value = value;
+    }
+
+    Statement compile(Context context)
+    {
+        Symbol target = this.target.compile(context);
+        Expression value = beExpression(this.value.compile(context));
+        Reference targetref = target.instanceOf(Reference);
+        value = implicitConvertTo(value, targetref.type());
+        if (!targetref) {
+            print("target of assignment must be a reference");
+            assert(false);
+        }
+        return new AssignStatement(targetref, value);
+    }
+}
+
+class AssignStatement : Statement
+{
+    Reference target;
+
+    Expression value;
+
+    this(Reference target, Expression value) { this.target = target; this.value = value; }
+
+    void emit(Generator output)
+    {
+        Type targetType = this.target.type();
+        Type valueType = this.value.type();
+
+        // TODO
+        /*assert(targetType == valueType,
+                format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
+
+        int target_reg = this.target.emitLocation(output);
+        int value_reg = this.value.emit(output);
+
+        output.fun.store(valueType.emit(output.platform), target_reg, value_reg);
+    }
+}
+
+ASTAssignStatement parseAssignment(Parser parser)
+{
+    parser.begin();
+    ASTSymbol lhs = parseExpressionLeaf(parser);
+    if (!lhs || !parser.accept("="))
+    {
+        parser.revert();
+        return null;
+    }
+    ASTSymbol expr = parseExpression(parser);
+    parser.commit();
+    return new ASTAssignStatement(lhs, expr);
+}
+
+ASTAssignStatement parseAssignStatement(Parser parser)
+{
+    ASTAssignStatement ret = parseAssignment(parser);
+    if (ret)
+    {
+        parser.expect(";");
+        return ret;
+    }
+    return null;
+}
+
+class ASTVarDeclStatement : ASTStatement
+{
+    string name;
+
+    ASTType type;
+
+    ASTSymbol initial;
+
+    this(string name, ASTType type, ASTSymbol initial)
+    {
+        this.name = name;
+        this.type = type;
+        this.initial = initial;
+    }
+
+    Statement compile(Context context)
+    {
+        if (this.initial)
+        {
+            Symbol initial = this.initial.compile(context);
+
+            return findVarDeclScope(context.namespace).declare(
+                this.name, this.type.compile(context), beExpression(initial));
+        }
+        else
+        {
+            return findVarDeclScope(context.namespace).declare(
+                this.name, this.type.compile(context));
+        }
+    }
+}
+
+ASTVarDeclStatement parseVarDecl(Parser parser)
+{
+    parser.begin();
+    ASTType type = parseType(parser);
+    if (!type)
+    {
+        parser.revert();
+        return null;
+    }
+    string name = parseIdentifier(parser);
+    if (!name.length)
+    {
+        parser.revert();
+        return null;
+    }
+    ASTSymbol initial;
+    if (parser.accept("="))
+    {
+        initial = parseExpression(parser);
+        assert(initial);
+    }
+    parser.expect(";");
+    parser.commit();
+    return new ASTVarDeclStatement(name, type, initial);
+}
+
 ASTStatement parseStatement(Parser parser)
 {
     {
@@ -1358,10 +1569,21 @@ ASTStatement parseStatement(Parser parser)
         ASTStatement stmt = parseIf(parser);
         if (stmt) return stmt;
     }
+    // if (auto stmt = parser.parseWhile) return stmt;
+    // if (auto stmt = parser.parseFor) return stmt;
     {
         ASTStatement stmt = parseScope(parser);
         if (stmt) return stmt;
     }
+    {
+        ASTStatement stmt = parseVarDecl(parser);
+        if (stmt) return stmt;
+    }
+    {
+        ASTStatement stmt = parseAssignStatement(parser);
+        if (stmt) return stmt;
+    }
+    // if (auto stmt = parser.parseExprStatement) return stmt;
     parser.fail("statement expected");
     assert(false);
 }
@@ -1468,8 +1690,8 @@ class Module : Namespace
 void main() {
     string src = "
         int ack(int m, int n) {
-            if (m == 0) return n + 1;
-            if (n == 0) return ack(m - 1, 1);
+            if (m == 0) { int n2 = n + 1; return n2; }
+            if (n == 0) { m = m - 1; return ack(m, 1); }
             return ack(m - 1, ack(m, n - 1));
         }
     ";

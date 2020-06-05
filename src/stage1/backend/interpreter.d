@@ -858,6 +858,7 @@ class IpBackendModule : BackendModule
                             break;
                         case Return:
                             assert(lastInstr);
+                            assert(ret.length == regArrays[instr.return_.reg].length);
                             ret[] = regArrays[instr.return_.reg];
                             return;
                         case Arg:

@@ -1,6 +1,6 @@
 module main;
 
-import array : Array, ArrayExpression, ArrayLength, ArrayPointer, ASTArrayLiteral, ASTArraySlice;
+import array : Array, ArrayExpression, ArrayLength, ArrayPointer, ASTArraySlice;
 import backend.backend;
 import backend.platform;
 import backend.types;
@@ -430,25 +430,6 @@ ASTAssignStatement parseAssignStatement(ref Parser parser)
             return ret;
         }
         return null;
-    }
-}
-
-ASTArrayLiteral parseArrayLiteral(ref Parser parser)
-{
-    with (parser)
-    {
-        if (!accept("["))
-            return null;
-        ASTArrayLiteral.Entry[] fields;
-        while (!accept("]"))
-        {
-            if (fields.length) expect(",");
-            bool spread = accept("...");
-            auto expr = parser.parseExpression;
-            assert(expr, "expression expected.");
-            fields ~= ASTArrayLiteral.Entry(expr, spread);
-        }
-        return new ASTArrayLiteral(loc, fields);
     }
 }
 
@@ -1911,10 +1892,6 @@ ASTSymbol parseExpressionBase(ref Parser parser)
         auto result = parser.parseExpression;
         parser.expect(")");
         return result;
-    }
-    if (auto arrayLiteral = parser.parseArrayLiteral)
-    {
-        return arrayLiteral;
     }
     parser.fail("Base expression expected.");
     assert(false);

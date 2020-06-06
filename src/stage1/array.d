@@ -102,6 +102,8 @@ class ArrayPointer : Expression
 
 class ASTArrayLiteral : ASTSymbol
 {
+    Loc loc;
+
     struct Entry
     {
         ASTSymbol symbol;
@@ -130,7 +132,7 @@ class ASTArrayLiteral : ASTSymbol
                 expressionElementType = newExpression.type;
             }
             if (!elementType) elementType = expressionElementType;
-            else assert(expressionElementType == elementType);
+            else loc.assert_(expressionElementType == elementType, "unexpected element type");
             elements ~= ArrayLiteral.Element(newExpression, entry.spread);
         }
         if (!elementType) assert(false, "cannot type empty literal");

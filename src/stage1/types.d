@@ -180,13 +180,16 @@ class FunctionPointer : Type
 class NamedType : ASTType
 {
     string name;
+
     invariant(name.length);
+
+    Loc loc;
 
     override Type compile(Context context)
     {
         auto target = context.namespace.lookup(this.name);
 
-        assert(cast(Type) target, format!"target for '%s' = %s"(this.name, target));
+        loc.assert_(cast(Type) target, format!"target for '%s' = %s"(this.name, target));
         return cast(Type) target;
     }
 
@@ -280,6 +283,6 @@ ASTType parseLeafType(ref Parser parser)
         }
 
         commit;
-        return new NamedType(identifier);
+        return new NamedType(identifier, loc);
     }
 }

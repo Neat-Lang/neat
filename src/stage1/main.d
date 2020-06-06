@@ -446,7 +446,7 @@ ASTArrayLiteral parseArrayLiteral(ref Parser parser)
             assert(expr, "expression expected.");
             fields ~= ASTArrayLiteral.Entry(expr, spread);
         }
-        return new ASTArrayLiteral(fields);
+        return new ASTArrayLiteral(loc, fields);
     }
 }
 
@@ -595,6 +595,8 @@ class ASTBinaryOp : ASTSymbol
 
     ASTSymbol right;
 
+    Loc loc;
+
     override Expression compile(Context context)
     {
         auto left = this.left.compile(context).beExpression;
@@ -603,7 +605,7 @@ class ASTBinaryOp : ASTSymbol
             return new BoolAnd(left, right);
         if (op == BinaryOpType.boolOr)
             return new BoolOr(left, right);
-        return new BinaryOp(op, left, right);
+        return new BinaryOp(op, left, right, loc);
     }
 
     mixin(GenerateAll);
@@ -689,6 +691,8 @@ class BinaryOp : Expression
 
     Expression right;
 
+    Loc loc;
+
     override Type type()
     {
         return new Integer;
@@ -714,8 +718,8 @@ class BinaryOp : Expression
                     output.fun.intLiteral(leftSize)]);
             }
         }
-        assert(this.left.type == new Integer, format!"expected integer, not %s"(this.left.type));
-        assert(this.right.type == new Integer, format!"expected integer, not %s"(this.right.type));
+        loc.assert_(this.left.type == new Integer, format!"expected integer, not %s"(this.left.type));
+        loc.assert_(this.right.type == new Integer, format!"expected integer, not %s"(this.right.type));
         Reg leftreg = this.left.emit(output);
         Reg rightreg = this.right.emit(output);
         string op = {
@@ -783,7 +787,7 @@ void parseMul(ref Parser parser, ref ASTSymbol left, int myLevel)
         if (parser.accept("*"))
         {
             auto right = parser.parseArithmetic(myLevel + 1);
-            left = new ASTBinaryOp(BinaryOpType.mul, left, right);
+            left = new ASTBinaryOp(BinaryOpType.mul, left, right, parser.loc);
             continue;
         }
         break;
@@ -797,7 +801,7 @@ void parseBoolAnd(ref Parser parser, ref ASTSymbol left, int myLevel)
         if (parser.accept("&&"))
         {
             auto right = parser.parseArithmetic(myLevel + 1);
-            left = new ASTBinaryOp(BinaryOpType.boolAnd, left, right);
+            left = new ASTBinaryOp(BinaryOpType.boolAnd, left, right, parser.loc);
             continue;
         }
         break;
@@ -811,7 +815,7 @@ void parseBoolOr(ref Parser parser, ref ASTSymbol left, int myLevel)
         if (parser.accept("||"))
         {
             auto right = parser.parseArithmetic(myLevel + 1);
-            left = new ASTBinaryOp(BinaryOpType.boolOr, left, right);
+            left = new ASTBinaryOp(BinaryOpType.boolOr, left, right, parser.loc);
             continue;
         }
         break;
@@ -825,13 +829,13 @@ void parseAddSub(ref Parser parser, ref ASTSymbol left, int myLevel)
         if (parser.accept("+"))
         {
             auto right = parser.parseArithmetic(myLevel + 1);
-            left = new ASTBinaryOp(BinaryOpType.add, left, right);
+            left = new ASTBinaryOp(BinaryOpType.add, left, right, parser.loc);
             continue;
         }
         if (parser.accept("-"))
         {
             auto right = parser.parseArithmetic(myLevel + 1);
-            left = new ASTBinaryOp(BinaryOpType.sub, left, right);
+            left = new ASTBinaryOp(BinaryOpType.sub, left, right, parser.loc);
             continue;
         }
         break;
@@ -843,32 +847,32 @@ void parseComparison(ref Parser parser, ref ASTSymbol left, int myLevel)
     if (parser.accept("=="))
     {
         auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTBinaryOp(BinaryOpType.eq, left, right);
+        left = new ASTBinaryOp(BinaryOpType.eq, left, right, parser.loc);
     }
     if (parser.accept("!=")) // same as !(a == b)
     {
         auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTNegation(new ASTBinaryOp(BinaryOpType.eq, left, right));
+        left = new ASTNegation(new ASTBinaryOp(BinaryOpType.eq, left, right, parser.loc));
     }
     if (parser.accept(">="))
     {
         auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTBinaryOp(BinaryOpType.ge, left, right);
+        left = new ASTBinaryOp(BinaryOpType.ge, left, right, parser.loc);
     }
     if (parser.accept(">"))
     {
         auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTBinaryOp(BinaryOpType.gt, left, right);
+        left = new ASTBinaryOp(BinaryOpType.gt, left, right, parser.loc);
     }
     if (parser.accept("<="))
     {
         auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTBinaryOp(BinaryOpType.le, left, right);
+        left = new ASTBinaryOp(BinaryOpType.le, left, right, parser.loc);
     }
     if (parser.accept("<"))
     {
         auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTBinaryOp(BinaryOpType.lt, left, right);
+        left = new ASTBinaryOp(BinaryOpType.lt, left, right, parser.loc);
     }
 }
 
@@ -1012,10 +1016,12 @@ class ASTCall : ASTSymbol
 
     ASTSymbol[] args;
 
+    Loc loc;
+
     override Expression compile(Context context)
     {
         auto target = this.target.compile(context);
-        auto args = this.args.map!(a => a.compile(context).beExpression).array;
+        auto args = this.args.map!(a => a.compile(context).beExpression(loc)).array;
 
         return target.call(args);
     }
@@ -1092,13 +1098,15 @@ class FuncPtrCall : Expression
 
 class Variable : ASTSymbol
 {
+    Loc loc;
+
     string name;
 
     override Symbol compile(Context context)
     out (result; result !is null)
     {
         auto ret = context.namespace.lookup(name);
-        assert(ret, format!"%s not found"(name));
+        loc.assert_(ret, format!"%s not found"(name));
         return ret;
     }
 
@@ -1331,7 +1339,7 @@ ASTCall parseCall(ref Parser parser, ASTSymbol base)
         }
         ASTSymbol[] args = parser.parseSymbolList;
         commit;
-        return new ASTCall(base, args);
+        return new ASTCall(base, args, loc);
     }
 }
 
@@ -1344,7 +1352,7 @@ class ClassMethod : Symbol
     mixin(GenerateThis);
 }
 
-Symbol accessMember(Symbol base, string member)
+Symbol accessMember(Symbol base, string member, Loc loc)
 {
     if (cast(Expression) base)
     {
@@ -1355,9 +1363,9 @@ Symbol accessMember(Symbol base, string member)
         }
         if (auto structType = cast(Struct) baseExpr.type)
         {
-            assert(cast(Reference) baseExpr, "TODO struct member of value");
+            loc.assert_(cast(Reference) baseExpr, "TODO struct member of value");
             auto memberOffset = structType.members.countUntil!(a => a.name == member);
-            assert(memberOffset != -1, "no such member " ~ member);
+            loc.assert_(memberOffset != -1, "no such member " ~ member);
             return new StructMember(cast(Reference) baseExpr, cast(int) memberOffset);
         }
         if (auto classType = cast(Class) baseExpr.type)
@@ -1375,16 +1383,17 @@ Symbol accessMember(Symbol base, string member)
                 return new ClassMethod(funcPtr, baseExpr);
             }
             auto memberOffset = classType.visibleMembers.find!(a => a.name == member);
-            assert(!memberOffset.empty, format!"no such member %s in %s"(member, classType));
+            loc.assert_(!memberOffset.empty, format!"no such member %s in %s"(member, classType));
             return new StructMember(
                 new Dereference(asStructPtr),
                 cast(int) memberOffset.front.index,
             );
         }
 
-        assert(false, format!"expected struct/class type for member, not %s of %s"(baseExpr, baseExpr.type));
+        loc.assert_(false, format!"expected struct/class type for member, not %s of %s"(baseExpr, baseExpr.type));
     }
-    assert(false, format!"expected expression for member access, not %s"(base));
+    loc.assert_(false, format!"expected expression for member access, not %s"(base));
+    assert(false);
 }
 
 class ASTMember : ASTSymbol
@@ -1392,6 +1401,8 @@ class ASTMember : ASTSymbol
     ASTSymbol base;
 
     string member;
+
+    Loc loc;
 
     override Symbol compile(Context context)
     {
@@ -1410,7 +1421,7 @@ class ASTMember : ASTSymbol
             return new ArrayPointer((cast(Array) expr.type).elementType, expr);
         }
 
-        return base.accessMember(this.member);
+        return base.accessMember(this.member, loc);
     }
 
     mixin(GenerateThis);
@@ -1430,7 +1441,7 @@ ASTSymbol parseMember(ref Parser parser, ASTSymbol base)
         auto name = parser.parseIdentifier;
         assert(name, "member expected");
         commit;
-        return new ASTMember(base, name);
+        return new ASTMember(base, name, loc);
     }
 }
 
@@ -1439,6 +1450,8 @@ class ASTIndexAccess : ASTSymbol
     ASTSymbol base;
 
     ASTSymbol index;
+
+    Loc loc;
 
     override Expression compile(Context context)
     {
@@ -1459,7 +1472,7 @@ class ASTIndexAccess : ASTSymbol
             [Argument("", new Pointer(new Void)), Argument("", new Integer)],
             true, null);
         int size = context.platform.size((cast(Pointer) base.type).target.emit(context.platform));
-        auto offset = new BinaryOp(BinaryOpType.mul, index, new Literal(size));
+        auto offset = new BinaryOp(BinaryOpType.mul, index, new Literal(size), loc);
 
         return new Dereference(new PointerCast(base.type, new Call(ptr_offset, [base, offset])));
     }
@@ -1490,7 +1503,7 @@ ASTSymbol parseIndex(ref Parser parser, ASTSymbol base)
         }
         expect("]");
         commit;
-        return new ASTIndexAccess(base, index);
+        return new ASTIndexAccess(base, index, loc);
     }
 }
 
@@ -1499,6 +1512,8 @@ class ASTNewClassExpression : ASTSymbol
     ASTType type;
 
     Nullable!(ASTSymbol[]) args;
+
+    Loc loc;
 
     override Expression compile(Context context)
     {
@@ -1510,9 +1525,9 @@ class ASTNewClassExpression : ASTSymbol
         {
             return classptr;
         }
-        Expression[] argExpressions = this.args.get.map!(a => a.compile(context).beExpression).array;
-        assert(classType, format!"expected new <class>, not %s"(type));
-        return new CallCtorExpression(classptr, argExpressions);
+        Expression[] argExpressions = this.args.get.map!(a => a.compile(context).beExpression(loc)).array;
+        loc.assert_(classType, format!"expected new <class>, not %s"(type));
+        return new CallCtorExpression(classptr, argExpressions, loc);
     }
 
     mixin(GenerateThis);
@@ -1524,6 +1539,8 @@ class CallCtorExpression : Expression
 
     Expression[] args;
 
+    Loc loc;
+
     override Type type()
     {
         return this.classptr.type;
@@ -1534,7 +1551,7 @@ class CallCtorExpression : Expression
         auto reg = this.classptr.emit(output);
         auto expr = new RegExpr(type, reg);
 
-        expr.accessMember("this").call(this.args).emit(output);
+        expr.accessMember("this", loc).call(this.args).emit(output);
         return reg;
     }
 
@@ -1641,7 +1658,7 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
                 args = parser.parseSymbolList;
             }
 
-            return new ASTNewClassExpression(type, args);
+            return new ASTNewClassExpression(type, args, loc);
         }
         if (accept("!"))
         {
@@ -1694,13 +1711,15 @@ class ASTInstanceOf : ASTSymbol
 
     ASTType target;
 
+    Loc loc;
+
     override Symbol compile(Context context)
     {
-        auto base = this.base.compile(context).beExpression;
+        auto base = this.base.compile(context).beExpression(loc);
         assert(cast(Class) base.type);
         auto target = cast(Class) this.target.compile(context);
         assert(target);
-        return new PointerCast(target, base.accessMember("__instanceof").call([new StringLiteral(target.name)]));
+        return new PointerCast(target, base.accessMember("__instanceof", loc).call([new StringLiteral(target.name)]));
     }
 
     mixin(GenerateThis);
@@ -1709,17 +1728,19 @@ class ASTInstanceOf : ASTSymbol
 ASTSymbol parseInstanceOf(ref Parser parser, ASTSymbol left)
 {
     mixin(ParserGuard!());
-    parser.begin;
-    if (!(parser.accept(".") && parser.accept("instanceOf")))
-    {
-        parser.revert;
-        return null;
+    with (parser) {
+        begin;
+        if (!(accept(".") && accept("instanceOf")))
+        {
+            revert;
+            return null;
+        }
+        expect("(");
+        auto type = parser.parseType;
+        expect(")");
+        commit;
+        return new ASTInstanceOf(left, type, loc);
     }
-    parser.expect("(");
-    auto type = parser.parseType;
-    parser.expect(")");
-    parser.commit;
-    return new ASTInstanceOf(left, type);
 }
 
 ASTStringLiteral parseStringLiteral(ref Parser parser, string endMarker)
@@ -1821,7 +1842,7 @@ ASTSymbol parseExpressionBase(ref Parser parser)
     mixin(ParserGuard!());
     if (auto name = parser.parseIdentifier)
     {
-        return new Variable(name);
+        return new Variable(parser.loc, name);
     }
     int i;
     if (parser.parseNumber(i))
@@ -2028,6 +2049,7 @@ class Method : Symbol
         }
 
         this.compiledStatement.emit(generator);
+
         generator.fun.ret(generator.fun.voidLiteral);
     }
 
@@ -2147,7 +2169,7 @@ class Class : Type
         auto current = this;
         while (current)
         {
-            auto test = new BinaryOp(BinaryOpType.eq, target, new StringLiteral(current.name));
+            auto test = new BinaryOp(BinaryOpType.eq, target, new StringLiteral(current.name), Loc.init);
 
             castStmts ~= new IfStatement(test, new ReturnStatement(thisptr));
             current = current.superClass;
@@ -2219,7 +2241,7 @@ class ASTClassDecl : ASTType
         if (this.superClass)
         {
             auto superClassObj = context.namespace.lookup(this.superClass);
-            assert(superClassObj);
+            assert(superClassObj, format!"super class %s not found"(this.superClass));
             superClass = cast(Class) superClassObj;
             assert(superClass);
         }

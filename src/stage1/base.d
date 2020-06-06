@@ -4,6 +4,7 @@ import backend.backend;
 import backend.platform;
 import backend.types;
 import boilerplate;
+import parser;
 import std.format;
 import std.typecons;
 
@@ -46,6 +47,16 @@ Expression beExpression(Symbol symbol)
         return expr;
     }
     assert(false, format!"expected expression, not %s"(symbol));
+}
+
+Expression beExpression(Symbol symbol, Loc loc)
+{
+    if (auto expr = cast(Expression) symbol)
+    {
+        return expr;
+    }
+    loc.assert_(false, format!"expected expression, not %s"(symbol));
+    assert(false);
 }
 
 class Type : Symbol

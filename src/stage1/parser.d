@@ -1,5 +1,6 @@
 module parser;
 
+import boilerplate;
 import linenr;
 import std.algorithm;
 import std.conv;
@@ -99,6 +100,11 @@ class Parser
         assert(false, format!"at %s: %s"(this.lineNumbers.at(this.text), msg));
     }
 
+    Loc loc()
+    {
+        return Loc(this.lineNumbers, this.text);
+    }
+
     void strip()
     {
         while (true)
@@ -132,6 +138,23 @@ class Parser
             }
         }
     }
+}
+
+struct Loc
+{
+    LineNumberRegistry lineNumbers;
+
+    string text;
+
+    void fail(string msg) {
+        assert(false, format!"at %s: %s"(this.lineNumbers.at(this.text), msg));
+    }
+
+    void assert_(T)(T flag, lazy string text) {
+        if (!flag) fail(text);
+    }
+
+    mixin(GenerateThis);
 }
 
 enum ParserGuard(string file = __FILE__, size_t line = __LINE__) = format!q{

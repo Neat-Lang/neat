@@ -1,10 +1,9 @@
 module parser;
 
+import array;
 import backend.proxy;
-
-extern(C) void print(char[]);
-extern(C) void assert(int);
-extern(C) int atoi(char[]);
+import base;
+import types;
 
 class Parser
 {
@@ -237,77 +236,6 @@ bool acceptIdentifier(Parser parser, string identifier)
     return true;
 }
 
-// something that can be referenced by a name
-class Symbol
-{
-}
-
-class Namespace
-{
-    Namespace parent; // lexical parent
-
-    this(Namespace parent) { this.parent = parent; }
-
-    Symbol lookup(string name) { assert(false); }
-}
-
-class Context
-{
-    void* platform;
-
-    Namespace namespace;
-
-    this(void* platform, Namespace namespace) { this.platform = platform; this.namespace = namespace; }
-
-    Context withNamespace(Namespace namespace)
-    {
-        return new Context(this.platform, namespace);
-    }
-}
-
-class ASTSymbol
-{
-    Symbol compile(Context context) { assert(false); }
-}
-
-class Type
-{
-    void* emit(void* platform) { assert(false); }
-    bool same(Type type) { return false; }
-}
-
-class ASTType
-{
-    Type compile(Context context) { assert(false); }
-}
-
-class Integer : Type
-{
-    void* emit(Platform platform)
-    {
-        return platform.intType();
-    }
-
-    bool same(Type other) { return !!other.instanceOf(Integer); }
-}
-
-class Void : Type
-{
-    void* emit(Platform platform)
-    {
-        return platform.voidType();
-    }
-
-    bool same(Type other) { return !!other.instanceOf(Void); }
-}
-
-class ASTInteger : ASTType
-{
-    Type compile(Context context) {
-        return new Integer;
-    }
-}
-
 class NamedType : ASTType
 {
     string name;
@@ -348,11 +276,6 @@ ASTType parseLeafType(Parser parser)
     return new NamedType(identifier);
 }
 
-class ASTType
-{
-    Type compile(Context context) { assert(false); }
-}
-
 ASTType parseType(Parser parser)
 {
     ASTType current = parseLeafType(parser);
@@ -369,24 +292,6 @@ class ASTArgument
     {
         this.name = name;
         this.type = type;
-    }
-}
-
-class Generator
-{
-    BackendModule mod;
-
-    BackendFunction fun;
-
-    Platform platform;
-
-    int frameReg;
-
-    this(Platform platform, BackendModule mod)
-    {
-        this.platform = platform;
-        this.mod = mod;
-        this.fun = null;
     }
 }
 
@@ -532,19 +437,6 @@ ASTArgument[] parseIdentifierList(Parser parser)
         args = [...args, new ASTArgument(argname, argtype)];
     }
     return args;
-}
-
-class Expression : Symbol
-{
-    Type type() { assert(false); }
-    int emit(Generator output) { assert(false); }
-}
-
-Expression beExpression(Symbol symbol)
-{
-    Expression expr = symbol.instanceOf(Expression);
-    assert(expr);
-    return expr;
 }
 
 class Reference : Expression
@@ -834,7 +726,10 @@ class Variable : ASTSymbol
     Symbol compile(Context context)
     {
         Symbol symbol = context.namespace.lookup(this.name);
-        assert(symbol);
+        if (!symbol) {
+            print([...this.name, ..." not found"]);
+            assert(false);
+        }
         return symbol;
     }
 }
@@ -868,6 +763,101 @@ class Literal : Expression
     }
 }
 
+class ASTStringLiteral : ASTSymbol
+{
+    string text;
+
+    this(string text) { this.text = text; }
+
+    Symbol compile(Context context)
+    {
+        return new StringLiteral(this.text);
+    }
+}
+
+class StringLiteral : Expression
+{
+    string text;
+
+    this(string text) { this.text = text; }
+
+    Type type()
+    {
+        return new Array(new Character);
+    }
+
+    int emit(Generator output)
+    {
+        void* voidp = output.platform.pointerType(output.platform.voidType());
+        // TODO allocaless
+        void* structType = this.type().emit(output.platform);
+        int structReg = output.fun.alloca(structType);
+        int ptrField = output.fun.fieldOffset(structType, structReg, 0);
+        int lenField = output.fun.fieldOffset(structType, structReg, 1);
+
+        output.fun.store(voidp, ptrField, output.fun.stringLiteral(this.text));
+        output.fun.store(output.platform.intType(), lenField, output.fun.intLiteral(this.text.length));
+        return output.fun.load(structType, structReg);
+    }
+}
+
+string replaceEscapes(string text)
+{
+    string result;
+    int i;
+    while (i < text.length)
+    {
+        string ch = text[i .. i + 1];
+        i = i + 1;
+        if (ch == "\\")
+        {
+            string ctl = text[i .. i + 1];
+            i = i + 1;
+            if (ctl == "r") {
+                result = [...result, ..."\r"];
+            } else if (ctl == "n") {
+                result = [...result, ..."\n"];
+            } else if (ctl == "t") {
+                result = [...result, ..."\t"];
+            } else if (ctl == "\\") {
+                result = [...result, ..."\\"];
+            } else {
+                print([..."Unknown control sequence \\", ...ctl]);
+                assert(false);
+            }
+        }
+        else
+        {
+            result = [...result, ...ch];
+        }
+    }
+    return result;
+}
+
+ASTStringLiteral parseStringLiteral(Parser parser, string endMarker)
+{
+    string str;
+    while (parser.text().length < endMarker.length || parser.text()[0 .. endMarker.length] != endMarker)
+    {
+        if (parser.text().length == 0)
+        {
+            parser.fail("expected end of string, got end of file");
+        }
+        if (parser.text()[0 .. 1] == "\\") {
+            str = [...str, parser.text()[0]];
+            *parser.textp() = parser.text()[1 .. parser.text().length];
+        }
+        str = [...str, parser.text()[0]];
+        *parser.textp() = parser.text()[1 .. parser.text().length];
+    }
+    if (!parser.accept(endMarker))
+    {
+        parser.fail("this should never happen");
+    }
+
+    return new ASTStringLiteral(replaceEscapes(str));
+}
+
 ASTSymbol parseExpressionBase(Parser parser)
 {
     string name = parseIdentifier(parser);
@@ -880,11 +870,11 @@ ASTSymbol parseExpressionBase(Parser parser)
     {
         return new ASTLiteral(i);
     }
-    /*if (parser.accept("\""))
+    if (parser.accept("\""))
     {
-        return parser.parseStringLiteral("\"");
+        return parseStringLiteral(parser, "\"");
     }
-    if (parser.accept("("))
+    /*if (parser.accept("("))
     {
         auto result = parser.parseExpression;
         parser.expect(")");
@@ -1917,6 +1907,7 @@ void main() {
     Function fun = astFun.compile(generator);
     module_.add(fun.name, fun);
     module_.add("assert", new Function("assert", new Void, [new Argument("", new Integer)], true, null));
+    module_.add("print", new Function("print", new Void, [new Argument("", new Array(new Character))], true, null));
     Context context = new Context(generator.platform, module_);
     assert(fun);
     fun.emit(generator, context);

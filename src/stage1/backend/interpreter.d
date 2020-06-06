@@ -629,7 +629,10 @@ private void defineIntrinsics(IpBackendModule mod)
     defineCallback("_backend_createModule", delegate BackendModule(Backend backend, Platform platform)
         => backend.createModule(platform));
     defineCallback("_backend_intType", delegate BackendType() => new BackendIntType);
+    defineCallback("_backend_charType", delegate BackendType() => new BackendCharType);
     defineCallback("_backend_voidType", delegate BackendType() => new BackendVoidType);
+    defineCallback("_backend_pointerType", delegate BackendType(BackendType target)
+        => new BackendPointerType(target));
     defineCallback("_backend_structType", delegate BackendType(BackendType[] members)
         => new BackendStructType(members.dup));
     defineCallback(
@@ -676,6 +679,9 @@ private void defineIntrinsics(IpBackendModule mod)
     defineCallback(
         "_backendFunction_intLiteral",
         delegate int(BackendFunction fun, int index) => fun.intLiteral(index));
+    defineCallback(
+        "_backendFunction_stringLiteral",
+        delegate int(BackendFunction fun, string text) => fun.stringLiteral(text));
     defineCallback(
         "_backendFunction_voidLiteral",
         delegate int(BackendFunction fun) => fun.voidLiteral);

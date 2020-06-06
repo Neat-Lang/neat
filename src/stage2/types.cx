@@ -2,9 +2,13 @@ module types;
 
 import backend.proxy;
 import base;
+import format;
+import parser;
 
-class ASTCharType : ASTType
+class ASTCharacter : ASTType
 {
+    this() { }
+
     Type compile(Context context) {
         return new Character;
     }
@@ -12,6 +16,8 @@ class ASTCharType : ASTType
 
 class Character : Type
 {
+    this() { }
+
     void* emit(Platform platform)
     {
         return platform.charType();
@@ -21,10 +27,14 @@ class Character : Type
     {
         return !!other.instanceOf(Character);
     }
+
+    string repr() { return "char"; }
 }
 
 class ASTInteger : ASTType
 {
+    this() { }
+
     Type compile(Context context) {
         return new Integer;
     }
@@ -32,22 +42,39 @@ class ASTInteger : ASTType
 
 class Integer : Type
 {
+    this() { }
+
     void* emit(Platform platform)
     {
         return platform.intType();
     }
 
     bool same(Type other) { return !!other.instanceOf(Integer); }
+
+    string repr() { return "int"; }
+}
+
+class ASTVoid : ASTType
+{
+    this() { }
+
+    Type compile(Context context) {
+        return new Void;
+    }
 }
 
 class Void : Type
 {
+    this() { }
+
     void* emit(Platform platform)
     {
         return platform.voidType();
     }
 
     bool same(Type other) { return !!other.instanceOf(Void); }
+
+    string repr() { return "void"; }
 }
 
 class ASTPointer : ASTType
@@ -80,5 +107,194 @@ class Pointer : Type
         Pointer otherPtr = other.instanceOf(Pointer);
 
         return otherPtr && this.target.same(otherPtr.target);
+    }
+
+    string repr() { return ssJoin(this.target.repr(), "*"); }
+}
+
+class NamedType : ASTType
+{
+    string name;
+
+    this(string name) { assert(name.length > 0); this.name = name; }
+
+    Type compile(Context context)
+    {
+        Symbol target = context.namespace.lookup(this.name);
+
+        if (!target || !target.instanceOf(Type)) {
+            print(ssJoin(this.name, " is not a type"));
+            assert(false);
+        }
+        return target.instanceOf(Type);
+    }
+}
+
+ASTType parseLeafType(Parser parser)
+{
+    parser.begin();
+
+    string identifier = parseIdentifier(parser);
+
+    if (!identifier.length)
+    {
+        parser.revert();
+        return null;
+    }
+
+    if (identifier == "int")
+    {
+        parser.commit();
+        return new ASTInteger;
+    }
+
+    if (identifier == "char")
+    {
+        parser.commit();
+        return new ASTCharacter;
+    }
+
+    if (identifier == "void")
+    {
+        parser.commit();
+        return new ASTVoid;
+    }
+
+    parser.commit();
+    return new NamedType(identifier);
+}
+
+// ptr, length
+class Array : Type
+{
+    Type elementType;
+
+    this(Type elementType) { this.elementType = elementType; }
+
+    void* emit(Platform platform)
+    {
+        void*[] types = new void*[](2);
+        types[0] = platform.pointerType(this.elementType.emit(platform));
+        types[1] = platform.intType();
+        return platform.structType(types); // TODO mod.wordType / mod.wordSize
+    }
+
+    bool same(Type other)
+    {
+        Array otherArray = other.instanceOf(Array);
+
+        return otherArray && otherArray.elementType.same(this.elementType);
+    }
+
+    string repr() { return ssJoin(this.elementType.repr(), "[]"); }
+}
+
+class ASTArray : ASTType
+{
+    ASTType elementType;
+
+    this(ASTType elementType) { this.elementType = elementType; }
+
+    Type compile(Context context)
+    {
+        return new Array(this.elementType.compile(context));
+    }
+}
+
+class ASTFunctionPointer : ASTType
+{
+    ASTType ret;
+
+    ASTType[] args;
+
+    this(ASTType ret, ASTType[] args) { this.ret = ret; this.args = args; }
+
+    Type compile(Context context)
+    {
+        Type ret = this.ret.compile(context);
+        Type[] args = new Type[](this.args.length);
+        for (int i = 0; i < this.args.length; i = i + 1) args[i] = this.args[i].compile(context);
+
+        return new FunctionPointer(ret, args);
+    }
+}
+
+class FunctionPointer : Type
+{
+    Type ret;
+
+    Type[] args;
+
+    this(Type ret, Type[] args) { this.ret = ret; this.args = args; }
+
+    void* emit(Platform platform)
+    {
+        void*[] args = new void*[](this.args.length);
+        for (int i = 0; i < this.args.length; i = i + 1) args[i] = this.args[i].emit(platform);
+        return platform.functionPointerType(this.ret.emit(platform), args);
+    }
+
+    bool same(Type other)
+    {
+        FunctionPointer otherPtr = other.instanceOf(FunctionPointer);
+        if (!otherPtr) return false;
+        if (!this.ret.same(otherPtr.ret)) return false;
+        if (this.args.length != otherPtr.args.length) return false;
+        for (int i = 0; i < this.args.length; i = i + 1)
+            if (!this.args[i].same(otherPtr.args[i])) return false;
+        return true;
+    }
+
+    string repr() { return ssJoin(this.ret.repr(), "(...)"); }
+}
+
+ASTType parseType(Parser parser)
+{
+    ASTType current = parseLeafType(parser);
+    if (!current) return null;
+    while (true)
+    {
+        if (parser.accept("*"))
+        {
+            current = new ASTPointer(current);
+        }
+        else
+        {
+            parser.begin();
+            string identifier = parseIdentifier(parser);
+            if (identifier == "function")
+            {
+                parser.expect("(");
+                ASTType[] args;
+                while (!parser.accept(")"))
+                {
+                    if (args.length)
+                    {
+                        if (!parser.accept(","))
+                        {
+                            parser.fail("',' or ')' expected");
+                        }
+                    }
+                    ASTType argType = parseType(parser);
+                    assert(argType);
+
+                    args = args ~ argType;
+                }
+                parser.commit();
+                current = new ASTFunctionPointer(current, args);
+            } else {
+                parser.revert();
+                parser.begin();
+                if (parser.accept("[") && parser.accept("]"))
+                {
+                    parser.commit();
+
+                    current = new ASTArray(current);
+                } else {
+                    parser.revert();
+                    return current;
+                }
+            }
+        }
     }
 }

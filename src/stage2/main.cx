@@ -1,0 +1,3007 @@
+module main;
+
+import array;
+import backend.proxy;
+import base;
+import format;
+import parser;
+import types;
+
+extern(C) bool cxruntime_file_exists(string file);
+extern(C) string cxruntime_file_read(string file);
+
+void assert2s(int test, string msg) { if (!test) { print(msg); assert(false); } }
+void assert2s2(int test, string a, string b) { if (!test) { print(ssJoin(a, b)); assert(false); } }
+void assert2s3(int test, string a, string b, string c) { if (!test) { print(sssJoin(a, b, c)); assert(false); } }
+void assert2s4(int test, string a, string b, string c, string d) {
+    if (!test) { print(ssssJoin(a, b, c, d)); assert(false); } }
+
+class ASTArgument
+{
+    string name;
+
+    ASTType type;
+
+    this(string name, ASTType type)
+    {
+        this.name = name;
+        this.type = type;
+    }
+}
+
+class Statement
+{
+    void emit(Generator output) { assert(false); }
+}
+
+class ASTStatement
+{
+    Statement compile(Context context) { assert(false); }
+}
+
+class Argument
+{
+    string name;
+
+    Type type;
+
+    this(string name, Type type)
+    {
+        this.name = name;
+        this.type = type;
+    }
+}
+
+class Function : Symbol
+{
+    string name;
+
+    Type ret;
+
+    Argument[] args;
+
+    bool declaration;
+
+    ASTStatement statement;
+
+    this(string name, Type ret, Argument[] args, bool declaration, ASTStatement statement)
+    {
+        this.name = name;
+        this.ret = ret;
+        this.args = args;
+        this.declaration = declaration;
+        this.statement = statement;
+    }
+
+    void emit(Generator generator, Context module_)
+    {
+        assert(!generator.fun);
+        void*[] argTypes = new void*[](this.args.length);
+        for (int i = 0; i < this.args.length; i = i + 1)
+            argTypes[i] = this.args[i].type.emit(module_.platform);
+        assert(module_);
+        generator.fun = generator.mod.define(
+            this.name,
+            this.ret.emit(module_.platform),
+            argTypes
+        );
+        FunctionScope stackframe = new FunctionScope(module_.namespace);
+        VarDeclScope argscope = new VarDeclScope(stackframe, true);
+        Statement[] argAssignments = new Statement[](this.args.length);
+        for (int i = 0; i < this.args.length; i = i + 1)
+        {
+            Argument arg = this.args[i];
+            ArgExpr argExpr = new ArgExpr(i, arg.type);
+
+            argAssignments[i] = argscope.declare(arg.name, arg.type, argExpr, null);
+        }
+
+        Statement functionBody = this.statement.compile(module_.withNamespace(argscope));
+
+        generator.frameReg = generator.fun.alloca(stackframe.structType().emit(module_.platform));
+
+        for (int i = 0; i < argAssignments.length; i = i + 1)
+        {
+            argAssignments[i].emit(generator);
+        }
+
+        functionBody.emit(generator);
+        generator.fun.ret(generator.fun.voidLiteral());
+        generator.fun = null;
+        generator.frameReg = 0;
+    }
+}
+
+class ASTFunction
+{
+    string name;
+
+    ASTType ret;
+
+    ASTArgument[] args;
+
+    bool isDeclaration;
+
+    ASTStatement statement;
+
+    this(string name, ASTType ret, ASTArgument[] args, bool isDeclaration, ASTStatement statement)
+    {
+        this.name = name;
+        this.ret = ret;
+        this.args = args;
+        this.isDeclaration = isDeclaration;
+        this.statement = statement;
+    }
+
+    Function compile(Context context)
+    {
+        Argument[] arguments = new Argument[](this.args.length);
+        for (int i = 0; i < this.args.length; i = i + 1)
+        {
+            ASTArgument arg = this.args[i];
+            ASTType at = arg.type;
+            Type type = at.compile(context);
+            arguments[i] = new Argument(arg.name, type);
+        }
+
+        return new Function(
+            this.name,
+            this.ret.compile(context),
+            arguments,
+            this.isDeclaration,
+            this.statement);
+    }
+}
+
+ASTArgument[] parseIdentifierList(Parser parser)
+{
+    ASTArgument[] args;
+    while (!parser.accept(")"))
+    {
+        if (args.length)
+        {
+            if (!parser.accept(","))
+            {
+                parser.fail("',' or ')' expected");
+            }
+        }
+        ASTType argtype = parseType(parser);
+        string argname = parseIdentifier(parser);
+        args = args ~ new ASTArgument(argname, argtype);
+    }
+    return args;
+}
+
+class Reference : Expression
+{
+    int emitLocation(Generator output) { assert(false); }
+}
+
+class ArrayEqual : Expression
+{
+    Expression left;
+
+    Expression right;
+
+    this(Expression left, Expression right)
+    {
+        this.left = left;
+        this.right = right;
+    }
+
+    Type type() { return new Integer; }
+
+    int emit(Generator output)
+    {
+        Array leftArray = this.left.type().instanceOf(Array);
+        Array rightArray = this.right.type().instanceOf(Array);
+        if (leftArray && rightArray)
+        {
+            // TODO temp expr once array properties work on nonreferences
+            assert(leftArray.same(rightArray));
+            int leftLen = (new ArrayLength(this.left)).emit(output);
+            int rightLen = (new ArrayLength(this.right)).emit(output);
+            int leftPtr = (new ArrayPointer(leftArray.elementType, this.left)).emit(output);
+            int rightPtr = (new ArrayPointer(rightArray.elementType, this.right)).emit(output);
+            int leftSize = output.platform.size(leftArray.elementType.emit(output.platform));
+            return output.fun.call(output.platform.intType(), "_arraycmp", new int[](0)
+                ~ leftPtr ~ rightPtr ~ leftLen ~ rightLen
+                ~ output.fun.intLiteral(leftSize));
+        }
+    }
+}
+
+class BinaryOp : Expression
+{
+    string op;
+
+    Expression left;
+
+    Expression right;
+
+    this(string op, Expression left, Expression right)
+    {
+        assert2s3(left.type().instanceOf(Integer), op, " (l) expected int, not ", left.type().repr());
+        assert2s3(right.type().instanceOf(Integer), op, " (r) expected int, not ", right.type().repr());
+        this.op = op;
+        this.left = left;
+        this.right = right;
+    }
+
+    Type type()
+    {
+        return new Integer;
+    }
+
+    int emit(Generator output)
+    {
+        int leftreg = this.left.emit(output);
+        int rightreg = this.right.emit(output);
+        return output.fun.binop(this.op, leftreg, rightreg);
+    }
+}
+
+class ArgExpr : Expression
+{
+    int index;
+
+    Type type_;
+
+    this(int index, Type type_) { this.index = index; this.type_ = type_; }
+
+    int emit(Generator output)
+    {
+        return output.fun.arg(this.index);
+    }
+
+    Type type()
+    {
+        return this.type_;
+    }
+}
+
+class PointerCast : Expression
+{
+    Type target;
+
+    Expression value;
+
+    this(Type target, Expression value) {
+        this.target = target;
+        this.value = value;
+    }
+
+    Type type()
+    {
+        return this.target;
+    }
+
+    int emit(Generator output)
+    {
+        return this.value.emit(output); // pointer's a pointer
+    }
+}
+
+Expression implicitConvertTo(Expression from, Type to, Loc loc)
+{
+    if (from.type().same(to)) return from;
+    // void* casts to any pointer
+    if (to.instanceOf(Pointer) && from.type().same(new Pointer(new Void)))
+    {
+        return new PointerCast(to, from);
+    }
+    // any pointer casts to void*
+    if (from.type().instanceOf(Pointer) && to.same(new Pointer(new Void)))
+    {
+        return new PointerCast(to, from);
+    }
+    if (to.instanceOf(Class) && from.type().instanceOf(Class))
+    {
+        Class currentClass = from.type().instanceOf(Class);
+
+        while (currentClass)
+        {
+            if (currentClass.same(to))
+            {
+                return new PointerCast(to, from);
+            }
+            currentClass = currentClass.superClass;
+        }
+    }
+    if (to.instanceOf(Class) && from.instanceOf(NullExpr))
+    {
+        return new PointerCast(to, from);
+    }
+    // TODO bool
+    if (to.instanceOf(Integer) && (from.type().instanceOf(Pointer) || from.type().instanceOf(Class)))
+    {
+        Type voidp = new Pointer(new Void);
+        Function rt_ptr_test = new Function("cxruntime_ptr_test",
+            new Integer,
+            new Argument[](0) ~ new Argument("", voidp),
+            true, null);
+        Expression ptrCast = new PointerCast(voidp, from);
+
+        return new Call(rt_ptr_test, new Expression[](0) ~ ptrCast, loc);
+    }
+    loc.assert2s4(false, "todo: cast(", to.repr(), ") ", from.type().repr());
+}
+
+class Call : Expression
+{
+    Function function_;
+
+    Expression[] args;
+
+    Loc loc;
+
+    this(Function function_, Expression[] args, Loc loc)
+    {
+        loc.assert2s5(
+            function_.args.length == args.length,
+            function_.name, " expected ", itoa(function_.args.length), " args, not ", itoa(args.length));
+
+        for (int i = 0; i < args.length; i = i + 1)
+        {
+            args[i] = implicitConvertTo(args[i], function_.args[i].type, loc);
+        }
+        this.function_ = function_;
+        this.args = args;
+        this.loc = loc;
+    }
+
+    Type type()
+    {
+        return this.function_.ret;
+    }
+
+    int emit(Generator output)
+    {
+        int[] regs = new int[](this.args.length);
+        for (int i = 0; i < this.args.length; i = i + 1) {
+            regs[i] = this.args[i].emit(output);
+        }
+        return output.fun.call(this.type().emit(output.platform), this.function_.name, regs);
+    }
+}
+
+class FuncPtrCall : Expression
+{
+    Expression funcPtr;
+
+    Expression[] args;
+
+    this(Expression funcPtr, Expression[] args) { this.funcPtr = funcPtr; this.args = args; }
+
+    Type type()
+    {
+        return this.funcPtr.type().instanceOf(FunctionPointer).ret;
+    }
+
+    int emit(Generator output)
+    {
+        int[] regs = new int[](this.args.length);
+        for (int i = 0; i < this.args.length; i = i + 1)
+            regs[i] = this.args[i].emit(output);
+        return output.fun.callFuncPtr(
+            this.type().emit(output.platform), this.funcPtr.emit(output), regs);
+    }
+}
+
+class ClassMethodPtr : Symbol
+{
+    Expression funcPtr;
+
+    Expression thisPtr;
+
+    this(Expression funcPtr, Expression thisPtr) { this.funcPtr = funcPtr; this.thisPtr = thisPtr; }
+}
+
+Expression call(Symbol target, Expression[] args, Loc loc)
+{
+    if (target.instanceOf(Function))
+    {
+        return new Call(target.instanceOf(Function), args, loc);
+    }
+    ClassMethodPtr method = target.instanceOf(ClassMethodPtr);
+    if (method)
+    {
+        Expression[] combinedArgs;
+        combinedArgs = combinedArgs ~ method.thisPtr;
+        for (int i = 0; i < args.length; i = i + 1) combinedArgs = combinedArgs ~ args[i];
+        return new FuncPtrCall(method.funcPtr, combinedArgs);
+    }
+    Expression expr = target.instanceOf(Expression);
+    if (expr && expr.type().instanceOf(FunctionPointer))
+    {
+        return new FuncPtrCall(expr, args);
+    }
+    loc.assert2s(false, "unknown call target");
+}
+
+class ASTCall : ASTSymbol
+{
+    ASTSymbol target;
+
+    ASTSymbol[] args;
+
+    Loc loc;
+
+    this(ASTSymbol target, ASTSymbol[] args, Loc loc)
+    {
+        this.target = target;
+        this.args = args;
+        this.loc = loc;
+    }
+
+    Expression compile(Context context)
+    {
+        Symbol target = this.target.compile(context);
+        Expression[] args = new Expression[](this.args.length);
+        for (int i = 0; i < this.args.length; i = i + 1)
+        {
+            args[i] = beExpression(this.args[i].compile(context));
+        }
+        return call(target, args, this.loc);
+    }
+}
+
+ASTSymbol[] parseSymbolList(Parser parser)
+{
+    ASTSymbol[] args;
+    while (!parser.accept(")"))
+    {
+        if (args.length > 0)
+            parser.expect(",");
+
+        args = args ~ parseExpression(parser);
+    }
+    return args;
+}
+
+ASTCall parseCall(Parser parser, ASTSymbol base)
+{
+    parser.begin();
+    if (!parser.accept("("))
+    {
+        parser.revert();
+        return null;
+    }
+    ASTSymbol[] args = parseSymbolList(parser);
+    parser.commit();
+    return new ASTCall(base, args, parser.loc());
+}
+
+class ASTIndexAccess : ASTSymbol
+{
+    ASTSymbol base;
+
+    ASTSymbol index;
+
+    Loc loc;
+
+    this(ASTSymbol base, ASTSymbol index, Loc loc) {
+        this.base = base;
+        this.index = index;
+        this.loc = loc;
+    }
+
+    Expression compile(Context context)
+    {
+        Expression base = beExpression(this.base.compile(context));
+        Expression index = beExpression(this.index.compile(context));
+
+        Array array_ = base.type().instanceOf(Array);
+        if (array_)
+        {
+            // TODO bounds check
+            base = new ArrayPointer(array_.elementType, base);
+        }
+
+        Pointer basePtr = base.type().instanceOf(Pointer);
+
+        assert(basePtr); // expected pointer for index base
+        assert(index.type().instanceOf(Integer)); // expected int for index value
+
+        Argument[] ptrOffsetArgs = new Argument[](2);
+        ptrOffsetArgs[0] = new Argument("", new Pointer(new Void));
+        ptrOffsetArgs[1] = new Argument("", new Integer);
+        Function ptr_offset = new Function("ptr_offset", new Pointer(new Void), ptrOffsetArgs, true, null);
+        int size = context.platform.size(basePtr.target.emit(context.platform));
+        BinaryOp offset = new BinaryOp("*", index, new Literal(size));
+
+        Expression[] callArgs = new Expression[](2);
+        callArgs[0] = base;
+        callArgs[1] = offset;
+        return new Dereference(new PointerCast(base.type(), new Call(ptr_offset, callArgs, this.loc)));
+    }
+}
+
+ASTIndexAccess parseIndex(Parser parser, ASTSymbol base)
+{
+    parser.begin();
+    if (!parser.accept("["))
+    {
+        parser.revert();
+        return null;
+    }
+    ASTSymbol index = parseExpression(parser);
+    assert(index); // "index expected"
+    if (parser.accept(".."))
+    {
+        ASTSymbol lower = index;
+        ASTSymbol upper = parseExpression(parser);
+        parser.assert_(!!upper, "slice upper bound expected");
+        parser.expect("]");
+        parser.commit();
+        return new ASTArraySlice(base, lower, upper);
+    }
+    parser.expect("]");
+    parser.commit();
+    return new ASTIndexAccess(base, index, parser.loc());
+}
+
+Symbol accessMember(Symbol base, string member)
+{
+    if (base.instanceOf(Expression))
+    {
+        Expression baseExpr = beExpression(base);
+
+        while (baseExpr.type().instanceOf(Pointer)) {
+            baseExpr = new Dereference(baseExpr);
+        }
+        Struct structType = baseExpr.type().instanceOf(Struct);
+        if (structType)
+        {
+            assert2s(baseExpr.instanceOf(Reference), "TODO struct member of value");
+            int memberOffset = -1;
+            for (int i = 0; i < structType.members.length; i = i + 1)
+            {
+                if (structType.members[i].name == member) memberOffset = i;
+            }
+            assert2s2(memberOffset != -1, "no such member ", member);
+            return new StructMember(baseExpr.instanceOf(Reference), memberOffset);
+        }
+        Class classType = baseExpr.type().instanceOf(Class);
+        if (classType)
+        {
+            assert(classType.resolved());
+            ClassMethod[] vtable = classType.vtable();
+            int methodOffset = -1;
+            for (int i = 0; i < vtable.length; i = i + 1)
+                if (vtable[i].name == member) methodOffset = i;
+            Expression asStructPtr = new PointerCast(new Pointer(classType.dataStruct()), baseExpr);
+            if (methodOffset != -1)
+            {
+                Expression classInfo = new Dereference(new PointerCast(
+                    new Pointer(classType.classInfoStruct()), new StructMember(new Dereference(asStructPtr), 0)));
+                // TODO dereference-into-symbol so we can '&' it again
+                StructMember funcPtr = new StructMember(classInfo, methodOffset);
+                return new ClassMethodPtr(funcPtr, baseExpr);
+            }
+
+            ClassMember[] members = classType.allMembers();
+            int memberOffset = -1;
+            for (int i = 0; i < members.length; i = i + 1)
+                if (members[i].name == member) memberOffset = i;
+            assert2s4(memberOffset != -1, "no such member ", member, " in ", classType.name);
+            return new StructMember(new Dereference(asStructPtr), memberOffset);
+        }
+
+        assert(false); // , format!"expected struct/class type for member, not %s of %s"(baseExpr, baseExpr.type));
+    }
+    assert(false); // , format!"expected expression for member access, not %s"(base));
+}
+
+class ASTMember : ASTSymbol
+{
+    ASTSymbol base;
+
+    string member;
+
+    this(ASTSymbol base, string member) { this.base = base; this.member = member; }
+
+    Symbol compile(Context context)
+    {
+        Symbol base = this.base.compile(context);
+        Expression expr = base.instanceOf(Expression);
+
+        if (expr && expr.type().instanceOf(Array) && this.member == "length")
+        {
+            return new ArrayLength(expr);
+        }
+
+        if (expr && expr.type().instanceOf(Array) && this.member == "ptr")
+        {
+            return new ArrayPointer(expr.type().instanceOf(Array).elementType, expr);
+        }
+
+        return accessMember(base, this.member);
+    }
+}
+
+ASTMember parseMember(Parser parser, ASTSymbol base)
+{
+    parser.begin();
+    if (parser.accept("..") || !parser.accept(".")) // don't accept '..'
+    {
+        parser.revert();
+        return null;
+    }
+    string name = parseIdentifier(parser);
+    parser.assert_(name.length, "member expected");
+    parser.commit();
+    return new ASTMember(base, name);
+}
+
+class ASTInstanceOf : ASTSymbol
+{
+    ASTSymbol base;
+
+    ASTType target;
+
+    Loc loc;
+
+    this(ASTSymbol base, ASTType target, Loc loc) {
+        this.base = base;
+        this.target = target;
+        this.loc = loc;
+    }
+
+    Symbol compile(Context context)
+    {
+        Expression base = beExpression(this.base.compile(context));
+        assert(base.type().instanceOf(Class));
+        Class target = this.target.compile(context).instanceOf(Class);
+        assert(target);
+        Symbol instanceOf = accessMember(base, "__instanceof");
+        Expression name = new StringLiteral(target.name);
+        return new PointerCast(target, call(instanceOf, new Expression[](0) ~ name, this.loc));
+    }
+}
+
+ASTSymbol parseInstanceOf(Parser parser, ASTSymbol left)
+{
+    parser.begin();
+    if (!(parser.accept(".") && parser.accept("instanceOf")))
+    {
+        parser.revert();
+        return null;
+    }
+    parser.expect("(");
+    ASTType type = parseType(parser);
+    parser.expect(")");
+    parser.commit();
+    return new ASTInstanceOf(left, type, parser.loc());
+}
+
+ASTSymbol parseProperties(Parser parser, ASTSymbol current)
+{
+    while (true)
+    {
+        bool matched = false;
+        if (!matched) {
+            ASTSymbol expr = parseInstanceOf(parser, current);
+            if (expr)
+            {
+                matched = true;
+                current = expr;
+            }
+        }
+        if (!matched) {
+            ASTSymbol expr = parseCall(parser, current);
+            if (expr)
+            {
+                matched = true;
+                current = expr;
+            }
+        }
+        if (!matched) {
+            ASTSymbol expr = parseMember(parser, current);
+            if (expr)
+            {
+                matched = true;
+                current = expr;
+            }
+        }
+        if (!matched) {
+            ASTSymbol expr = parseIndex(parser, current);
+            if (expr)
+            {
+                matched = true;
+                current = expr;
+            }
+        }
+        if (!matched) return current;
+    }
+}
+
+class ASTDereference : ASTSymbol
+{
+    ASTSymbol base;
+
+    this(ASTSymbol base) { this.base = base; }
+
+    Symbol compile(Context context)
+    {
+        return new Dereference(beExpression(this.base.compile(context)));
+    }
+}
+
+class Dereference : Reference
+{
+    Expression base;
+
+    this(Expression base) { this.base = base; }
+
+    Type type()
+    {
+        Type superType = this.base.type();
+        Pointer pointerType = superType.instanceOf(Pointer);
+        assert(pointerType);
+        return pointerType.target;
+    }
+
+    int emit(Generator output)
+    {
+        int reg = this.emitLocation(output);
+
+        return output.fun.load(this.type().emit(output.platform), reg);
+    }
+
+    int emitLocation(Generator output)
+    {
+        return this.base.emit(output);
+    }
+}
+
+class FunctionReference : Expression
+{
+    Function fun;
+
+    this(Function fun) { this.fun = fun; }
+
+    Type type()
+    {
+        Type[] argTypes = new Type[](this.fun.args.length);
+        for (int i = 0; i < this.fun.args.length; i = i + 1)
+            argTypes[i] = this.fun.args[i].type;
+
+        return new FunctionPointer(this.fun.ret, argTypes);
+    }
+
+    int emit(Generator output)
+    {
+        return output.fun.getFuncPtr(this.fun.name);
+    }
+}
+
+class ASTReference : ASTSymbol
+{
+    ASTSymbol base;
+
+    this(ASTSymbol base) { this.base = base; }
+
+    Expression compile(Context context)
+    {
+        // &function
+        Variable var = this.base.instanceOf(Variable);
+        if (var) {
+            Symbol target = context.namespace.lookup(var.name);
+            Function fun = target.instanceOf(Function);
+
+            if (fun) return new FunctionReference(fun);
+        }
+        Symbol baseExpression = this.base.compile(context);
+
+        assert(baseExpression.instanceOf(Reference));
+
+        return new ReferenceExpression(baseExpression.instanceOf(Reference));
+    }
+}
+
+class ReferenceExpression : Expression
+{
+    Reference base;
+
+    this(Reference base) { this.base = base; }
+
+    Type type()
+    {
+        Type superType = this.base.type();
+
+        return new Pointer(superType);
+    }
+
+    int emit(Generator output)
+    {
+        return this.base.emitLocation(output);
+    }
+}
+
+class SizeOf : Expression
+{
+    Type type_;
+
+    this(Type type_) { this.type_ = type_; }
+
+    Type type() { return new Integer; }
+
+    int emit(Generator output)
+    {
+        int size = output.platform.size(this.type_.emit(output.platform));
+
+        return output.fun.intLiteral(size);
+    }
+}
+
+class NewClassExpression : Expression
+{
+    Class classType;
+
+    this(Class classType) { this.classType = classType; }
+
+    Type type()
+    {
+        return this.classType;
+    }
+
+    int emit(Generator output)
+    {
+        // oh boy.
+        Struct classInfoStruct = this.classType.classInfoStruct();
+        Struct classDataStruct = this.classType.dataStruct();
+        void* voidp = (new Pointer(new Void)).emit(output.platform);
+        int classInfoSize = output.platform.size(classInfoStruct.emit(output.platform));
+        int classInfoPtr = output.fun.call(voidp, "malloc", new int[](0) ~ output.fun.intLiteral(classInfoSize));
+        void* backendStructType = classInfoStruct.emit(output.platform);
+        ClassMethod[] vtable = this.classType.vtable();
+        for (int i = 0; i < vtable.length; i = i + 1) {
+            ClassMethod method = vtable[i];
+            Type funcPtr = method.funcPtrType();
+            int target = output.fun.fieldOffset(backendStructType, classInfoPtr, i);
+            int src = output.fun.getFuncPtr(method.mangle());
+            output.fun.store(funcPtr.emit(output.platform), target, src);
+        }
+        int classDataSize = output.platform.size(classDataStruct.emit(output.platform));
+        int classPtr = output.fun.call(voidp, "malloc", new int[](0) ~ output.fun.intLiteral(classDataSize));
+        int classInfoTarget = output.fun.fieldOffset(classDataStruct.emit(output.platform), classPtr, 0);
+        output.fun.store(voidp, classInfoTarget, classInfoPtr);
+
+        return classPtr;
+    }
+}
+
+class CallCtorExpression : Expression
+{
+    Expression classptr;
+
+    Expression[] args;
+
+    Loc loc;
+
+    this(Expression classptr, Expression[] args, Loc loc) {
+        this.classptr = classptr;
+        this.args = args;
+        this.loc = loc;
+    }
+
+    Type type()
+    {
+        return this.classptr.type();
+    }
+
+    int emit(Generator output)
+    {
+        int reg = this.classptr.emit(output);
+        RegExpr expr = new RegExpr(this.classptr.type(), reg);
+
+        call(accessMember(expr, "this"), this.args, this.loc).emit(output);
+        return reg;
+    }
+}
+
+class ASTNewExpression : ASTSymbol
+{
+    ASTType type;
+
+    ASTSymbol[] args;
+
+    Loc loc;
+
+    this(ASTType type, ASTSymbol[] args, Loc loc) {
+        this.type = type;
+        this.args = args;
+        this.loc = loc;
+    }
+
+    Symbol compile(Context context)
+    {
+        Type type = this.type.compile(context);
+
+        Class classType = type.instanceOf(Class);
+        if (classType) {
+            Expression classptr = new NewClassExpression(classType);
+
+            Expression[] argExpressions = new Expression[](this.args.length);
+            for (int i = 0; i < this.args.length; i = i + 1)
+                argExpressions[i] = beExpression(this.args[i].compile(context));
+            assert(!!classType); // , format!"expected new <class>, not %s"(type));
+            return new CallCtorExpression(classptr, argExpressions, this.loc);
+        }
+        Array arrayType = type.instanceOf(Array);
+        if (arrayType) {
+            assert(this.args.length == 1);
+
+            SizeOf elementSize = new SizeOf(arrayType.elementType);
+            // TODO only compute length once
+            Expression length = beExpression(this.args[0].compile(context));
+            BinaryOp byteLength = new BinaryOp("*", elementSize, length);
+
+            Argument[] mallocArgs = new Argument[](1);
+            mallocArgs[0] = new Argument("", new Integer);
+            Function malloc = new Function("malloc", new Pointer(new Void), mallocArgs, true, null);
+
+            Expression[] mallocParams = new Expression[](1);
+            mallocParams[0] = byteLength;
+            PointerCast dataPtr = new PointerCast(
+                new Pointer(arrayType.elementType),
+                call(malloc, mallocParams, this.loc));
+
+            return new ArrayExpression(dataPtr, length);
+        }
+        assert(false); // format!"don't know how to allocate %s"(type));
+    }
+}
+
+ASTSymbol parseExpressionLeaf(Parser parser)
+{
+    if (parser.accept("*"))
+    {
+        ASTSymbol next = parseExpressionLeaf(parser);
+
+        assert(next);
+        return new ASTDereference(next);
+    }
+    if (parser.accept("&"))
+    {
+        ASTSymbol next = parseExpressionLeaf(parser);
+
+        assert(next);
+        return new ASTReference(next);
+    }
+    if (acceptIdentifier(parser, "new"))
+    {
+        ASTType type = parseType(parser);
+        ASTSymbol[] args;
+        if (parser.accept("("))
+        {
+            args = parseSymbolList(parser);
+        }
+
+        return new ASTNewExpression(type, args, parser.loc());
+    }
+    if (parser.accept("!"))
+    {
+        ASTSymbol next = parseExpressionLeaf(parser);
+
+        assert(next);
+        return new ASTNegation(next, parser.loc());
+    }
+    ASTSymbol currentExpr = parseExpressionBase(parser);
+    assert(currentExpr);
+    return parseProperties(parser, currentExpr);
+}
+
+class Variable : ASTSymbol
+{
+    string name;
+
+    this(string name) { this.name = name; }
+
+    Symbol compile(Context context)
+    {
+        Symbol symbol = context.namespace.lookup(this.name);
+        if (!symbol) {
+            print(ssJoin(this.name, " not found"));
+            assert(false);
+        }
+        return symbol;
+    }
+}
+
+class ASTLiteral : ASTSymbol
+{
+    int value;
+
+    this(int value) { this.value = value; }
+
+    Symbol compile(Context context)
+    {
+        return new Literal(this.value);
+    }
+}
+
+class Literal : Expression
+{
+    int value;
+
+    this(int value) { this.value = value; }
+
+    Type type()
+    {
+        return new Integer;
+    }
+
+    int emit(Generator output)
+    {
+        return output.fun.intLiteral(this.value);
+    }
+}
+
+class ASTStringLiteral : ASTSymbol
+{
+    string text;
+
+    this(string text) { this.text = text; }
+
+    Symbol compile(Context context)
+    {
+        return new StringLiteral(this.text);
+    }
+}
+
+class StringLiteral : Expression
+{
+    string text;
+
+    this(string text) { this.text = text; }
+
+    Type type()
+    {
+        return new Array(new Character);
+    }
+
+    int emit(Generator output)
+    {
+        void* voidp = output.platform.pointerType(output.platform.voidType());
+        // TODO allocaless
+        void* structType = this.type().emit(output.platform);
+        int structReg = output.fun.alloca(structType);
+        int ptrField = output.fun.fieldOffset(structType, structReg, 0);
+        int lenField = output.fun.fieldOffset(structType, structReg, 1);
+
+        output.fun.store(voidp, ptrField, output.fun.stringLiteral(this.text));
+        output.fun.store(output.platform.intType(), lenField, output.fun.intLiteral(this.text.length));
+        return output.fun.load(structType, structReg);
+    }
+}
+
+string replaceEscapes(string text)
+{
+    string result;
+    int i;
+    while (i < text.length)
+    {
+        string ch = text[i .. i + 1];
+        i = i + 1;
+        if (ch == "\\")
+        {
+            string ctl = text[i .. i + 1];
+            i = i + 1;
+            if (ctl == "r") {
+                result = ssJoin(result, "\r");
+            } else if (ctl == "n") {
+                result = ssJoin(result, "\n");
+            } else if (ctl == "t") {
+                result = ssJoin(result, "\t");
+            } else if (ctl == "\"") {
+                result = ssJoin(result, "\"");
+            } else if (ctl == "\\") {
+                result = ssJoin(result, "\\");
+            } else {
+                print(ssJoin("Unknown control sequence \\", ctl));
+                assert(false);
+            }
+        }
+        else
+        {
+            result = ssJoin(result, ch);
+        }
+    }
+    return result;
+}
+
+ASTStringLiteral parseStringLiteral(Parser parser, string endMarker)
+{
+    string str;
+    while (parser.text().length < endMarker.length || parser.text()[0 .. endMarker.length] != endMarker)
+    {
+        if (parser.text().length == 0)
+        {
+            parser.fail("expected end of string, got end of file");
+        }
+        if (parser.text()[0 .. 1] == "\\") {
+            str = ssJoin(str, parser.text()[0 .. 1]);
+            *parser.textp() = parser.text()[1 .. parser.text().length];
+        }
+        str = ssJoin(str, parser.text()[0 .. 1]);
+        *parser.textp() = parser.text()[1 .. parser.text().length];
+    }
+    if (!parser.accept(endMarker))
+    {
+        parser.fail("this should never happen");
+    }
+
+    return new ASTStringLiteral(replaceEscapes(str));
+}
+
+ASTSymbol parseExpressionBase(Parser parser)
+{
+    string name = parseIdentifier(parser);
+    if (name.length)
+    {
+        return new Variable(name);
+    }
+    int i;
+    if (parseNumber(parser, &i))
+    {
+        return new ASTLiteral(i);
+    }
+    if (parser.accept("\""))
+    {
+        return parseStringLiteral(parser, "\"");
+    }
+    if (parser.accept("("))
+    {
+        ASTSymbol result = parseExpression(parser);
+
+        parser.expect(")");
+        return result;
+    }
+    parser.fail("Base expression expected.");
+    assert(false);
+}
+
+class BoolOr : Expression
+{
+    Expression left;
+
+    Expression right;
+
+    this(Expression left, Expression right)
+    {
+        this.left = left;
+        this.right = right;
+    }
+
+    Type type() { return new Integer; }
+
+    int emit(Generator output)
+    {
+        /**
+         * result = left;
+         * if (left) goto past;
+         * result = right;
+         * past:
+         */
+        void* intType = output.platform.intType();
+        int result = output.fun.alloca(intType);
+
+        int leftValue = this.left.emit(output);
+        output.fun.store(intType, result, leftValue);
+
+        TestBranchRecord condBranch = output.fun.testBranch(leftValue); // if (left)
+        condBranch.resolveElse(output.fun.blockIndex());
+
+        int rightValue = this.right.emit(output);
+        output.fun.store(intType, result, rightValue);
+
+        BranchRecord exitBranch = output.fun.branch();
+        condBranch.resolveThen(output.fun.blockIndex());
+        exitBranch.resolve(output.fun.blockIndex());
+
+        return output.fun.load(intType, result);
+    }
+}
+
+class BoolAnd : Expression
+{
+    Expression left;
+
+    Expression right;
+
+    this(Expression left, Expression right)
+    {
+        this.left = left;
+        this.right = right;
+    }
+
+    Type type() { return new Integer; }
+
+    int emit(Generator output)
+    {
+        /**
+         * result = left;
+         * if (left) result = right;
+         */
+        void* intType = output.platform.intType();
+        int result = output.fun.alloca(intType);
+
+        int leftValue = this.left.emit(output);
+        output.fun.store(intType, result, leftValue);
+
+        TestBranchRecord condBranch = output.fun.testBranch(leftValue); // if (left)
+        condBranch.resolveThen(output.fun.blockIndex());
+
+        int rightValue = this.right.emit(output);
+        output.fun.store(intType, result, rightValue);
+
+        BranchRecord exitBranch = output.fun.branch();
+        condBranch.resolveElse(output.fun.blockIndex());
+        exitBranch.resolve(output.fun.blockIndex());
+
+        return output.fun.load(intType, result);
+    }
+}
+
+class ArrayCat : Expression
+{
+    Expression left;
+
+    Expression right;
+
+    this(Expression left, Expression right) { this.left = left; this.right = right; }
+
+    Type type() {
+        Array leftArray = this.left.type().instanceOf(Array);
+        assert(leftArray);
+        assert(this.right.type().same(leftArray.elementType));
+
+        return leftArray;
+    }
+
+    int emit(Generator output)
+    {
+        // TODO simplify this?
+        int leftReg = this.left.emit(output);
+        Array leftType = this.left.type().instanceOf(Array);
+        assert(leftType);
+        int leftLen = getArrayLen(output, leftType, leftReg);
+        int leftPtr = getArrayPtr(output, leftType, leftReg);
+        int elementSize = output.fun.intLiteral(output.platform.size(leftType.elementType.emit(output.platform)));
+        // size = sizeof(T) * (array.length + 1)
+        int oldSize = output.fun.binop("*", leftLen, elementSize);
+        int newSize = output.fun.binop("+", oldSize, elementSize);
+        void* voidp = (new Pointer(new Void)).emit(output.platform);
+
+        int newArrayPtr = output.fun.call(voidp, "malloc", new int[](0) ~ newSize);
+        output.fun.call((new Void).emit(output.platform), "memcpy", new int[](0) ~ newArrayPtr ~ leftPtr ~ oldSize);
+        // *(ptr + prevLength) = right;
+        int newElement = output.fun.call(voidp, "ptr_offset", new int[](0) ~ newArrayPtr ~ oldSize);
+        output.fun.store(this.right.type().emit(output.platform), newElement, this.right.emit(output));
+
+        // return ptr[0 .. prevLength + 1];
+        int newArrayLen = output.fun.binop("+", leftLen, output.fun.intLiteral(1));
+        return makeArray(output, leftType.elementType, newArrayPtr, newArrayLen);
+    }
+}
+
+class ASTBinaryOp : ASTSymbol
+{
+    string op;
+
+    ASTSymbol left;
+
+    ASTSymbol right;
+
+    this(string op, ASTSymbol left, ASTSymbol right) { this.op = op; this.left = left; this.right = right; }
+
+    Expression compile(Context context)
+    {
+        Expression left = beExpression(this.left.compile(context));
+        Expression right = beExpression(this.right.compile(context));
+        if (this.op == "~")
+            return new ArrayCat(left, right);
+        if (this.op == "&&")
+            return new BoolAnd(left, right);
+        if (this.op == "||")
+            return new BoolOr(left, right);
+        if (this.op == "==" && left.type().instanceOf(Array) && right.type().instanceOf(Array))
+            return new ArrayEqual(left, right);
+
+        return new BinaryOp(this.op, left, right);
+    }
+}
+
+ASTSymbol parseAddSubCat(Parser parser, ASTSymbol left, int myLevel)
+{
+    while (true)
+    {
+        if (parser.accept("+"))
+        {
+            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+            left = new ASTBinaryOp("+", left, right);
+        }
+        else if (parser.accept("-"))
+        {
+            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+            left = new ASTBinaryOp("-", left, right);
+        }
+        else if (parser.accept("~"))
+        {
+            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+            left = new ASTBinaryOp("~", left, right);
+        }
+        else return left;
+    }
+}
+
+ASTSymbol parseMul(Parser parser, ASTSymbol left, int myLevel)
+{
+    while (true)
+    {
+        if (parser.accept("*"))
+        {
+            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+            left = new ASTBinaryOp("*", left, right);
+        }
+        else return left;
+    }
+}
+
+ASTSymbol parseBoolAnd(Parser parser, ASTSymbol left, int myLevel)
+{
+    while (true)
+    {
+        if (parser.accept("&&"))
+        {
+            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+            left = new ASTBinaryOp("&&", left, right);
+        } else return left;
+    }
+}
+
+ASTSymbol parseBoolOr(Parser parser, ASTSymbol left, int myLevel)
+{
+    while (true)
+    {
+        if (parser.accept("||"))
+        {
+            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+            left = new ASTBinaryOp("||", left, right);
+        } else return left;
+    }
+}
+
+class ASTNegation : ASTSymbol
+{
+    ASTSymbol next;
+
+    Loc loc;
+
+    this(ASTSymbol next, Loc loc) { this.next = next; this.loc = loc; }
+
+    Expression compile(Context context)
+    {
+        return new Negation(
+            implicitConvertTo(
+                beExpression(this.next.compile(context)),
+                new Integer, this.loc));
+    }
+}
+
+class Negation : Expression
+{
+    Expression next;
+
+    this(Expression next) { this.next = next; }
+
+    Type type()
+    {
+        return new Integer;
+    }
+
+    int emit(Generator output)
+    {
+        int[] next = new int[](1);
+        next[0] = this.next.emit(output);
+
+        return output.fun.call(output.platform.intType(), "cxruntime_int_negate", next);
+    }
+}
+
+ASTSymbol parseComparison(Parser parser, ASTSymbol left, int myLevel)
+{
+    if (parser.accept("=="))
+    {
+        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+        return new ASTBinaryOp("==", left, right);
+    }
+    if (parser.accept("!=")) // same as !(a == b)
+    {
+        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+        return new ASTNegation(new ASTBinaryOp("==", left, right), parser.loc());
+    }
+    if (parser.accept(">="))
+    {
+        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+        return new ASTBinaryOp(">=", left, right);
+    }
+    if (parser.accept(">")) // same as !(a == b)
+    {
+        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+        return new ASTBinaryOp(">", left, right);
+    }
+    if (parser.accept("<=")) // same as !(a == b)
+    {
+        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+        return new ASTBinaryOp("<=", left, right);
+    }
+    if (parser.accept("<")) // same as !(a == b)
+    {
+        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+        return new ASTBinaryOp("<", left, right);
+    }
+    return left;
+}
+
+ASTSymbol parseArithmetic(Parser parser, int level)
+{
+    ASTSymbol left = parseExpressionLeaf(parser);
+
+    if (level <= 4)
+    {
+        left = parseMul(parser, left, 4);
+    }
+    if (level <= 3)
+    {
+        left = parseAddSubCat(parser, left, 3);
+    }
+    if (level <= 2)
+    {
+        left = parseComparison(parser, left, 2);
+    }
+    if (level <= 1)
+    {
+        left = parseBoolAnd(parser, left, 1);
+    }
+    if (level <= 0)
+    {
+        left = parseBoolOr(parser, left, 0);
+    }
+    return left;
+}
+
+ASTSymbol parseExpression(Parser parser)
+{
+    return parseArithmetic(parser, 0);
+}
+
+class ReturnStatement : Statement
+{
+    Expression value;
+
+    this(Expression value) { this.value = value; }
+
+    void emit(Generator output)
+    {
+        int reg = this.value.emit(output);
+
+        output.fun.ret(reg);
+    }
+}
+
+class ASTReturnStatement : ASTStatement
+{
+    ASTSymbol value;
+
+    this(ASTSymbol value) { this.value = value; }
+
+    Statement compile(Context context)
+    {
+        Expression expr = beExpression(this.value.compile(context));
+
+        return new ReturnStatement(expr);
+    }
+}
+
+class ASTVoidExpression : ASTSymbol
+{
+    this() { }
+    Expression compile(Context context) { return new VoidExpression; }
+}
+
+class VoidExpression : Expression
+{
+    this() { }
+    Type type() { return new Void; }
+    int emit(Generator generator)
+    {
+        return generator.fun.voidLiteral();
+    }
+}
+
+ASTReturnStatement parseReturn(Parser parser)
+{
+    parser.begin();
+    string identifier = parseIdentifier(parser);
+    if (identifier != "return")
+    {
+        parser.revert();
+        return null;
+    }
+    ASTSymbol expr;
+    if (parser.accept(";")) // return;
+    {
+        expr = new ASTVoidExpression;
+    }
+    else
+    {
+        expr = parseExpression(parser);
+        parser.expect(";");
+    }
+    parser.commit();
+    return new ASTReturnStatement(expr);
+}
+
+class StructMemberDeclaration
+{
+    string name;
+
+    Type type;
+
+    this(string name, Type type)
+    {
+        this.name = name;
+        this.type = type;
+    }
+}
+
+class Struct : Type
+{
+    string name;
+
+    StructMemberDeclaration[] members;
+
+    this(string name, StructMemberDeclaration[] members)
+    {
+        this.name = name;
+        this.members = members;
+    }
+
+    bool same(Type other) {
+        Struct otherStruct = other.instanceOf(Struct);
+        if (!otherStruct || otherStruct.members.length != this.members.length) return false;
+        for (int i = 0; i < this.members.length; i = i + 1)
+        {
+            if (!this.members[i].type.same(otherStruct.members[i].type)) return false;
+        }
+        return true;
+    }
+
+    void* emit(Platform platform)
+    {
+        void*[] memberTypes = new void*[](this.members.length);
+        for (int i = 0; i < this.members.length; i = i + 1)
+        {
+            memberTypes[i] = this.members[i].type.emit(platform);
+        }
+        return platform.structType(memberTypes);
+    }
+
+    string repr() { return this.name; }
+}
+
+class StructMember : Reference
+{
+    Reference base;
+
+    int index;
+
+    this(Reference base, int index)
+    {
+        this.base = base;
+        this.index = index;
+    }
+
+    Type type()
+    {
+        Type type = this.base.type();
+        Struct structType = type.instanceOf(Struct);
+        assert(structType);
+        return structType.members[this.index].type;
+    }
+
+    int emit(Generator output)
+    {
+        int locationReg = this.emitLocation(output);
+
+        return output.fun.load(this.type().emit(output.platform), locationReg);
+    }
+
+    int emitLocation(Generator output)
+    {
+        int reg = this.base.emitLocation(output);
+
+        return output.fun.fieldOffset(this.base.type().emit(output.platform), reg, this.index);
+    }
+}
+
+class StackFrame : Reference
+{
+    Type targetType;
+
+    this(Type targetType) { this.targetType = targetType; }
+
+    Type type()
+    {
+        return this.targetType;
+    }
+
+    int emit(Generator generator)
+    {
+        assert(false);
+    }
+
+    int emitLocation(Generator generator)
+    {
+        return generator.frameReg;
+    }
+}
+
+class FunctionScope : Namespace
+{
+    Type[] variableTypes;
+
+    this(Namespace parent) { this.parent = parent; }
+
+    StructMember declare(Type type)
+    {
+        this.variableTypes = this.variableTypes ~ type;
+
+        return new StructMember(
+            new StackFrame(this.structType()),
+            this.variableTypes.length - 1);
+    }
+
+    Struct structType()
+    {
+        StructMemberDeclaration[] members = new StructMemberDeclaration[](this.variableTypes.length);
+        for (int i = 0; i < this.variableTypes.length; i = i + 1)
+        {
+            members[i] = new StructMemberDeclaration("", this.variableTypes[i]);
+        }
+        return new Struct("", members);
+    }
+
+    Symbol lookup(string name)
+    {
+        assert(this.parent);
+        return this.parent.lookup(name);
+    }
+}
+
+FunctionScope findFunctionScope(Namespace namespace)
+{
+    FunctionScope functionScope = namespace.instanceOf(FunctionScope);
+    if (functionScope) return functionScope;
+    assert(namespace.parent);
+    return findFunctionScope(namespace.parent);
+}
+
+class AssignStatement : Statement
+{
+    Reference target;
+
+    Expression value;
+
+    this(Reference target, Expression value) { this.target = target; this.value = value; }
+
+    void emit(Generator output)
+    {
+        Type targetType = this.target.type();
+        Type valueType = this.value.type();
+        /*assert(targetType == valueType,
+                format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
+
+        int target_reg = this.target.emitLocation(output);
+        int value_reg = this.value.emit(output);
+
+        output.fun.store(valueType.emit(output.platform), target_reg, value_reg);
+    }
+}
+
+class NoopStatement : Statement
+{
+    this() { }
+
+    void emit(Generator generator)
+    {
+    }
+}
+
+class DeclaredVariable
+{
+    string name;
+
+    Expression value;
+
+    this(string name, Expression value) { this.name = name; this.value = value; }
+}
+
+class VarDeclScope : Namespace
+{
+    DeclaredVariable[] declarations;
+
+    bool frameBase; // base of function frame. all variables here are parameters.
+
+    this(Namespace parent, bool frameBase)
+    {
+        this.parent = parent;
+        this.frameBase = frameBase;
+    }
+
+    Statement declare(string name, Type type, Expression value, Loc loc)
+    {
+        StructMember member = findFunctionScope(this).declare(type);
+
+        this.appendDeclaration(name, member);
+        return new AssignStatement(member, implicitConvertTo(value, type, loc));
+    }
+
+    Statement declareZeroInit(string name, Type type)
+    {
+        StructMember member = findFunctionScope(this).declare(type);
+
+        this.appendDeclaration(name, member);
+        return new NoopStatement;
+    }
+
+    void appendDeclaration(string name, StructMember member)
+    {
+        this.declarations = this.declarations ~ new DeclaredVariable(name, member);
+    }
+
+    Symbol lookup(string name)
+    {
+        for (int i = 0; i < this.declarations.length; i = i + 1)
+        {
+            if (this.declarations[i].name == name)
+            {
+                return this.declarations[i].value;
+            }
+        }
+        if (this.parent)
+            return this.parent.lookup(name);
+        return null;
+    }
+}
+
+VarDeclScope findVarDeclScope(Namespace namespace)
+{
+    VarDeclScope varDeclScope = namespace.instanceOf(VarDeclScope);
+    if (varDeclScope) return varDeclScope;
+    assert(namespace.parent);
+    return findVarDeclScope(namespace.parent);
+}
+
+class ASTIfStatement : ASTStatement
+{
+    ASTSymbol test;
+
+    ASTStatement then;
+
+    ASTStatement else_;
+
+    this(ASTSymbol test, ASTStatement then, ASTStatement else_)
+    {
+        this.test = test;
+        this.then = then;
+        this.else_ = else_;
+    }
+
+    Statement compile(Context context)
+    {
+        VarDeclScope ifscope = new VarDeclScope(context.namespace, false);
+        Symbol test = this.test.compile(context.withNamespace(ifscope));
+        Statement then = this.then.compile(context.withNamespace(ifscope));
+        Statement else_;
+        if (this.else_) {
+            VarDeclScope elsescope = new VarDeclScope(context.namespace, false);
+            else_ = this.else_.compile(context.withNamespace(elsescope));
+        }
+
+        return new IfStatement(beExpression(test), then, else_);
+    }
+}
+
+class IfStatement : Statement
+{
+    Expression test;
+
+    Statement then;
+
+    Statement else_;
+
+    this(Expression test, Statement then, Statement else_)
+    {
+        this.test = test;
+        this.then = then;
+        this.else_ = else_;
+    }
+
+    void emit(Generator output)
+    {
+        int reg = this.test.emit(output);
+
+        TestBranchRecord tbrRecord = output.fun.testBranch(reg);
+
+        tbrRecord.resolveThen(output.fun.blockIndex());
+        this.then.emit(output);
+        BranchRecord brRecord = output.fun.branch();
+        tbrRecord.resolveElse(output.fun.blockIndex());
+
+        if (this.else_)
+        {
+            this.else_.emit(output);
+            BranchRecord elseBrRecord = output.fun.branch();
+
+            elseBrRecord.resolve(output.fun.blockIndex());
+        }
+        brRecord.resolve(output.fun.blockIndex());
+    }
+}
+
+ASTIfStatement parseIf(Parser parser)
+{
+    parser.begin();
+    string identifier = parseIdentifier(parser);
+    if (identifier != "if")
+    {
+        parser.revert();
+        return null;
+    }
+    parser.expect("(");
+    ASTSymbol expr = parseExpression(parser);
+    parser.expect(")");
+    ASTStatement thenStmt = parseStatement(parser);
+    ASTStatement elseStatement;
+    if (parser.accept("else"))
+    {
+        elseStatement = parseStatement(parser);
+    }
+    parser.commit();
+    return new ASTIfStatement(expr, thenStmt, elseStatement);
+}
+
+class ASTScopeStatement : ASTStatement
+{
+    ASTStatement[] statements;
+
+    this(ASTStatement[] statements) { this.statements = statements; }
+
+    Statement compile(Context context)
+    {
+        VarDeclScope subscope = new VarDeclScope(context.namespace, false);
+
+        Statement[] statements = new Statement[](this.statements.length);
+        for (int i = 0; i < this.statements.length; i = i + 1)
+        {
+            statements[i] = this.statements[i].compile(context.withNamespace(subscope));
+        }
+        return new SequenceStatement(statements);
+    }
+}
+
+class SequenceStatement : Statement
+{
+    Statement[] statements;
+
+    this(Statement[] statements) { this.statements = statements; }
+
+    void emit(Generator output)
+    {
+        for (int i = 0; i < this.statements.length; i = i + 1)
+        {
+            this.statements[i].emit(output);
+        }
+    }
+}
+
+ASTScopeStatement parseScope(Parser parser)
+{
+    if (!parser.accept("{"))
+    {
+        return null;
+    }
+    ASTStatement[] statements;
+    while (!parser.accept("}"))
+    {
+        ASTStatement stmt = parseStatement(parser);
+
+        statements = statements ~ stmt;
+    }
+    return new ASTScopeStatement(statements);
+}
+
+class ASTAssignStatement : ASTStatement
+{
+    ASTSymbol target;
+
+    ASTSymbol value;
+
+    Loc loc;
+
+    this(ASTSymbol target, ASTSymbol value, Loc loc)
+    {
+        this.target = target;
+        this.value = value;
+        this.loc = loc;
+    }
+
+    Statement compile(Context context)
+    {
+        Symbol target = this.target.compile(context);
+        Expression value = beExpression(this.value.compile(context));
+        Reference targetref = target.instanceOf(Reference);
+        value = implicitConvertTo(value, targetref.type(), this.loc);
+        if (!targetref) {
+            print("target of assignment must be a reference");
+            assert(false);
+        }
+        return new AssignStatement(targetref, value);
+    }
+}
+
+class AssignStatement : Statement
+{
+    Reference target;
+
+    Expression value;
+
+    this(Reference target, Expression value) { this.target = target; this.value = value; }
+
+    void emit(Generator output)
+    {
+        Type targetType = this.target.type();
+        Type valueType = this.value.type();
+
+        // TODO
+        /*assert(targetType == valueType,
+                format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
+
+        int target_reg = this.target.emitLocation(output);
+        int value_reg = this.value.emit(output);
+
+        output.fun.store(valueType.emit(output.platform), target_reg, value_reg);
+    }
+}
+
+ASTAssignStatement parseAssignment(Parser parser)
+{
+    parser.begin();
+    ASTSymbol lhs = parseExpressionLeaf(parser);
+    if (!lhs || !parser.accept("="))
+    {
+        parser.revert();
+        return null;
+    }
+    ASTSymbol expr = parseExpression(parser);
+    parser.commit();
+    return new ASTAssignStatement(lhs, expr, parser.loc());
+}
+
+ASTAssignStatement parseAssignStatement(Parser parser)
+{
+    ASTAssignStatement ret = parseAssignment(parser);
+    if (ret)
+    {
+        parser.expect(";");
+        return ret;
+    }
+    return null;
+}
+
+class ASTVarDeclStatement : ASTStatement
+{
+    string name;
+
+    ASTType type;
+
+    ASTSymbol initial;
+
+    Loc loc;
+
+    this(string name, ASTType type, ASTSymbol initial, Loc loc)
+    {
+        this.name = name;
+        this.type = type;
+        this.initial = initial;
+        this.loc = loc;
+    }
+
+    Statement compile(Context context)
+    {
+        if (this.initial)
+        {
+            Symbol initial = this.initial.compile(context);
+
+            return findVarDeclScope(context.namespace).declare(
+                this.name, this.type.compile(context), beExpression(initial), this.loc);
+        }
+        else
+        {
+            return findVarDeclScope(context.namespace).declareZeroInit(
+                this.name, this.type.compile(context));
+        }
+    }
+}
+
+ASTVarDeclStatement parseVarDecl(Parser parser)
+{
+    parser.begin();
+    ASTType type = parseType(parser);
+    if (!type)
+    {
+        parser.revert();
+        return null;
+    }
+    string name = parseIdentifier(parser);
+    if (!name.length)
+    {
+        parser.revert();
+        return null;
+    }
+    ASTSymbol initial;
+    if (parser.accept("="))
+    {
+        initial = parseExpression(parser);
+        assert(initial);
+    }
+    parser.expect(";");
+    parser.commit();
+    return new ASTVarDeclStatement(name, type, initial, parser.loc());
+}
+
+class ASTWhile : ASTStatement
+{
+    ASTSymbol cond;
+
+    ASTStatement body_;
+
+    this(ASTSymbol cond, ASTStatement body_) { this.cond = cond; this.body_ = body_; }
+
+    Statement compile(Context context)
+    {
+        VarDeclScope subscope = new VarDeclScope(context.namespace, false);
+        Expression condExpr = beExpression(this.cond.compile(context.withNamespace(subscope)));
+        Statement bodyStmt = this.body_.compile(context.withNamespace(subscope));
+
+        return new WhileLoop(condExpr, bodyStmt);
+    }
+}
+
+class WhileLoop : Statement
+{
+    Expression cond;
+
+    Statement body_;
+
+    this(Expression cond, Statement body_) { this.cond = cond; this.body_ = body_; }
+
+    void emit(Generator output)
+    {
+        /**
+         * start:
+         * if (cond) goto body; else goto end;
+         * body:
+         * goto start
+         * end:
+         */
+        BranchRecord start = output.fun.branch(); // start:
+        int startIndex = output.fun.blockIndex();
+
+        start.resolve(startIndex);
+
+        int condReg = this.cond.emit(output);
+        TestBranchRecord condBranch = output.fun.testBranch(condReg); // if (cond)
+
+        condBranch.resolveThen(output.fun.blockIndex()); // goto body
+        this.body_.emit(output);
+        output.fun.branch().resolve(startIndex); // goto start
+        condBranch.resolveElse(output.fun.blockIndex()); // else goto end
+    }
+}
+
+ASTWhile parseWhile(Parser parser)
+{
+    if (!acceptIdentifier(parser, "while"))
+    {
+        return null;
+    }
+    parser.expect("(");
+    ASTSymbol cond = parseExpression(parser);
+    parser.expect(")");
+    ASTStatement body_ = parseStatement(parser);
+
+    return new ASTWhile(cond, body_);
+}
+
+class ASTExprStatement : ASTStatement
+{
+    ASTSymbol value;
+
+    this(ASTSymbol value) { this.value = value; }
+
+    Statement compile(Context context)
+    {
+        return new ExprStatement(beExpression(this.value.compile(context)));
+    }
+}
+
+class ExprStatement : Statement
+{
+    Expression value;
+
+    this(Expression value) { this.value = value; }
+
+    void emit(Generator output)
+    {
+        this.value.emit(output); // discard reg
+    }
+}
+
+ASTExprStatement parseExprStatement(Parser parser)
+{
+    parser.begin();
+    ASTSymbol value = parseExpression(parser);
+    if (!value)
+    {
+        parser.revert();
+        return null;
+    }
+    parser.expect(";");
+    parser.commit();
+    return new ASTExprStatement(value);
+}
+
+class ASTForLoop : ASTStatement
+{
+    ASTVarDeclStatement declareLoopVar;
+
+    ASTSymbol condition;
+
+    ASTStatement step;
+
+    ASTStatement body_;
+
+    this(ASTVarDeclStatement declareLoopVar, ASTSymbol condition, ASTStatement step, ASTStatement body_)
+    {
+        this.declareLoopVar = declareLoopVar;
+        this.condition = condition;
+        this.step = step;
+        this.body_ = body_;
+    }
+
+    Statement compile(Context context)
+    {
+        /*
+         * hack until break/continue:
+         * for (decl; test; step) body
+         * decl; while (test) { body; step; }
+         */
+        Context forscope = context.withNamespace(new VarDeclScope(context.namespace, false));
+
+        Statement decl = this.declareLoopVar.compile(forscope);
+        Expression condition = beExpression(this.condition.compile(forscope));
+        Statement[] loopStatements = new Statement[](2);
+        loopStatements[0] = this.body_.compile(forscope);
+        loopStatements[1] = this.step.compile(forscope);
+        Statement loop = new WhileLoop(condition, new SequenceStatement(loopStatements));
+
+        Statement[] sequenceStatements = new Statement[](2);
+        sequenceStatements[0] = decl;
+        sequenceStatements[1] = loop;
+
+        return new SequenceStatement(sequenceStatements);
+    }
+}
+
+ASTForLoop parseFor(Parser parser)
+{
+    if (!acceptIdentifier(parser, "for"))
+    {
+        return null;
+    }
+    parser.expect("(");
+    ASTVarDeclStatement varDecl = parseVarDecl(parser);
+    ASTSymbol condition = parseExpression(parser);
+    parser.expect(";");
+    ASTStatement step = parseAssignment(parser);
+    parser.expect(")");
+    ASTStatement body_ = parseStatement(parser);
+
+    return new ASTForLoop(varDecl, condition, step, body_);
+}
+
+ASTStatement parseStatement(Parser parser)
+{
+    {
+        ASTStatement stmt = parseReturn(parser);
+        if (stmt) return stmt;
+    }
+    {
+        ASTStatement stmt = parseIf(parser);
+        if (stmt) return stmt;
+    }
+    {
+        ASTStatement stmt = parseWhile(parser);
+        if (stmt) return stmt;
+    }
+    {
+        ASTStatement stmt = parseFor(parser);
+        if (stmt) return stmt;
+    }
+    {
+        ASTStatement stmt = parseScope(parser);
+        if (stmt) return stmt;
+    }
+    {
+        ASTStatement stmt = parseVarDecl(parser);
+        if (stmt) return stmt;
+    }
+    {
+        ASTStatement stmt = parseAssignStatement(parser);
+        if (stmt) return stmt;
+    }
+    {
+        ASTStatement stmt = parseExprStatement(parser);
+        if (stmt) return stmt;
+    }
+    parser.fail("statement expected");
+}
+
+ASTFunction parseFunction(Parser parser)
+{
+    parser.begin();
+    ASTType ret = parseType(parser);
+    if (!ret)
+    {
+        parser.revert();
+        return null;
+    }
+    string name = parseIdentifier(parser);
+    parser.expect("(");
+    ASTArgument[] args = parseIdentifierList(parser);
+    ASTStatement stmt = parseStatement(parser);
+    parser.commit();
+    return new ASTFunction(name, ret, args, false, stmt);
+}
+
+class ModuleEntry
+{
+    string name;
+
+    Symbol value;
+
+    this(string name, Symbol value) { this.name = name; this.value = value; }
+}
+
+class Module : Namespace
+{
+    string name;
+
+    this(string name)
+    {
+        this.parent = null;
+        this.name = name;
+    }
+
+    Module[] imports;
+
+    ModuleEntry[] entries;
+
+    void add(string name, Symbol symbol)
+    {
+        this.entries = this.entries ~ new ModuleEntry(name, symbol);
+    }
+
+    void addImport(Module module_)
+    {
+        this.imports = this.imports ~ module_;
+    }
+
+    void emit(Generator generator)
+    {
+        assert(!generator.fun);
+        // TODO each only once!
+        for (int i = 0; i < this.imports.length; i = i + 1)
+            this.imports[i].emit(generator);
+
+        for (int i = 0; i < this.entries.length; i = i + 1) {
+            ModuleEntry entry = this.entries[i];
+            Class class_ = entry.value.instanceOf(Class);
+            if (class_)
+                class_.resolve();
+        }
+
+        for (int i = 0; i < this.entries.length; i = i + 1) {
+            ModuleEntry entry = this.entries[i];
+            Function fun = entry.value.instanceOf(Function);
+            if (fun && !fun.declaration)
+                fun.emit(generator, new Context(generator.platform, this));
+            Class class_ = entry.value.instanceOf(Class);
+            if (class_) {
+                for (int i = 0; i < class_.methods.length; i = i + 1)
+                    class_.methods[i].emit(generator, this, class_);
+            }
+        }
+    }
+
+    Symbol lookupPublic(string name)
+    {
+        // not counting imports (non-transitive)
+        for (int i = 0; i < this.entries.length; i = i + 1)
+        {
+            if (this.entries[i].name == name)
+                return this.entries[i].value;
+        }
+        return null;
+    }
+
+    Symbol lookup(string name)
+    {
+        Symbol public_ = this.lookupPublic(name);
+        if (public_) return public_;
+        for (int i = 0; i < this.imports.length; i = i + 1)
+        {
+            Symbol entry = this.imports[i].lookupPublic(name);
+            if (entry) return entry;
+        }
+        if (this.parent)
+            return this.parent.lookup(name);
+        return null;
+    }
+}
+
+class NullExpr : Expression
+{
+    Type type_;
+
+    this(Type type_) { this.type_ = type_; }
+
+    Type type()
+    {
+        return this.type_;
+    }
+
+    int emit(Generator generator)
+    {
+        // TODO allocaless
+        // exploit that alloca are zero initialized
+        void* type = this.type_.emit(generator.platform);
+        int reg = generator.fun.alloca(type);
+
+        return generator.fun.load(type, reg);
+    }
+}
+
+class ASTExtern
+{
+    string name;
+
+    ASTType ret;
+
+    ASTArgument[] args;
+
+    this(string name, ASTType ret, ASTArgument[] args)
+    {
+        this.name = name;
+        this.ret = ret;
+        this.args = args;
+    }
+
+    Function compile(Context context)
+    {
+        Argument[] args = new Argument[](this.args.length);
+        for (int i = 0; i < this.args.length; i = i + 1)
+            args[i] = new Argument(this.args[i].name, this.args[i].type.compile(context));
+
+        return new Function(this.name, this.ret.compile(context), args, true, null);
+    }
+}
+
+ASTExtern parseExtern(Parser parser)
+{
+    if (parser.accept("extern"))
+    {
+        parser.expect("(");
+        parser.expect("C");
+        parser.expect(")");
+        ASTType ret = parseType(parser);
+        string name = parseIdentifier(parser);
+        if (!name.length) parser.fail("identifier expected");
+        parser.expect("(");
+        ASTArgument[] args = parseIdentifierList(parser);
+        parser.expect(";");
+        return new ASTExtern(name, ret, args);
+    }
+    return null;
+}
+
+string moduleToFile(string module_)
+{
+    string modulePath;
+    for (int i = 0; i < module_.length; i = i + 1) {
+        if (module_[i .. i + 1] == ".") modulePath = ssJoin(modulePath, "/");
+        else modulePath = ssJoin(modulePath, module_[i .. i + 1]);
+    }
+    return ssJoin(modulePath, ".cx");
+}
+
+string findFile(string filename, string[] includes)
+{
+    if (cxruntime_file_exists(filename))
+        return filename;
+    for (int i = 0; i < includes.length; i = i + 1)
+    {
+        string path = sssJoin(includes[i], "/", filename);
+
+        if (cxruntime_file_exists(path))
+            return path;
+    }
+    print(sssJoin("cannot find file '", filename, "' in includes"));
+    assert(false);
+}
+
+class ASTImport
+{
+    string name;
+
+    this(string name) { this.name = name; }
+}
+
+ASTImport parseImport(Parser parser)
+{
+    if (!parser.accept("import"))
+        return null;
+    string modname = parseIdentifier2(parser, ".");
+    parser.expect(";");
+    return new ASTImport(modname);
+}
+
+class ClassMember
+{
+    string name;
+
+    Type type;
+
+    this(string name, Type type) { this.name = name; this.type = type; }
+}
+
+// TODO merge with class Function
+class ClassMethod : Symbol
+{
+    Class classType;
+
+    string name;
+
+    Type ret;
+
+    Argument[] args;
+
+    ASTStatement statement;
+
+    Statement compiledStatement;
+
+    bool emitted;
+
+    this(Class classType, string name, Type ret, Argument[] args, ASTStatement statement, Statement compiledStatement)
+    {
+        this.classType = classType;
+        this.name = name;
+        this.ret = ret;
+        this.args = args;
+        this.statement = statement;
+        this.compiledStatement = compiledStatement;
+    }
+
+    string mangle()
+    {
+        // TODO mangle types
+        return ssssJoin("_", this.classType.name, "_", this.name);
+    }
+
+    void emit(Generator generator, Namespace module_, Class thisType)
+    {
+        assert(!this.emitted);
+        this.emitted = true;
+
+        assert(!generator.fun);
+        Type voidp = new Pointer(new Void);
+
+        void*[] argTypes = new void*[](this.args.length + 1);
+        argTypes[0] = voidp.emit(generator.platform);
+        for (int i = 0; i < this.args.length; i = i + 1)
+            argTypes[i + 1] = this.args[i].type.emit(generator.platform);
+        generator.fun = generator.mod.define(
+            this.mangle(),
+            this.ret.emit(generator.platform),
+            argTypes
+        );
+
+        if (!this.compiledStatement)
+        {
+            Statement[] argAssignments;
+            FunctionScope stackframe = new FunctionScope(module_);
+            VarDeclScope argscope = new VarDeclScope(stackframe, true);
+
+            argAssignments = argAssignments ~ argscope.declare(
+                "this", thisType, new PointerCast(thisType, new ArgExpr(0, voidp)), null);
+            for (int i = 0; i < this.args.length; i = i + 1) {
+                ArgExpr argExpr = new ArgExpr(i + 1, this.args[i].type);
+
+                argAssignments = argAssignments
+                    ~ argscope.declare(this.args[i].name, this.args[i].type, argExpr, null);
+            }
+
+            this.compiledStatement = this.statement.compile(new Context(generator.platform, argscope));
+
+            generator.frameReg = generator.fun.alloca(stackframe.structType().emit(generator.platform));
+
+            for (int i = 0; i < argAssignments.length; i = i + 1)
+            {
+                argAssignments[i].emit(generator);
+            }
+        }
+
+        this.compiledStatement.emit(generator);
+
+        generator.fun.ret(generator.fun.voidLiteral());
+        generator.frameReg = 0;
+        generator.fun = null;
+    }
+
+    Type funcPtrType()
+    {
+        Type[] argTypes = new Type[](this.args.length);
+        for (int i = 0; i < this.args.length; i = i + 1) argTypes[i] = this.args[i].type;
+        return new FunctionPointer(this.ret, argTypes);
+    }
+}
+
+class Class : Type
+{
+    string name;
+
+    Class superClass;
+
+    // will resolve members and methods as required
+    ASTClassDecl decl;
+
+    // used for resolving
+    Context context;
+
+    ClassMember[] members;
+
+    ClassMethod[] methods;
+
+    this(ASTClassDecl decl, Class superClass, Context context)
+    {
+        assert(decl);
+        this.name = decl.name;
+        this.superClass = superClass;
+        this.decl = decl;
+        this.context = context;
+    }
+
+    void resolve()
+    {
+        this.decl.compile2(this.context, this);
+        this.decl = null;
+    }
+
+    bool resolved() { return !this.decl; }
+
+    void* emit(Platform platform)
+    {
+        return platform.pointerType(platform.voidType());
+    }
+
+    ClassMember[] allMembers()
+    {
+        if (!this.superClass)
+        {
+            ClassMember[] members = new ClassMember[](this.members.length + 1);
+            members[0] = new ClassMember("__classinfo", new Pointer(new Void));
+            for (int i = 0; i < this.members.length; i = i + 1)
+                members[i + 1] = this.members[i];
+            return members;
+        }
+        ClassMember[] members = this.superClass.allMembers();
+        for (int i = 0; i < this.members.length; i = i + 1)
+            members = members ~ this.members[i];
+        return members;
+    }
+
+    Struct dataStruct()
+    {
+        ClassMember[] allMembers = this.allMembers();
+
+        StructMemberDeclaration[] structMembers = new StructMemberDeclaration[](allMembers.length);
+        for (int i = 0; i < allMembers.length; i = i + 1)
+            structMembers[i] = new StructMemberDeclaration(allMembers[i].name, allMembers[i].type);
+
+        return new Struct("", structMembers);
+    }
+
+    Struct classInfoStruct()
+    {
+        ClassMethod[] vtable = this.vtable();
+
+        StructMemberDeclaration[] vtableMembers = new StructMemberDeclaration[](vtable.length);
+        for (int i = 0; i < vtable.length; i = i + 1)
+            vtableMembers[i] = new StructMemberDeclaration(vtable[i].name, vtable[i].funcPtrType());
+
+        return new Struct("", vtableMembers);
+    }
+
+    ClassMethod[] vtable()
+    {
+        ClassMethod[] combinedMethods;
+        if (this.superClass) combinedMethods = this.superClass.vtable();
+
+        for (int i = 0; i < this.methods.length; i = i + 1) {
+            ClassMethod method = this.methods[i];
+
+            // TODO match types
+            int index = -1;
+            for (int i = 0; i < combinedMethods.length; i = i + 1)
+            {
+                if (combinedMethods[i].name == method.name) index = i;
+            }
+            if (index != -1)
+                // override
+                combinedMethods[index] = method;
+            else
+                combinedMethods = combinedMethods ~ method;
+        }
+
+        return combinedMethods;
+    }
+
+    void genInstanceofMethod()
+    {
+        Type voidp = new Pointer(new Void);
+        Array stringType = new Array(new Character);
+
+        Statement[] castStmts;
+        ArgExpr thisptr = new ArgExpr(0, voidp);
+        ArgExpr target = new ArgExpr(1, stringType);
+        NullExpr nullptr = new NullExpr(voidp);
+        Class current = this;
+        while (current)
+        {
+            ArrayEqual test = new ArrayEqual(target, new StringLiteral(current.name));
+            Statement cmp = new IfStatement(test, new ReturnStatement(thisptr), null);
+
+            castStmts = castStmts ~ cmp;
+            current = current.superClass;
+        }
+        Statement ret = new ReturnStatement(nullptr);
+        castStmts = castStmts ~ ret;
+
+        SequenceStatement stmt = new SequenceStatement(castStmts);
+
+        this.methods = this.methods ~ new ClassMethod(
+            this, "__instanceof", voidp, new Argument[](0) ~ new Argument("target", stringType), null, stmt);
+    }
+
+    bool same(Type other) {
+        Class otherClass = other.instanceOf(Class);
+
+        return otherClass && otherClass.name == this.name; // TODO module
+    }
+
+    string repr() { return this.name; }
+}
+
+class ClassScope : Namespace
+{
+    Class class_;
+
+    this(Namespace parent, Class class_)
+    {
+        this.parent = parent;
+        this.class_ = class_;
+    }
+
+    Symbol lookup(string name)
+    {
+        if (name == this.class_.name)
+        {
+            return this.class_;
+        }
+        return this.parent.lookup(name);
+    }
+}
+
+class ASTClassDeclMember
+{
+    string name;
+
+    ASTType type;
+
+    this(string name, ASTType type) { this.name = name; this.type = type; }
+}
+
+class ASTClassDeclMethod
+{
+    string name;
+
+    ASTType ret;
+
+    ASTArgument[] args;
+
+    ASTStatement body_;
+
+    this(string name, ASTType ret, ASTArgument[] args, ASTStatement body_) {
+        this.name = name;
+        this.ret = ret;
+        this.args = args;
+        this.body_ = body_;
+    }
+}
+
+class ASTClassDecl : ASTType
+{
+    string name;
+
+    string superClass;
+
+    ASTClassDeclMember[] members;
+
+    ASTClassDeclMethod[] methods;
+
+    this(string name, string superClass, ASTClassDeclMember[] members, ASTClassDeclMethod[] methods)
+    {
+        this.name = name;
+        this.superClass = superClass;
+        this.members = members;
+        this.methods = methods;
+    }
+
+    Class compile(Context context)
+    {
+        Class superClass = null;
+        if (this.superClass.length)
+        {
+            Symbol superClassObj = context.namespace.lookup(this.superClass);
+            assert(superClassObj); // , format!"super class %s not found"(this.superClass));
+            superClass = superClassObj.instanceOf(Class);
+            assert(superClass);
+        }
+        return new Class(this, superClass, context);
+    }
+
+    void compile2(Context context, Class target)
+    {
+        ClassScope classScope = new ClassScope(context.namespace, target);
+        Context classContext = context.withNamespace(classScope);
+
+        target.members = new ClassMember[](this.members.length);
+        for (int i = 0; i < this.members.length; i = i + 1)
+            target.members[i] = new ClassMember(this.members[i].name, this.members[i].type.compile(classContext));
+
+        target.methods = new ClassMethod[](this.methods.length);
+        for (int i = 0; i < this.methods.length; i = i + 1)
+        {
+            ASTClassDeclMethod method = this.methods[i];
+
+            Argument[] methodArgs = new Argument[](method.args.length);
+            for (int k = 0; k < method.args.length; k = k + 1)
+                methodArgs[k] = new Argument(method.args[k].name, method.args[k].type.compile(classContext));
+
+            target.methods[i] = new ClassMethod(
+                target,
+                method.name,
+                method.ret.compile(classContext),
+                methodArgs,
+                method.body_, null);
+        }
+        target.genInstanceofMethod();
+    }
+}
+
+ASTArgument[] parseArglist(Parser parser)
+{
+    ASTArgument[] args;
+    while (!parser.accept(")"))
+    {
+        if (args.length > 0)
+        {
+            if (!parser.accept(","))
+            {
+                parser.fail("',' or ')' expected");
+            }
+        }
+        ASTType argtype = parseType(parser);
+        parser.assert_(!!argtype, "argument type expected");
+        string argname = parseIdentifier(parser);
+        parser.assert_(argname.length, "argument name expected");
+        args = args ~ new ASTArgument(argname, argtype);
+    }
+    return args;
+}
+
+ASTClassDecl parseClassDecl(Parser parser)
+{
+    if (!acceptIdentifier(parser, "class"))
+    {
+        return null;
+    }
+    string name = parseIdentifier(parser);
+    string superClass;
+    if (parser.accept(":")) {
+        superClass = parseIdentifier(parser);
+        parser.assert_(superClass.length, "expected super class identifier");
+    }
+    ASTClassDeclMember[] members;
+    ASTClassDeclMethod[] methods;
+    parser.expect("{");
+    while (!parser.accept("}"))
+    {
+        ASTType retType;
+        string memberName;
+        if (parser.accept("this"))
+        {
+            retType = new ASTVoid;
+            memberName = "this";
+        }
+        else
+        {
+            retType = parseType(parser);
+            parser.assert_(!!retType, "expected member type");
+            memberName = parseIdentifier(parser);
+            parser.assert_(memberName.length, "expected member name");
+        }
+        if (parser.accept("(")) // method
+        {
+            ASTArgument[] args = parseArglist(parser);
+            ASTStatement stmt = parseStatement(parser);
+            methods = methods ~ new ASTClassDeclMethod(memberName, retType, args, stmt);
+        }
+        else
+        {
+            parser.expect(";");
+            members = members ~ new ASTClassDeclMember(memberName, retType);
+        }
+    }
+    return new ASTClassDecl(name, superClass, members, methods);
+}
+
+Module parseModule(string filename, string[] includes, Platform platform, Module[] defaultImports)
+{
+    string path = findFile(filename, includes);
+    string code = cxruntime_file_read(path);
+    Parser parser = new Parser(path, code);
+
+    parser.expect("module");
+    string modname = parseIdentifier2(parser, ".");
+    parser.expect(";");
+
+    assert(filename == moduleToFile(modname));
+
+    Module module_ = new Module(modname);
+    Context context = new Context(platform, module_);
+
+    for (int i = 0; i < defaultImports.length; i = i + 1) {
+        module_.addImport(defaultImports[i]);
+    }
+
+    while (!parser.eof())
+    {
+        bool matched = false;
+        if (!matched) {
+            ASTImport import_ = parseImport(parser);
+            if (import_) {
+                matched = true;
+                Module importedModule = parseModule(
+                    moduleToFile(import_.name), includes, platform, defaultImports);
+
+                module_.addImport(importedModule);
+            }
+        }
+        if (!matched) {
+            ASTClassDecl classDecl = parseClassDecl(parser);
+            if (classDecl) {
+                matched = true;
+                module_.add(classDecl.name, classDecl.compile(context));
+            }
+        }
+        if (!matched) {
+            ASTExtern extern_ = parseExtern(parser);
+            if (extern_)
+            {
+                matched = true;
+                module_.add(extern_.name, extern_.compile(context));
+            }
+        }
+        /*
+        if (auto strct = parser.parseStructDecl)
+        {
+            module_.add(strct.name, strct.compile(context));
+            continue;
+        }*/
+        if (!matched) {
+            ASTFunction fun = parseFunction(parser);
+            if (fun)
+            {
+                matched = true;
+                module_.add(fun.name, fun.compile(context));
+            }
+        }
+
+        if (!matched) parser.fail("couldn't parse function or struct");
+    }
+    return module_;
+}
+
+void main(string[] args)
+{
+    print("# stage2");
+    string[] includes;
+    {
+        string[] remArgs;
+        for (int i = 0; i < args.length; i = i + 1) {
+            string arg = args[i];
+
+            if (arg.length >= 2 && arg[0 .. 2] == "-I") {
+                includes = includes ~ arg[2 .. arg.length];
+            } else {
+                remArgs = remArgs ~ arg;
+            }
+        }
+        args = remArgs;
+    }
+
+    if (args.length != 1)
+    {
+        print("Usage: stage2 [-Iincludepath]* FILE.cx");
+        assert(false);
+    }
+    Module builtins = new Module("");
+    Backend backend = new Backend();
+    BackendModule backendModule = backend.createModule();
+    Platform platform = new Platform();
+
+    builtins.add("string", new Array(new Character));
+    builtins.add("bool", new Integer);
+    builtins.add("true", new Literal(1));
+    builtins.add("false", new Literal(0));
+    builtins.add("null", new NullExpr(new Pointer(new Void)));
+
+    Module[] defaultImports = new Module[](1);
+    defaultImports[0] = builtins;
+
+    Module toplevel = parseModule(args[0], includes, platform, defaultImports);
+    Generator output = new Generator(platform, backendModule);
+
+    toplevel.emit(output);
+
+    string[] nextArgs;
+    backendModule.callMain(nextArgs);
+}

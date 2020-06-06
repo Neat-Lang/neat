@@ -4,39 +4,9 @@ import backend.proxy;
 import base;
 import types;
 
-class ASTArray : ASTType
+int getArrayLen(Generator output, Type arrayType, int arrayReg)
 {
-    ASTType elementType;
-
-    this(ASTType elementType) { this.elementType = elementType; }
-
-    Type compile(Context context)
-    {
-        return new Array(this.elementType.compile(context));
-    }
-}
-
-// ptr, length
-class Array : Type
-{
-    Type elementType;
-
-    this(Type elementType) { this.elementType = elementType; }
-
-    void* emit(Platform platform)
-    {
-        void*[] types = new void*[](2);
-        types[0] = platform.pointerType(this.elementType.emit(platform));
-        types[1] = platform.intType();
-        return platform.structType(types); // TODO mod.wordType / mod.wordSize
-    }
-
-    bool same(Type other)
-    {
-        Array otherArray = other.instanceOf(Array);
-
-        return otherArray && otherArray.elementType.same(this.elementType);
-    }
+    return output.fun.field(arrayType.emit(output.platform), arrayReg, 1);
 }
 
 class ArrayLength : Expression
@@ -55,11 +25,11 @@ class ArrayLength : Expression
     {
         int arrayReg = this.arrayValue.emit(output);
 
-        return output.fun.field(this.arrayValue.type().emit(output.platform), arrayReg, 1);
+        return getArrayLen(output, this.arrayValue.type(), arrayReg);
     }
 }
 
-int getArrayPointer(Generator output, Type arrayType, int arrayReg)
+int getArrayPtr(Generator output, Type arrayType, int arrayReg)
 {
     return output.fun.field(arrayType.emit(output.platform), arrayReg, 0);
 }
@@ -81,139 +51,48 @@ class ArrayPointer : Expression
     {
         int arrayReg = this.arrayValue.emit(output);
 
-        return getArrayPointer(output, this.arrayValue.type(), arrayReg);
+        return getArrayPtr(output, this.arrayValue.type(), arrayReg);
     }
 }
 
-class ASTArrayLiteralElement
+int makeArray(Generator output, Type elementType, int ptrReg, int lenReg)
 {
-    ASTSymbol symbol;
+    void* voidp = (new Pointer(new Void)).emit(output.platform);
+    void* intType = (new Integer).emit(output.platform);
 
-    bool spread;
+    // TODO allocaless
+    void* structType = (new Array(elementType)).emit(output.platform);
+    int structReg = output.fun.alloca(structType);
+    int ptrField = output.fun.fieldOffset(structType, structReg, 0);
+    int lenField = output.fun.fieldOffset(structType, structReg, 1);
 
-    this(ASTSymbol symbol, bool spread) { this.symbol = symbol; this.spread = spread; }
+    output.fun.store(voidp, ptrField, ptrReg);
+    output.fun.store(intType, lenField, lenReg);
+    return output.fun.load(structType, structReg);
 }
 
-/*
-class ASTArrayLiteral : ASTSymbol
+class ArrayExpression : Expression
 {
-    ASTArrayLiteralElement[] elements;
+    Expression pointer;
 
-    Symbol compile(Context context)
+    Expression length;
+
+    this(Expression pointer, Expression length) { this.pointer = pointer; this.length = length; }
+
+    Type type()
     {
-        ArrayLiteral.Element[] elements;
-        Type elementType;
-        foreach (entry; this.elements)
-        {
-            auto newExpression = entry.symbol.compile(context).beExpression;
-            Type expressionElementType;
-            if (entry.spread)
-            {
-                auto subtype = cast(Array) newExpression.type;
-                assert(subtype, "spread entry must be array");
-                expressionElementType = subtype.elementType;
-            }
-            else
-            {
-                expressionElementType = newExpression.type;
-            }
-            if (!elementType) elementType = expressionElementType;
-            else assert(expressionElementType == elementType);
-            elements ~= ArrayLiteral.Element(newExpression, entry.spread);
-        }
-        if (!elementType) assert(false, "cannot type empty literal");
-        return new ArrayLiteral(elementType, elements);
+        Pointer ptrType = this.pointer.type().instanceOf(Pointer);
+        assert(ptrType);
+        return new Array(ptrType.target);
     }
 
-    override string toString() const
+    int emit(Generator output)
     {
-        return format!"[%(%s, %)]"(this.elements);
+        int pointer = this.pointer.emit(output);
+        int length = this.length.emit(output);
+
+        return makeArray(output, this.type().instanceOf(Array).elementType, pointer, length);
     }
-
-    mixin(GenerateThis);
-}
-
-class ArrayLiteral : Expression
-{
-    struct Element
-    {
-        Expression expression;
-
-        bool spread;
-    }
-    Type elementType;
-
-    // TODO rename to Component
-    Element[] elements;
-
-    override Type type()
-    {
-        return new Array(elementType);
-    }
-
-    override Reg emit(Generator output)
-    {
-        auto voidp = new BackendPointerType(new BackendVoidType);
-        auto intType = new BackendIntType;
-
-        Reg lenPtr = output.fun.alloca(intType); // TODO word type
-        const numNonSpreadElements = this.elements.filter!(a => !a.spread).count;
-        output.fun.store(intType, lenPtr, output.fun.intLiteral(cast(int) numNonSpreadElements));
-
-        // add the lengths of each array element
-        foreach (i, element; this.elements)
-        {
-            if (element.spread)
-            {
-                Reg len = output.fun.load(intType, lenPtr);
-                // TODO prevent double emit when we can have non-ref struct base
-                Reg addLen = (new ArrayLength(element.expression)).emit(output);
-                Reg sumLen = output.fun.binop("+", len, addLen);
-                output.fun.store(intType, lenPtr, sumLen);
-            }
-        }
-        const int arrayElementSize = output.platform.size(this.elementType.emit(output.platform));
-        Reg memSize = output.fun.binop("*", output.fun.load(intType, lenPtr), output.fun.intLiteral(arrayElementSize));
-
-        Reg ptr = output.fun.call(voidp, "malloc", [memSize]);
-        Reg currentOffsetPtr = output.fun.alloca(intType);
-        output.fun.store(intType, currentOffsetPtr, output.fun.intLiteral(0));
-
-        foreach (i, element; this.elements)
-        {
-            Reg currentOffset = output.fun.load(intType, currentOffsetPtr);
-            Reg ptrOffsetReg = output.fun.call(voidp, "ptr_offset", [ptr, currentOffset]);
-
-            if (element.spread)
-            {
-                // TODO prevent double emit when we can have non-ref struct base
-                Reg elementLen = (new ArrayLength(element.expression)).emit(output);
-                Reg elementPtr = (new ArrayPointer(this.elementType, element.expression)).emit(output);
-                Reg elementSize = output.fun.binop("*", elementLen, output.fun.intLiteral(arrayElementSize));
-
-                output.fun.call(voidp, "memcpy", [ptrOffsetReg, elementPtr, elementSize]);
-                output.fun.store(intType, currentOffsetPtr,
-                    output.fun.binop("+", currentOffset, elementSize));
-            }
-            else
-            {
-                output.fun.store(elementType.emit(output.platform), ptrOffsetReg, element.expression.emit(output));
-                output.fun.store(intType, currentOffsetPtr,
-                    output.fun.binop("+", currentOffset, output.fun.intLiteral(arrayElementSize)));
-            }
-        }
-        auto structType = type.emit(output.platform);
-        // TODO allocaless
-        Reg structReg = output.fun.alloca(structType);
-        Reg ptrField = output.fun.fieldOffset(structType, structReg, 0);
-        Reg lenField = output.fun.fieldOffset(structType, structReg, 1);
-
-        output.fun.store(voidp, ptrField, ptr);
-        output.fun.store(intType, lenField, output.fun.load(intType, lenPtr));
-        return output.fun.load(structType, structReg);
-    }
-
-    mixin(GenerateThis);
 }
 
 class ASTArraySlice : ASTSymbol
@@ -224,20 +103,20 @@ class ASTArraySlice : ASTSymbol
 
     ASTSymbol upper;
 
-    override ArraySlice compile(Context context)
+    this(ASTSymbol array, ASTSymbol lower, ASTSymbol upper)
+    {
+        this.array = array;
+        this.lower = lower;
+        this.upper = upper;
+    }
+
+    Symbol compile(Context context)
     {
         return new ArraySlice(
-            this.array.compile(context).beExpression,
-            this.lower.compile(context).beExpression,
-            this.upper.compile(context).beExpression);
+            beExpression(this.array.compile(context)),
+            beExpression(this.lower.compile(context)),
+            beExpression(this.upper.compile(context)));
     }
-
-    override string toString() const
-    {
-        return format!"%s[%s .. %s]"(array, lower, upper);
-    }
-
-    mixin(GenerateThis);
 }
 
 class ArraySlice : Expression
@@ -248,38 +127,34 @@ class ArraySlice : Expression
 
     Expression upper;
 
-    override Type type() { return this.array.type; }
-
-    override Reg emit(Generator output)
+    this(Expression array, Expression lower, Expression upper)
     {
-        auto voidp = new BackendPointerType(new BackendVoidType);
-        auto intType = new BackendIntType;
-
-        auto arrayType = cast(Array) this.array.type;
-        assert(arrayType, "slice of non-array");
-        const int elementSize = output.platform.size(arrayType.elementType.emit(output.platform));
-
-        auto arrayReg = this.array.emit(output);
-        auto lowerReg = this.lower.emit(output);
-        auto upperReg = this.upper.emit(output);
-        auto ptr = getArrayPointer(output, arrayType, arrayReg);
-        // ptr = ptr + lower
-        Reg lowerOffset = output.fun.binop("*", lowerReg, output.fun.intLiteral(elementSize));
-        Reg newPtr = output.fun.call(voidp, "ptr_offset", [ptr, lowerOffset]);
-        // len = upper - lower
-        Reg newLen = output.fun.binop("-", upperReg, lowerReg);
-
-        // TODO allocaless
-        auto structType = arrayType.emit(output.platform);
-        Reg structReg = output.fun.alloca(structType);
-        Reg ptrField = output.fun.fieldOffset(structType, structReg, 0);
-        Reg lenField = output.fun.fieldOffset(structType, structReg, 1);
-
-        output.fun.store(voidp, ptrField, newPtr);
-        output.fun.store(intType, lenField, newLen);
-        return output.fun.load(structType, structReg);
+        this.array = array;
+        this.lower = lower;
+        this.upper = upper;
     }
 
-    mixin(GenerateThis);
+    Type type() { return this.array.type(); }
+
+    int emit(Generator output)
+    {
+        void* voidp = output.platform.pointerType(output.platform.voidType());
+        void* intType = output.platform.intType();
+
+        Array arrayType = this.array.type().instanceOf(Array);
+        assert(arrayType); // , "slice of non-array");
+        int elementSize = output.platform.size(arrayType.elementType.emit(output.platform));
+
+        int arrayReg = this.array.emit(output);
+        int lowerReg = this.lower.emit(output);
+        int upperReg = this.upper.emit(output);
+        int ptr = getArrayPtr(output, arrayType, arrayReg);
+        // ptr = ptr + lower
+        int lowerOffset = output.fun.binop("*", lowerReg, output.fun.intLiteral(elementSize));
+        int newPtr = output.fun.call(voidp, "ptr_offset", new int[](0) ~ ptr ~ lowerOffset);
+        // len = upper - lower
+        int newLen = output.fun.binop("-", upperReg, lowerReg);
+
+        return makeArray(output, arrayType.elementType, newPtr, newLen);
+    }
 }
-*/

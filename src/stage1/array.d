@@ -56,6 +56,11 @@ class Array : Type
     mixin(GenerateThis);
 }
 
+Reg getArrayLen(Generator output, Type arrayType, Reg arrayReg)
+{
+    return output.fun.field(arrayType.emit(output.platform), arrayReg, 1);
+}
+
 class ArrayLength : Expression
 {
     Expression arrayValue;
@@ -69,13 +74,14 @@ class ArrayLength : Expression
     override Reg emit(Generator output)
     {
         auto arrayReg = this.arrayValue.emit(output);
-        return output.fun.field(arrayValue.type.emit(output.platform), arrayReg, 1);
+
+        return getArrayLen(output, arrayValue.type, arrayReg);
     }
 
     mixin(GenerateThis);
 }
 
-Reg getArrayPointer(Generator output, Type arrayType, Reg arrayReg)
+Reg getArrayPtr(Generator output, Type arrayType, Reg arrayReg)
 {
     return output.fun.field(arrayType.emit(output.platform), arrayReg, 0);
 }
@@ -94,7 +100,7 @@ class ArrayPointer : Expression
     override Reg emit(Generator output)
     {
         auto arrayReg = this.arrayValue.emit(output);
-        return getArrayPointer(output, this.arrayValue.type, arrayReg);
+        return getArrayPtr(output, this.arrayValue.type, arrayReg);
     }
 
     mixin(GenerateThis);
@@ -180,7 +186,7 @@ class ArraySlice : Expression
         auto arrayReg = this.array.emit(output);
         auto lowerReg = this.lower.emit(output);
         auto upperReg = this.upper.emit(output);
-        auto ptr = getArrayPointer(output, arrayType, arrayReg);
+        auto ptr = getArrayPtr(output, arrayType, arrayReg);
         // ptr = ptr + lower
         Reg lowerOffset = output.fun.binop("*", lowerReg, output.fun.intLiteral(elementSize));
         Reg newPtr = output.fun.call(voidp, "ptr_offset", [ptr, lowerOffset]);

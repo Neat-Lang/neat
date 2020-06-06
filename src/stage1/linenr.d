@@ -38,4 +38,3 @@ class LineNumberRegistry
         files ~= File(filename, text);
     }
 }
-

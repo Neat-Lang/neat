@@ -1,6 +1,6 @@
 module main;
 
-import array : Array, ArrayExpression, ArrayLength, ArrayPointer, ASTArraySlice;
+import array : Array, ArrayExpression, ArrayLength, ArrayPointer, ASTArraySlice, getArrayLen, getArrayPtr;
 import backend.backend;
 import backend.platform;
 import backend.types;
@@ -494,9 +494,11 @@ class ASTExprStatement : ASTStatement
 {
     ASTSymbol value;
 
+    Loc loc;
+
     override Statement compile(Context context)
     {
-        return new ExprStatement(this.value.compile(context).beExpression);
+        return new ExprStatement(this.value.compile(context).beExpression(loc));
     }
 
     mixin(GenerateAll);
@@ -527,7 +529,7 @@ ASTExprStatement parseExprStatement(ref Parser parser)
         }
         expect(";");
         commit;
-        return new ASTExprStatement(value);
+        return new ASTExprStatement(value, loc);
     }
 }
 
@@ -563,6 +565,7 @@ enum BinaryOpType
 {
     add,
     sub,
+    cat,
     mul,
     eq,
     gt,
@@ -587,6 +590,8 @@ class ASTBinaryOp : ASTSymbol
     {
         auto left = this.left.compile(context).beExpression;
         auto right = this.right.compile(context).beExpression;
+        if (op == BinaryOpType.cat)
+            return new ArrayCat(left, right, loc);
         if (op == BinaryOpType.boolAnd)
             return new BoolAnd(left, right);
         if (op == BinaryOpType.boolOr)
@@ -595,6 +600,51 @@ class ASTBinaryOp : ASTSymbol
     }
 
     mixin(GenerateAll);
+}
+
+class ArrayCat : Expression
+{
+    Expression left;
+
+    Expression right;
+
+    Loc loc;
+
+    override Type type() {
+        auto leftArray = cast(Array) left.type;
+        loc.assert_(leftArray, "array expected");
+        loc.assert_(right.type == leftArray.elementType, "type mismatch");
+
+        return left.type;
+    }
+
+    override Reg emit(Generator output)
+    {
+        // TODO simplify this?
+        auto leftReg = this.left.emit(output);
+        auto leftType = cast(Array) this.left.type;
+        auto leftLen = getArrayLen(output, leftType, leftReg);
+        auto leftPtr = getArrayPtr(output, leftType, leftReg);
+        auto elementSize = output.fun.intLiteral(leftType.elementType.emit(output.platform).size(output.platform));
+        // size = sizeof(T) * (array.length + 1)
+        auto oldSize = output.fun.binop("*", leftLen, elementSize);
+        auto newSize = output.fun.binop("+", oldSize, elementSize);
+        auto voidp = (new Pointer(new Void)).emit(output.platform);
+        auto newArrayPtr = output.fun.call(voidp, "malloc", [newSize]);
+        output.fun.call((new Void).emit(output.platform), "memcpy", [newArrayPtr, leftPtr, oldSize]);
+        // *(ptr + prevLength) = right;
+        auto newElement = output.fun.call(voidp, "ptr_offset", [newArrayPtr, oldSize]);
+        output.fun.store(this.right.type.emit(output.platform), newElement, this.right.emit(output));
+
+        // return ptr[0 .. prevLength + 1];
+        auto newLen = output.fun.binop("+", leftLen, output.fun.intLiteral(1));
+        return (new ArrayExpression(
+            new RegExpr(new Pointer(leftType.elementType), newArrayPtr),
+            new RegExpr(new Integer, newLen))
+        ).emit(output);
+    }
+
+    mixin(GenerateThis);
 }
 
 class BoolOr : Expression
@@ -727,6 +777,7 @@ class BinaryOp : Expression
                     return ">=";
                 case le:
                     return "<=";
+                case cat:
                 case boolAnd:
                 case boolOr:
                     assert(false, "should be handled separately");
@@ -749,7 +800,7 @@ ASTSymbol parseArithmetic(ref Parser parser, size_t level = 0)
     }
     if (level <= 3)
     {
-        parseAddSub(parser, left, 3);
+        parseAddSubCat(parser, left, 3);
     }
     if (level <= 2)
     {
@@ -808,7 +859,7 @@ void parseBoolOr(ref Parser parser, ref ASTSymbol left, int myLevel)
     }
 }
 
-void parseAddSub(ref Parser parser, ref ASTSymbol left, int myLevel)
+void parseAddSubCat(ref Parser parser, ref ASTSymbol left, int myLevel)
 {
     while (true)
     {
@@ -822,6 +873,12 @@ void parseAddSub(ref Parser parser, ref ASTSymbol left, int myLevel)
         {
             auto right = parser.parseArithmetic(myLevel + 1);
             left = new ASTBinaryOp(BinaryOpType.sub, left, right, parser.loc);
+            continue;
+        }
+        if (parser.accept("~"))
+        {
+            auto right = parser.parseArithmetic(myLevel + 1);
+            left = new ASTBinaryOp(BinaryOpType.cat, left, right, parser.loc);
             continue;
         }
         break;
@@ -1025,7 +1082,7 @@ class Call : Expression
 
     this(Function function_, Expression[] args, Loc loc)
     {
-        assert(function_.args.length == args.length, format!"'%s' expected %s args, not %s"(
+        loc.assert_(function_.args.length == args.length, format!"'%s' expected %s args, not %s"(
             function_.name, function_.args.length, args.length));
         foreach (i, ref arg; args)
         {
@@ -1516,7 +1573,7 @@ class ASTNewExpression : ASTSymbol
 {
     ASTType type;
 
-    Nullable!(ASTSymbol[]) args;
+    ASTSymbol[] args;
 
     Loc loc;
 
@@ -1526,20 +1583,16 @@ class ASTNewExpression : ASTSymbol
         if (auto classType = cast(Class) type) {
             auto classptr = new NewClassExpression(classType);
 
-            if (args.isNull)
-            {
-                return classptr;
-            }
-            Expression[] argExpressions = this.args.get.map!(a => a.compile(context).beExpression(loc)).array;
+            Expression[] argExpressions = this.args.map!(a => a.compile(context).beExpression(loc)).array;
             loc.assert_(classType, format!"expected new <class>, not %s"(type));
             return new CallCtorExpression(classptr, argExpressions, loc);
         }
         if (auto arrayType = cast(Array) type) {
-            assert(!args.isNull && args.get.length == 1);
+            assert(args.length == 1);
 
             auto elementSize = new SizeOf(arrayType.elementType);
             // TODO only compute length once
-            auto length = args.get[0].compile(context).beExpression(loc);
+            auto length = args[0].compile(context).beExpression(loc);
             auto byteLength = new BinaryOp(BinaryOpType.mul, elementSize, length, loc);
             auto malloc = new Function("malloc", new Pointer(new Void), [Argument("", new Integer)], true, null);
             auto dataPtr = new PointerCast(new Pointer(arrayType.elementType), call(malloc, [byteLength], loc));
@@ -1673,7 +1726,7 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
         {
             mixin(ParserGuard!());
             auto type = parser.parseType;
-            Nullable!(ASTSymbol[]) args;
+            ASTSymbol[] args;
             if (accept("("))
             {
                 args = parser.parseSymbolList;
@@ -2114,19 +2167,36 @@ class Class : Type
 
     Class superClass;
 
-    @(This.Init!null)
+    // will resolve members and methods as required
+    ASTClassDecl decl;
+
+    // used for resolving
+    Context context;
+
     Member[] members;
 
-    @(This.Init!null)
     Method[] methods;
 
-    this(string name, Class superClass)
+    this(ASTClassDecl decl, Class superClass, Context context)
+    in (decl)
     {
-        this.name = name;
+        this.name = decl.name;
         this.superClass = superClass;
+        this.decl = decl;
+        this.context = context;
         this.members = null;
         this.methods = null;
     }
+
+    void resolve()
+    {
+        // TODO only resolve once
+        if (!decl) return;
+        decl.compile2(context, this);
+        decl = null;
+    }
+
+    bool resolved() { return this.decl is null; }
 
     override BackendType emit(Platform platform)
     {
@@ -2139,6 +2209,7 @@ class Class : Type
     }
 
     Struct dataStruct()
+    in (resolved)
     {
         static Member[] allMembers(Class class_)
         {
@@ -2154,6 +2225,7 @@ class Class : Type
     }
 
     Tuple!(string, "name", size_t, "index")[] visibleMembers()
+    in (resolved)
     {
         Tuple!(string, "name", size_t, "index")[] result = superClass ? superClass.visibleMembers : null;
         const ownMembersOffset = superClass ? superClass.dataStruct.members.length : 1;
@@ -2167,6 +2239,7 @@ class Class : Type
     }
 
     Struct classInfoStruct()
+    in (resolved)
     {
         return new Struct(
             null,
@@ -2175,6 +2248,7 @@ class Class : Type
     }
 
     Method[] vtable()
+    in (resolved)
     {
         auto combinedMethods = superClass ? superClass.vtable : null;
 
@@ -2273,7 +2347,7 @@ class ASTClassDecl : ASTType
 
     Method[] methods;
 
-    override Class compile(Context context)
+    Class compile(Context context)
     {
         Class superClass = null;
         if (this.superClass)
@@ -2283,22 +2357,24 @@ class ASTClassDecl : ASTType
             superClass = cast(Class) superClassObj;
             assert(superClass);
         }
-        // FIXME proxy type
-        auto class_ = new Class(name, superClass);
-        auto classScope = new ClassScope(context.namespace, class_);
+        return new Class(this, superClass, context);
+    }
+
+    void compile2(Context context, Class target)
+    {
+        auto classScope = new ClassScope(context.namespace, target);
         auto classContext = context.withNamespace(classScope);
 
-        class_.members = this.members
+        target.members = this.members
             .map!(a => Class.Member(a.name, a.type.compile(classContext)))
             .array;
-        class_.methods = methods.map!(a => new .Method(
-            class_,
+        target.methods = methods.map!(a => new .Method(
+            target,
             a.name,
             a.ret.compile(classContext),
             a.args.map!(b => Argument(b.name, b.type.compile(classContext))).array,
             a.body_)).array;
-        class_.genInstanceofMethod;
-        return class_;
+        target.genInstanceofMethod;
     }
 
     mixin(GenerateThis);
@@ -2468,6 +2544,13 @@ class Module : Namespace
     void emit(Generator generator)
     in (generator.fun is null)
     {
+        // TODO each only once!
+        foreach (import_; imports) import_.emit(generator);
+        foreach (entry; entries)
+        {
+            if (auto class_ = cast(Class) entry.value)
+                class_.resolve;
+        }
         foreach (entry; entries)
         {
             if (auto fun = cast(Function) entry.value)
@@ -2481,8 +2564,6 @@ class Module : Namespace
                 }
             }
         }
-        // TODO each only once!
-        foreach (import_; imports) import_.emit(generator);
     }
 
     Symbol lookupPublic(string name)

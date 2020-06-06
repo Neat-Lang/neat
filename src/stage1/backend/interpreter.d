@@ -623,7 +623,7 @@ private void defineIntrinsics(IpBackendModule mod)
     defineCallback("memcpy", (void* target, void* source, int size) {
         import core.stdc.string : memcpy;
 
-        return memcpy(target, source, size);
+        memcpy(target, source, size);
     });
     defineCallback("print", (string text) {
         import std.stdio : writefln;
@@ -646,6 +646,21 @@ private void defineIntrinsics(IpBackendModule mod)
 
         return format!"%s"(num);
     });
+    // helper because we don't have pointer math
+    defineCallback("cxruntime_linenr", delegate int(string haystack, string needle, int* linep, int* columnp) {
+        if (needle.ptr < haystack.ptr && needle.ptr >= haystack.ptr + haystack.length)
+            return false;
+        foreach (i, line; haystack.splitter("\n").enumerate)
+        {
+            if (needle.ptr >= line.ptr && needle.ptr <= line.ptr + line.length)
+            {
+                *linep = cast(int) i;
+                *columnp = cast(int) (needle.ptr - line.ptr);
+                return true;
+            }
+        }
+        assert(false);
+    });
 
     defineCallback("_backend_createModule", delegate BackendModule(Backend backend, Platform platform)
         => backend.createModule(platform));
@@ -654,6 +669,8 @@ private void defineIntrinsics(IpBackendModule mod)
     defineCallback("_backend_voidType", delegate BackendType() => new BackendVoidType);
     defineCallback("_backend_pointerType", delegate BackendType(BackendType target)
         => new BackendPointerType(target));
+    defineCallback("_backend_functionPointerType", delegate BackendType(BackendType ret, BackendType[] args)
+        => new BackendFunctionPointerType(ret, args));
     defineCallback("_backend_structType", delegate BackendType(BackendType[] members)
         => new BackendStructType(members));
 
@@ -685,17 +702,15 @@ private void defineIntrinsics(IpBackendModule mod)
 
         writefln!"(nested) module:\n%s"(mod);
     });
+    // helper so I don't have to work out string[] conversion in cx
     defineCallback(
-        "_backendModule_call",
-        delegate void(BackendModule mod, void* ret, char[] name, void*[] args)
+        "_backendModule_callMain",
+        delegate void(BackendModule mod, string[] args)
         {
-            // TODO non-int args, ret
+            auto target = new void[12];
+            encode(args, target);
             // TODO hardcode interpreter backend in target environment
-            (cast(IpBackendModule) mod).call(
-                name.dup,
-                ret[0 .. 4],
-                args.map!(a => a[0 .. 4]).array,
-            );
+            (cast(IpBackendModule) mod).call("main", null, [target]);
         }
     );
     defineCallback(
@@ -714,6 +729,14 @@ private void defineIntrinsics(IpBackendModule mod)
         "_backendFunction_call",
         delegate int(BackendFunction fun, BackendType ret, char[] name, int[] args)
             => fun.call(ret, name.idup, args));
+    defineCallback(
+        "_backendFunction_getFuncPtr",
+        delegate int(BackendFunction fun, string name)
+            => fun.getFuncPtr(name));
+    defineCallback(
+        "_backendFunction_callFuncPtr",
+        delegate int(BackendFunction fun, BackendType type, Reg funcPtr, Reg[] args)
+            => fun.callFuncPtr(type, funcPtr, args));
     defineCallback(
         "_backendFunction_binop",
         delegate int(BackendFunction fun, char[] op, int left, int right)
@@ -759,7 +782,6 @@ private void defineIntrinsics(IpBackendModule mod)
     defineCallback(
         "_testBranchRecord_resolveElse",
         delegate void(TestBranchRecord record, int block) => record.resolveElse(block));
-
 }
 
 public  template decode(T) {

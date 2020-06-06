@@ -2634,10 +2634,17 @@ else
     int main(string[] args)
     {
         import backend.interpreter : IpBackend;
+        import backend.interpreter : backendEncode = encode;
         import core.memory : GC;
 
         // turn on if you get random crashes
         GC.disable;
+
+        string[] nextArgs;
+        if (auto split = args.findSplit("--".only)) {
+            args = split[0];
+            nextArgs = split[2];
+        }
 
         string[] includes;
         foreach (arg; args)
@@ -2677,7 +2684,13 @@ else
 
         // writefln!"module:\n%s"(module_);
 
-        module_.call("main", null, null);
+        auto type = new Array(new Array(new Character));
+        const size = output.platform.size(type.emit(output.platform));
+        auto modArg = new void[size];
+
+        backendEncode(nextArgs, modArg);
+
+        module_.call("main", null, [modArg]);
         return 0;
     }
 }

@@ -501,6 +501,10 @@ void setInitValue(BackendType type, void* target, Platform platform)
         *cast(int*) target = 0;
         return;
     }
+    if (cast(BackendVoidType) type)
+    {
+        return;
+    }
     if (auto strct = cast(BackendStructType) type)
     {
         foreach (subtype; strct.members)
@@ -600,6 +604,16 @@ private void defineIntrinsics(IpBackendModule mod)
     defineCallback("cxruntime_ptr_test", delegate int(void* p) => !!p);
     defineCallback("assert", (int test) { assert(test, "Assertion failed!"); });
     defineCallback("ptr_offset", delegate void*(void* ptr, int offset) { assert(offset >= 0); return ptr + offset; });
+    defineCallback("cxruntime_file_exists", delegate int(string name) {
+        import std.file : exists;
+
+        return name.exists;
+    });
+    defineCallback("cxruntime_file_read", delegate string(string name) {
+        import std.file : readText;
+
+        return name.readText;
+    });
     defineCallback("malloc", (int size) {
         // import std.stdio : writefln; writefln!"malloc %s"(size);
         assert(size >= 0 && size < 1048576);
@@ -739,7 +753,7 @@ private void defineIntrinsics(IpBackendModule mod)
 
 }
 
-private template decode(T) {
+public  template decode(T) {
     static if (is(T == U[], U))
     {
         T decode(void[] arg) {
@@ -757,12 +771,25 @@ private template decode(T) {
     }
 }
 
-private void encode(T)(T arg, void[] target)
+public void encode(T)(T arg, void[] target)
 {
     static if (is(T == U[], U))
     {
-        struct ArrayHack { align(4) U* ptr; int length; }
-        return .encode(ArrayHack(arg.ptr, cast(int) arg.length), target);
+        static if (is(U == int) || is(typeof(cast() U.init) == char))
+        {
+            struct ArrayHack { align(4) U* ptr; int length; }
+            return .encode(ArrayHack(arg.ptr, cast(int) arg.length), target);
+        }
+        else static if (is(U == string))
+        {
+            struct ArrayHack { align(4) void* ptr; int length; }
+            auto subtarget = new void[ArrayHack.sizeof * arg.length];
+            foreach (i, subarg; arg) {
+                .encode(subarg, subtarget[i * ArrayHack.sizeof .. (i + 1) * ArrayHack.sizeof]);
+            }
+            .encode(ArrayHack(subtarget.ptr, cast(int) arg.length), target);
+        }
+        else static assert(false, "? " ~ T.stringof);
     }
     else
     {

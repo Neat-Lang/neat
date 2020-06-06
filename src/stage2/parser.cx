@@ -6,6 +6,9 @@ import base;
 import format;
 import types;
 
+extern(C) bool cxruntime_file_exists(string file);
+extern(C) string cxruntime_file_read(string file);
+
 class Parser
 {
     string[] stack;
@@ -203,23 +206,33 @@ bool isWhitespace(string s)
     return s == " " || s == "\t" || s == "\r" || s == "\n";
 }
 
-string parseIdentifier(Parser parser)
+string parseIdentifier2(Parser parser, string allowedChars)
 {
     parser.begin();
     parser.strip();
-    if (parser.text().length == 0 || (!isAlpha(parser.text()[0 .. 1]) && parser.text()[0 .. 1] != "_"))
+    if (parser.text().length == 0 || (!isAlpha(parser.text()[0 .. 1])
+        && parser.text()[0 .. 1] != "_")
+        && find(allowedChars, parser.text()[0 .. 1]) == -1)
     {
         parser.revert();
         return "";
     }
     string identifier;
-    while (parser.text().length > 0 && (isAlnum(parser.text()[0 .. 1]) || parser.text()[0 .. 1] == "_"))
+    while (parser.text().length > 0 && (
+        isAlnum(parser.text()[0 .. 1])
+        || parser.text()[0 .. 1] == "_"
+        || find(allowedChars, parser.text()[0 .. 1]) != -1))
     {
         identifier = ssJoin(identifier, parser.text()[0 .. 1]);
         *parser.textp() = parser.text()[1 .. parser.text().length];
     }
     parser.commit();
     return identifier;
+}
+
+string parseIdentifier(Parser parser)
+{
+    return parseIdentifier2(parser, "");
 }
 
 bool acceptIdentifier(Parser parser, string identifier)
@@ -1854,7 +1867,7 @@ class Module : Namespace
         this.name = name;
     }
 
-    // Module[] imports;
+    Module[] imports;
 
     ModuleEntry[] entries;
 
@@ -1866,32 +1879,36 @@ class Module : Namespace
         this.entries[prevEntries.length] = new ModuleEntry(name, symbol);
     }
 
-    /*
     void addImport(Module module_)
     {
-        imports ~= module_;
+        Module[] prevImports = this.imports;
+        this.imports = new Module[](prevImports.length + 1);
+        for (int i = 0; i < prevImports.length; i = i + 1) this.imports[i] = prevImports[i];
+        this.imports[prevImports.length] = module_;
     }
 
     void emit(Generator generator)
-    in (generator.fun is null)
     {
-        foreach (entry; entries)
+        assert(!generator.fun);
+        for (int i = 0; i < this.entries.length; i = i + 1)
         {
-            if (auto fun = cast(Function) entry.value)
-                if (!fun.declaration)
-                    fun.emit(generator, Context(generator.platform, this));
-            if (auto class_ = cast(Class) entry.value)
+            ModuleEntry entry = this.entries[i];
+            Function fun = entry.value.instanceOf(Function);
+            if (fun && !fun.declaration)
+                fun.emit(generator, new Context(generator.platform, this));
+            /*Class class_ = entry.value.instanceOf(Class);
+            if (class_)
             {
-                foreach (method; class_.methods)
+                for (int i = 0; i < class_.methods.length; i = i + 1)
                 {
-                    method.emit(generator, this, class_);
+                    class_.methods[i].emit(generator, this, class_);
                 }
-            }
+            }*/
         }
         // TODO each only once!
-        foreach (import_; imports) import_.emit(generator);
+        for (int i = 0; i < this.imports.length; i = i + 1)
+            this.imports[i].emit(generator);
     }
-    */
 
     Symbol lookupPublic(string name)
     {
@@ -1920,41 +1937,156 @@ class Module : Namespace
     }
 }
 
-void main() {
-    string src = "
-        int ack(int m, int n) {
-            if (m == 0) { int n2 = n + 1; return n2; }
-            if (n == 0) { m = m - 1; return ack(m, 1); }
-            return ack(m - 1, ack(m, n - 1));
-        }
-    ";
+class NullExpr : Expression
+{
+    Type type_;
 
-    Parser parser = new Parser(src);
+    this(Type type_) { this.type_ = type_; }
+
+    Type type()
+    {
+        return this.type_;
+    }
+
+    int emit(Generator generator)
+    {
+        // TODO allocaless
+        // exploit that alloca are zero initialized
+        void* type = this.type_.emit(generator.platform);
+        int reg = generator.fun.alloca(type);
+
+        return generator.fun.load(type, reg);
+    }
+}
+
+string moduleToFile(string module_)
+{
+    string modulePath;
+    for (int i = 0; i < module_.length; i = i + 1) {
+        if (module_[i .. i + 1] == ".") modulePath = ssJoin(modulePath, "/");
+        else modulePath = ssJoin(modulePath, module_[i .. i + 1]);
+    }
+    return ssJoin(modulePath, ".cx");
+}
+
+string findFile(string filename, string[] includes)
+{
+    if (cxruntime_file_exists(filename))
+        return filename;
+    for (int i = 0; i < includes.length; i = i + 1)
+    {
+        string path = sssJoin(includes[i], "/", filename);
+
+        if (cxruntime_file_exists(path))
+            return path;
+    }
+    print(sssJoin("cannot find file '", filename, "' in includes"));
+    assert(false);
+}
+
+Module parseModule(string filename, string[] includes, Platform platform, Module[] defaultImports)
+{
+    string path = findFile(filename, includes);
+    string code = cxruntime_file_read(path);
+    Parser parser = new Parser(code);
+
+    parser.expect("module");
+    string modname = parseIdentifier2(parser, ".");
+    parser.expect(";");
+
+    assert(filename == moduleToFile(modname));
+
+    Module module_ = new Module(modname);
+    Context context = new Context(platform, module_);
+
+    for (int i = 0; i < defaultImports.length; i = i + 1) {
+        module_.addImport(defaultImports[i]);
+    }
+
+    while (!parser.eof())
+    {
+        /*if (auto import_ = parser.parseImport)
+        {
+            auto importedModule = parseModule(
+                import_.name.moduleToFile, includes, platform, defaultImports, importCache);
+
+            module_.addImport(importedModule);
+            continue;
+        }
+        if (auto classDecl = parser.parseClassDecl)
+        {
+            module_.add(classDecl.name, classDecl.compile(context));
+            continue;
+        }
+        if (auto extern_ = parser.parseExtern)
+        {
+            module_.add(extern_.name, extern_.compile(context));
+            continue;
+        }
+        if (auto strct = parser.parseStructDecl)
+        {
+            module_.add(strct.name, strct.compile(context));
+            continue;
+        }
+        if (auto fun = parser.parseFunction)
+        {
+            module_.add(fun.name, fun.compile(context));
+            continue;
+        }*/
+
+        parser.fail("couldn't parse function or struct");
+    }
+    return module_;
+}
+
+void main(string[] args)
+{
+    string[] includes;
+    {
+        string[] remArgs;
+        for (int i = 0; i < args.length; i = i + 1) {
+            string arg = args[i];
+
+            if (arg.length >= 2 && arg[0 .. 2] == "-I") {
+                string[] prevIncludes = includes;
+                includes = new string[](prevIncludes.length + 1);
+                for (int i = 0; i < prevIncludes.length; i = i + 1) includes[i] = prevIncludes[i];
+                includes[prevIncludes.length] = arg[2 .. arg.length];
+            } else {
+                string[] prevRemArgs = remArgs;
+                remArgs = new string[](prevRemArgs.length + 1);
+                for (int i = 0; i < prevRemArgs.length; i = i + 1) remArgs[i] = prevRemArgs[i];
+                remArgs[prevRemArgs.length] = arg;
+            }
+        }
+        args = remArgs;
+    }
+
+    if (args.length != 1)
+    {
+        print("Usage: stage2 [-Iincludepath]* FILE.cx");
+        assert(false);
+    }
+    Module builtins = new Module("");
     Backend backend = new Backend();
-    print("--------");
-    ASTFunction astFun = parseFunction(parser);
-    assert(astFun);
-    Module module_ = new Module("ack");
-    BackendModule backendModule_ = backend.createModule();
-    Generator generator = new Generator(new Platform(), backendModule_);
-    Function fun = astFun.compile(generator);
-    module_.add(fun.name, fun);
-    Argument[] assertArguments = new Argument[](1);
-    assertArguments[0] = new Argument("", new Integer);
-    module_.add("assert", new Function("assert", new Void, assertArguments, true, null));
-    Argument[] printArguments = new Argument[](1);
-    printArguments[0] = new Argument("", new Array(new Character));
-    module_.add("print", new Function("print", new Void, printArguments, true, null));
-    Context context = new Context(generator.platform, module_);
-    assert(fun);
-    fun.emit(generator, context);
-    print("ack(3, 8):");
-    int m = 3;
-    int n = 8;
-    void*[] params = new void*[](2);
-    params[0] = &m;
-    params[1] = &n;
-    int ret;
-    backendModule_.call(&ret, "ack", params);
-    assert(ret == 2045); print(" 2045");
+    BackendModule backendModule = backend.createModule();
+    Platform platform = new Platform();
+
+    builtins.add("string", new Array(new Character));
+    builtins.add("bool", new Integer);
+    builtins.add("true", new Literal(1));
+    builtins.add("false", new Literal(0));
+    builtins.add("null", new NullExpr(new Pointer(new Void)));
+
+    Module[] defaultImports = new Module[](1);
+    defaultImports[0] = builtins;
+
+    Module toplevel = parseModule(args[0], includes, platform, defaultImports);
+    Generator output = new Generator(platform, backendModule);
+
+    toplevel.emit(output);
+
+    void ret;
+    void*[] args;
+    backendModule.call(&ret, "main", args);
 }

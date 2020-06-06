@@ -147,6 +147,40 @@ class ASTArrayLiteral : ASTSymbol
     mixin(GenerateThis);
 }
 
+class ArrayExpression : Expression
+{
+    Expression pointer;
+
+    Expression length;
+
+    override Type type()
+    {
+        auto ptrType = cast(Pointer) this.pointer.type;
+        assert(ptrType);
+        return new Array(ptrType.target);
+    }
+
+    override Reg emit(Generator output)
+    {
+        auto pointer = this.pointer.emit(output);
+        auto length = this.length.emit(output);
+        auto voidp = (new Pointer(new Void)).emit(output.platform);
+        auto intType = (new Integer).emit(output.platform);
+
+        // TODO allocaless
+        auto structType = this.type.emit(output.platform);
+        Reg structReg = output.fun.alloca(structType);
+        Reg ptrField = output.fun.fieldOffset(structType, structReg, 0);
+        Reg lenField = output.fun.fieldOffset(structType, structReg, 1);
+
+        output.fun.store(voidp, ptrField, pointer);
+        output.fun.store(intType, lenField, length);
+        return output.fun.load(structType, structReg);
+    }
+
+    mixin(GenerateThis);
+}
+
 class ArrayLiteral : Expression
 {
     struct Element

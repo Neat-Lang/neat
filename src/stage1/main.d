@@ -1,6 +1,6 @@
 module main;
 
-import array : Array, ArrayLength, ArrayPointer, ASTArrayLiteral, ASTArraySlice;
+import array : Array, ArrayExpression, ArrayLength, ArrayPointer, ASTArrayLiteral, ASTArraySlice;
 import backend.backend;
 import backend.platform;
 import backend.types;
@@ -95,7 +95,7 @@ class Function : Symbol
         {
             auto argExpr = new ArgExpr(cast(int) i, arg.type);
 
-            argAssignments ~= argscope.declare(arg.name, arg.type, argExpr);
+            argAssignments ~= argscope.declare(arg.name, arg.type, argExpr, Loc.init);
         }
 
         auto functionBody = statement.compile(module_.withNamespace(argscope));
@@ -368,13 +368,15 @@ class ASTAssignStatement : ASTStatement
 
     ASTSymbol value;
 
+    Loc loc;
+
     override AssignStatement compile(Context context)
     {
         auto target = this.target.compile(context);
         auto value = this.value.compile(context);
         auto targetref = cast(Reference) target;
         assert(targetref, "target of assignment must be a reference");
-        return new AssignStatement(targetref, value.beExpression.implicitConvertTo(targetref.type()));
+        return new AssignStatement(targetref, value.beExpression.implicitConvertTo(targetref.type(), loc));
     }
 
     mixin(GenerateAll);
@@ -414,7 +416,7 @@ ASTAssignStatement parseAssignment(ref Parser parser)
         }
         auto expr = parser.parseExpression;
         commit;
-        return new ASTAssignStatement(lhs, expr);
+        return new ASTAssignStatement(lhs, expr, loc);
     }
 }
 
@@ -458,13 +460,16 @@ class ASTVarDeclStatement : ASTStatement
 
     ASTSymbol initial;
 
+    Loc loc;
+
     override Statement compile(Context context)
     {
         if (this.initial)
         {
             auto initial = this.initial.compile(context);
 
-            return context.namespace.find!VarDeclScope.declare(this.name, this.type.compile(context), initial.beExpression);
+            return context.namespace.find!VarDeclScope.declare(
+                this.name, this.type.compile(context), initial.beExpression, loc);
         }
         else
         {
@@ -500,7 +505,7 @@ ASTVarDeclStatement parseVarDecl(ref Parser parser)
         }
         expect(";");
         commit;
-        return new ASTVarDeclStatement(name, type, initial);
+        return new ASTVarDeclStatement(name, type, initial, loc);
     }
 }
 
@@ -852,7 +857,7 @@ void parseComparison(ref Parser parser, ref ASTSymbol left, int myLevel)
     if (parser.accept("!=")) // same as !(a == b)
     {
         auto right = parser.parseArithmetic(myLevel + 1);
-        left = new ASTNegation(new ASTBinaryOp(BinaryOpType.eq, left, right, parser.loc));
+        left = new ASTNegation(new ASTBinaryOp(BinaryOpType.eq, left, right, parser.loc), parser.loc);
     }
     if (parser.accept(">="))
     {
@@ -1035,6 +1040,8 @@ class Call : Expression
 
     Expression[] args;
 
+    Loc loc;
+
     this(Function function_, Expression[] args)
     {
         assert(function_.args.length == args.length, format!"'%s' expected %s args, not %s"(
@@ -1046,7 +1053,7 @@ class Call : Expression
             scope(failure)
                 stderr.writefln!"While converting arg %s of %s to %s:"(
                     i, function_.name, function_.args[i].type);
-            arg = arg.implicitConvertTo(function_.args[i].type);
+            arg = arg.implicitConvertTo(function_.args[i].type, loc);
         }
         this.function_ = function_;
         this.args = args.dup;
@@ -1507,7 +1514,23 @@ ASTSymbol parseIndex(ref Parser parser, ASTSymbol base)
     }
 }
 
-class ASTNewClassExpression : ASTSymbol
+class SizeOf : Expression
+{
+    Type type_;
+
+    override Type type() { return new Integer; }
+
+    override Reg emit(Generator output)
+    {
+        int size = output.platform.size(this.type_.emit(output.platform));
+
+        return output.fun.intLiteral(size);
+    }
+
+    mixin(GenerateThis);
+}
+
+class ASTNewExpression : ASTSymbol
 {
     ASTType type;
 
@@ -1518,16 +1541,30 @@ class ASTNewClassExpression : ASTSymbol
     override Expression compile(Context context)
     {
         auto type = this.type.compile(context);
-        auto classType = cast(Class) type;
-        auto classptr = new NewClassExpression(classType);
+        if (auto classType = cast(Class) type) {
+            auto classptr = new NewClassExpression(classType);
 
-        if (args.isNull)
-        {
-            return classptr;
+            if (args.isNull)
+            {
+                return classptr;
+            }
+            Expression[] argExpressions = this.args.get.map!(a => a.compile(context).beExpression(loc)).array;
+            loc.assert_(classType, format!"expected new <class>, not %s"(type));
+            return new CallCtorExpression(classptr, argExpressions, loc);
         }
-        Expression[] argExpressions = this.args.get.map!(a => a.compile(context).beExpression(loc)).array;
-        loc.assert_(classType, format!"expected new <class>, not %s"(type));
-        return new CallCtorExpression(classptr, argExpressions, loc);
+        if (auto arrayType = cast(Array) type) {
+            assert(!args.isNull && args.get.length == 1);
+
+            auto elementSize = new SizeOf(arrayType.elementType);
+            // TODO only compute length once
+            auto length = args.get[0].compile(context).beExpression(loc);
+            auto byteLength = new BinaryOp(BinaryOpType.mul, elementSize, length, loc);
+            auto malloc = new Function("malloc", new Pointer(new Void), [Argument("", new Integer)], true, null);
+            auto dataPtr = new PointerCast(new Pointer(arrayType.elementType), call(malloc, [byteLength]));
+            return new ArrayExpression(dataPtr, length);
+        }
+        loc.assert_(false, format!"don't know how to allocate %s"(type));
+        assert(false);
     }
 
     mixin(GenerateThis);
@@ -1598,13 +1635,15 @@ class ASTNegation : ASTSymbol
 {
     ASTSymbol next;
 
+    Loc loc;
+
     override Negation compile(Context context)
     {
         return new Negation(
             this.next
                 .compile(context)
                 .beExpression
-                .implicitConvertTo(new Integer));
+                .implicitConvertTo(new Integer, loc));
     }
 
     mixin(GenerateThis);
@@ -1658,7 +1697,7 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
                 args = parser.parseSymbolList;
             }
 
-            return new ASTNewClassExpression(type, args, loc);
+            return new ASTNewExpression(type, args, loc);
         }
         if (accept("!"))
         {
@@ -1666,7 +1705,7 @@ ASTSymbol parseExpressionLeaf(ref Parser parser)
             auto next = parser.parseExpressionLeaf;
 
             assert(next !is null);
-            return new ASTNegation(next);
+            return new ASTNegation(next, loc);
         }
         mixin(ParserGuard!());
         auto currentExpr = parser.parseExpressionBase;
@@ -1926,7 +1965,7 @@ class PointerCast : Expression
     mixin(GenerateThis);
 }
 
-Expression implicitConvertTo(Expression from, Type to)
+Expression implicitConvertTo(Expression from, Type to, Loc loc)
 {
     if (from.type == to) return from;
     // void* casts to any pointer
@@ -1966,7 +2005,8 @@ Expression implicitConvertTo(Expression from, Type to)
             true, null);
         return new Call(rt_ptr_test, [new PointerCast(voidp, from)]);
     }
-    assert(false, format!"todo: cast(%s) %s"(to, from.type));
+    loc.assert_(false, format!"todo: cast(%s) %s"(to, from.type));
+    assert(false);
 }
 
 class NoopStatement : Statement
@@ -2043,12 +2083,13 @@ class Method : Symbol
             auto stackframe = new FunctionScope(module_);
 
             auto argscope = new VarDeclScope(stackframe, Yes.frameBase);
-            argAssignments ~= argscope.declare("this", thisType, new PointerCast(thisType, new ArgExpr(0, voidp)));
+            argAssignments ~= argscope.declare(
+                "this", thisType, new PointerCast(thisType, new ArgExpr(0, voidp)), Loc.init);
             foreach (i, arg; args)
             {
                 auto argExpr = new ArgExpr(cast(int) i + 1, arg.type);
 
-                argAssignments ~= argscope.declare(arg.name, arg.type, argExpr);
+                argAssignments ~= argscope.declare(arg.name, arg.type, argExpr, Loc.init);
             }
 
             this.compiledStatement = this.statement.compile(Context(generator.platform, argscope));
@@ -2372,12 +2413,12 @@ class VarDeclScope : Namespace
     @(This.Init!null)
     Variable[] declarations;
 
-    Statement declare(string name, Type type, Expression value)
+    Statement declare(string name, Type type, Expression value, Loc loc)
     {
         auto member = this.find!FunctionScope.declare(type);
 
         declarations ~= Variable(name, member);
-        return new AssignStatement(member, value.implicitConvertTo(type));
+        return new AssignStatement(member, value.implicitConvertTo(type, loc));
     }
 
     Statement declare(string name, Type type)

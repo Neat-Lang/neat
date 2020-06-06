@@ -1757,6 +1757,10 @@ ASTStringLiteral parseStringLiteral(ref Parser parser, string endMarker)
                 fail("expected end of string, got end of file");
             }
 
+            if (text.front == '\\') {
+                str ~= text.front;
+                text.popFront;
+            }
             str ~= text.front;
             text.popFront;
         }
@@ -1775,6 +1779,9 @@ string replaceEscapes(string text)
         char ch = text[i++];
         if (ch == '\\')
         {
+            if (i == text.length) {
+                assert(false, "unterminated control sequence");
+            }
             char ctl = text[i++];
             switch (ctl)
             {
@@ -1786,6 +1793,12 @@ string replaceEscapes(string text)
                     break;
                 case 't':
                     result ~= '\t';
+                    break;
+                case '"':
+                    result ~= '"';
+                    break;
+                case '\\':
+                    result ~= '\\';
                     break;
                 default:
                     assert(false, format!"Unknown control sequence \\%s"(ctl));
@@ -2002,6 +2015,9 @@ class Method : Symbol
     @(This.Default!null)
     Statement compiledStatement;
 
+    @(This.Init!false)
+    bool emitted;
+
     string mangle()
     {
         // TODO mangle types
@@ -2010,6 +2026,9 @@ class Method : Symbol
 
     void emit(Generator generator, Namespace module_, Class thisType)
     {
+        assert(!this.emitted);
+        this.emitted = true;
+
         assert(generator.fun is null);
         auto voidp = new Pointer(new Void);
         generator.fun = generator.mod.define(
@@ -2439,7 +2458,7 @@ class Module : Namespace
             {
                 foreach (method; class_.methods)
                 {
-                    method.emit(generator, this, class_);
+                    if (!method.emitted) method.emit(generator, this, class_);
                 }
             }
         }
@@ -2517,8 +2536,13 @@ string moduleToFile(string module_)
     return module_.replace(".", "/") ~ ".cx";
 }
 
-Module parseModule(string filename, string[] includes, Platform platform, Module[] defaultImports)
+Module parseModule(
+    string filename, string[] includes, Platform platform, Module[] defaultImports, ref Module[string] importCache)
 {
+    if (filename in importCache)
+    {
+        return importCache[filename];
+    }
     import std.file : exists, readText;
     import std.path : chainPath;
 
@@ -2553,9 +2577,10 @@ Module parseModule(string filename, string[] includes, Platform platform, Module
         if (auto import_ = parser.parseImport)
         {
             auto importedModule = parseModule(
-                import_.name.moduleToFile, includes, platform, defaultImports);
+                import_.name.moduleToFile, includes, platform, defaultImports, importCache);
 
             module_.addImport(importedModule);
+            continue;
         }
         if (auto classDecl = parser.parseClassDecl)
         {
@@ -2580,6 +2605,7 @@ Module parseModule(string filename, string[] includes, Platform platform, Module
 
         parser.fail("couldn't parse function or struct");
     }
+    importCache[filename] = module_;
     return module_;
 }
 
@@ -2622,7 +2648,9 @@ else
         builtins.add("false", new Literal(0));
         builtins.add("null", new NullExpr(new Pointer(new Void)));
 
-        auto toplevel = parseModule(args[1], includes, defaultPlatform, [builtins]);
+        Module[string] importCache;
+
+        auto toplevel = parseModule(args[1], includes, defaultPlatform, [builtins], importCache);
 
         auto output = new Generator(defaultPlatform, module_);
 

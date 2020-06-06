@@ -584,14 +584,14 @@ private void defineIntrinsics(IpBackendModule mod)
         {
             T typedArgs;
             static foreach (i, U; T)
-                typedArgs[i] = args[i].as!U;
+                typedArgs[i] = args[i].decode!U;
             static if (is(typeof(dg(typedArgs)) == void))
             {
                 dg(typedArgs);
             }
             else
             {
-                *cast(R*) ret.ptr = dg(typedArgs);
+                encode(dg(typedArgs), ret);
             }
         });
     }
@@ -601,6 +601,7 @@ private void defineIntrinsics(IpBackendModule mod)
     defineCallback("assert", (int test) { assert(test, "Assertion failed!"); });
     defineCallback("ptr_offset", delegate void*(void* ptr, int offset) { assert(offset >= 0); return ptr + offset; });
     defineCallback("malloc", (int size) {
+        // import std.stdio : writefln; writefln!"malloc %s"(size);
         assert(size >= 0 && size < 1048576);
         return (new void[size]).ptr;
     });
@@ -624,6 +625,11 @@ private void defineIntrinsics(IpBackendModule mod)
         import std.conv : parse;
 
         return parse!int(text);
+    });
+    defineCallback("itoa", (int num) {
+        import std.format : format;
+
+        return format!"%s"(num);
     });
 
     defineCallback("_backend_createModule", delegate BackendModule(Backend backend, Platform platform)
@@ -733,21 +739,35 @@ private void defineIntrinsics(IpBackendModule mod)
 
 }
 
-private template as(T) {
+private template decode(T) {
     static if (is(T == U[], U))
     {
-        T as(void[] arg) {
+        T decode(void[] arg) {
             struct ArrayHack { align(4) U* ptr; int length; }
-            auto arrayVal = arg.as!ArrayHack;
+            auto arrayVal = arg.decode!ArrayHack;
             return arrayVal.ptr[0 .. arrayVal.length];
         }
     }
     else
     {
-        ref T as(void[] arg) {
+        ref T decode(void[] arg) {
             assert(arg.length == T.sizeof, format!"arg has invalid size %s for %s"(arg.length, T.sizeof));
             return (cast(T[]) arg)[0];
         }
+    }
+}
+
+private void encode(T)(T arg, void[] target)
+{
+    static if (is(T == U[], U))
+    {
+        struct ArrayHack { align(4) U* ptr; int length; }
+        return .encode(ArrayHack(arg.ptr, cast(int) arg.length), target);
+    }
+    else
+    {
+        assert(target.length == T.sizeof, format!"target has invalid size %s for %s"(target.length, T.sizeof));
+        *cast(T*) target.ptr = arg;
     }
 }
 
@@ -934,7 +954,7 @@ class IpBackendModule : BackendModule
                             assert(!lastInstr);
                             auto target = (cast(void*[]) regArrays[instr.load.target])[0];
                             assert(regArrays[reg]);
-                            assert(target);
+                            assert(cast(size_t) target > 0x100);
 
                             regArrays[reg][] = target[0 .. regArrays[reg].length];
                             break;

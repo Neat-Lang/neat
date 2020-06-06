@@ -997,11 +997,11 @@ ASTForLoop parseFor(ref Parser parser)
     }
 }
 
-Expression call(Symbol target, Expression[] args)
+Expression call(Symbol target, Expression[] args, Loc loc)
 {
     if (auto function_ = cast(Function) target)
     {
-        return new Call(function_, args);
+        return new Call(function_, args, loc);
     }
     if (auto method = cast(ClassMethod) target)
     {
@@ -1028,7 +1028,7 @@ class ASTCall : ASTSymbol
         auto target = this.target.compile(context);
         auto args = this.args.map!(a => a.compile(context).beExpression(loc)).array;
 
-        return target.call(args);
+        return target.call(args, loc);
     }
 
     mixin(GenerateAll);
@@ -1042,7 +1042,7 @@ class Call : Expression
 
     Loc loc;
 
-    this(Function function_, Expression[] args)
+    this(Function function_, Expression[] args, Loc loc)
     {
         assert(function_.args.length == args.length, format!"'%s' expected %s args, not %s"(
             function_.name, function_.args.length, args.length));
@@ -1057,6 +1057,7 @@ class Call : Expression
         }
         this.function_ = function_;
         this.args = args.dup;
+        this.loc = loc;
     }
 
     override Type type()
@@ -1446,7 +1447,7 @@ ASTSymbol parseMember(ref Parser parser, ASTSymbol base)
             return null;
         }
         auto name = parser.parseIdentifier;
-        assert(name, "member expected");
+        loc.assert_(name, "member expected");
         commit;
         return new ASTMember(base, name, loc);
     }
@@ -1481,7 +1482,7 @@ class ASTIndexAccess : ASTSymbol
         int size = context.platform.size((cast(Pointer) base.type).target.emit(context.platform));
         auto offset = new BinaryOp(BinaryOpType.mul, index, new Literal(size), loc);
 
-        return new Dereference(new PointerCast(base.type, new Call(ptr_offset, [base, offset])));
+        return new Dereference(new PointerCast(base.type, new Call(ptr_offset, [base, offset], loc)));
     }
 
     mixin(GenerateThis);
@@ -1560,7 +1561,7 @@ class ASTNewExpression : ASTSymbol
             auto length = args.get[0].compile(context).beExpression(loc);
             auto byteLength = new BinaryOp(BinaryOpType.mul, elementSize, length, loc);
             auto malloc = new Function("malloc", new Pointer(new Void), [Argument("", new Integer)], true, null);
-            auto dataPtr = new PointerCast(new Pointer(arrayType.elementType), call(malloc, [byteLength]));
+            auto dataPtr = new PointerCast(new Pointer(arrayType.elementType), call(malloc, [byteLength], loc));
             return new ArrayExpression(dataPtr, length);
         }
         loc.assert_(false, format!"don't know how to allocate %s"(type));
@@ -1588,7 +1589,7 @@ class CallCtorExpression : Expression
         auto reg = this.classptr.emit(output);
         auto expr = new RegExpr(type, reg);
 
-        expr.accessMember("this", loc).call(this.args).emit(output);
+        expr.accessMember("this", loc).call(this.args, loc).emit(output);
         return reg;
     }
 
@@ -1758,7 +1759,7 @@ class ASTInstanceOf : ASTSymbol
         assert(cast(Class) base.type);
         auto target = cast(Class) this.target.compile(context);
         assert(target);
-        return new PointerCast(target, base.accessMember("__instanceof", loc).call([new StringLiteral(target.name)]));
+        return new PointerCast(target, base.accessMember("__instanceof", loc).call([new StringLiteral(target.name)], loc));
     }
 
     mixin(GenerateThis);
@@ -2003,7 +2004,7 @@ Expression implicitConvertTo(Expression from, Type to, Loc loc)
             new Integer,
             [Argument("", voidp)],
             true, null);
-        return new Call(rt_ptr_test, [new PointerCast(voidp, from)]);
+        return new Call(rt_ptr_test, [new PointerCast(voidp, from)], loc);
     }
     loc.assert_(false, format!"todo: cast(%s) %s"(to, from.type));
     assert(false);

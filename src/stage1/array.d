@@ -175,7 +175,7 @@ class ArraySlice : Expression
 
         auto arrayType = cast(Array) this.array.type;
         assert(arrayType, "slice of non-array");
-        const int elementSize = output.platform.size(arrayType.elementType.emit(output.platform));
+        const int elementSize = arrayType.elementType.emit(output.platform).size(output.platform);
 
         auto arrayReg = this.array.emit(output);
         auto lowerReg = this.lower.emit(output);

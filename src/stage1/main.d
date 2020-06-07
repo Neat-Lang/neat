@@ -698,7 +698,7 @@ class BinaryOp : Expression
                 auto rightLen = (new ArrayLength(this.right)).emit(output);
                 auto leftPtr = (new ArrayPointer(leftArray.elementType, this.left)).emit(output);
                 auto rightPtr = (new ArrayPointer(rightArray.elementType, this.right)).emit(output);
-                const leftSize = output.platform.size(leftArray.elementType.emit(output.platform));
+                const leftSize = leftArray.elementType.emit(output.platform).size(output.platform);
                 return output.fun.call(new BackendIntType, "_arraycmp", [
                     leftPtr, rightPtr, leftLen, rightLen,
                     output.fun.intLiteral(leftSize)]);
@@ -1460,7 +1460,7 @@ class ASTIndexAccess : ASTSymbol
             new Pointer(new Void),
             [Argument("", new Pointer(new Void)), Argument("", new Integer)],
             true, null);
-        int size = context.platform.size((cast(Pointer) base.type).target.emit(context.platform));
+        int size = (cast(Pointer) base.type).target.emit(context.platform).size(context.platform);
         auto offset = new BinaryOp(BinaryOpType.mul, index, new Literal(size), loc);
 
         return new Dereference(new PointerCast(base.type, new Call(ptr_offset, [base, offset], loc)));
@@ -1504,7 +1504,7 @@ class SizeOf : Expression
 
     override Reg emit(Generator output)
     {
-        int size = output.platform.size(this.type_.emit(output.platform));
+        int size = this.type_.emit(output.platform).size(output.platform);
 
         return output.fun.intLiteral(size);
     }
@@ -1592,7 +1592,7 @@ class NewClassExpression : Expression
         auto classInfoStruct = this.classType.classInfoStruct;
         auto classDataStruct = this.classType.dataStruct;
         auto voidp = (new Pointer(new Void)).emit(output.platform);
-        int classInfoSize = output.platform.size(classInfoStruct.emit(output.platform));
+        int classInfoSize = classInfoStruct.emit(output.platform).size(output.platform);
         auto classInfoPtr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(classInfoSize)]);
         auto backendStructType = classInfoStruct.emit(output.platform);
         foreach (i, method; classType.vtable)
@@ -1602,7 +1602,7 @@ class NewClassExpression : Expression
             auto src = output.fun.getFuncPtr(method.mangle);
             output.fun.store(funcPtr.emit(output.platform), target, src);
         }
-        int classDataSize = output.platform.size(classDataStruct.emit(output.platform));
+        int classDataSize = classDataStruct.emit(output.platform).size(output.platform);
         auto classPtr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(classDataSize)]);
         auto classInfoTarget = output.fun.fieldOffset(classDataStruct.emit(output.platform), classPtr, 0);
         output.fun.store(voidp, classInfoTarget, classInfoPtr);
@@ -2685,7 +2685,7 @@ else
         // writefln!"module:\n%s"(module_);
 
         auto type = new Array(new Array(new Character));
-        const size = output.platform.size(type.emit(output.platform));
+        const size = type.emit(output.platform).size(output.platform);
         auto modArg = new void[size];
 
         backendEncode(nextArgs, modArg);

@@ -9,6 +9,7 @@ import std.algorithm;
 import std.array;
 import std.format;
 import std.range;
+import std.typecons : Tuple;
 
 class IpBackend : Backend
 {
@@ -213,14 +214,14 @@ struct Instr
         if (!intType) intType = new BackendIntType;
         with (Kind) final switch (this.kind)
         {
-            case CallFuncPtr: return platform.size(callFuncPtr.type);
-            case Call: return platform.size(call.type);
-            case Arg: return platform.size(fun.argTypes[arg.index]);
-            case BinOp: return platform.size(intType);
-            case Literal: return platform.size(literal.type);
-            case Load: return platform.size(load.targetType);
+            case CallFuncPtr: return callFuncPtr.type.size(platform);
+            case Call: return call.type.size(platform);
+            case Arg: return fun.argTypes[arg.index].size(platform);
+            case BinOp: return intType.size(platform);
+            case Literal: return literal.type.size(platform);
+            case Load: return load.targetType.size(platform);
             case GetField:
-                return platform.size(getField.structType.members[getField.member]);
+                return getField.structType.members[getField.member].size(platform);
             // pointers
             case Alloca:
             case FieldOffset:
@@ -511,7 +512,7 @@ void setInitValue(BackendType type, void* target, Platform platform)
         {
             setInitValue(subtype, target, platform);
             // TODO alignment
-            target += platform.size(subtype);
+            target += subtype.size(platform);
         }
         return;
     }
@@ -654,7 +655,11 @@ private void defineIntrinsics(IpBackendModule mod)
     defineCallback("_backend_pointerType", delegate BackendType(BackendType target)
         => new BackendPointerType(target));
     defineCallback("_backend_structType", delegate BackendType(BackendType[] members)
-        => new BackendStructType(members.dup));
+        => new BackendStructType(members));
+
+    defineCallback("_platform_size", delegate int(Platform platform, BackendType type)
+        => type.size(platform));
+
     defineCallback(
         "_backendModule_define",
         delegate BackendFunction(
@@ -720,6 +725,10 @@ private void defineIntrinsics(IpBackendModule mod)
     defineCallback(
         "_backendFunction_load",
         delegate int(BackendFunction fun, BackendType dataType, int target) => fun.load(dataType, target));
+    defineCallback(
+        "_backendFunction_field",
+        delegate int(BackendFunction fun, BackendType structType, int structValue, int member)
+            => fun.field(structType, structValue, member));
     defineCallback(
         "_backendFunction_fieldOffset",
         delegate int(BackendFunction fun, BackendType structType, int structBase, int member)
@@ -827,6 +836,8 @@ class IpBackendModule : BackendModule
         callbacks[name] = call;
     }
 
+    Tuple!(size_t, "numRegs", int, "regAreaSize", int[], "instrSizes")[string] regsizeCache;
+
     void call(string name, void[] ret, void[][] args)
     in (name in this.functions || name in this.callbacks, format!"function '%s' not found"(name))
     {
@@ -835,9 +846,9 @@ class IpBackendModule : BackendModule
 
         scope(failure) writefln!"in %s:"(name);
 
-        if (name in this.callbacks)
+        if (auto dg = name in this.callbacks)
         {
-            return this.callbacks[name](ret, args);
+            return (*dg)(ret, args);
         }
 
         // import std.stdio; writefln!"-------\ncall %s"(name);
@@ -848,9 +859,18 @@ class IpBackendModule : BackendModule
             args.length == fun.argTypes.length,
             format!"%s expected %s arguments, not %s"(name, fun.argTypes.length, args.length));
         size_t numRegs;
-        foreach (block; fun.blocks) numRegs += block.instrs.length;
         int regAreaSize;
-        foreach (block; fun.blocks) foreach (instr; block.instrs) regAreaSize += instr.regSize(fun, this.platform);
+        int[] instrSizes;
+        if (name in regsizeCache) {
+            numRegs = regsizeCache[name].numRegs;
+            regAreaSize = regsizeCache[name].regAreaSize;
+            instrSizes = regsizeCache[name].instrSizes;
+        } else {
+            foreach (block; fun.blocks) numRegs += block.instrs.length;
+            foreach (block; fun.blocks) foreach (instr; block.instrs) instrSizes ~= instr.regSize(fun, this.platform);
+            regAreaSize = instrSizes.sum;
+            regsizeCache[name] = typeof(regsizeCache[name])(numRegs, regAreaSize, instrSizes);
+        }
 
         void[] regData = ArrayAllocator!void.allocate(regAreaSize);
         scope(success) ArrayAllocator!void.free(regData);
@@ -863,8 +883,9 @@ class IpBackendModule : BackendModule
             int i;
             foreach (block; fun.blocks) foreach (instr; block.instrs)
             {
-                regArrays[i++] = regCurrent[0 .. instr.regSize(fun, platform)];
-                regCurrent = regCurrent[instr.regSize(fun, platform) .. $];
+                regArrays[i] = regCurrent[0 .. instrSizes[i]];
+                regCurrent = regCurrent[instrSizes[i] .. $];
+                i++;
             }
             assert(regCurrent.length == 0);
             assert(i == numRegs);
@@ -912,7 +933,8 @@ class IpBackendModule : BackendModule
                             break;
                         case Return:
                             assert(lastInstr);
-                            assert(ret.length == regArrays[instr.return_.reg].length);
+                            assert(ret.length == regArrays[instr.return_.reg].length,
+                                format!"%s != %s"(ret.length, regArrays[instr.return_.reg].length));
                             ret[] = regArrays[instr.return_.reg];
                             return;
                         case Arg:
@@ -958,22 +980,22 @@ class IpBackendModule : BackendModule
                             break;
                         case Alloca:
                             assert(!lastInstr);
-                            auto target = new void[this.platform.size(instr.alloca.type)];
+                            auto target = new void[instr.alloca.type.size(this.platform)];
                             setInitValue(instr.alloca.type, target.ptr, this.platform);
                             (cast(void*[]) regArrays[reg])[0] = target.ptr;
                             break;
                         case FieldOffset:
                             assert(!lastInstr);
                             auto base = (cast(void*[]) regArrays[instr.fieldOffset.base])[0];
-                            auto offset = this.platform.offsetOf(instr.fieldOffset.structType, instr.fieldOffset.member);
+                            auto offset = instr.fieldOffset.structType.offsetOf(this.platform, instr.fieldOffset.member);
 
                             (cast(void*[]) regArrays[reg])[0] = base + offset;
                             break;
                         case GetField:
                             assert(!lastInstr);
                             auto value = cast(void[]) regArrays[instr.fieldOffset.base];
-                            auto size = this.platform.size(instr.getField.structType.members[instr.getField.member]);
-                            auto offset = this.platform.offsetOf(instr.getField.structType, instr.getField.member);
+                            auto size = instr.getField.structType.members[instr.getField.member].size(this.platform);
+                            auto offset = instr.getField.structType.offsetOf(this.platform, instr.getField.member);
 
                             (cast(void[]) regArrays[reg])[] = value[offset .. offset + size];
                             break;

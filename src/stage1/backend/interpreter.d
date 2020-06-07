@@ -7,6 +7,7 @@ import backend.types;
 import boilerplate;
 import std.algorithm;
 import std.array;
+import std.ascii;
 import std.format;
 import std.range;
 import std.typecons : Tuple;
@@ -602,6 +603,8 @@ private void defineIntrinsics(IpBackendModule mod)
     }
     defineCallback("_backendModule", delegate BackendModule() => mod);
     defineCallback("cxruntime_int_negate", delegate int(int a) => !a);
+    defineCallback("cxruntime_isAlpha", delegate int(char ch) => isAlpha(ch));
+    defineCallback("cxruntime_isDigit", delegate int(char ch) => isDigit(ch));
     defineCallback("cxruntime_ptr_test", delegate int(void* p) => !!p);
     defineCallback("assert", (int test) { assert(test, "Assertion failed!"); });
     defineCallback("ptr_offset", delegate void*(void* ptr, int offset) { assert(offset >= 0); return ptr + offset; });
@@ -788,9 +791,24 @@ public  template decode(T) {
     static if (is(T == U[], U))
     {
         T decode(void[] arg) {
-            struct ArrayHack { align(4) U* ptr; int length; }
-            auto arrayVal = arg.decode!ArrayHack;
-            return arrayVal.ptr[0 .. arrayVal.length];
+            static if (is(U == int) || is(typeof(cast() U.init) == char) || is(U == class) || is(U == interface))
+            {
+                struct ArrayHack { align(4) U* ptr; int length; }
+                auto arrayVal = arg.decode!ArrayHack;
+                return arrayVal.ptr[0 .. arrayVal.length];
+            }
+            else static if (is(U == string))
+            {
+                struct ArrayHack { align(4) void* ptr; int length; }
+                auto outerArrayVal = arg.decode!ArrayHack;
+                string[] res;
+                for (int i = 0; i < outerArrayVal.length; i++) {
+                    auto innerArrayVal = cast(void[]) (cast(ArrayHack*) outerArrayVal.ptr)[i .. i + 1];
+                    res ~= decode!string(innerArrayVal);
+                }
+                return res;
+            }
+            else static assert(false, "? " ~ T.stringof);
         }
     }
     else
@@ -969,15 +987,15 @@ class IpBackendModule : BackendModule
                             regArrays[reg][] = args[instr.arg.index];
                             break;
                         case BinOp:
-                            int left = (cast(int[]) regArrays[instr.binop.left])[0];
-                            int right = (cast(int[]) regArrays[instr.binop.right])[0];
+                            int left = *cast(int*) regArrays[instr.binop.left].ptr;
+                            int right = *cast(int*) regArrays[instr.binop.right].ptr;
                             final switch (instr.binop.op)
                             {
                                 static foreach (op;
                                     ["+", "-", "*", "/", "%", "&", "|", "^", "<", ">", "<=", ">=", "=="])
                                 {
                                     case op:
-                                        (cast(int[]) regArrays[reg])[0] = mixin("left " ~ op ~ " right");
+                                        *cast(int*) regArrays[reg].ptr = mixin("left " ~ op ~ " right");
                                         break outer;
                                 }
                             }

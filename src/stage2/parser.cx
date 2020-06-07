@@ -4,6 +4,9 @@ import base;
 import format;
 import linenr;
 
+extern(C) int cxruntime_isAlpha(char);
+extern(C) int cxruntime_isDigit(char);
+
 class Parser
 {
     string[] stack;
@@ -90,7 +93,7 @@ class Parser
     {
         if (!this.accept(match))
         {
-            this.fail(sssJoin("'", match, "' expected"));
+            this.fail(s3join("'", match, "' expected"));
         }
     }
 
@@ -109,37 +112,46 @@ class Parser
 
     void strip()
     {
+        string text = this.text();
         while (true)
         {
             /* this.text = this.text.strip; */
-            while (this.text().length > 0 && isWhitespace(this.text()[0 .. 1]))
+            while (text.length > 0 && isWhitespace(text[0 .. 1]))
             {
-                *this.textp() = this.text()[1 .. this.text().length];
+                text = text[1 .. text.length];
             }
-            if (startsWith(this.text(), "//"))
+            if (startsWith(text, "//"))
             {
-                assert(find(this.text(), "\n") != -1);
-                *this.textp() = this.text()[find(this.text(), "\n") + 1 .. this.text().length];
+                int newline = find(text, "\n");
+                assert(newline != -1);
+                text = text[newline + 1 .. text.length];
             }
             else
             {
-                if (!startsWith(this.text(), "/*")) return;
-                *this.textp() = this.text()["/*".length .. this.text().length];
+                if (!startsWith(text, "/*"))
+                {
+                    *this.textp() = text;
+                    return;
+                }
+                text = text["/*".length .. text.length];
                 int commentLevel = 1;
                 while (commentLevel > 0)
                 {
-                    int more = find(this.text(), "/*");
-                    int less = find(this.text(), "*/");
+                    int more = find(text, "/*");
+                    int less = find(text, "*/");
 
-                    if (more == -1 && less == -1) this.fail("comment spans end of file");
+                    if (more == -1 && less == -1) {
+                        *this.textp() = text;
+                        this.fail("comment spans end of file");
+                    }
                     if (less != -1 && (more == -1 || less < more))
                     {
-                        *this.textp() = this.text()[less + "*/".length .. this.text().length];
+                        text = text[less + "*/".length .. text.length];
                         commentLevel = commentLevel - 1;
                     }
                     if (more != -1 && (less == -1 || more < less))
                     {
-                        *this.textp() = this.text()[more + "/*".length .. this.text().length];
+                        text = text[more + "/*".length .. text.length];
                         commentLevel = commentLevel + 1;
                     }
                 }
@@ -178,12 +190,12 @@ class Loc {
     }
 
     void assert2s(int test, string msg) { if (!test) this.fail(msg); }
-    void assert2s2(int test, string a, string b) { if (!test) this.fail(ssJoin(a, b)); }
-    void assert2s3(int test, string a, string b, string c) { if (!test) this.fail(sssJoin(a, b, c)); }
+    void assert2s2(int test, string a, string b) { if (!test) this.fail(s2join(a, b)); }
+    void assert2s3(int test, string a, string b, string c) { if (!test) this.fail(s3join(a, b, c)); }
     void assert2s4(int test, string a, string b, string c, string d) {
-        if (!test) this.fail(ssssJoin(a, b, c, d)); }
+        if (!test) this.fail(s4join(a, b, c, d)); }
     void assert2s5(int test, string a, string b, string c, string d, string e) {
-        if (!test) this.fail(sssssJoin(a, b, c, d, e)); }
+        if (!test) this.fail(s5join(a, b, c, d, e)); }
 }
 
 bool startsWith(string haystack, string needle)
@@ -207,15 +219,15 @@ bool parseNumber(Parser parser, int* ip)
     if (parser.accept("-"))
         negative = true;
     parser.strip();
-    if (parser.eof() || !isNumber(parser.text()[0 .. 1]))
+    if (parser.eof() || !cxruntime_isDigit(parser.text()[0]))
     {
         parser.revert();
         return false;
     }
     string number;
-    while (!parser.eof() && isNumber(parser.text()[0 .. 1]))
+    while (!parser.eof() && cxruntime_isDigit(parser.text()[0]))
     {
-        number = ssJoin(number, parser.text()[0 .. 1]);
+        number = s2join(number, parser.text()[0 .. 1]);
         *parser.textp() = parser.text()[1 .. parser.text().length];
     }
     parser.commit();
@@ -225,21 +237,9 @@ bool parseNumber(Parser parser, int* ip)
     return true;
 }
 
-bool isNumber(string s)
-{
-    assert(s.length == 1);
-    return find("0123456789", s) != -1;
-}
-
-bool isAlpha(string s)
-{
-    assert(s.length == 1);
-    return find("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", s) != -1;
-}
-
 bool isAlnum(string s)
 {
-    return isAlpha(s) || isNumber(s);
+    return cxruntime_isAlpha(s[0]) || cxruntime_isDigit(s[0]);
 }
 
 bool isWhitespace(string s)
@@ -251,7 +251,7 @@ string parseIdentifier2(Parser parser, string allowedChars)
 {
     parser.begin();
     parser.strip();
-    if (parser.text().length == 0 || (!isAlpha(parser.text()[0 .. 1])
+    if (parser.text().length == 0 || (!cxruntime_isAlpha(parser.text()[0])
         && parser.text()[0 .. 1] != "_")
         && find(allowedChars, parser.text()[0 .. 1]) == -1)
     {
@@ -264,7 +264,7 @@ string parseIdentifier2(Parser parser, string allowedChars)
         || parser.text()[0 .. 1] == "_"
         || find(allowedChars, parser.text()[0 .. 1]) != -1))
     {
-        identifier = ssJoin(identifier, parser.text()[0 .. 1]);
+        identifier = s2join(identifier, parser.text()[0 .. 1]);
         *parser.textp() = parser.text()[1 .. parser.text().length];
     }
     parser.commit();

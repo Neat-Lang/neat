@@ -15,6 +15,8 @@ void assert2s2(int test, string a, string b) { if (!test) { print(s2join(a, b));
 void assert2s3(int test, string a, string b, string c) { if (!test) { print(s3join(a, b, c)); assert(false); } }
 void assert2s4(int test, string a, string b, string c, string d) {
     if (!test) { print(s4join(a, b, c, d)); assert(false); } }
+void assert2s5(int test, string a, string b, string c, string d, string e) {
+    if (!test) { print(s5join(a, b, c, d, e)); assert(false); } }
 
 class ASTArgument
 {
@@ -79,7 +81,7 @@ class Function : Symbol
         void*[] argTypes = new void*[](this.args.length);
         for (int i = 0; i < this.args.length; i = i + 1)
             argTypes[i] = this.args[i].type.emit(module_.platform);
-        assert(module_);
+        assert(!!module_);
         generator.fun = generator.mod.define(
             this.name,
             this.ret.emit(module_.platform),
@@ -195,19 +197,36 @@ class ArrayEqual : Expression
     {
         Array leftArray = this.left.type().instanceOf(Array);
         Array rightArray = this.right.type().instanceOf(Array);
-        if (leftArray && rightArray)
-        {
-            // TODO temp expr once array properties work on nonreferences
-            assert(leftArray.same(rightArray));
-            int leftLen = (new ArrayLength(this.left)).emit(output);
-            int rightLen = (new ArrayLength(this.right)).emit(output);
-            int leftPtr = (new ArrayPointer(leftArray.elementType, this.left)).emit(output);
-            int rightPtr = (new ArrayPointer(rightArray.elementType, this.right)).emit(output);
-            int leftSize = output.platform.size(leftArray.elementType.emit(output.platform));
-            return output.fun.call(output.platform.intType(), "_arraycmp", new int[](0)
-                ~ leftPtr ~ rightPtr ~ leftLen ~ rightLen
-                ~ output.fun.intLiteral(leftSize));
-        }
+        assert(leftArray && rightArray);
+        // TODO temp expr once array properties work on nonreferences
+        assert(leftArray.same(rightArray));
+        int left = this.left.emit(output);
+        int right = this.right.emit(output);
+        int leftLen = getArrayLen(output, leftArray, left);
+        int rightLen = getArrayLen(output, rightArray, right);
+        int leftPtr = getArrayPtr(output, leftArray, left);
+        int rightPtr = getArrayPtr(output, rightArray, right);
+        int leftSize = output.fun.wordLiteral(
+            output.platform,
+            output.platform.size(leftArray.elementType.emit(output.platform)));
+        return output.fun.call(output.platform.intType(), "_arraycmp", new int[](0)
+            ~ leftPtr ~ rightPtr ~ leftLen ~ rightLen ~ leftSize);
+    }
+}
+
+class IntToLong : Expression
+{
+    Expression intValue;
+
+    this(Expression intValue) { this.intValue = intValue; }
+
+    Type type() { return new Long; }
+
+    int emit(Generator output) {
+        assert(!!this.intValue.type().instanceOf(Integer));
+
+        int intValue = this.intValue.emit(output);
+        return output.fun.zeroExtend(intValue, 4, 8);
     }
 }
 
@@ -221,8 +240,6 @@ class BinaryOp : Expression
 
     this(string op, Expression left, Expression right)
     {
-        assert2s3(left.type().instanceOf(Integer), op, " (l) expected int, not ", left.type().repr());
-        assert2s3(right.type().instanceOf(Integer), op, " (r) expected int, not ", right.type().repr());
         this.op = op;
         this.left = left;
         this.right = right;
@@ -230,14 +247,36 @@ class BinaryOp : Expression
 
     Type type()
     {
-        return new Integer;
+        string op = this.op;
+        if (op == "+" || op == "-" || op == "*") {
+            Type rightType = this.right.type();
+            if (rightType.instanceOf(Long)) return rightType;
+            return this.left.type();
+        }
+        if (op == "==" || op == ">=" || op == "<=" || op == ">" || op == "<")
+            return new Integer;
+        assert(false);
     }
 
     int emit(Generator output)
     {
-        int leftreg = this.left.emit(output);
-        int rightreg = this.right.emit(output);
-        return output.fun.binop(this.op, leftreg, rightreg);
+        Expression left = this.left;
+        Expression right = this.right;
+        if (left.type().instanceOf(Integer) && right.type().instanceOf(Long)) {
+            left = new IntToLong(left);
+        }
+        if (left.type().instanceOf(Long) && right.type().instanceOf(Integer)) {
+            right = new IntToLong(right);
+        }
+        assert2s3(left.type().instanceOf(Integer) || left.type().instanceOf(Long),
+            this.op, " (l) expected int, not ", left.type().repr());
+        assert2s5(!!left.type().same(right.type()),
+            this.op, ": types don't match, ", left.type().repr(), ", ", right.type().repr());
+        int size = 4;
+        if (left.type().instanceOf(Long)) size = 8;
+        int leftreg = left.emit(output);
+        int rightreg = right.emit(output);
+        return output.fun.binop(this.op, size, leftreg, rightreg);
     }
 }
 
@@ -290,6 +329,10 @@ Expression implicitConvertTo(Expression from, Type to, Loc loc)
     {
         return new PointerCast(to, from);
     }
+    if (from.type().instanceOf(Integer) && to.instanceOf(Long))
+    {
+        return new IntToLong(from);
+    }
     // any pointer casts to void*
     if (from.type().instanceOf(Pointer) && to.same(new Pointer(new Void)))
     {
@@ -312,18 +355,6 @@ Expression implicitConvertTo(Expression from, Type to, Loc loc)
     {
         return new PointerCast(to, from);
     }
-    // TODO bool
-    if (to.instanceOf(Integer) && (from.type().instanceOf(Pointer) || from.type().instanceOf(Class)))
-    {
-        Type voidp = new Pointer(new Void);
-        Function rt_ptr_test = new Function("cxruntime_ptr_test",
-            new Integer,
-            new Argument[](0) ~ new Argument("", voidp),
-            true, null);
-        Expression ptrCast = new PointerCast(voidp, from);
-
-        return new Call(rt_ptr_test, new Expression[](0) ~ ptrCast, loc);
-    }
     loc.assert2s4(false, "todo: cast(", to.repr(), ") ", from.type().repr());
 }
 
@@ -339,7 +370,7 @@ class Call : Expression
     {
         loc.assert2s5(
             function_.args.length == args.length,
-            function_.name, " expected ", itoa(function_.args.length), " args, not ", itoa(args.length));
+            function_.name, " expected ", ltoa(function_.args.length), " args, not ", ltoa(args.length));
 
         for (int i = 0; i < args.length; i = i + 1)
         {
@@ -371,7 +402,13 @@ class FuncPtrCall : Expression
 
     Expression[] args;
 
-    this(Expression funcPtr, Expression[] args) { this.funcPtr = funcPtr; this.args = args; }
+    Loc loc;
+
+    this(Expression funcPtr, Expression[] args, Loc loc) {
+        this.funcPtr = funcPtr;
+        this.args = args;
+        this.loc = loc;
+    }
 
     Type type()
     {
@@ -380,11 +417,22 @@ class FuncPtrCall : Expression
 
     int emit(Generator output)
     {
+        FunctionPointer type = this.funcPtr.type().instanceOf(FunctionPointer);
+
+        this.loc.assert2s4(
+            type.args.length == this.args.length,
+            "expected ", ltoa(type.args.length), " args, not ", ltoa(this.args.length));
+
         int[] regs = new int[](this.args.length);
         for (int i = 0; i < this.args.length; i = i + 1)
-            regs[i] = this.args[i].emit(output);
+        {
+            Expression arg = this.args[i];
+            arg = implicitConvertTo(arg, type.args[i], this.loc);
+
+            regs[i] = arg.emit(output);
+        }
         return output.fun.callFuncPtr(
-            this.type().emit(output.platform), this.funcPtr.emit(output), regs);
+            type.emit(output.platform), this.funcPtr.emit(output), regs);
     }
 }
 
@@ -409,12 +457,12 @@ Expression call(Symbol target, Expression[] args, Loc loc)
         Expression[] combinedArgs;
         combinedArgs = combinedArgs ~ method.thisPtr;
         for (int i = 0; i < args.length; i = i + 1) combinedArgs = combinedArgs ~ args[i];
-        return new FuncPtrCall(method.funcPtr, combinedArgs);
+        return new FuncPtrCall(method.funcPtr, combinedArgs, loc);
     }
     Expression expr = target.instanceOf(Expression);
     if (expr && expr.type().instanceOf(FunctionPointer))
     {
-        return new FuncPtrCall(expr, args);
+        return new FuncPtrCall(expr, args, loc);
     }
     loc.assert2s(false, "unknown call target");
 }
@@ -488,9 +536,11 @@ class ASTIndexAccess : ASTSymbol
 
     Expression compile(Context context)
     {
+        Type wordType = nativeWordType(context.platform);
         Expression base = beExpression(this.base.compile(context));
         Expression index = beExpression(this.index.compile(context));
 
+        index = implicitConvertTo(index, wordType, this.loc);
         Array array_ = base.type().instanceOf(Array);
         if (array_)
         {
@@ -500,20 +550,49 @@ class ASTIndexAccess : ASTSymbol
 
         Pointer basePtr = base.type().instanceOf(Pointer);
 
-        assert(basePtr); // expected pointer for index base
-        assert(index.type().instanceOf(Integer)); // expected int for index value
+        assert(!!basePtr); // expected pointer for index base
 
         Argument[] ptrOffsetArgs = new Argument[](2);
         ptrOffsetArgs[0] = new Argument("", new Pointer(new Void));
-        ptrOffsetArgs[1] = new Argument("", new Integer);
+        ptrOffsetArgs[1] = new Argument("", wordType);
         Function ptr_offset = new Function("ptr_offset", new Pointer(new Void), ptrOffsetArgs, true, null);
         int size = context.platform.size(basePtr.target.emit(context.platform));
         BinaryOp offset = new BinaryOp("*", index, new Literal(size));
+        assert(offset.type().same(wordType));
 
         Expression[] callArgs = new Expression[](2);
         callArgs[0] = base;
         callArgs[1] = offset;
         return new Dereference(new PointerCast(base.type(), new Call(ptr_offset, callArgs, this.loc)));
+    }
+}
+
+class ASTArraySlice : ASTSymbol
+{
+    ASTSymbol array;
+
+    ASTSymbol lower;
+
+    ASTSymbol upper;
+
+    Loc loc;
+
+    this(ASTSymbol array, ASTSymbol lower, ASTSymbol upper, Loc loc)
+    {
+        this.array = array;
+        this.lower = lower;
+        this.upper = upper;
+        this.loc = loc;
+    }
+
+    Symbol compile(Context context)
+    {
+        Type wordType = nativeWordType(context.platform);
+
+        return new ArraySlice(
+            beExpression(this.array.compile(context)),
+            implicitConvertTo(beExpression(this.lower.compile(context)), wordType, this.loc),
+            implicitConvertTo(beExpression(this.upper.compile(context)), wordType, this.loc));
     }
 }
 
@@ -526,7 +605,7 @@ ASTIndexAccess parseIndex(Parser parser, ASTSymbol base)
         return null;
     }
     ASTSymbol index = parseExpression(parser);
-    assert(index); // "index expected"
+    assert(!!index); // "index expected"
     if (parser.accept(".."))
     {
         ASTSymbol lower = index;
@@ -534,7 +613,7 @@ ASTIndexAccess parseIndex(Parser parser, ASTSymbol base)
         parser.assert_(!!upper, "slice upper bound expected");
         parser.expect("]");
         parser.commit();
-        return new ASTArraySlice(base, lower, upper);
+        return new ASTArraySlice(base, lower, upper, parser.loc());
     }
     parser.expect("]");
     parser.commit();
@@ -553,7 +632,7 @@ Symbol accessMember(Symbol base, string member)
         Struct structType = baseExpr.type().instanceOf(Struct);
         if (structType)
         {
-            assert2s(baseExpr.instanceOf(Reference), "TODO struct member of value");
+            assert2s(!!baseExpr.instanceOf(Reference), "TODO struct member of value");
             int memberOffset = -1;
             for (int i = 0; i < structType.members.length; i = i + 1)
             {
@@ -573,7 +652,7 @@ Symbol accessMember(Symbol base, string member)
             Expression asStructPtr = new PointerCast(new Pointer(classType.dataStruct()), baseExpr);
             if (methodOffset != -1)
             {
-                Expression classInfo = new Dereference(new PointerCast(
+                Reference classInfo = new Dereference(new PointerCast(
                     new Pointer(classType.classInfoStruct()), new StructMember(new Dereference(asStructPtr), 0)));
                 // TODO dereference-into-symbol so we can '&' it again
                 StructMember funcPtr = new StructMember(classInfo, methodOffset);
@@ -608,7 +687,7 @@ class ASTMember : ASTSymbol
 
         if (expr && expr.type().instanceOf(Array) && this.member == "length")
         {
-            return new ArrayLength(expr);
+            return new ArrayLength(expr, nativeWordType(context.platform));
         }
 
         if (expr && expr.type().instanceOf(Array) && this.member == "ptr")
@@ -629,7 +708,7 @@ ASTMember parseMember(Parser parser, ASTSymbol base)
         return null;
     }
     string name = parseIdentifier(parser);
-    parser.assert_(name.length, "member expected");
+    parser.assert_(name.length > 0, "member expected");
     parser.commit();
     return new ASTMember(base, name);
 }
@@ -651,9 +730,9 @@ class ASTInstanceOf : ASTSymbol
     Symbol compile(Context context)
     {
         Expression base = beExpression(this.base.compile(context));
-        assert(base.type().instanceOf(Class));
+        assert(!!base.type().instanceOf(Class));
         Class target = this.target.compile(context).instanceOf(Class);
-        assert(target);
+        assert(!!target);
         Symbol instanceOf = accessMember(base, "__instanceof");
         Expression name = new StringLiteral(target.name);
         return new PointerCast(target, call(instanceOf, new Expression[](0) ~ name, this.loc));
@@ -738,7 +817,7 @@ class Dereference : Reference
     {
         Type superType = this.base.type();
         Pointer pointerType = superType.instanceOf(Pointer);
-        assert(pointerType);
+        assert(!!pointerType);
         return pointerType.target;
     }
 
@@ -794,7 +873,7 @@ class ASTReference : ASTSymbol
         }
         Symbol baseExpression = this.base.compile(context);
 
-        assert(baseExpression.instanceOf(Reference));
+        assert(!!baseExpression.instanceOf(Reference));
 
         return new ReferenceExpression(baseExpression.instanceOf(Reference));
     }
@@ -853,7 +932,8 @@ class NewClassExpression : Expression
         Struct classDataStruct = this.classType.dataStruct();
         void* voidp = (new Pointer(new Void)).emit(output.platform);
         int classInfoSize = output.platform.size(classInfoStruct.emit(output.platform));
-        int classInfoPtr = output.fun.call(voidp, "malloc", new int[](0) ~ output.fun.intLiteral(classInfoSize));
+        int classInfoPtr = output.fun.call(
+            voidp, "malloc", new int[](0) ~ output.fun.wordLiteral(output.platform, classInfoSize));
         void* backendStructType = classInfoStruct.emit(output.platform);
         ClassMethod[] vtable = this.classType.vtable();
         for (int i = 0; i < vtable.length; i = i + 1) {
@@ -864,7 +944,8 @@ class NewClassExpression : Expression
             output.fun.store(funcPtr.emit(output.platform), target, src);
         }
         int classDataSize = output.platform.size(classDataStruct.emit(output.platform));
-        int classPtr = output.fun.call(voidp, "malloc", new int[](0) ~ output.fun.intLiteral(classDataSize));
+        int classPtr = output.fun.call(
+            voidp, "malloc", new int[](0) ~ output.fun.wordLiteral(output.platform, classDataSize));
         int classInfoTarget = output.fun.fieldOffset(classDataStruct.emit(output.platform), classPtr, 0);
         output.fun.store(voidp, classInfoTarget, classInfoPtr);
 
@@ -933,13 +1014,14 @@ class ASTNewExpression : ASTSymbol
         if (arrayType) {
             assert(this.args.length == 1);
 
+            Type wordType = nativeWordType(context.platform);
             SizeOf elementSize = new SizeOf(arrayType.elementType);
             // TODO only compute length once
-            Expression length = beExpression(this.args[0].compile(context));
+            Expression length = implicitConvertTo(beExpression(this.args[0].compile(context)), wordType, this.loc);
             BinaryOp byteLength = new BinaryOp("*", elementSize, length);
 
             Argument[] mallocArgs = new Argument[](1);
-            mallocArgs[0] = new Argument("", new Integer);
+            mallocArgs[0] = new Argument("", wordType);
             Function malloc = new Function("malloc", new Pointer(new Void), mallocArgs, true, null);
 
             Expression[] mallocParams = new Expression[](1);
@@ -960,14 +1042,14 @@ ASTSymbol parseExpressionLeaf(Parser parser)
     {
         ASTSymbol next = parseExpressionLeaf(parser);
 
-        assert(next);
+        assert(!!next);
         return new ASTDereference(next);
     }
     if (parser.accept("&"))
     {
         ASTSymbol next = parseExpressionLeaf(parser);
 
-        assert(next);
+        assert(!!next);
         return new ASTReference(next);
     }
     if (acceptIdentifier(parser, "new"))
@@ -985,11 +1067,11 @@ ASTSymbol parseExpressionLeaf(Parser parser)
     {
         ASTSymbol next = parseExpressionLeaf(parser);
 
-        assert(next);
+        assert(!!next);
         return new ASTNegation(next, parser.loc());
     }
     ASTSymbol currentExpr = parseExpressionBase(parser);
-    assert(currentExpr);
+    assert(!!currentExpr);
     return parseProperties(parser, currentExpr);
 }
 
@@ -1064,16 +1146,10 @@ class StringLiteral : Expression
 
     int emit(Generator output)
     {
-        void* voidp = output.platform.pointerType(output.platform.voidType());
-        // TODO allocaless
-        void* structType = this.type().emit(output.platform);
-        int structReg = output.fun.alloca(structType);
-        int ptrField = output.fun.fieldOffset(structType, structReg, 0);
-        int lenField = output.fun.fieldOffset(structType, structReg, 1);
+        int len = output.fun.wordLiteral(output.platform, this.text.length);
+        int ptr = output.fun.stringLiteral(this.text);
 
-        output.fun.store(voidp, ptrField, output.fun.stringLiteral(this.text));
-        output.fun.store(output.platform.intType(), lenField, output.fun.intLiteral(this.text.length));
-        return output.fun.load(structType, structReg);
+        return makeArray(output, new Character, len, ptr);
     }
 }
 
@@ -1257,7 +1333,7 @@ class ArrayCat : Expression
 
     Type type() {
         Array leftArray = this.left.type().instanceOf(Array);
-        assert(leftArray);
+        assert(!!leftArray);
         assert(this.right.type().same(leftArray.elementType));
 
         return leftArray;
@@ -1268,13 +1344,19 @@ class ArrayCat : Expression
         // TODO simplify this?
         int leftReg = this.left.emit(output);
         Array leftType = this.left.type().instanceOf(Array);
-        assert(leftType);
+        assert(!!leftType);
         int leftLen = getArrayLen(output, leftType, leftReg);
         int leftPtr = getArrayPtr(output, leftType, leftReg);
-        int elementSize = output.fun.intLiteral(output.platform.size(leftType.elementType.emit(output.platform)));
+        int elementSize = output.fun.wordLiteral(
+            output.platform,
+            output.platform.size(leftType.elementType.emit(output.platform)));
         // size = sizeof(T) * (array.length + 1)
-        int oldSize = output.fun.binop("*", leftLen, elementSize);
-        int newSize = output.fun.binop("+", oldSize, elementSize);
+        int oldSize = output.fun.binop(
+            "*", output.platform.nativeWordSize(),
+            leftLen, elementSize);
+        int newSize = output.fun.binop(
+            "+", output.platform.nativeWordSize(),
+            oldSize, elementSize);
         void* voidp = (new Pointer(new Void)).emit(output.platform);
 
         int newArrayPtr = output.fun.call(voidp, "malloc", new int[](0) ~ newSize);
@@ -1284,8 +1366,10 @@ class ArrayCat : Expression
         output.fun.store(this.right.type().emit(output.platform), newElement, this.right.emit(output));
 
         // return ptr[0 .. prevLength + 1];
-        int newArrayLen = output.fun.binop("+", leftLen, output.fun.intLiteral(1));
-        return makeArray(output, leftType.elementType, newArrayPtr, newArrayLen);
+        int newArrayLen = output.fun.binop(
+            "+", output.platform.nativeWordSize(),
+            leftLen, output.fun.wordLiteral(output.platform, 1));
+        return makeArray(output, leftType.elementType, newArrayLen, newArrayPtr);
     }
 }
 
@@ -1297,7 +1381,14 @@ class ASTBinaryOp : ASTSymbol
 
     ASTSymbol right;
 
-    this(string op, ASTSymbol left, ASTSymbol right) { this.op = op; this.left = left; this.right = right; }
+    Loc loc;
+
+    this(string op, ASTSymbol left, ASTSymbol right, Loc loc) {
+        this.op = op;
+        this.left = left;
+        this.right = right;
+        this.loc = loc;
+    }
 
     Expression compile(Context context)
     {
@@ -1306,9 +1397,9 @@ class ASTBinaryOp : ASTSymbol
         if (this.op == "~")
             return new ArrayCat(left, right);
         if (this.op == "&&")
-            return new BoolAnd(left, right);
+            return new BoolAnd(truthy(left, this.loc), truthy(right, this.loc));
         if (this.op == "||")
-            return new BoolOr(left, right);
+            return new BoolOr(truthy(left, this.loc), truthy(right, this.loc));
         if (this.op == "==" && left.type().instanceOf(Array) && right.type().instanceOf(Array))
             return new ArrayEqual(left, right);
 
@@ -1324,19 +1415,19 @@ ASTSymbol parseAddSubCat(Parser parser, ASTSymbol left, int myLevel)
         {
             ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-            left = new ASTBinaryOp("+", left, right);
+            left = new ASTBinaryOp("+", left, right, parser.loc());
         }
         else if (parser.accept("-"))
         {
             ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-            left = new ASTBinaryOp("-", left, right);
+            left = new ASTBinaryOp("-", left, right, parser.loc());
         }
         else if (parser.accept("~"))
         {
             ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-            left = new ASTBinaryOp("~", left, right);
+            left = new ASTBinaryOp("~", left, right, parser.loc());
         }
         else return left;
     }
@@ -1350,7 +1441,7 @@ ASTSymbol parseMul(Parser parser, ASTSymbol left, int myLevel)
         {
             ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-            left = new ASTBinaryOp("*", left, right);
+            left = new ASTBinaryOp("*", left, right, parser.loc());
         }
         else return left;
     }
@@ -1364,7 +1455,7 @@ ASTSymbol parseBoolAnd(Parser parser, ASTSymbol left, int myLevel)
         {
             ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-            left = new ASTBinaryOp("&&", left, right);
+            left = new ASTBinaryOp("&&", left, right, parser.loc());
         } else return left;
     }
 }
@@ -1377,9 +1468,29 @@ ASTSymbol parseBoolOr(Parser parser, ASTSymbol left, int myLevel)
         {
             ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-            left = new ASTBinaryOp("||", left, right);
+            left = new ASTBinaryOp("||", left, right, parser.loc());
         } else return left;
     }
+}
+
+Expression truthy(Expression ex, Loc loc) {
+    Type exType = ex.type();
+    if (exType.instanceOf(Pointer) || exType.instanceOf(Class))
+    {
+        Type voidp = new Pointer(new Void);
+        Function rt_ptr_test = new Function("cxruntime_ptr_test",
+            new Integer,
+            new Argument[](0) ~ new Argument("", voidp),
+            true, null);
+        Expression ptrCast = new PointerCast(voidp, ex);
+        return new Call(rt_ptr_test, new Expression[](0) ~ ptrCast, loc);
+    }
+    loc.assert2s(ex.type().instanceOf(Integer) || ex.type().instanceOf(Long), "integer expected");
+    // (a == 0) == 0
+    return new BinaryOp(
+        "==",
+        new BinaryOp("==", ex, new Literal(0)),
+        new Literal(0));
 }
 
 class ASTNegation : ASTSymbol
@@ -1392,30 +1503,9 @@ class ASTNegation : ASTSymbol
 
     Expression compile(Context context)
     {
-        return new Negation(
-            implicitConvertTo(
-                beExpression(this.next.compile(context)),
-                new Integer, this.loc));
-    }
-}
+        Expression isTrue = truthy(beExpression(this.next.compile(context)), this.loc);
 
-class Negation : Expression
-{
-    Expression next;
-
-    this(Expression next) { this.next = next; }
-
-    Type type()
-    {
-        return new Integer;
-    }
-
-    int emit(Generator output)
-    {
-        int[] next = new int[](1);
-        next[0] = this.next.emit(output);
-
-        return output.fun.call(output.platform.intType(), "cxruntime_int_negate", next);
+        return new BinaryOp("==", isTrue, new Literal(0));
     }
 }
 
@@ -1425,37 +1515,37 @@ ASTSymbol parseComparison(Parser parser, ASTSymbol left, int myLevel)
     {
         ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-        return new ASTBinaryOp("==", left, right);
+        return new ASTBinaryOp("==", left, right, parser.loc());
     }
     if (parser.accept("!=")) // same as !(a == b)
     {
         ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-        return new ASTNegation(new ASTBinaryOp("==", left, right), parser.loc());
+        return new ASTNegation(new ASTBinaryOp("==", left, right, parser.loc()), parser.loc());
     }
     if (parser.accept(">="))
     {
         ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-        return new ASTBinaryOp(">=", left, right);
+        return new ASTBinaryOp(">=", left, right, parser.loc());
     }
     if (parser.accept(">")) // same as !(a == b)
     {
         ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-        return new ASTBinaryOp(">", left, right);
+        return new ASTBinaryOp(">", left, right, parser.loc());
     }
     if (parser.accept("<=")) // same as !(a == b)
     {
         ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-        return new ASTBinaryOp("<=", left, right);
+        return new ASTBinaryOp("<=", left, right, parser.loc());
     }
     if (parser.accept("<")) // same as !(a == b)
     {
         ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
-        return new ASTBinaryOp("<", left, right);
+        return new ASTBinaryOp("<", left, right, parser.loc());
     }
     return left;
 }
@@ -1623,7 +1713,7 @@ class StructMember : Reference
     {
         Type type = this.base.type();
         Struct structType = type.instanceOf(Struct);
-        assert(structType);
+        assert(!!structType);
         return structType.members[this.index].type;
     }
 
@@ -1673,10 +1763,13 @@ class FunctionScope : Namespace
     StructMember declare(Type type)
     {
         this.variableTypes = this.variableTypes ~ type;
+        // having cast sure would be nice...
+        int len;
+        while (len < this.variableTypes.length) len = len + 1;
 
         return new StructMember(
             new StackFrame(this.structType()),
-            this.variableTypes.length - 1);
+            len - 1);
     }
 
     Struct structType()
@@ -1691,7 +1784,7 @@ class FunctionScope : Namespace
 
     Symbol lookup(string name)
     {
-        assert(this.parent);
+        assert(!!this.parent);
         return this.parent.lookup(name);
     }
 }
@@ -1700,7 +1793,7 @@ FunctionScope findFunctionScope(Namespace namespace)
 {
     FunctionScope functionScope = namespace.instanceOf(FunctionScope);
     if (functionScope) return functionScope;
-    assert(namespace.parent);
+    assert(!!namespace.parent);
     return findFunctionScope(namespace.parent);
 }
 
@@ -1716,8 +1809,7 @@ class AssignStatement : Statement
     {
         Type targetType = this.target.type();
         Type valueType = this.value.type();
-        /*assert(targetType == valueType,
-                format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
+        assert(targetType.same(valueType)); // format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
 
         int target_reg = this.target.emitLocation(output);
         int value_reg = this.value.emit(output);
@@ -1796,7 +1888,7 @@ VarDeclScope findVarDeclScope(Namespace namespace)
 {
     VarDeclScope varDeclScope = namespace.instanceOf(VarDeclScope);
     if (varDeclScope) return varDeclScope;
-    assert(namespace.parent);
+    assert(!!namespace.parent);
     return findVarDeclScope(namespace.parent);
 }
 
@@ -1981,9 +2073,7 @@ class AssignStatement : Statement
         Type targetType = this.target.type();
         Type valueType = this.value.type();
 
-        // TODO
-        /*assert(targetType == valueType,
-                format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
+        assert(targetType.same(valueType)); // format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
 
         int target_reg = this.target.emitLocation(output);
         int value_reg = this.value.emit(output);
@@ -2071,7 +2161,7 @@ ASTVarDeclStatement parseVarDecl(Parser parser)
     if (parser.accept("="))
     {
         initial = parseExpression(parser);
-        assert(initial);
+        assert(!!initial);
     }
     parser.expect(";");
     parser.commit();
@@ -2344,7 +2434,9 @@ class Module : Namespace
             ModuleEntry entry = this.entries[i];
             Function fun = entry.value.instanceOf(Function);
             if (fun && !fun.declaration)
+            {
                 fun.emit(generator, new Context(generator.platform, this));
+            }
             Class class_ = entry.value.instanceOf(Class);
             if (class_) {
                 for (int i = 0; i < class_.methods.length; i = i + 1)
@@ -2579,8 +2671,9 @@ class ClassMethod : Symbol
 
     Type funcPtrType()
     {
-        Type[] argTypes = new Type[](this.args.length);
-        for (int i = 0; i < this.args.length; i = i + 1) argTypes[i] = this.args[i].type;
+        Type[] argTypes = new Type[](this.args.length + 1);
+        argTypes[0] = this.classType;
+        for (int i = 0; i < this.args.length; i = i + 1) argTypes[i + 1] = this.args[i].type;
         return new FunctionPointer(this.ret, argTypes);
     }
 }
@@ -2603,7 +2696,7 @@ class Class : Type
 
     this(ASTClassDecl decl, Class superClass, Context context)
     {
-        assert(decl);
+        assert(!!decl);
         this.name = decl.name;
         this.superClass = superClass;
         this.decl = decl;
@@ -2792,9 +2885,9 @@ class ASTClassDecl : ASTType
         if (this.superClass.length)
         {
             Symbol superClassObj = context.namespace.lookup(this.superClass);
-            assert(superClassObj); // , format!"super class %s not found"(this.superClass));
+            assert(!!superClassObj); // , format!"super class %s not found"(this.superClass));
             superClass = superClassObj.instanceOf(Class);
-            assert(superClass);
+            assert(!!superClass);
         }
         return new Class(this, superClass, context);
     }
@@ -2843,7 +2936,7 @@ ASTArgument[] parseArglist(Parser parser)
         ASTType argtype = parseType(parser);
         parser.assert_(!!argtype, "argument type expected");
         string argname = parseIdentifier(parser);
-        parser.assert_(argname.length, "argument name expected");
+        parser.assert_(argname.length > 0, "argument name expected");
         args = args ~ new ASTArgument(argname, argtype);
     }
     return args;
@@ -2859,7 +2952,7 @@ ASTClassDecl parseClassDecl(Parser parser)
     string superClass;
     if (parser.accept(":")) {
         superClass = parseIdentifier(parser);
-        parser.assert_(superClass.length, "expected super class identifier");
+        parser.assert_(superClass.length > 0, "expected super class identifier");
     }
     ASTClassDeclMember[] members;
     ASTClassDeclMethod[] methods;
@@ -2878,7 +2971,7 @@ ASTClassDecl parseClassDecl(Parser parser)
             retType = parseType(parser);
             parser.assert_(!!retType, "expected member type");
             memberName = parseIdentifier(parser);
-            parser.assert_(memberName.length, "expected member name");
+            parser.assert_(memberName.length > 0, "expected member name");
         }
         if (parser.accept("(")) // method
         {
@@ -2969,7 +3062,7 @@ void main(string[] args)
     string[] nextArgs;
     {
         string[] remArgs;
-        for (int i = 0; i < args.length; i = i + 1) {
+        for (size_t i = 0; i < args.length; i = i + 1) {
             string arg = args[i];
 
             if (arg.length >= 2 && arg[0 .. 2] == "-I") {
@@ -2987,7 +3080,7 @@ void main(string[] args)
     if (args.length != 1)
     {
         print("Usage: stage2 [-Iincludepath]* FILE.cx");
-        assert(false);
+        return;
     }
     Module builtins = new Module("");
     Backend backend = new Backend();
@@ -2999,6 +3092,11 @@ void main(string[] args)
     builtins.add("true", new Literal(1));
     builtins.add("false", new Literal(0));
     builtins.add("null", new NullExpr(new Pointer(new Void)));
+    if (platform.nativeWordSize() == 4)
+        builtins.add("size_t", new Integer);
+    else if (platform.nativeWordSize() == 8)
+        builtins.add("size_t", new Long);
+    else assert(false);
 
     Module[] defaultImports = new Module[](1);
     defaultImports[0] = builtins;

@@ -29,16 +29,17 @@ class ASTArray : ASTType
     mixin(GenerateThis);
 }
 
-// ptr, length
+// length, ptr
 class Array : Type
 {
     Type elementType;
 
     override BackendType emit(Platform platform)
     {
+        // layout matches D arrays for efficiency
         return new BackendStructType([
-            cast(BackendType) new BackendPointerType(this.elementType.emit(platform)),
-            cast(BackendType) new BackendIntType]); // TODO mod.wordType / mod.wordSize
+            cast(BackendType) platform.backendWordType,
+            cast(BackendType) new BackendPointerType(this.elementType.emit(platform))]);
     }
 
     override string toString() const
@@ -58,17 +59,18 @@ class Array : Type
 
 Reg getArrayLen(Generator output, Type arrayType, Reg arrayReg)
 {
-    return output.fun.field(arrayType.emit(output.platform), arrayReg, 1);
+    return output.fun.field(arrayType.emit(output.platform), arrayReg, 0);
 }
 
 class ArrayLength : Expression
 {
     Expression arrayValue;
 
+    Type type_;
+
     override Type type()
     {
-        // TODO word type
-        return new Integer;
+        return type_;
     }
 
     override Reg emit(Generator output)
@@ -83,7 +85,7 @@ class ArrayLength : Expression
 
 Reg getArrayPtr(Generator output, Type arrayType, Reg arrayReg)
 {
-    return output.fun.field(arrayType.emit(output.platform), arrayReg, 0);
+    return output.fun.field(arrayType.emit(output.platform), arrayReg, 1);
 }
 
 class ArrayPointer : Expression
@@ -106,6 +108,22 @@ class ArrayPointer : Expression
     mixin(GenerateThis);
 }
 
+int makeArray(Generator output, Type arrayType, int lenReg, int ptrReg)
+{
+    auto voidp = (new Pointer(new Void)).emit(output.platform);
+    auto wordType = output.platform.backendWordType;
+
+    // TODO allocaless
+    auto structType = arrayType.emit(output.platform);
+    int structReg = output.fun.alloca(structType);
+    int lenField = output.fun.fieldOffset(structType, structReg, 0);
+    int ptrField = output.fun.fieldOffset(structType, structReg, 1);
+
+    output.fun.store(wordType, lenField, lenReg);
+    output.fun.store(voidp, ptrField, ptrReg);
+    return output.fun.load(structType, structReg);
+}
+
 class ArrayExpression : Expression
 {
     Expression pointer;
@@ -126,39 +144,7 @@ class ArrayExpression : Expression
         auto voidp = (new Pointer(new Void)).emit(output.platform);
         auto intType = (new Integer).emit(output.platform);
 
-        // TODO allocaless
-        auto structType = this.type.emit(output.platform);
-        Reg structReg = output.fun.alloca(structType);
-        Reg ptrField = output.fun.fieldOffset(structType, structReg, 0);
-        Reg lenField = output.fun.fieldOffset(structType, structReg, 1);
-
-        output.fun.store(voidp, ptrField, pointer);
-        output.fun.store(intType, lenField, length);
-        return output.fun.load(structType, structReg);
-    }
-
-    mixin(GenerateThis);
-}
-
-class ASTArraySlice : ASTSymbol
-{
-    ASTSymbol array;
-
-    ASTSymbol lower;
-
-    ASTSymbol upper;
-
-    override ArraySlice compile(Context context)
-    {
-        return new ArraySlice(
-            this.array.compile(context).beExpression,
-            this.lower.compile(context).beExpression,
-            this.upper.compile(context).beExpression);
-    }
-
-    override string toString() const
-    {
-        return format!"%s[%s .. %s]"(array, lower, upper);
+        return makeArray(output, this.type, length, pointer);
     }
 
     mixin(GenerateThis);
@@ -177,31 +163,25 @@ class ArraySlice : Expression
     override Reg emit(Generator output)
     {
         auto voidp = new BackendPointerType(new BackendVoidType);
-        auto intType = new BackendIntType;
-
         auto arrayType = cast(Array) this.array.type;
         assert(arrayType, "slice of non-array");
-        const int elementSize = arrayType.elementType.emit(output.platform).size(output.platform);
+        const elementSize = arrayType.elementType.emit(output.platform).size(output.platform);
 
         auto arrayReg = this.array.emit(output);
         auto lowerReg = this.lower.emit(output);
         auto upperReg = this.upper.emit(output);
         auto ptr = getArrayPtr(output, arrayType, arrayReg);
         // ptr = ptr + lower
-        Reg lowerOffset = output.fun.binop("*", lowerReg, output.fun.intLiteral(elementSize));
+        Reg lowerOffset = output.fun.binop(
+            "*", output.platform.nativeWordSize,
+            lowerReg, output.fun.longLiteral(elementSize));
         Reg newPtr = output.fun.call(voidp, "ptr_offset", [ptr, lowerOffset]);
         // len = upper - lower
-        Reg newLen = output.fun.binop("-", upperReg, lowerReg);
+        Reg newLen = output.fun.binop(
+            "-", output.platform.nativeWordSize,
+            upperReg, lowerReg);
 
-        // TODO allocaless
-        auto structType = arrayType.emit(output.platform);
-        Reg structReg = output.fun.alloca(structType);
-        Reg ptrField = output.fun.fieldOffset(structType, structReg, 0);
-        Reg lenField = output.fun.fieldOffset(structType, structReg, 1);
-
-        output.fun.store(voidp, ptrField, newPtr);
-        output.fun.store(intType, lenField, newLen);
-        return output.fun.load(structType, structReg);
+        return makeArray(output, arrayType, newLen, newPtr);
     }
 
     mixin(GenerateThis);

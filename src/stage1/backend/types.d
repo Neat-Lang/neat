@@ -33,6 +33,15 @@ class BackendLongType : BackendType {
     override int size(Platform) const { return 8; }
 }
 
+BackendType backendWordType(Platform platform)
+{
+    switch (platform.nativeWordSize) {
+        case 4: return new BackendIntType;
+        case 8: return new BackendLongType;
+        default: assert(false, format!"Unknown word size %s"(platform.nativeWordSize));
+    }
+}
+
 class BackendPointerType : BackendType
 {
     BackendType target;

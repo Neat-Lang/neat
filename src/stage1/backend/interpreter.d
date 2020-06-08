@@ -25,6 +25,10 @@ string formatLiteral(const BackendType type, const void[] data)
     {
         return format!"%s"((cast(int[]) data)[0]);
     }
+    if (cast(BackendLongType) type)
+    {
+        return format!"%s"((cast(long[]) data)[0]);
+    }
     if (cast(BackendVoidType) type)
     {
         return "void";
@@ -77,6 +81,7 @@ struct Instr
         Arg,
         Literal,
         BinOp,
+        ZeroExtend,
         Alloca,
         GetField,
         FieldOffset,
@@ -115,8 +120,14 @@ struct Instr
         {
             /// ops: + - * / % & | ^ < > <= >= ==
             string op;
+            int size; // 4, 8
             Reg left;
             Reg right;
+        }
+        static struct ZeroExtend
+        {
+            Reg value;
+            int from, to;
         }
         static struct Branch
         {
@@ -161,7 +172,7 @@ struct Instr
         }
         static struct CallFuncPtr
         {
-            BackendType type;
+            BackendFunctionPointerType type;
             Reg funcPtr;
             Reg[] args;
         }
@@ -169,6 +180,7 @@ struct Instr
         Return return_;
         Arg arg;
         BinOp binop;
+        ZeroExtend zeroExtend;
         Literal literal;
         Branch branch;
         TestBranch testBranch;
@@ -187,12 +199,13 @@ struct Instr
         {
             case Call: return format!"%s %s(%(%%%s, %))"(call.type, call.name, call.args);
             case Arg: return format!"_%s"(arg.index);
-            case Literal: return formatLiteral(literal.type, literal.value);
-            case BinOp: return format!"%%%s %s %%%s"(binop.left, binop.op, binop.right);
+            case Literal: return format!"(%s) %s"(literal.type, formatLiteral(literal.type, literal.value));
+            case BinOp: return format!"(%s) %%%s %s %%%s"(binop.size, binop.left, binop.op, binop.right);
+            case ZeroExtend: return format!"%%%s %s->%s(0)"(zeroExtend.value, zeroExtend.from, zeroExtend.to);
             case Alloca: return format!"alloca %s"(alloca.type);
             case GetField: return format!"%%%s.%s (%s)"(
                 getField.base, getField.member, getField.structType);
-            case FieldOffset: return format!"%%%s.%s (%s)"(
+            case FieldOffset: return format!"&%%%s.%s (%s)"(
                 fieldOffset.base, fieldOffset.member, fieldOffset.structType);
             case Load: return format!"*%%%s"(load.target);
             case Store: return format!"*%%%s = %%%s"(store.target, store.value);
@@ -215,14 +228,25 @@ struct Instr
         if (!intType) intType = new BackendIntType;
         with (Kind) final switch (this.kind)
         {
-            case CallFuncPtr: return callFuncPtr.type.size(platform);
+            case CallFuncPtr: return callFuncPtr.type.returnType.size(platform);
             case Call: return call.type.size(platform);
             case Arg: return fun.argTypes[arg.index].size(platform);
-            case BinOp: return intType.size(platform);
             case Literal: return literal.type.size(platform);
             case Load: return load.targetType.size(platform);
             case GetField:
                 return getField.structType.members[getField.member].size(platform);
+            case BinOp:
+                switch (binop.op) {
+                    /// ops: + - * / % & | ^ < > <= >= ==
+                    case "==": case ">": case ">=": case "<": case "<=":
+                        return intType.size(platform);
+                    case "+": case "-": case "*": case "/": case "%": case "&": case "|": case "^":
+                        return binop.size;
+                    default:
+                        assert(false, "unknown op " ~ binop.op);
+                }
+            case ZeroExtend:
+                return zeroExtend.to;
             // pointers
             case Alloca:
             case FieldOffset:
@@ -249,6 +273,7 @@ private bool isBlockFinisher(Instr.Kind kind)
         case Call:
         case Arg:
         case BinOp:
+        case ZeroExtend:
         case Literal:
         case Alloca:
         case GetField:
@@ -310,6 +335,16 @@ class IpBackendFunction : BackendFunction
         return block.append(instr);
     }
 
+    override int longLiteral(long value)
+    {
+        auto instr = Instr(Instr.Kind.Literal);
+
+        instr.literal.type = new BackendLongType;
+        instr.literal.value = cast(void[]) [value];
+
+        return block.append(instr);
+    }
+
     override Reg stringLiteral(string text)
     {
         import std.string : toStringz;
@@ -334,10 +369,9 @@ class IpBackendFunction : BackendFunction
 
     override int call(BackendType type, string name, Reg[] args)
     {
-        assert(cast(BackendType) type !is null);
         auto instr = Instr(Instr.Kind.Call);
 
-        instr.call.type = cast(BackendType) type;
+        instr.call.type = type;
         instr.call.name = name;
         instr.call.args = args.dup;
         return block.append(instr);
@@ -345,10 +379,10 @@ class IpBackendFunction : BackendFunction
 
     override int callFuncPtr(BackendType type, Reg funcPtr, Reg[] args)
     {
-        assert(cast(BackendType) type !is null);
+        assert(cast(BackendFunctionPointerType) type !is null);
         auto instr = Instr(Instr.Kind.CallFuncPtr);
 
-        instr.callFuncPtr.type = cast(BackendType) type;
+        instr.callFuncPtr.type = cast(BackendFunctionPointerType) type;
         instr.callFuncPtr.funcPtr = funcPtr;
         instr.callFuncPtr.args = args.dup;
         return block.append(instr);
@@ -371,23 +405,33 @@ class IpBackendFunction : BackendFunction
         block.append(instr);
     }
 
-    override Reg binop(string op, Reg left, Reg right)
+    override Reg binop(string op, int size, Reg left, Reg right)
+    in (size == 4 || size == 8)
     {
         auto instr = Instr(Instr.Kind.BinOp);
 
         instr.binop.op = op;
+        instr.binop.size = size;
         instr.binop.left = left;
         instr.binop.right = right;
         return block.append(instr);
     }
 
+    override Reg zeroExtend(Reg value, int from, int to)
+    {
+        auto instr = Instr(Instr.Kind.ZeroExtend);
+
+        instr.zeroExtend.value = value;
+        instr.zeroExtend.from = from;
+        instr.zeroExtend.to = to;
+        return block.append(instr);
+    }
+
     override int alloca(BackendType type)
     {
-        assert(cast(BackendType) type !is null);
-
         auto instr = Instr(Instr.Kind.Alloca);
 
-        instr.alloca.type = cast(BackendType) type;
+        instr.alloca.type = type;
         return block.append(instr);
     }
 
@@ -419,11 +463,9 @@ class IpBackendFunction : BackendFunction
 
     override void store(BackendType targetType, Reg target, Reg value)
     {
-        assert(cast(BackendType) targetType !is null);
-
         auto instr = Instr(Instr.Kind.Store);
 
-        instr.store.targetType = cast(BackendType) targetType;
+        instr.store.targetType = targetType;
         instr.store.target = target;
         instr.store.value = value;
 
@@ -432,11 +474,9 @@ class IpBackendFunction : BackendFunction
 
     override Reg load(BackendType targetType, Reg target)
     {
-        assert(cast(BackendType) targetType !is null);
-
         auto instr = Instr(Instr.Kind.Load);
 
-        instr.load.targetType = cast(BackendType) targetType;
+        instr.load.targetType = targetType;
         instr.load.target = target;
 
         return block.append(instr);
@@ -501,6 +541,11 @@ void setInitValue(BackendType type, void* target, Platform platform)
     if (cast(BackendIntType) type)
     {
         *cast(int*) target = 0;
+        return;
+    }
+    if (cast(BackendLongType) type)
+    {
+        *cast(long*) target = 0;
         return;
     }
     if (cast(BackendVoidType) type)
@@ -590,24 +635,28 @@ private void defineIntrinsics(IpBackendModule mod)
         {
             T typedArgs;
             static foreach (i, U; T)
-                typedArgs[i] = args[i].decode!U;
+            {
+                assert(
+                    args[i].length == U.sizeof,
+                    format!"arg %s has invalid size %s for %s"(i + 1, args[i].length, U.sizeof));
+                typedArgs[i] = *cast(U*) args[i].ptr;
+            }
             static if (is(typeof(dg(typedArgs)) == void))
             {
                 dg(typedArgs);
             }
             else
             {
-                encode(dg(typedArgs), ret);
+                *cast(typeof(dg(typedArgs))*) ret.ptr = dg(typedArgs);
             }
         });
     }
     defineCallback("_backendModule", delegate BackendModule() => mod);
-    defineCallback("cxruntime_int_negate", delegate int(int a) => !a);
     defineCallback("cxruntime_isAlpha", delegate int(char ch) => isAlpha(ch));
     defineCallback("cxruntime_isDigit", delegate int(char ch) => isDigit(ch));
     defineCallback("cxruntime_ptr_test", delegate int(void* p) => !!p);
     defineCallback("assert", (int test) { assert(test, "Assertion failed!"); });
-    defineCallback("ptr_offset", delegate void*(void* ptr, int offset) { assert(offset >= 0); return ptr + offset; });
+    defineCallback("ptr_offset", delegate void*(void* ptr, size_t offset) { assert(offset >= 0); return ptr + offset; });
     defineCallback("cxruntime_file_exists", delegate int(string name) {
         import std.file : exists;
 
@@ -618,20 +667,20 @@ private void defineIntrinsics(IpBackendModule mod)
 
         return name.readText;
     });
-    defineCallback("malloc", (int size) {
+    defineCallback("malloc", (size_t size) {
         // import std.stdio : writefln; writefln!"malloc %s"(size);
         assert(size >= 0 && size < 1048576);
         return (new void[size]).ptr;
     });
-    defineCallback("memcpy", (void* target, void* source, int size) {
+    defineCallback("memcpy", (void* target, void* source, size_t size) {
         import core.stdc.string : memcpy;
 
         memcpy(target, source, size);
     });
     defineCallback("print", (string text) {
-        import std.stdio : writefln;
+        import core.stdc.stdio : printf;
 
-        writefln!"%s"(text);
+        printf("%.*s\n", text.length, text.ptr);
     });
     defineCallback("strlen", (char* text) {
         import std.conv : to;
@@ -645,6 +694,11 @@ private void defineIntrinsics(IpBackendModule mod)
         return parse!int(text);
     });
     defineCallback("itoa", (int num) {
+        import std.format : format;
+
+        return format!"%s"(num);
+    });
+    defineCallback("ltoa", (long num) {
         import std.format : format;
 
         return format!"%s"(num);
@@ -667,6 +721,7 @@ private void defineIntrinsics(IpBackendModule mod)
 
     defineCallback("_backend_createModule", delegate BackendModule(Backend backend, Platform platform)
         => backend.createModule(platform));
+    defineCallback("_backend_longType", delegate BackendType() => new BackendLongType);
     defineCallback("_backend_intType", delegate BackendType() => new BackendIntType);
     defineCallback("_backend_charType", delegate BackendType() => new BackendCharType);
     defineCallback("_backend_voidType", delegate BackendType() => new BackendVoidType);
@@ -679,6 +734,8 @@ private void defineIntrinsics(IpBackendModule mod)
 
     defineCallback("_platform_size", delegate int(Platform platform, BackendType type)
         => type.size(platform));
+    defineCallback("_platform_nativeWordSize", delegate int(Platform platform)
+        => platform.nativeWordSize);
 
     defineCallback(
         "_backendModule_define",
@@ -692,7 +749,7 @@ private void defineIntrinsics(IpBackendModule mod)
         delegate Backend(BackendModule mod) { return mod.backend; });
     defineCallback("_backendModule_platform",
         delegate Platform(BackendModule mod) { return mod.platform; });
-    defineCallback("_arraycmp", (void* left, void* right, int leftlen, int rightlen, int elemsize)
+    defineCallback("_arraycmp", (void* left, void* right, size_t leftlen, size_t rightlen, size_t elemsize)
     {
         if (leftlen != rightlen) return 0;
         auto leftArray = (cast(ubyte*) left)[0 .. leftlen * elemsize];
@@ -710,10 +767,8 @@ private void defineIntrinsics(IpBackendModule mod)
         "_backendModule_callMain",
         delegate void(BackendModule mod, string[] args)
         {
-            auto target = new void[12];
-            encode(args, target);
             // TODO hardcode interpreter backend in target environment
-            (cast(IpBackendModule) mod).call("main", null, [target]);
+            (cast(IpBackendModule) mod).call("main", null, [cast(void[]) [args]]);
         }
     );
     defineCallback(
@@ -721,7 +776,13 @@ private void defineIntrinsics(IpBackendModule mod)
         delegate int(BackendFunction fun, int index) => fun.arg(index));
     defineCallback(
         "_backendFunction_intLiteral",
-        delegate int(BackendFunction fun, int index) => fun.intLiteral(index));
+        delegate int(BackendFunction fun, int value) => fun.intLiteral(value));
+    defineCallback(
+        "_backendFunction_longLiteral",
+        delegate int(BackendFunction fun, long value) => fun.longLiteral(value));
+    defineCallback(
+        "_backendFunction_wordLiteral",
+        delegate int(BackendFunction fun, Platform platform, size_t value) => fun.wordLiteral(platform, value));
     defineCallback(
         "_backendFunction_stringLiteral",
         delegate int(BackendFunction fun, string text) => fun.stringLiteral(text));
@@ -742,8 +803,12 @@ private void defineIntrinsics(IpBackendModule mod)
             => fun.callFuncPtr(type, funcPtr, args));
     defineCallback(
         "_backendFunction_binop",
-        delegate int(BackendFunction fun, char[] op, int left, int right)
-            => fun.binop(op.idup, left, right));
+        delegate int(BackendFunction fun, char[] op, int size, int left, int right)
+            => fun.binop(op.idup, size, left, right));
+    defineCallback(
+        "_backendFunction_zeroExtend",
+        delegate int(BackendFunction fun, int reg, int from, int to)
+            => fun.zeroExtend(reg, from, to));
     defineCallback(
         "_backendFunction_alloca",
         delegate int(BackendFunction fun, BackendType type)
@@ -785,66 +850,6 @@ private void defineIntrinsics(IpBackendModule mod)
     defineCallback(
         "_testBranchRecord_resolveElse",
         delegate void(TestBranchRecord record, int block) => record.resolveElse(block));
-}
-
-public  template decode(T) {
-    static if (is(T == U[], U))
-    {
-        T decode(void[] arg) {
-            static if (is(U == int) || is(typeof(cast() U.init) == char) || is(U == class) || is(U == interface))
-            {
-                struct ArrayHack { align(4) U* ptr; int length; }
-                auto arrayVal = arg.decode!ArrayHack;
-                return arrayVal.ptr[0 .. arrayVal.length];
-            }
-            else static if (is(U == string))
-            {
-                struct ArrayHack { align(4) void* ptr; int length; }
-                auto outerArrayVal = arg.decode!ArrayHack;
-                string[] res;
-                for (int i = 0; i < outerArrayVal.length; i++) {
-                    auto innerArrayVal = cast(void[]) (cast(ArrayHack*) outerArrayVal.ptr)[i .. i + 1];
-                    res ~= decode!string(innerArrayVal);
-                }
-                return res;
-            }
-            else static assert(false, "? " ~ T.stringof);
-        }
-    }
-    else
-    {
-        ref T decode(void[] arg) {
-            assert(arg.length == T.sizeof, format!"arg has invalid size %s for %s"(arg.length, T.sizeof));
-            return (cast(T[]) arg)[0];
-        }
-    }
-}
-
-public void encode(T)(T arg, void[] target)
-{
-    static if (is(T == U[], U))
-    {
-        static if (is(U == int) || is(typeof(cast() U.init) == char))
-        {
-            struct ArrayHack { align(4) U* ptr; int length; }
-            return .encode(ArrayHack(arg.ptr, cast(int) arg.length), target);
-        }
-        else static if (is(U == string))
-        {
-            struct ArrayHack { align(4) void* ptr; int length; }
-            auto subtarget = new void[ArrayHack.sizeof * arg.length];
-            foreach (i, subarg; arg) {
-                .encode(subarg, subtarget[i * ArrayHack.sizeof .. (i + 1) * ArrayHack.sizeof]);
-            }
-            .encode(ArrayHack(subtarget.ptr, cast(int) arg.length), target);
-        }
-        else static assert(false, "? " ~ T.stringof);
-    }
-    else
-    {
-        assert(target.length == T.sizeof, format!"target has invalid size %s for %s"(target.length, T.sizeof));
-        *cast(T*) target.ptr = arg;
-    }
 }
 
 class IpBackendModule : BackendModule
@@ -987,17 +992,56 @@ class IpBackendModule : BackendModule
                             regArrays[reg][] = args[instr.arg.index];
                             break;
                         case BinOp:
-                            int left = *cast(int*) regArrays[instr.binop.left].ptr;
-                            int right = *cast(int*) regArrays[instr.binop.right].ptr;
-                            final switch (instr.binop.op)
+                            assert(regArrays[instr.binop.left].length == instr.binop.size);
+                            assert(regArrays[instr.binop.right].length == instr.binop.size);
+                            if (instr.binop.size == 4)
                             {
-                                static foreach (op;
-                                    ["+", "-", "*", "/", "%", "&", "|", "^", "<", ">", "<=", ">=", "=="])
+                                int left = *cast(int*) regArrays[instr.binop.left].ptr;
+                                int right = *cast(int*) regArrays[instr.binop.right].ptr;
+                                assert(regArrays[reg].length == 4);
+                                final switch (instr.binop.op)
                                 {
-                                    case op:
-                                        *cast(int*) regArrays[reg].ptr = mixin("left " ~ op ~ " right");
-                                        break outer;
+                                    static foreach (op;
+                                        ["+", "-", "*", "/", "%", "&", "|", "^", "<", ">", "<=", ">=", "=="])
+                                    {
+                                        case op:
+                                            *cast(int*) regArrays[reg].ptr = mixin("left " ~ op ~ " right");
+                                            break outer;
+                                    }
                                 }
+                            }
+                            else if (instr.binop.size == 8)
+                            {
+                                long left = *cast(long*) regArrays[instr.binop.left].ptr;
+                                long right = *cast(long*) regArrays[instr.binop.right].ptr;
+                                final switch (instr.binop.op)
+                                {
+                                    static foreach (op;
+                                        ["+", "-", "*", "/", "%", "&", "|", "^"])
+                                    {
+                                        case op:
+                                            assert(regArrays[reg].length == 8);
+                                            *cast(long*) regArrays[reg].ptr = mixin("left " ~ op ~ " right");
+                                            break outer;
+                                    }
+                                    static foreach (op;
+                                        ["<", ">", "<=", ">=", "=="])
+                                    {
+                                        case op:
+                                            assert(regArrays[reg].length == 4);
+                                            *cast(int*) regArrays[reg].ptr = mixin("left " ~ op ~ " right");
+                                            break outer;
+                                    }
+                                }
+                            }
+                            assert(false);
+                        case ZeroExtend:
+                            assert(regArrays[instr.zeroExtend.value].length == instr.zeroExtend.from);
+                            assert(regArrays[reg].length == instr.zeroExtend.to);
+                            if (instr.zeroExtend.from == 4 && instr.zeroExtend.to == 8) {
+                                int value = *cast(int*) regArrays[instr.zeroExtend.value];
+                                *cast(ulong*) regArrays[reg].ptr = cast(uint) value;
+                                break;
                             }
                             assert(false);
                         case Literal:
@@ -1048,9 +1092,14 @@ class IpBackendModule : BackendModule
                             regArrays[reg][] = target[0 .. regArrays[reg].length];
                             break;
                         case Store:
+                            assert(!lastInstr);
                             auto target = (cast(void*[]) regArrays[instr.store.target])[0];
                             assert(regArrays[instr.store.value]);
-                            assert(target);
+                            assert(cast(size_t) target > 0x100);
+                            assert(
+                                instr.store.targetType.size(this.platform) == regArrays[instr.store.value].length,
+                                format!"can't store %s bytes, got %s"(
+                                    instr.store.targetType.size(this.platform), regArrays[instr.store.value].length));
 
                             target[0 .. regArrays[instr.store.value].length] = regArrays[instr.store.value];
                             break;

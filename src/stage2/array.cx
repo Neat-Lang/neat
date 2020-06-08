@@ -6,19 +6,23 @@ import types;
 
 int getArrayLen(Generator output, Type arrayType, int arrayReg)
 {
-    return output.fun.field(arrayType.emit(output.platform), arrayReg, 1);
+    return output.fun.field(arrayType.emit(output.platform), arrayReg, 0);
 }
 
 class ArrayLength : Expression
 {
     Expression arrayValue;
 
-    this(Expression arrayValue) { this.arrayValue = arrayValue; }
+    Type type_;
+
+    this(Expression arrayValue, Type type_) {
+        this.arrayValue = arrayValue;
+        this.type_ = type_;
+    }
 
     Type type()
     {
-        // TODO word type
-        return new Integer;
+        return this.type_;
     }
 
     int emit(Generator output)
@@ -31,7 +35,7 @@ class ArrayLength : Expression
 
 int getArrayPtr(Generator output, Type arrayType, int arrayReg)
 {
-    return output.fun.field(arrayType.emit(output.platform), arrayReg, 0);
+    return output.fun.field(arrayType.emit(output.platform), arrayReg, 1);
 }
 
 class ArrayPointer : Expression
@@ -55,19 +59,19 @@ class ArrayPointer : Expression
     }
 }
 
-int makeArray(Generator output, Type elementType, int ptrReg, int lenReg)
+int makeArray(Generator output, Type elementType, int lenReg, int ptrReg)
 {
     void* voidp = (new Pointer(new Void)).emit(output.platform);
-    void* intType = (new Integer).emit(output.platform);
+    void* wordType = nativeWordType(output.platform).emit(output.platform);
 
     // TODO allocaless
     void* structType = (new Array(elementType)).emit(output.platform);
     int structReg = output.fun.alloca(structType);
-    int ptrField = output.fun.fieldOffset(structType, structReg, 0);
-    int lenField = output.fun.fieldOffset(structType, structReg, 1);
+    int lenField = output.fun.fieldOffset(structType, structReg, 0);
+    int ptrField = output.fun.fieldOffset(structType, structReg, 1);
 
+    output.fun.store(wordType, lenField, lenReg);
     output.fun.store(voidp, ptrField, ptrReg);
-    output.fun.store(intType, lenField, lenReg);
     return output.fun.load(structType, structReg);
 }
 
@@ -82,7 +86,7 @@ class ArrayExpression : Expression
     Type type()
     {
         Pointer ptrType = this.pointer.type().instanceOf(Pointer);
-        assert(ptrType);
+        assert(!!ptrType);
         return new Array(ptrType.target);
     }
 
@@ -91,31 +95,7 @@ class ArrayExpression : Expression
         int pointer = this.pointer.emit(output);
         int length = this.length.emit(output);
 
-        return makeArray(output, this.type().instanceOf(Array).elementType, pointer, length);
-    }
-}
-
-class ASTArraySlice : ASTSymbol
-{
-    ASTSymbol array;
-
-    ASTSymbol lower;
-
-    ASTSymbol upper;
-
-    this(ASTSymbol array, ASTSymbol lower, ASTSymbol upper)
-    {
-        this.array = array;
-        this.lower = lower;
-        this.upper = upper;
-    }
-
-    Symbol compile(Context context)
-    {
-        return new ArraySlice(
-            beExpression(this.array.compile(context)),
-            beExpression(this.lower.compile(context)),
-            beExpression(this.upper.compile(context)));
+        return makeArray(output, this.type().instanceOf(Array).elementType, length, pointer);
     }
 }
 
@@ -142,7 +122,7 @@ class ArraySlice : Expression
         void* intType = output.platform.intType();
 
         Array arrayType = this.array.type().instanceOf(Array);
-        assert(arrayType); // , "slice of non-array");
+        assert(!!arrayType); // , "slice of non-array");
         int elementSize = output.platform.size(arrayType.elementType.emit(output.platform));
 
         int arrayReg = this.array.emit(output);
@@ -150,11 +130,15 @@ class ArraySlice : Expression
         int upperReg = this.upper.emit(output);
         int ptr = getArrayPtr(output, arrayType, arrayReg);
         // ptr = ptr + lower
-        int lowerOffset = output.fun.binop("*", lowerReg, output.fun.intLiteral(elementSize));
+        int lowerOffset = output.fun.binop(
+            "*", output.platform.nativeWordSize(),
+            lowerReg, output.fun.wordLiteral(output.platform, elementSize));
         int newPtr = output.fun.call(voidp, "ptr_offset", new int[](0) ~ ptr ~ lowerOffset);
         // len = upper - lower
-        int newLen = output.fun.binop("-", upperReg, lowerReg);
+        int newLen = output.fun.binop(
+            "-", output.platform.nativeWordSize(),
+            upperReg, lowerReg);
 
-        return makeArray(output, arrayType.elementType, newPtr, newLen);
+        return makeArray(output, arrayType.elementType, newLen, newPtr);
     }
 }

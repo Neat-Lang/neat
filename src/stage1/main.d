@@ -1,6 +1,6 @@
 module main;
 
-import array : Array, ArrayExpression, ArrayLength, ArrayPointer, ASTArraySlice, getArrayLen, getArrayPtr;
+import array : Array, ArrayExpression, ArrayLength, ArrayPointer, ArraySlice, getArrayLen, getArrayPtr, makeArray;
 import backend.backend;
 import backend.platform;
 import backend.types;
@@ -593,9 +593,11 @@ class ASTBinaryOp : ASTSymbol
         if (op == BinaryOpType.cat)
             return new ArrayCat(left, right, loc);
         if (op == BinaryOpType.boolAnd)
-            return new BoolAnd(left, right);
+            return new BoolAnd(left.truthy(loc), right.truthy(loc));
         if (op == BinaryOpType.boolOr)
-            return new BoolOr(left, right);
+            return new BoolOr(left.truthy(loc), right.truthy(loc));
+        if (op == BinaryOpType.eq && cast(Array) left.type && cast(Array) right.type)
+            return new ArrayEqual(left, right);
         return new BinaryOp(op, left, right, loc);
     }
 
@@ -625,10 +627,11 @@ class ArrayCat : Expression
         auto leftType = cast(Array) this.left.type;
         auto leftLen = getArrayLen(output, leftType, leftReg);
         auto leftPtr = getArrayPtr(output, leftType, leftReg);
-        auto elementSize = output.fun.intLiteral(leftType.elementType.emit(output.platform).size(output.platform));
+        auto elementSize = output.fun.wordLiteral(output.platform,
+            leftType.elementType.emit(output.platform).size(output.platform));
         // size = sizeof(T) * (array.length + 1)
-        auto oldSize = output.fun.binop("*", leftLen, elementSize);
-        auto newSize = output.fun.binop("+", oldSize, elementSize);
+        auto oldSize = output.fun.binop("*", output.platform.nativeWordSize, leftLen, elementSize);
+        auto newSize = output.fun.binop("+", output.platform.nativeWordSize, oldSize, elementSize);
         auto voidp = (new Pointer(new Void)).emit(output.platform);
         auto newArrayPtr = output.fun.call(voidp, "malloc", [newSize]);
         output.fun.call((new Void).emit(output.platform), "memcpy", [newArrayPtr, leftPtr, oldSize]);
@@ -637,7 +640,9 @@ class ArrayCat : Expression
         output.fun.store(this.right.type.emit(output.platform), newElement, this.right.emit(output));
 
         // return ptr[0 .. prevLength + 1];
-        auto newLen = output.fun.binop("+", leftLen, output.fun.intLiteral(1));
+        auto newLen = output.fun.binop(
+            "+", output.platform.nativeWordSize,
+            leftLen, output.fun.wordLiteral(output.platform, 1));
         return (new ArrayExpression(
             new RegExpr(new Pointer(leftType.elementType), newArrayPtr),
             new RegExpr(new Integer, newLen))
@@ -719,6 +724,51 @@ class BoolAnd : Expression
     mixin(GenerateThis);
 }
 
+class ArrayEqual : Expression
+{
+    Expression left;
+
+    Expression right;
+
+    override Type type() { return new Integer; }
+
+    override int emit(Generator output)
+    {
+        auto leftArray = cast(Array) this.left.type;
+        auto rightArray = cast(Array) this.right.type;
+        assert(leftArray && rightArray);
+        assert(leftArray == rightArray);
+        auto left = this.left.emit(output);
+        auto right = this.right.emit(output);
+        auto leftLen = getArrayLen(output, leftArray, left);
+        auto rightLen = getArrayLen(output, rightArray, right);
+        auto leftPtr = getArrayPtr(output, leftArray, left);
+        auto rightPtr = getArrayPtr(output, rightArray, right);
+        const leftSize = leftArray.elementType.emit(output.platform).size(output.platform);
+        return output.fun.call(new BackendIntType, "_arraycmp", [
+            leftPtr, rightPtr, leftLen, rightLen,
+            output.fun.wordLiteral(output.platform, leftSize)]);
+    }
+
+    mixin(GenerateThis);
+}
+
+class IntToLong : Expression
+{
+    Expression intValue;
+
+    override Type type() { return new Long; }
+
+    override Reg emit(Generator output) {
+        assert(cast(Integer) this.intValue.type);
+        Reg intValue = this.intValue.emit(output);
+
+        return output.fun.zeroExtend(intValue, 4, 8);
+    }
+
+    mixin(GenerateThis);
+}
+
 class BinaryOp : Expression
 {
     BinaryOpType op;
@@ -731,33 +781,42 @@ class BinaryOp : Expression
 
     override Type type()
     {
-        return new Integer;
+        with (BinaryOpType) final switch (this.op) {
+            case add:
+            case sub:
+            case mul:
+                // arithmetic
+                auto rightType = this.right.type;
+                if (cast(Long) rightType) return rightType;
+                return this.left.type;
+            case eq:
+            case gt:
+            case lt:
+            case ge:
+            case le:
+                return new Integer; // comparison
+            case cat:
+            case boolAnd:
+            case boolOr:
+                assert(false);
+        }
     }
 
     override Reg emit(Generator output)
     {
-        if (op == BinaryOpType.eq)
-        {
-            auto leftArray = cast(Array) this.left.type;
-            auto rightArray = cast(Array) this.right.type;
-            if (leftArray && rightArray)
-            {
-                // TODO temp expr once array properties work on nonreferences
-                assert(leftArray == rightArray);
-                auto leftLen = (new ArrayLength(this.left)).emit(output);
-                auto rightLen = (new ArrayLength(this.right)).emit(output);
-                auto leftPtr = (new ArrayPointer(leftArray.elementType, this.left)).emit(output);
-                auto rightPtr = (new ArrayPointer(rightArray.elementType, this.right)).emit(output);
-                const leftSize = leftArray.elementType.emit(output.platform).size(output.platform);
-                return output.fun.call(new BackendIntType, "_arraycmp", [
-                    leftPtr, rightPtr, leftLen, rightLen,
-                    output.fun.intLiteral(leftSize)]);
-            }
+        auto left = this.left;
+        auto right = this.right;
+        if (cast(Integer) left.type && cast(Long) right.type) {
+            left = new IntToLong(left);
         }
-        loc.assert_(this.left.type == new Integer, format!"expected integer, not %s"(this.left.type));
-        loc.assert_(this.right.type == new Integer, format!"expected integer, not %s"(this.right.type));
-        Reg leftreg = this.left.emit(output);
-        Reg rightreg = this.right.emit(output);
+        if (cast(Long) left.type && cast(Integer) right.type) {
+            right = new IntToLong(right);
+        }
+        loc.assert_(cast(Integer) left.type || cast(Long) left.type, format!"expected integer/long, not %s"(left.type));
+        loc.assert_(left.type == right.type, format!"types don't match: %s, %s"(left.type, right.type));
+        int size = (cast(Integer) left.type) ? 4 : 8;
+        Reg leftreg = left.emit(output);
+        Reg rightreg = right.emit(output);
         string op = {
             with (BinaryOpType) final switch (this.op)
             {
@@ -783,7 +842,7 @@ class BinaryOp : Expression
                     assert(false, "should be handled separately");
             }
         }();
-        return output.fun.binop(op, leftreg, rightreg);
+        return output.fun.binop(op, size, leftreg, rightreg);
     }
 
     mixin(GenerateThis);
@@ -1043,12 +1102,12 @@ Expression call(Symbol target, Expression[] args, Loc loc)
     }
     if (auto method = cast(ClassMethod) target)
     {
-        return new FuncPtrCall(method.funcPtr, [method.thisPtr] ~ args);
+        return new FuncPtrCall(method.funcPtr, [method.thisPtr] ~ args, loc);
     }
     auto expr = cast(Expression) target;
     if (expr && cast(FunctionPointer) expr.type)
     {
-        return new FuncPtrCall(expr, args);
+        return new FuncPtrCall(expr, args, loc);
     }
     assert(false, format!"unknown call target %s (%s?)"(target, expr ? expr.type : null));
 }
@@ -1122,6 +1181,8 @@ class FuncPtrCall : Expression
 
     Expression[] args;
 
+    Loc loc;
+
     override Type type()
     {
         return (cast(FunctionPointer) funcPtr.type).ret;
@@ -1129,9 +1190,14 @@ class FuncPtrCall : Expression
 
     override Reg emit(Generator output)
     {
+        auto type = cast(FunctionPointer) funcPtr.type;
+        loc.assert_(type.args.length == args.length, format!"expected %s args, not %s"(
+            type.args.length, args.length));
+
         Reg[] regs;
-        foreach (arg; this.args)
+        foreach (i, arg; this.args)
         {
+            arg = arg.implicitConvertTo(type.args[i], loc);
             regs ~= arg.emit(output);
         }
         return output.fun.callFuncPtr(
@@ -1459,7 +1525,7 @@ class ASTMember : ASTSymbol
 
         if (expr && cast(Array) expr.type && member == "length")
         {
-            return new ArrayLength(expr);
+            return new ArrayLength(expr, context.platform.nativeWordType);
         }
 
         if (expr && cast(Array) expr.type && member == "ptr")
@@ -1501,8 +1567,12 @@ class ASTIndexAccess : ASTSymbol
 
     override Expression compile(Context context)
     {
+        auto wordType = context.platform.nativeWordType;
         auto base = this.base.compile(context).beExpression;
-        auto index = this.index.compile(context).beExpression;
+        auto index = this.index
+            .compile(context)
+            .beExpression
+            .implicitConvertTo(wordType, loc);
 
         if (auto array_ = cast(Array) base.type)
         {
@@ -1511,16 +1581,44 @@ class ASTIndexAccess : ASTSymbol
         }
 
         assert(cast(Pointer) base.type, "expected pointer for index base");
-        assert(cast(Integer) index.type, "expected int for index value");
 
         auto ptr_offset = new Function("ptr_offset",
             new Pointer(new Void),
-            [Argument("", new Pointer(new Void)), Argument("", new Integer)],
+            [Argument("", new Pointer(new Void)), Argument("", wordType)],
             true, null);
         int size = (cast(Pointer) base.type).target.emit(context.platform).size(context.platform);
         auto offset = new BinaryOp(BinaryOpType.mul, index, new Literal(size), loc);
+        assert(offset.type == wordType);
 
         return new Dereference(new PointerCast(base.type, new Call(ptr_offset, [base, offset], loc)));
+    }
+
+    mixin(GenerateThis);
+}
+
+class ASTArraySlice : ASTSymbol
+{
+    ASTSymbol array;
+
+    ASTSymbol lower;
+
+    ASTSymbol upper;
+
+    Loc loc;
+
+    override ArraySlice compile(Context context)
+    {
+        auto wordType = context.platform.nativeWordType;
+
+        return new ArraySlice(
+            this.array.compile(context).beExpression,
+            this.lower.compile(context).beExpression.implicitConvertTo(wordType, loc),
+            this.upper.compile(context).beExpression.implicitConvertTo(wordType, loc));
+    }
+
+    override string toString() const
+    {
+        return format!"%s[%s .. %s]"(array, lower, upper);
     }
 
     mixin(GenerateThis);
@@ -1545,7 +1643,7 @@ ASTSymbol parseIndex(ref Parser parser, ASTSymbol base)
             assert(upper, "slice upper bound expected");
             expect("]");
             commit;
-            return new ASTArraySlice(base, lower, upper);
+            return new ASTArraySlice(base, lower, upper, loc);
         }
         expect("]");
         commit;
@@ -1590,11 +1688,12 @@ class ASTNewExpression : ASTSymbol
         if (auto arrayType = cast(Array) type) {
             assert(args.length == 1);
 
+            auto wordType = context.platform.nativeWordType;
             auto elementSize = new SizeOf(arrayType.elementType);
             // TODO only compute length once
-            auto length = args[0].compile(context).beExpression(loc);
+            auto length = args[0].compile(context).beExpression(loc).implicitConvertTo(wordType, loc);
             auto byteLength = new BinaryOp(BinaryOpType.mul, elementSize, length, loc);
-            auto malloc = new Function("malloc", new Pointer(new Void), [Argument("", new Integer)], true, null);
+            auto malloc = new Function("malloc", new Pointer(new Void), [Argument("", wordType)], true, null);
             auto dataPtr = new PointerCast(new Pointer(arrayType.elementType), call(malloc, [byteLength], loc));
             return new ArrayExpression(dataPtr, length);
         }
@@ -1646,7 +1745,7 @@ class NewClassExpression : Expression
         auto classDataStruct = this.classType.dataStruct;
         auto voidp = (new Pointer(new Void)).emit(output.platform);
         int classInfoSize = classInfoStruct.emit(output.platform).size(output.platform);
-        auto classInfoPtr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(classInfoSize)]);
+        auto classInfoPtr = output.fun.call(voidp, "malloc", [output.fun.wordLiteral(output.platform, classInfoSize)]);
         auto backendStructType = classInfoStruct.emit(output.platform);
         foreach (i, method; classType.vtable)
         {
@@ -1656,7 +1755,7 @@ class NewClassExpression : Expression
             output.fun.store(funcPtr.emit(output.platform), target, src);
         }
         int classDataSize = classDataStruct.emit(output.platform).size(output.platform);
-        auto classPtr = output.fun.call(voidp, "malloc", [output.fun.intLiteral(classDataSize)]);
+        auto classPtr = output.fun.call(voidp, "malloc", [output.fun.wordLiteral(output.platform, classDataSize)]);
         auto classInfoTarget = output.fun.fieldOffset(classDataStruct.emit(output.platform), classPtr, 0);
         output.fun.store(voidp, classInfoTarget, classInfoPtr);
 
@@ -1672,34 +1771,35 @@ class ASTNegation : ASTSymbol
 
     Loc loc;
 
-    override Negation compile(Context context)
+    override Expression compile(Context context)
     {
-        return new Negation(
-            this.next
-                .compile(context)
-                .beExpression
-                .implicitConvertTo(new Integer, loc));
+        auto isTrue = this.next
+            .compile(context)
+            .beExpression
+            .truthy(loc);
+
+        return new BinaryOp(BinaryOpType.eq, isTrue, new Literal(0), loc);
     }
 
     mixin(GenerateThis);
 }
 
-class Negation : Expression
-{
-    Expression next;
-
-    override Type type()
+Expression truthy(Expression ex, Loc loc) {
+    if (cast(Pointer) ex.type || cast(Class) ex.type)
     {
-        return new Integer;
+        auto voidp = new Pointer(new Void);
+        auto rt_ptr_test = new Function("cxruntime_ptr_test",
+            new Integer,
+            [Argument("", voidp)],
+            true, null);
+        return new Call(rt_ptr_test, [new PointerCast(voidp, ex)], loc);
     }
-
-    override Reg emit(Generator output)
-    {
-        auto next = this.next.emit(output);
-        return output.fun.call(new BackendIntType, "cxruntime_int_negate", [next]);
-    }
-
-    mixin(GenerateThis);
+    loc.assert_(cast(Integer) ex.type || cast(Long) ex.type, "integer expected");
+    // (a == 0) == 0
+    return new BinaryOp(
+        BinaryOpType.eq,
+        new BinaryOp(BinaryOpType.eq, ex, new Literal(0), loc),
+        new Literal(0), loc);
 }
 
 ASTSymbol parseExpressionLeaf(ref Parser parser)
@@ -1909,16 +2009,10 @@ class StringLiteral : Expression
 
     override Reg emit(Generator output)
     {
-        auto voidp = new BackendPointerType(new BackendVoidType);
-        // TODO allocaless
-        auto structType = type.emit(output.platform);
-        Reg structReg = output.fun.alloca(structType);
-        Reg ptrField = output.fun.fieldOffset(structType, structReg, 0);
-        Reg lenField = output.fun.fieldOffset(structType, structReg, 1);
+        auto len = output.fun.wordLiteral(output.platform, this.text.length);
+        auto ptr = output.fun.stringLiteral(this.text);
 
-        output.fun.store(voidp, ptrField, output.fun.stringLiteral(this.text));
-        output.fun.store(new BackendIntType, lenField, output.fun.intLiteral(cast(int)  this.text.length));
-        return output.fun.load(structType, structReg);
+        return makeArray(output, type, len, ptr);
     }
 
     mixin(GenerateThis);
@@ -2004,6 +2098,10 @@ Expression implicitConvertTo(Expression from, Type to, Loc loc)
     {
         return new PointerCast(to, from);
     }
+    if (cast(Integer) from.type && cast(Long) to)
+    {
+        return new IntToLong(from);
+    }
     // any pointer casts to void*
     if (cast(Pointer) from.type && to == new Pointer(new Void))
     {
@@ -2025,16 +2123,6 @@ Expression implicitConvertTo(Expression from, Type to, Loc loc)
     if (cast(Class) to && cast(NullExpr) from)
     {
         return new PointerCast(to, from);
-    }
-    // TODO bool
-    if (cast(Integer) to && (cast(Pointer) from.type || cast(Class) from.type))
-    {
-        auto voidp = new Pointer(new Void);
-        auto rt_ptr_test = new Function("cxruntime_ptr_test",
-            new Integer,
-            [Argument("", voidp)],
-            true, null);
-        return new Call(rt_ptr_test, [new PointerCast(voidp, from)], loc);
     }
     loc.assert_(false, format!"todo: cast(%s) %s"(to, from.type));
     assert(false);
@@ -2146,7 +2234,9 @@ class Method : Symbol
 
     Type funcPtrType()
     {
-        return new FunctionPointer(ret, args.map!(arg => arg.type).array);
+        Type thisp = classType;
+
+        return new FunctionPointer(ret, [thisp] ~ args.map!(arg => arg.type).array);
     }
 
     mixin(GenerateAll);
@@ -2281,7 +2371,7 @@ class Class : Type
         auto current = this;
         while (current)
         {
-            auto test = new BinaryOp(BinaryOpType.eq, target, new StringLiteral(current.name), Loc.init);
+            auto test = new ArrayEqual(target, new StringLiteral(current.name));
 
             castStmts ~= new IfStatement(test, new ReturnStatement(thisptr));
             current = current.superClass;
@@ -2715,7 +2805,6 @@ else
     int main(string[] args)
     {
         import backend.interpreter : IpBackend;
-        import backend.interpreter : backendEncode = encode;
         import core.memory : GC;
 
         // turn on if you get random crashes
@@ -2754,6 +2843,16 @@ else
         builtins.add("true", new Literal(1));
         builtins.add("false", new Literal(0));
         builtins.add("null", new NullExpr(new Pointer(new Void)));
+        switch (defaultPlatform.nativeWordSize) {
+            case 4:
+                builtins.add("size_t", new Integer);
+                break;
+            case 8:
+                builtins.add("size_t", new Long);
+                break;
+            default:
+                assert(false);
+        }
 
         Module[string] importCache;
 
@@ -2768,8 +2867,7 @@ else
         auto type = new Array(new Array(new Character));
         const size = type.emit(output.platform).size(output.platform);
         auto modArg = new void[size];
-
-        backendEncode(nextArgs, modArg);
+        *cast(string[]*) modArg = nextArgs;
 
         module_.call("main", null, [modArg]);
         return 0;

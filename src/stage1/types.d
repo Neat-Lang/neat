@@ -40,6 +40,40 @@ class Integer : Type
     }
 }
 
+class ASTLong : ASTType
+{
+    override Long compile(Context) {
+        return new Long;
+    }
+}
+
+class Long : Type
+{
+    override BackendType emit(Platform)
+    {
+        return new BackendLongType;
+    }
+
+    override string toString() const
+    {
+        return "long";
+    }
+
+    override bool opEquals(const Object obj) const
+    {
+        return cast(Long) obj !is null;
+    }
+}
+
+Type nativeWordType(Platform platform) {
+    // TODO unsigned
+    switch (platform.nativeWordSize) {
+        case 4: return new Integer;
+        case 8: return new Long;
+        default: assert(false, "unknwon word size");
+    }
+}
+
 class ASTCharType : ASTType
 {
     override Character compile(Context) {
@@ -264,20 +298,22 @@ ASTType parseLeafType(ref Parser parser)
             return null;
         }
 
-        if (identifier == "int")
-        {
+        if (identifier == "int") {
             commit;
             return new ASTInteger;
         }
 
-        if (identifier == "void")
-        {
+        if (identifier == "long") {
+            commit;
+            return new ASTLong;
+        }
+
+        if (identifier == "void") {
             commit;
             return new ASTVoid;
         }
 
-        if (identifier == "char")
-        {
+        if (identifier == "char") {
             commit;
             return new ASTCharType;
         }

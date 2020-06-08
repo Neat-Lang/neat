@@ -2807,7 +2807,7 @@ else
         import backend.interpreter : IpBackend;
         import core.memory : GC;
 
-        // turn on if you get random crashes
+        // disable gc if you get random crashes
         GC.disable;
 
         string[] nextArgs;

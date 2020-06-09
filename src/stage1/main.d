@@ -287,6 +287,8 @@ class ASTIfStatement : ASTStatement
 
     ASTStatement else_;
 
+    Loc loc;
+
     override IfStatement compile(Context context)
     {
         auto ifscope = new VarDeclScope(context.namespace, No.frameBase);
@@ -298,7 +300,7 @@ class ASTIfStatement : ASTStatement
             else_ = this.else_.compile(context.withNamespace(elsescope));
         }
 
-        return new IfStatement(test.beExpression, then, else_);
+        return new IfStatement(test.beExpression.truthy(loc), then, else_);
     }
 
     mixin(GenerateAll);
@@ -358,7 +360,7 @@ ASTIfStatement parseIf(ref Parser parser)
             elseStatement = parser.parseStatement;
         }
         commit;
-        return new ASTIfStatement(expr, thenStmt, elseStatement);
+        return new ASTIfStatement(expr, thenStmt, elseStatement, loc);
     }
 }
 
@@ -984,13 +986,15 @@ class ASTWhile : ASTStatement
 
     ASTStatement body_;
 
+    Loc loc;
+
     override WhileLoop compile(Context context)
     {
         auto subscope = new VarDeclScope(context.namespace, No.frameBase);
         auto condExpr = this.cond.compile(context.withNamespace(subscope));
         auto bodyStmt = this.body_.compile(context.withNamespace(subscope));
 
-        return new WhileLoop(condExpr.beExpression, bodyStmt);
+        return new WhileLoop(condExpr.beExpression.truthy(this.loc), bodyStmt);
     }
 
     mixin(GenerateAll);
@@ -1041,7 +1045,7 @@ ASTWhile parseWhile(ref Parser parser)
         expect(")");
         ASTStatement body_ = parser.parseStatement;
 
-        return new ASTWhile(cond, body_);
+        return new ASTWhile(cond, body_, loc);
     }
 }
 
@@ -2086,6 +2090,8 @@ class PointerCast : Expression
     {
         return this.value.emit(output); // pointer's a pointer
     }
+
+    override string toString() const { return format!"(%s) %s"(target, value); }
 
     mixin(GenerateThis);
 }

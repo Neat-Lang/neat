@@ -99,11 +99,13 @@ class BackendStructType : BackendType
     mixin(GenerateThis);
 }
 
-int roundToNext(int value, int size)
+int roundToNext(int size, int alignment)
 {
-    value += size - 1;
-    value -= value % size;
-    return value;
+    size += alignment - 1;
+    // alignment is a power of two, so alignment - 1 is a mask
+    // size -= size % alignment;
+    size -= size & (alignment - 1);
+    return size;
 }
 
 class BackendFunctionPointerType : BackendType

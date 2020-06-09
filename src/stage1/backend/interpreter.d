@@ -9,6 +9,7 @@ import std.algorithm;
 import std.array;
 import std.ascii;
 import std.format;
+import std.traits : EnumMembers;
 import std.range;
 import std.typecons : Tuple;
 
@@ -118,8 +119,18 @@ struct Instr
         }
         static struct BinOp
         {
-            /// ops: + - * / % & | ^ < > <= >= ==
-            string op;
+            static enum Ops = [
+                "+", "-", "*", "/", "%",
+                "&", "|", "^",
+                "<", ">", "<=", ">=", "==",
+            ];
+            static enum Op {
+                add, sub, mul, div, rem,
+                and, or, xor,
+                lt, gt, le, ge, eq,
+            }
+            static assert(Ops.length == EnumMembers!Op.length);
+            Op op;
             int size; // 4, 8
             Reg left;
             Reg right;
@@ -142,18 +153,21 @@ struct Instr
         static struct Alloca
         {
             BackendType type;
+            int size; // cache
         }
         static struct GetField
         {
             BackendStructType structType;
             Reg base;
             int member;
+            int offset; // cache
         }
         static struct FieldOffset
         {
             BackendStructType structType;
             Reg base;
             int member;
+            int offset; // cache
         }
         static struct Load
         {
@@ -236,14 +250,12 @@ struct Instr
             case GetField:
                 return getField.structType.members[getField.member].size(platform);
             case BinOp:
-                switch (binop.op) {
+                with (Instr.BinOp.Op) final switch (binop.op) {
                     /// ops: + - * / % & | ^ < > <= >= ==
-                    case "==": case ">": case ">=": case "<": case "<=":
+                    case eq: case gt: case ge: case lt: case le:
                         return intType.size(platform);
-                    case "+": case "-": case "*": case "/": case "%": case "&": case "|": case "^":
+                    case add: case sub: case mul: case div: case rem: case and: case or: case xor:
                         return binop.size;
-                    default:
-                        assert(false, "unknown op " ~ binop.op);
                 }
             case ZeroExtend:
                 return zeroExtend.to;
@@ -293,6 +305,8 @@ class IpBackendFunction : BackendFunction
     BackendType retType;
 
     BackendType[] argTypes;
+
+    IpBackendModule module_;
 
     @(This.Init!null)
     BasicBlock[] blocks;
@@ -410,7 +424,25 @@ class IpBackendFunction : BackendFunction
     {
         auto instr = Instr(Instr.Kind.BinOp);
 
-        instr.binop.op = op;
+        /// ops: + - * / % & | ^ < > <= >= ==
+        instr.binop.op = {
+            with (Instr.BinOp.Op) switch (op) {
+                case "+": return add;
+                case "-": return sub;
+                case "*": return mul;
+                case "/": return div;
+                case "%": return rem;
+                case "&": return and;
+                case "|": return or;
+                case "^": return xor;
+                case "<": return lt;
+                case ">": return gt;
+                case "<=": return le;
+                case ">=": return ge;
+                case "==": return eq;
+                default: assert(false, "unknown op " ~ op);
+            }
+        }();
         instr.binop.size = size;
         instr.binop.left = left;
         instr.binop.right = right;
@@ -432,31 +464,34 @@ class IpBackendFunction : BackendFunction
         auto instr = Instr(Instr.Kind.Alloca);
 
         instr.alloca.type = type;
+        instr.alloca.size = type.size(this.module_.platform);
         return block.append(instr);
     }
 
-    override Reg field(BackendType structType, Reg structBase, int member)
+    override Reg field(BackendType type, Reg structBase, int member)
     {
-        assert(cast(BackendStructType) structType !is null);
-
         auto instr = Instr(Instr.Kind.GetField);
+        auto structType = cast(BackendStructType) type;
+        assert(structType !is null);
 
-        instr.getField.structType = cast(BackendStructType) structType;
+        instr.getField.structType = structType;
         instr.getField.base = structBase;
         instr.getField.member = member;
+        instr.getField.offset = structType.offsetOf(this.module_.platform, member);
 
         return block.append(instr);
     }
 
-    override Reg fieldOffset(BackendType structType, Reg structBase, int member)
+    override Reg fieldOffset(BackendType type, Reg structBase, int member)
     {
-        assert(cast(BackendStructType) structType !is null);
-
         auto instr = Instr(Instr.Kind.FieldOffset);
+        auto structType = cast(BackendStructType) type;
+        assert(structType !is null);
 
-        instr.fieldOffset.structType = cast(BackendStructType) structType;
+        instr.fieldOffset.structType = structType;
         instr.fieldOffset.base = structBase;
         instr.fieldOffset.member = member;
+        instr.fieldOffset.offset = structType.offsetOf(this.module_.platform, member);
 
         return block.append(instr);
     }
@@ -534,89 +569,6 @@ class IpBackendFunction : BackendFunction
     }
 
     mixin(GenerateThis);
-}
-
-void setInitValue(BackendType type, void* target, Platform platform)
-{
-    if (cast(BackendIntType) type)
-    {
-        *cast(int*) target = 0;
-        return;
-    }
-    if (cast(BackendLongType) type)
-    {
-        *cast(long*) target = 0;
-        return;
-    }
-    if (cast(BackendVoidType) type)
-    {
-        return;
-    }
-    if (auto strct = cast(BackendStructType) type)
-    {
-        foreach (subtype; strct.members)
-        {
-            setInitValue(subtype, target, platform);
-            // TODO alignment
-            target += subtype.size(platform);
-        }
-        return;
-    }
-    if (cast(BackendPointerType) type || cast(BackendFunctionPointerType) type)
-    {
-        *cast(void**) target = null;
-        return;
-    }
-    assert(false, format!"what is init for %s"(type));
-}
-
-struct ArrayAllocator(T)
-{
-    static T*[] pointers = null;
-
-    static T[] allocate(size_t length)
-    {
-        if (length == 0) return null;
-
-        int slot = findMsb(cast(int) length - 1);
-        while (slot >= this.pointers.length) this.pointers ~= null;
-        if (this.pointers[slot]) {
-            auto ret = this.pointers[slot][0 .. length];
-            this.pointers[slot] = *cast(T**) this.pointers[slot];
-            return ret;
-        }
-        assert(length <= (1 << slot));
-        auto allocSize = 1 << slot;
-
-        // ensure we have space for the next-pointer
-        while (T[1].sizeof * allocSize < (T*).sizeof) allocSize++;
-        return (new T[allocSize])[0 .. length];
-    }
-
-    static void free(T[] array)
-    {
-        if (array.empty) return;
-
-        int slot = findMsb(cast(int) array.length - 1);
-        *cast(T**) array.ptr = this.pointers[slot];
-        this.pointers[slot] = array.ptr;
-    }
-}
-
-private int findMsb(int size)
-{
-    int bit_ = 0;
-    while (size) {
-        bit_ ++;
-        size >>= 1;
-    }
-    return bit_;
-}
-
-unittest
-{
-    foreach (i, v; [0, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5])
-        assert(findMsb(cast(int) i) == v);
 }
 
 class IpFuncPtr
@@ -852,6 +804,39 @@ private void defineIntrinsics(IpBackendModule mod)
         delegate void(TestBranchRecord record, int block) => record.resolveElse(block));
 }
 
+struct StackAllocator
+{
+    void[] stack;
+
+    size_t used;
+
+    void resize(size_t target) {
+        while (stack.length < target) {
+            if (!stack.length) stack = new void[1];
+            else stack.length = stack.length * 2;
+        }
+        // import std.stdio : writefln; writefln!"stack resized to %s"(stack.length);
+    }
+
+    static struct Record
+    {
+        void[] data;
+        size_t offset;
+    }
+
+    Record allocate(size_t size)
+    {
+        if (used + size > stack.length) resize(used + size);
+        size_t offset = used;
+        used += size;
+        return Record(this.stack[offset .. used], offset);
+    }
+
+    void free(size_t offset) {
+        this.used = offset;
+    }
+}
+
 class IpBackendModule : BackendModule
 {
     IpBackend backend_;
@@ -863,6 +848,8 @@ class IpBackendModule : BackendModule
     Callable[string] callbacks;
 
     IpBackendFunction[string] functions;
+
+    StackAllocator allocator;
 
     this(IpBackend backend, Platform platform)
     {
@@ -881,7 +868,12 @@ class IpBackendModule : BackendModule
         callbacks[name] = call;
     }
 
-    Tuple!(size_t, "numRegs", int, "regAreaSize", int[], "instrSizes")[string] regsizeCache;
+    Tuple!(
+        size_t, "numRegs",
+        int, "regAreaSize",
+        int[], "instrSizes",
+        int[], "instrOffsets",
+    )[string] regsizeCache;
 
     void call(string name, void[] ret, void[][] args)
     in (name in this.functions || name in this.callbacks, format!"function '%s' not found"(name))
@@ -906,35 +898,35 @@ class IpBackendModule : BackendModule
         size_t numRegs;
         int regAreaSize;
         int[] instrSizes;
+        int[] instrOffsets;
         if (name in regsizeCache) {
             numRegs = regsizeCache[name].numRegs;
             regAreaSize = regsizeCache[name].regAreaSize;
             instrSizes = regsizeCache[name].instrSizes;
+            instrOffsets = regsizeCache[name].instrOffsets;
         } else {
             foreach (block; fun.blocks) numRegs += block.instrs.length;
-            foreach (block; fun.blocks) foreach (instr; block.instrs) instrSizes ~= instr.regSize(fun, this.platform);
-            regAreaSize = instrSizes.sum;
-            regsizeCache[name] = typeof(regsizeCache[name])(numRegs, regAreaSize, instrSizes);
-        }
-
-        void[] regData = ArrayAllocator!void.allocate(regAreaSize);
-        scope(success) ArrayAllocator!void.free(regData);
-
-        void[][] regArrays = ArrayAllocator!(void[]).allocate(numRegs);
-        scope(success) ArrayAllocator!(void[]).free(regArrays);
-        // TODO embed offset in the instrs?
-        {
-            auto regCurrent = regData;
             int i;
-            foreach (block; fun.blocks) foreach (instr; block.instrs)
-            {
-                regArrays[i] = regCurrent[0 .. instrSizes[i]];
-                regCurrent = regCurrent[instrSizes[i] .. $];
-                i++;
+            foreach (block; fun.blocks) foreach (instr; block.instrs) {
+                int size = instr.regSize(fun, this.platform);
+                instrSizes ~= size;
+                instrOffsets ~= i;
+                i += size;
             }
-            assert(regCurrent.length == 0);
-            assert(i == numRegs);
+            regAreaSize = instrSizes.sum;
+            regsizeCache[name] = typeof(regsizeCache[name])(numRegs, regAreaSize, instrSizes, instrOffsets);
         }
+
+        auto regDataAllocation = allocator.allocate(regAreaSize);
+
+        void[] regData = regDataAllocation.data;
+        scope(success) allocator.free(regDataAllocation.offset);
+
+        auto regArrayAllocation = allocator.allocate(numRegs * (void[]).sizeof);
+
+        void[][] regArrays = cast(void[][]) regArrayAllocation.data;
+        scope(success) allocator.free(regArrayAllocation.offset);
+        // TODO embed offset in the instrs?
 
         int block = 0;
         while (true)
@@ -946,6 +938,7 @@ class IpBackendModule : BackendModule
                 const lastInstr = i == fun.blocks[block].instrs.length - 1;
 
                 int reg = fun.blocks[block].regBase + cast(int) i;
+                regArrays[reg] = regData[instrOffsets[reg] .. instrOffsets[reg] + instrSizes[reg]];
 
                 // import std.stdio : writefln; writefln!"%%%s = %s"(reg, instr);
 
@@ -956,7 +949,9 @@ class IpBackendModule : BackendModule
                         case Call:
                             assert(!lastInstr);
                             int len = cast(int) instr.call.args.length;
-                            void[][] callArgs = (cast(void[]*) alloca(len * (void[]).sizeof))[0 .. len];
+                            void[][] callArgs = (
+                                cast(void[]*) allocator.allocate(len * (void[]).sizeof).data
+                            )[0 .. len];
                             foreach (k, argReg; instr.call.args) callArgs[k] = regArrays[argReg];
 
                             call(instr.call.name, regArrays[reg], callArgs);
@@ -965,7 +960,9 @@ class IpBackendModule : BackendModule
                             assert(!lastInstr);
                             IpFuncPtr funcPtr = (cast(IpFuncPtr[]) regArrays[instr.callFuncPtr.funcPtr])[0];
                             int len = cast(int) instr.callFuncPtr.args.length;
-                            void[][] callArgs = (cast(void[]*) alloca(len * (void[]).sizeof))[0 .. len];
+                            void[][] callArgs = (
+                                cast(void[]*) allocator.allocate(len * (void[]).sizeof).data
+                            )[0 .. len];
                             foreach (k, argReg; instr.callFuncPtr.args)
                                 callArgs[k] = regArrays[argReg];
 
@@ -1001,11 +998,11 @@ class IpBackendModule : BackendModule
                                 assert(regArrays[reg].length == 4);
                                 final switch (instr.binop.op)
                                 {
-                                    static foreach (op;
-                                        ["+", "-", "*", "/", "%", "&", "|", "^", "<", ">", "<=", ">=", "=="])
+                                    static foreach (op; [EnumMembers!(Instr.BinOp.Op)])
                                     {
                                         case op:
-                                            *cast(int*) regArrays[reg].ptr = mixin("left " ~ op ~ " right");
+                                            *cast(int*) regArrays[reg].ptr
+                                                = mixin("left " ~ Instr.BinOp.Ops[op] ~ " right");
                                             break outer;
                                     }
                                 }
@@ -1014,22 +1011,22 @@ class IpBackendModule : BackendModule
                             {
                                 long left = *cast(long*) regArrays[instr.binop.left].ptr;
                                 long right = *cast(long*) regArrays[instr.binop.right].ptr;
-                                final switch (instr.binop.op)
+                                with (Instr.BinOp.Op) final switch (instr.binop.op)
                                 {
-                                    static foreach (op;
-                                        ["+", "-", "*", "/", "%", "&", "|", "^"])
+                                    static foreach (op; [add, sub, mul, div, rem, and, or, xor])
                                     {
                                         case op:
                                             assert(regArrays[reg].length == 8);
-                                            *cast(long*) regArrays[reg].ptr = mixin("left " ~ op ~ " right");
+                                            *cast(long*) regArrays[reg].ptr
+                                                = mixin("left " ~ Instr.BinOp.Ops[op] ~ " right");
                                             break outer;
                                     }
-                                    static foreach (op;
-                                        ["<", ">", "<=", ">=", "=="])
+                                    static foreach (op; [lt, gt, le, ge, eq])
                                     {
                                         case op:
                                             assert(regArrays[reg].length == 4);
-                                            *cast(int*) regArrays[reg].ptr = mixin("left " ~ op ~ " right");
+                                            *cast(int*) regArrays[reg].ptr
+                                                = mixin("left " ~ Instr.BinOp.Ops[op] ~ " right");
                                             break outer;
                                     }
                                 }
@@ -1054,7 +1051,9 @@ class IpBackendModule : BackendModule
                             break;
                         case TestBranch:
                             assert(lastInstr);
-                            auto testValue = (cast(int[]) regArrays[instr.testBranch.test])[0];
+                            assert(regArrays[instr.testBranch.test].length == int.sizeof);
+
+                            auto testValue = *cast(int*) regArrays[instr.testBranch.test].ptr;
 
                             if (testValue) {
                                 block = instr.testBranch.thenBlock;
@@ -1064,22 +1063,24 @@ class IpBackendModule : BackendModule
                             break;
                         case Alloca:
                             assert(!lastInstr);
-                            auto target = new void[instr.alloca.type.size(this.platform)];
-                            setInitValue(instr.alloca.type, target.ptr, this.platform);
+
+                            auto target = allocator.allocate(instr.alloca.size).data;
+                            (cast(ubyte[]) target)[] = 0;
                             (cast(void*[]) regArrays[reg])[0] = target.ptr;
                             break;
                         case FieldOffset:
                             assert(!lastInstr);
-                            auto base = (cast(void*[]) regArrays[instr.fieldOffset.base])[0];
-                            auto offset = instr.fieldOffset.structType.offsetOf(this.platform, instr.fieldOffset.member);
+                            assert(regArrays[instr.fieldOffset.base].length == (void*).sizeof);
 
-                            (cast(void*[]) regArrays[reg])[0] = base + offset;
+                            auto base = *cast(void**) regArrays[instr.fieldOffset.base].ptr;
+
+                            *cast(void**) regArrays[reg] = base + instr.fieldOffset.offset;
                             break;
                         case GetField:
                             assert(!lastInstr);
                             auto value = cast(void[]) regArrays[instr.fieldOffset.base];
                             auto size = instr.getField.structType.members[instr.getField.member].size(this.platform);
-                            auto offset = instr.getField.structType.offsetOf(this.platform, instr.getField.member);
+                            auto offset = instr.getField.offset;
 
                             (cast(void[]) regArrays[reg])[] = value[offset .. offset + size];
                             break;
@@ -1115,7 +1116,8 @@ class IpBackendModule : BackendModule
         assert(cast(BackendType) ret);
         assert(args.all!(a => cast(BackendType) a));
 
-        auto fun = new IpBackendFunction(name, cast(BackendType) ret, args.map!(a => cast(BackendType) a).array);
+        auto fun = new IpBackendFunction(
+            name, cast(BackendType) ret, args.map!(a => cast(BackendType) a).array, this);
 
         this.functions[name] = fun;
         return fun;

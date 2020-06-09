@@ -95,6 +95,11 @@ class Parser
         return false;
     }
 
+    void assert_(T)(T test, string msg)
+    {
+        assert(test, format!"at %s: %s"(this.lineNumbers.at(this.text), msg));
+    }
+
     void fail(string msg)
     {
         assert(false, format!"at %s: %s"(this.lineNumbers.at(this.text), msg));
@@ -147,7 +152,11 @@ struct Loc
     string text;
 
     void fail(string msg) {
-        assert(false, format!"at %s: %s"(this.lineNumbers.at(this.text), msg));
+        import core.stdc.stdlib : exit;
+        import std.stdio : writefln;
+
+        writefln!"at %s: %s"(this.lineNumbers.at(this.text), msg);
+        exit(1);
     }
 
     void assert_(T)(T flag, lazy string text) {

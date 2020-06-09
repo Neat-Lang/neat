@@ -2189,7 +2189,11 @@ class Method : Symbol
 {
     Class classType;
 
+    bool override_;
+
     string name;
+
+    Loc loc;
 
     @NonNull
     Type ret;
@@ -2294,6 +2298,10 @@ class Class : Type
 
     Method[] methods;
 
+    Method[] vtable_; // methods appearing in the classinfo
+
+    bool hasVtable;
+
     this(ASTClassDecl decl, Class superClass, Context context)
     in (decl)
     {
@@ -2303,6 +2311,7 @@ class Class : Type
         this.context = context;
         this.members = null;
         this.methods = null;
+        this.hasVtable = false;
     }
 
     void resolve()
@@ -2364,26 +2373,44 @@ class Class : Type
         );
     }
 
-    Method[] vtable()
-    in (resolved)
+    Method[] vtable() in (resolved) { return this.vtable_.dup; }
+
+    void genVtable()
     {
-        auto combinedMethods = superClass ? superClass.vtable : null;
+        if (hasVtable) return;
+
+        assert(!vtable_);
+
+        Method[] combinedMethods;
+        if (superClass)
+        {
+            superClass.genVtable;
+            combinedMethods = superClass.vtable;
+        }
+
+        this.genInstanceofMethod;
 
         foreach (method; methods)
         {
             // TODO match types
             alias pred = a => a.name == method.name;
+            bool isThis = method.name == "this"; // workaround: no final yet, no proper masking yet
 
             if (combinedMethods.any!pred)
             {
+                method.loc.assert_(method.override_ || isThis,
+                    "Expected 'override' attribute for overriding method.");
                 combinedMethods[combinedMethods.countUntil!pred] = method;
             }
             else
             {
+                method.loc.assert_(
+                    !method.override_, "'override' specified but method does not override a parent method.");
                 combinedMethods ~= method;
             }
         }
-        return combinedMethods;
+        vtable_ = combinedMethods;
+        hasVtable = true;
     }
 
     void genInstanceofMethod()
@@ -2407,7 +2434,9 @@ class Class : Type
 
         auto stmt = new SequenceStatement(castStmts);
 
-        methods ~= new Method(this, "__instanceof", voidp, [Argument("target", strng)], null, stmt);
+        bool override_ = superClass ? true : false;
+
+        methods ~= new Method(this, override_, "__instanceof", Loc.init, voidp, [Argument("target", strng)], null, stmt);
     }
 
     override string toString() const
@@ -2445,6 +2474,10 @@ class ASTClassDecl : ASTType
 
     struct Method
     {
+        Loc loc;
+
+        bool override_;
+
         string name;
 
         ASTType ret;
@@ -2487,11 +2520,13 @@ class ASTClassDecl : ASTType
             .array;
         target.methods = methods.map!(a => new .Method(
             target,
+            a.override_,
             a.name,
+            a.loc,
             a.ret.compile(classContext),
             a.args.map!(b => Argument(b.name, b.type.compile(classContext))).array,
             a.body_)).array;
-        target.genInstanceofMethod;
+        target.genVtable;
     }
 
     mixin(GenerateThis);
@@ -2540,10 +2575,17 @@ ASTClassDecl parseClassDecl(ref Parser parser)
         expect("{");
         while (!accept("}"))
         {
+            strip;
+
+            auto methodLoc = loc;
+
             ASTType retType;
             string memberName;
+            bool override_ = parser.acceptIdentifier("override");
+
             if (accept("this"))
             {
+                assert_(!override_, "cannot override constructor");
                 retType = new ASTVoid;
                 memberName = "this";
             }
@@ -2558,10 +2600,11 @@ ASTClassDecl parseClassDecl(ref Parser parser)
             {
                 ASTArgument[] args = parser.parseArglist;
                 ASTStatement stmt = parser.parseStatement;
-                methods ~= ASTClassDecl.Method(memberName, retType, args, stmt);
+                methods ~= ASTClassDecl.Method(methodLoc, override_, memberName, retType, args, stmt);
             }
             else
             {
+                assert_(!override_, "cannot override class member");
                 expect(";");
                 members ~= ASTClassDecl.Member(memberName, retType);
             }

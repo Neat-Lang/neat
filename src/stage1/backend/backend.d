@@ -62,12 +62,14 @@ Reg wordLiteral(BackendFunction fun, Platform platform, size_t size)
 /// helpers to allow delayed jump resolution
 interface BranchRecord
 {
+    // must be called before first instruction in block
     void resolve(int index);
 }
 
 /// ditto
 interface TestBranchRecord
 {
+    // must be called before first instruction in block
     void resolveThen(int index);
     void resolveElse(int index);
 }

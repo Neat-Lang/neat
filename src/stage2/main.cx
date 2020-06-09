@@ -149,12 +149,12 @@ class ArgExpr : Expression
 
     this(int index, Type type_) { this.index = index; this.type_ = type_; }
 
-    int emit(Generator output)
+    override int emit(Generator output)
     {
         return output.fun.arg(this.index);
     }
 
-    Type type()
+    override Type type()
     {
         return this.type_;
     }
@@ -174,12 +174,12 @@ class FuncPtrCall : Expression
         this.loc = loc;
     }
 
-    Type type()
+    override Type type()
     {
         return this.funcPtr.type().instanceOf(FunctionPointer).ret;
     }
 
-    int emit(Generator output)
+    override int emit(Generator output)
     {
         FunctionPointer type = this.funcPtr.type().instanceOf(FunctionPointer);
 
@@ -246,7 +246,7 @@ class ASTCall : ASTSymbol
         this.loc = loc;
     }
 
-    Expression compile(Context context)
+    override Expression compile(Context context)
     {
         auto target = this.target.compile(context);
         auto args = new Expression[](this.args.length);
@@ -298,7 +298,7 @@ class ASTIndexAccess : ASTSymbol
         this.loc = loc;
     }
 
-    Expression compile(Context context)
+    override Expression compile(Context context)
     {
         Type wordType = nativeWordType(context.platform);
         Expression base = beExpression(this.base.compile(context));
@@ -349,7 +349,7 @@ class ASTArraySlice : ASTSymbol
         this.loc = loc;
     }
 
-    Symbol compile(Context context)
+    override Symbol compile(Context context)
     {
         Type wordType = nativeWordType(context.platform);
 
@@ -384,7 +384,7 @@ ASTIndexAccess parseIndex(Parser parser, ASTSymbol base)
     return new ASTIndexAccess(base, index, parser.loc());
 }
 
-Symbol accessMember(Symbol base, string member)
+Symbol accessMember(Symbol base, string member, Loc loc)
 {
     if (base.instanceOf(Expression))
     {
@@ -396,13 +396,13 @@ Symbol accessMember(Symbol base, string member)
         Struct structType = baseExpr.type().instanceOf(Struct);
         if (structType)
         {
-            assert2s(!!baseExpr.instanceOf(Reference), "TODO struct member of value");
+            loc.assert2s(!!baseExpr.instanceOf(Reference), "TODO struct member of value");
             int memberOffset = -1;
             for (int i = 0; i < structType.members.length; i = i + 1)
             {
                 if (structType.members[i].name == member) memberOffset = i;
             }
-            assert2s2(memberOffset != -1, "no such member ", member);
+            loc.assert2s2(memberOffset != -1, "no such member ", member);
             return new StructMember(baseExpr.instanceOf(Reference), memberOffset);
         }
         Class classType = baseExpr.type().instanceOf(Class);
@@ -411,8 +411,9 @@ Symbol accessMember(Symbol base, string member)
             assert(classType.resolved());
             ClassMethod[] vtable = classType.vtable();
             int methodOffset = -1;
-            for (int i = 0; i < vtable.length; i = i + 1)
+            for (int i = 0; i < vtable.length; i = i + 1) {
                 if (vtable[i].name == member) methodOffset = i;
+            }
             Expression asStructPtr = new PointerCast(new Pointer(classType.dataStruct()), baseExpr);
             if (methodOffset != -1)
             {
@@ -427,11 +428,11 @@ Symbol accessMember(Symbol base, string member)
             int memberOffset = -1;
             for (int i = 0; i < members.length; i = i + 1)
                 if (members[i].name == member) memberOffset = i;
-            assert2s4(memberOffset != -1, "no such member ", member, " in ", classType.name);
+            loc.assert2s4(memberOffset != -1, "no such member ", member, " in ", classType.name);
             return new StructMember(new Dereference(asStructPtr), memberOffset);
         }
 
-        assert(false); // , format!"expected struct/class type for member, not %s of %s"(baseExpr, baseExpr.type));
+        loc.assert2s2(false, "expected struct/class type for member, not ", baseExpr.type().repr());
     }
     assert(false); // , format!"expected expression for member access, not %s"(base));
 }
@@ -442,9 +443,15 @@ class ASTMember : ASTSymbol
 
     string member;
 
-    this(ASTSymbol base, string member) { this.base = base; this.member = member; }
+    Loc loc;
 
-    Symbol compile(Context context)
+    this(ASTSymbol base, string member, Loc loc) {
+        this.base = base;
+        this.member = member;
+        this.loc = loc;
+    }
+
+    override Symbol compile(Context context)
     {
         Symbol base = this.base.compile(context);
         Expression expr = base.instanceOf(Expression);
@@ -459,7 +466,7 @@ class ASTMember : ASTSymbol
             return new ArrayPointer(expr.type().instanceOf(Array).elementType, expr);
         }
 
-        return accessMember(base, this.member);
+        return accessMember(base, this.member, this.loc);
     }
 }
 
@@ -474,7 +481,7 @@ ASTMember parseMember(Parser parser, ASTSymbol base)
     string name = parseIdentifier(parser);
     parser.assert_(name.length > 0, "member expected");
     parser.commit();
-    return new ASTMember(base, name);
+    return new ASTMember(base, name, parser.loc());
 }
 
 class ASTInstanceOf : ASTSymbol
@@ -491,13 +498,13 @@ class ASTInstanceOf : ASTSymbol
         this.loc = loc;
     }
 
-    Symbol compile(Context context)
+    override Symbol compile(Context context)
     {
         Expression base = beExpression(this.base.compile(context));
         assert(!!base.type().instanceOf(Class));
         Class target = this.target.compile(context).instanceOf(Class);
         assert(!!target);
-        Symbol instanceOf = accessMember(base, "__instanceof");
+        Symbol instanceOf = accessMember(base, "__instanceof", this.loc);
         Expression name = new StringLiteral(target.name);
         return new PointerCast(target, call(instanceOf, new Expression[](0) ~ name, this.loc));
     }
@@ -565,7 +572,7 @@ class ASTDereference : ASTSymbol
 
     this(ASTSymbol base) { this.base = base; }
 
-    Symbol compile(Context context)
+    override Symbol compile(Context context)
     {
         return new Dereference(beExpression(this.base.compile(context)));
     }
@@ -577,7 +584,7 @@ class Dereference : Reference
 
     this(Expression base) { this.base = base; }
 
-    Type type()
+    override Type type()
     {
         Type superType = this.base.type();
         Pointer pointerType = superType.instanceOf(Pointer);
@@ -585,14 +592,14 @@ class Dereference : Reference
         return pointerType.target;
     }
 
-    int emit(Generator output)
+    override int emit(Generator output)
     {
         int reg = this.emitLocation(output);
 
         return output.fun.load(this.type().emit(output.platform), reg);
     }
 
-    int emitLocation(Generator output)
+    override int emitLocation(Generator output)
     {
         return this.base.emit(output);
     }
@@ -604,7 +611,7 @@ class FunctionReference : Expression
 
     this(Function fun) { this.fun = fun; }
 
-    Type type()
+    override Type type()
     {
         auto argTypes = new Type[](this.fun.args.length);
         for (int i = 0; i < this.fun.args.length; i = i + 1)
@@ -613,7 +620,7 @@ class FunctionReference : Expression
         return new FunctionPointer(this.fun.ret, argTypes);
     }
 
-    int emit(Generator output)
+    override int emit(Generator output)
     {
         return output.fun.getFuncPtr(this.fun.name);
     }
@@ -625,7 +632,7 @@ class ASTReference : ASTSymbol
 
     this(ASTSymbol base) { this.base = base; }
 
-    Expression compile(Context context)
+    override Expression compile(Context context)
     {
         // &function
         ASTVariable var = this.base.instanceOf(ASTVariable);
@@ -649,14 +656,14 @@ class ReferenceExpression : Expression
 
     this(Reference base) { this.base = base; }
 
-    Type type()
+    override Type type()
     {
         Type superType = this.base.type();
 
         return new Pointer(superType);
     }
 
-    int emit(Generator output)
+    override int emit(Generator output)
     {
         return this.base.emitLocation(output);
     }
@@ -668,9 +675,9 @@ class SizeOf : Expression
 
     this(Type type_) { this.type_ = type_; }
 
-    Type type() { return new Integer; }
+    override Type type() { return new Integer; }
 
-    int emit(Generator output)
+    override int emit(Generator output)
     {
         int size = output.platform.size(this.type_.emit(output.platform));
 
@@ -684,12 +691,12 @@ class NewClassExpression : Expression
 
     this(Class classType) { this.classType = classType; }
 
-    Type type()
+    override Type type()
     {
         return this.classType;
     }
 
-    int emit(Generator output)
+    override int emit(Generator output)
     {
         // oh boy.
         Struct classInfoStruct = this.classType.classInfoStruct();
@@ -731,17 +738,17 @@ class CallCtorExpression : Expression
         this.loc = loc;
     }
 
-    Type type()
+    override Type type()
     {
         return this.classptr.type();
     }
 
-    int emit(Generator output)
+    override int emit(Generator output)
     {
         int reg = this.classptr.emit(output);
         RegExpr expr = new RegExpr(this.classptr.type(), reg);
 
-        call(accessMember(expr, "this"), this.args, this.loc).emit(output);
+        call(accessMember(expr, "this", this.loc), this.args, this.loc).emit(output);
         return reg;
     }
 }
@@ -760,7 +767,7 @@ class ASTNewExpression : ASTSymbol
         this.loc = loc;
     }
 
-    Symbol compile(Context context)
+    override Symbol compile(Context context)
     {
         Type type = this.type.compile(context);
 
@@ -845,7 +852,7 @@ class ASTVariable : ASTSymbol
 
     this(string name) { this.name = name; }
 
-    Symbol compile(Context context)
+    override Symbol compile(Context context)
     {
         Symbol symbol = context.namespace.lookup(this.name);
         if (!symbol) {
@@ -862,7 +869,7 @@ class ASTLiteral : ASTSymbol
 
     this(int value) { this.value = value; }
 
-    Symbol compile(Context context)
+    override Symbol compile(Context context)
     {
         return new Literal(this.value);
     }
@@ -874,7 +881,7 @@ class ASTStringLiteral : ASTSymbol
 
     this(string text) { this.text = text; }
 
-    Symbol compile(Context context)
+    override Symbol compile(Context context)
     {
         return new StringLiteral(this.text);
     }
@@ -1042,7 +1049,7 @@ class ASTNegation : ASTSymbol
 
     this(ASTSymbol next, Loc loc) { this.next = next; this.loc = loc; }
 
-    Expression compile(Context context)
+    override Expression compile(Context context)
     {
         Expression isTrue = truthy(beExpression(this.next.compile(context)), this.loc);
 
@@ -1129,7 +1136,7 @@ class ASTReturnStatement : ASTStatement
 
     this(ASTSymbol value) { this.value = value; }
 
-    Statement compile(Context context)
+    override Statement compile(Context context)
     {
         Expression expr = beExpression(this.value.compile(context));
 
@@ -1140,14 +1147,14 @@ class ASTReturnStatement : ASTStatement
 class ASTVoidExpression : ASTSymbol
 {
     this() { }
-    Expression compile(Context context) { return new VoidExpression; }
+    override Expression compile(Context context) { return new VoidExpression; }
 }
 
 class VoidExpression : Expression
 {
     this() { }
-    Type type() { return new Void; }
-    int emit(Generator generator)
+    override Type type() { return new Void; }
+    override int emit(Generator generator)
     {
         return generator.fun.voidLiteral();
     }
@@ -1182,17 +1189,17 @@ class StackFrame : Reference
 
     this(Type targetType) { this.targetType = targetType; }
 
-    Type type()
+    override Type type()
     {
         return this.targetType;
     }
 
-    int emit(Generator generator)
+    override int emit(Generator generator)
     {
         assert(false);
     }
 
-    int emitLocation(Generator generator)
+    override int emitLocation(Generator generator)
     {
         return generator.frameReg;
     }
@@ -1226,7 +1233,7 @@ class FunctionScope : Namespace
         return new Struct("", members);
     }
 
-    Symbol lookup(string name)
+    override Symbol lookup(string name)
     {
         assert(!!this.parent);
         return this.parent.lookup(name);
@@ -1283,7 +1290,7 @@ class VarDeclScope : Namespace
         this.declarations = this.declarations ~ new DeclaredVariable(name, member);
     }
 
-    Symbol lookup(string name)
+    override Symbol lookup(string name)
     {
         for (int i = 0; i < this.declarations.length; i = i + 1)
         {
@@ -1324,7 +1331,7 @@ class ASTIfStatement : ASTStatement
         this.loc = loc;
     }
 
-    Statement compile(Context context)
+    override Statement compile(Context context)
     {
         auto ifscope = new VarDeclScope(context.namespace, false);
         Symbol test = this.test.compile(context.withNamespace(ifscope));
@@ -1367,7 +1374,7 @@ class ASTScopeStatement : ASTStatement
 
     this(ASTStatement[] statements) { this.statements = statements; }
 
-    Statement compile(Context context)
+    override Statement compile(Context context)
     {
         auto subscope = new VarDeclScope(context.namespace, false);
         auto statements = new Statement[](this.statements.length);
@@ -1444,7 +1451,7 @@ class ASTVarDeclStatement : ASTStatement
         this.loc = loc;
     }
 
-    Statement compile(Context context)
+    override Statement compile(Context context)
     {
         Type type;
         if (this.type) type = this.type.compile(context);
@@ -1517,7 +1524,7 @@ class ASTWhile : ASTStatement
         this.loc = loc;
     }
 
-    Statement compile(Context context)
+    override Statement compile(Context context)
     {
         auto subscope = new VarDeclScope(context.namespace, false);
         Expression condExpr = truthy(beExpression(this.cond.compile(context.withNamespace(subscope))), this.loc);
@@ -1573,7 +1580,7 @@ class ASTForLoop : ASTStatement
         this.body_ = body_;
     }
 
-    Statement compile(Context context)
+    override Statement compile(Context context)
     {
         /*
          * hack until break/continue:
@@ -1739,7 +1746,7 @@ class Module : Namespace
         return null;
     }
 
-    Symbol lookup(string name)
+    override Symbol lookup(string name)
     {
         Symbol public_ = this.lookupPublic(name);
         if (public_) return public_;
@@ -1760,12 +1767,12 @@ class NullExpr : Expression
 
     this(Type type_) { this.type_ = type_; }
 
-    Type type()
+    override Type type()
     {
         return this.type_;
     }
 
-    int emit(Generator generator)
+    override int emit(Generator generator)
     {
         // TODO allocaless
         // exploit that alloca are zero initialized
@@ -1874,6 +1881,8 @@ class ClassMethod : Symbol
 {
     Class classType;
 
+    bool override_;
+
     string name;
 
     Type ret;
@@ -1886,9 +1895,13 @@ class ClassMethod : Symbol
 
     bool emitted;
 
-    this(Class classType, string name, Type ret, Argument[] args, ASTStatement statement, Statement compiledStatement)
+    Loc loc;
+
+    this(Loc loc, Class classType, bool override_, string name, Type ret, Argument[] args, ASTStatement statement, Statement compiledStatement)
     {
+        this.loc = loc;
         this.classType = classType;
+        this.override_ = override_;
         this.name = name;
         this.ret = ret;
         this.args = args;
@@ -1977,6 +1990,10 @@ class Class : Type
 
     ClassMethod[] methods;
 
+    ClassMethod[] vtable_; // methods appearing in the classinfo struct
+
+    bool hasVtable;
+
     this(ASTClassDecl decl, Class superClass, Context context)
     {
         assert(!!decl);
@@ -1984,15 +2001,16 @@ class Class : Type
         this.superClass = superClass;
         this.decl = decl;
         this.context = context;
+        this.hasVtable = false;
     }
 
-    Expression truthy(Expression value, Loc loc)
+    override Expression truthy(Expression value, Loc loc)
     {
         Type voidp = new Pointer(new Void);
         return truthy(new PointerCast(voidp, value), loc);
     }
 
-    Expression implicitConvertFrom(Expression from)
+    override Expression implicitConvertFrom(Expression from)
     {
         // upcast
         if (from.type().instanceOf(Class))
@@ -2024,7 +2042,7 @@ class Class : Type
 
     bool resolved() { return !this.decl; }
 
-    void* emit(Platform platform)
+    override void* emit(Platform platform)
     {
         return platform.pointerType(platform.voidType());
     }
@@ -2069,8 +2087,26 @@ class Class : Type
 
     ClassMethod[] vtable()
     {
+        assert(this.resolved());
+        auto copy = new ClassMethod[](this.vtable_.length);
+        for (int i = 0; i < this.vtable_.length; i = i + 1)
+            copy[i] = this.vtable_[i];
+        return copy;
+    }
+
+    void genVtable()
+    {
+        if (this.hasVtable) return;
+
+        assert(this.vtable_.length == 0);
+
         ClassMethod[] combinedMethods;
-        if (this.superClass) combinedMethods = this.superClass.vtable();
+        if (this.superClass) {
+            this.superClass.genVtable();
+            combinedMethods = this.superClass.vtable();
+        }
+
+        this.genInstanceofMethod();
 
         for (int i = 0; i < this.methods.length; i = i + 1) {
             ClassMethod method = this.methods[i];
@@ -2081,14 +2117,25 @@ class Class : Type
             {
                 if (combinedMethods[i].name == method.name) index = i;
             }
+            bool isThis = method.name == "this"; // workaround: no final yet, no proper masking yet
             if (index != -1)
+            {
+                if (method.loc)
+                    method.loc.assert2s(method.override_ || isThis,
+                        "Expected 'override' attribute for overriding method.");
                 // override
                 combinedMethods[index] = method;
+            }
             else
+            {
+                if (method.loc)
+                    method.loc.assert2s(!method.override_,
+                        "'override specified but method does not override a parent method.");
                 combinedMethods = combinedMethods ~ method;
+            }
         }
-
-        return combinedMethods;
+        this.vtable_ = combinedMethods;
+        this.hasVtable = true;
     }
 
     void genInstanceofMethod()
@@ -2114,17 +2161,21 @@ class Class : Type
 
         auto stmt = new SequenceStatement(castStmts);
 
+        bool override_ = false;
+        if (this.superClass) override_ = true;
+
         this.methods = this.methods ~ new ClassMethod(
-            this, "__instanceof", voidp, new Argument[](0) ~ new Argument("target", stringType), null, stmt);
+            null, this, override_, "__instanceof",
+            voidp, new Argument[](0) ~ new Argument("target", stringType), null, stmt);
     }
 
-    bool same(Type other) {
+    override bool same(Type other) {
         Class otherClass = other.instanceOf(Class);
 
         return otherClass && otherClass.name == this.name; // TODO module
     }
 
-    string repr() { return this.name; }
+    override string repr() { return this.name; }
 }
 
 class ClassScope : Namespace
@@ -2137,7 +2188,7 @@ class ClassScope : Namespace
         this.class_ = class_;
     }
 
-    Symbol lookup(string name)
+    override Symbol lookup(string name)
     {
         if (name == this.class_.name)
         {
@@ -2158,6 +2209,10 @@ class ASTClassDeclMember
 
 class ASTClassDeclMethod
 {
+    Loc loc;
+
+    bool override_;
+
     string name;
 
     ASTType ret;
@@ -2166,7 +2221,9 @@ class ASTClassDeclMethod
 
     ASTStatement body_;
 
-    this(string name, ASTType ret, ASTArgument[] args, ASTStatement body_) {
+    this(Loc loc, bool override_, string name, ASTType ret, ASTArgument[] args, ASTStatement body_) {
+        this.loc = loc;
+        this.override_ = override_;
         this.name = name;
         this.ret = ret;
         this.args = args;
@@ -2192,7 +2249,7 @@ class ASTClassDecl : ASTType
         this.methods = methods;
     }
 
-    Class compile(Context context)
+    override Class compile(Context context)
     {
         Class superClass = null;
         if (this.superClass.length)
@@ -2224,13 +2281,15 @@ class ASTClassDecl : ASTType
                 methodArgs[k] = new Argument(method.args[k].name, method.args[k].type.compile(classContext));
 
             target.methods[i] = new ClassMethod(
+                method.loc,
                 target,
+                method.override_,
                 method.name,
                 method.ret.compile(classContext),
                 methodArgs,
                 method.body_, null);
         }
-        target.genInstanceofMethod();
+        target.genVtable();
     }
 }
 
@@ -2272,10 +2331,17 @@ ASTClassDecl parseClassDecl(Parser parser)
     parser.expect("{");
     while (!parser.accept("}"))
     {
+        parser.strip();
+
+        Loc methodLoc = parser.loc();
+
         ASTType retType;
         string memberName;
+        bool override_ = acceptIdentifier(parser, "override");
+
         if (parser.accept("this"))
         {
+            parser.assert_(!override_, "cannot override constructor");
             retType = new ASTVoid;
             memberName = "this";
         }
@@ -2290,10 +2356,12 @@ ASTClassDecl parseClassDecl(Parser parser)
         {
             ASTArgument[] args = parseArglist(parser);
             ASTStatement stmt = parseStatement(parser);
-            methods = methods ~ new ASTClassDeclMethod(memberName, retType, args, stmt);
+            methods = methods ~ new ASTClassDeclMethod(
+                parser.loc(), override_, memberName, retType, args, stmt);
         }
         else
         {
+            parser.assert_(!override_, "cannot override class member");
             parser.expect(";");
             members = members ~ new ASTClassDeclMember(memberName, retType);
         }

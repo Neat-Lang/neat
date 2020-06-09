@@ -439,24 +439,34 @@ class ASTVarDeclStatement : ASTStatement
 {
     string name;
 
+    bool infer;
+
     ASTType type;
 
     ASTSymbol initial;
+
+    invariant(infer == !type);
+    invariant(!infer || !!initial);
 
     Loc loc;
 
     override Statement compile(Context context)
     {
+        Type type;
+        if (this.type) type = this.type.compile(context);
         if (this.initial)
         {
-            auto initial = this.initial.compile(context);
+            auto initial = this.initial.compile(context).beExpression;
+            if (infer) {
+                assert(!type);
+                type = initial.type();
+            }
 
-            return context.namespace.find!VarDeclScope.declare(
-                this.name, this.type.compile(context), initial.beExpression, loc);
+            return context.namespace.find!VarDeclScope.declare(this.name, type, initial, loc);
         }
         else
         {
-            return context.namespace.find!VarDeclScope.declare(this.name, this.type.compile(context));
+            return context.namespace.find!VarDeclScope.declare(this.name, type);
         }
     }
 
@@ -468,11 +478,17 @@ ASTVarDeclStatement parseVarDecl(ref Parser parser)
     with (parser)
     {
         begin;
-        auto type = parser.parseType;
-        if (!type)
-        {
-            revert;
-            return null;
+        bool infer = false;
+        ASTType type;
+        if (parser.acceptIdentifier("auto")) {
+            infer = true;
+        } else {
+            type = parser.parseType;
+            if (!type)
+            {
+                revert;
+                return null;
+            }
         }
         auto name = parser.parseIdentifier;
         if (!name)
@@ -481,14 +497,19 @@ ASTVarDeclStatement parseVarDecl(ref Parser parser)
             return null;
         }
         ASTSymbol initial = null;
-        if (accept("="))
+        if (infer) {
+            expect("=");
+            initial = parser.parseExpression;
+            assert(initial);
+        }
+        else if (accept("="))
         {
             initial = parser.parseExpression;
             assert(initial);
         }
         expect(";");
         commit;
-        return new ASTVarDeclStatement(name, type, initial, loc);
+        return new ASTVarDeclStatement(name, infer, type, initial, loc);
     }
 }
 

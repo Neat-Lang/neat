@@ -3,20 +3,15 @@ module main;
 import array;
 import backend.proxy;
 import base;
+import expr;
 import format;
 import parser;
+import statements;
+import struct_;
 import types;
 
 extern(C) bool cxruntime_file_exists(string file);
 extern(C) string cxruntime_file_read(string file);
-
-void assert2s(int test, string msg) { if (!test) { print(msg); assert(false); } }
-void assert2s2(int test, string a, string b) { if (!test) { print(s2join(a, b)); assert(false); } }
-void assert2s3(int test, string a, string b, string c) { if (!test) { print(s3join(a, b, c)); assert(false); } }
-void assert2s4(int test, string a, string b, string c, string d) {
-    if (!test) { print(s4join(a, b, c, d)); assert(false); } }
-void assert2s5(int test, string a, string b, string c, string d, string e) {
-    if (!test) { print(s5join(a, b, c, d, e)); assert(false); } }
 
 class ASTArgument
 {
@@ -31,47 +26,15 @@ class ASTArgument
     }
 }
 
-class Statement
+class Function : FunctionDeclaration
 {
-    void emit(Generator output) { assert(false); }
-}
-
-class ASTStatement
-{
-    Statement compile(Context context) { assert(false); }
-}
-
-class Argument
-{
-    string name;
-
-    Type type;
-
-    this(string name, Type type)
-    {
-        this.name = name;
-        this.type = type;
-    }
-}
-
-class Function : Symbol
-{
-    string name;
-
-    Type ret;
-
-    Argument[] args;
-
-    bool declaration;
-
     ASTStatement statement;
 
-    this(string name, Type ret, Argument[] args, bool declaration, ASTStatement statement)
+    this(string name, Type ret, Argument[] args, ASTStatement statement)
     {
         this.name = name;
         this.ret = ret;
         this.args = args;
-        this.declaration = declaration;
         this.statement = statement;
     }
 
@@ -135,7 +98,7 @@ class ASTFunction
         this.statement = statement;
     }
 
-    Function compile(Context context)
+    FunctionDeclaration compile(Context context)
     {
         Argument[] arguments = new Argument[](this.args.length);
         for (int i = 0; i < this.args.length; i = i + 1)
@@ -146,11 +109,16 @@ class ASTFunction
             arguments[i] = new Argument(arg.name, type);
         }
 
+        if (this.isDeclaration)
+        {
+            return new FunctionDeclaration(
+                this.name, this.ret.compile(context), arguments);
+        }
+
         return new Function(
             this.name,
             this.ret.compile(context),
             arguments,
-            this.isDeclaration,
             this.statement);
     }
 }
@@ -174,112 +142,6 @@ ASTArgument[] parseIdentifierList(Parser parser)
     return args;
 }
 
-class Reference : Expression
-{
-    int emitLocation(Generator output) { assert(false); }
-}
-
-class ArrayEqual : Expression
-{
-    Expression left;
-
-    Expression right;
-
-    this(Expression left, Expression right)
-    {
-        this.left = left;
-        this.right = right;
-    }
-
-    Type type() { return new Integer; }
-
-    int emit(Generator output)
-    {
-        Array leftArray = this.left.type().instanceOf(Array);
-        Array rightArray = this.right.type().instanceOf(Array);
-        assert(leftArray && rightArray);
-        // TODO temp expr once array properties work on nonreferences
-        assert(leftArray.same(rightArray));
-        int left = this.left.emit(output);
-        int right = this.right.emit(output);
-        int leftLen = getArrayLen(output, leftArray, left);
-        int rightLen = getArrayLen(output, rightArray, right);
-        int leftPtr = getArrayPtr(output, leftArray, left);
-        int rightPtr = getArrayPtr(output, rightArray, right);
-        int leftSize = output.fun.wordLiteral(
-            output.platform,
-            output.platform.size(leftArray.elementType.emit(output.platform)));
-        return output.fun.call(output.platform.intType(), "_arraycmp", new int[](0)
-            ~ leftPtr ~ rightPtr ~ leftLen ~ rightLen ~ leftSize);
-    }
-}
-
-class IntToLong : Expression
-{
-    Expression intValue;
-
-    this(Expression intValue) { this.intValue = intValue; }
-
-    Type type() { return new Long; }
-
-    int emit(Generator output) {
-        assert(!!this.intValue.type().instanceOf(Integer));
-
-        int intValue = this.intValue.emit(output);
-        return output.fun.zeroExtend(intValue, 4, 8);
-    }
-}
-
-class BinaryOp : Expression
-{
-    string op;
-
-    Expression left;
-
-    Expression right;
-
-    this(string op, Expression left, Expression right)
-    {
-        this.op = op;
-        this.left = left;
-        this.right = right;
-    }
-
-    Type type()
-    {
-        string op = this.op;
-        if (op == "+" || op == "-" || op == "*") {
-            Type rightType = this.right.type();
-            if (rightType.instanceOf(Long)) return rightType;
-            return this.left.type();
-        }
-        if (op == "==" || op == ">=" || op == "<=" || op == ">" || op == "<")
-            return new Integer;
-        assert(false);
-    }
-
-    int emit(Generator output)
-    {
-        Expression left = this.left;
-        Expression right = this.right;
-        if (left.type().instanceOf(Integer) && right.type().instanceOf(Long)) {
-            left = new IntToLong(left);
-        }
-        if (left.type().instanceOf(Long) && right.type().instanceOf(Integer)) {
-            right = new IntToLong(right);
-        }
-        assert2s3(left.type().instanceOf(Integer) || left.type().instanceOf(Long),
-            this.op, " (l) expected int, not ", left.type().repr());
-        assert2s5(!!left.type().same(right.type()),
-            this.op, ": types don't match, ", left.type().repr(), ", ", right.type().repr());
-        int size = 4;
-        if (left.type().instanceOf(Long)) size = 8;
-        int leftreg = left.emit(output);
-        int rightreg = right.emit(output);
-        return output.fun.binop(this.op, size, leftreg, rightreg);
-    }
-}
-
 class ArgExpr : Expression
 {
     int index;
@@ -296,103 +158,6 @@ class ArgExpr : Expression
     Type type()
     {
         return this.type_;
-    }
-}
-
-class PointerCast : Expression
-{
-    Type target;
-
-    Expression value;
-
-    this(Type target, Expression value) {
-        this.target = target;
-        this.value = value;
-    }
-
-    Type type()
-    {
-        return this.target;
-    }
-
-    int emit(Generator output)
-    {
-        return this.value.emit(output); // pointer's a pointer
-    }
-}
-
-Expression implicitConvertTo(Expression from, Type to, Loc loc)
-{
-    if (from.type().same(to)) return from;
-    // void* casts to any pointer
-    if (to.instanceOf(Pointer) && from.type().same(new Pointer(new Void)))
-    {
-        return new PointerCast(to, from);
-    }
-    if (from.type().instanceOf(Integer) && to.instanceOf(Long))
-    {
-        return new IntToLong(from);
-    }
-    // any pointer casts to void*
-    if (from.type().instanceOf(Pointer) && to.same(new Pointer(new Void)))
-    {
-        return new PointerCast(to, from);
-    }
-    if (to.instanceOf(Class) && from.type().instanceOf(Class))
-    {
-        Class currentClass = from.type().instanceOf(Class);
-
-        while (currentClass)
-        {
-            if (currentClass.same(to))
-            {
-                return new PointerCast(to, from);
-            }
-            currentClass = currentClass.superClass;
-        }
-    }
-    if (to.instanceOf(Class) && from.instanceOf(NullExpr))
-    {
-        return new PointerCast(to, from);
-    }
-    loc.assert2s4(false, "todo: cast(", to.repr(), ") ", from.type().repr());
-}
-
-class Call : Expression
-{
-    Function function_;
-
-    Expression[] args;
-
-    Loc loc;
-
-    this(Function function_, Expression[] args, Loc loc)
-    {
-        loc.assert2s5(
-            function_.args.length == args.length,
-            function_.name, " expected ", ltoa(function_.args.length), " args, not ", ltoa(args.length));
-
-        for (int i = 0; i < args.length; i = i + 1)
-        {
-            args[i] = implicitConvertTo(args[i], function_.args[i].type, loc);
-        }
-        this.function_ = function_;
-        this.args = args;
-        this.loc = loc;
-    }
-
-    Type type()
-    {
-        return this.function_.ret;
-    }
-
-    int emit(Generator output)
-    {
-        int[] regs = new int[](this.args.length);
-        for (int i = 0; i < this.args.length; i = i + 1) {
-            regs[i] = this.args[i].emit(output);
-        }
-        return output.fun.call(this.type().emit(output.platform), this.function_.name, regs);
     }
 }
 
@@ -447,9 +212,9 @@ class ClassMethodPtr : Symbol
 
 Expression call(Symbol target, Expression[] args, Loc loc)
 {
-    if (target.instanceOf(Function))
+    if (target.instanceOf(FunctionDeclaration))
     {
-        return new Call(target.instanceOf(Function), args, loc);
+        return new Call(target.instanceOf(FunctionDeclaration), args, loc);
     }
     ClassMethodPtr method = target.instanceOf(ClassMethodPtr);
     if (method)
@@ -555,7 +320,7 @@ class ASTIndexAccess : ASTSymbol
         Argument[] ptrOffsetArgs = new Argument[](2);
         ptrOffsetArgs[0] = new Argument("", new Pointer(new Void));
         ptrOffsetArgs[1] = new Argument("", wordType);
-        Function ptr_offset = new Function("ptr_offset", new Pointer(new Void), ptrOffsetArgs, true, null);
+        FunctionDeclaration ptr_offset = new FunctionDeclaration("ptr_offset", new Pointer(new Void), ptrOffsetArgs);
         int size = context.platform.size(basePtr.target.emit(context.platform));
         BinaryOp offset = new BinaryOp("*", index, new Literal(size));
         assert(offset.type().same(wordType));
@@ -864,7 +629,7 @@ class ASTReference : ASTSymbol
     Expression compile(Context context)
     {
         // &function
-        Variable var = this.base.instanceOf(Variable);
+        ASTVariable var = this.base.instanceOf(ASTVariable);
         if (var) {
             Symbol target = context.namespace.lookup(var.name);
             Function fun = target.instanceOf(Function);
@@ -1022,7 +787,7 @@ class ASTNewExpression : ASTSymbol
 
             Argument[] mallocArgs = new Argument[](1);
             mallocArgs[0] = new Argument("", wordType);
-            Function malloc = new Function("malloc", new Pointer(new Void), mallocArgs, true, null);
+            FunctionDeclaration malloc = new FunctionDeclaration("malloc", new Pointer(new Void), mallocArgs);
 
             Expression[] mallocParams = new Expression[](1);
             mallocParams[0] = byteLength;
@@ -1075,7 +840,7 @@ ASTSymbol parseExpressionLeaf(Parser parser)
     return parseProperties(parser, currentExpr);
 }
 
-class Variable : ASTSymbol
+class ASTVariable : ASTSymbol
 {
     string name;
 
@@ -1104,23 +869,6 @@ class ASTLiteral : ASTSymbol
     }
 }
 
-class Literal : Expression
-{
-    int value;
-
-    this(int value) { this.value = value; }
-
-    Type type()
-    {
-        return new Integer;
-    }
-
-    int emit(Generator output)
-    {
-        return output.fun.intLiteral(this.value);
-    }
-}
-
 class ASTStringLiteral : ASTSymbol
 {
     string text;
@@ -1130,26 +878,6 @@ class ASTStringLiteral : ASTSymbol
     Symbol compile(Context context)
     {
         return new StringLiteral(this.text);
-    }
-}
-
-class StringLiteral : Expression
-{
-    string text;
-
-    this(string text) { this.text = text; }
-
-    Type type()
-    {
-        return new Array(new Character);
-    }
-
-    int emit(Generator output)
-    {
-        int len = output.fun.wordLiteral(output.platform, this.text.length);
-        int ptr = output.fun.stringLiteral(this.text);
-
-        return makeArray(output, new Character, len, ptr);
     }
 }
 
@@ -1219,7 +947,7 @@ ASTSymbol parseExpressionBase(Parser parser)
     string name = parseIdentifier(parser);
     if (name.length)
     {
-        return new Variable(name);
+        return new ASTVariable(name);
     }
     int i;
     if (parseNumber(parser, &i))
@@ -1239,172 +967,6 @@ ASTSymbol parseExpressionBase(Parser parser)
     }
     parser.fail("Base expression expected.");
     assert(false);
-}
-
-class BoolOr : Expression
-{
-    Expression left;
-
-    Expression right;
-
-    this(Expression left, Expression right)
-    {
-        this.left = left;
-        this.right = right;
-    }
-
-    Type type() { return new Integer; }
-
-    int emit(Generator output)
-    {
-        /**
-         * result = left;
-         * if (left) goto past;
-         * result = right;
-         * past:
-         */
-        void* intType = output.platform.intType();
-        int result = output.fun.alloca(intType);
-
-        int leftValue = this.left.emit(output);
-        output.fun.store(intType, result, leftValue);
-
-        TestBranchRecord condBranch = output.fun.testBranch(leftValue); // if (left)
-        condBranch.resolveElse(output.fun.blockIndex());
-
-        int rightValue = this.right.emit(output);
-        output.fun.store(intType, result, rightValue);
-
-        BranchRecord exitBranch = output.fun.branch();
-        condBranch.resolveThen(output.fun.blockIndex());
-        exitBranch.resolve(output.fun.blockIndex());
-
-        return output.fun.load(intType, result);
-    }
-}
-
-class BoolAnd : Expression
-{
-    Expression left;
-
-    Expression right;
-
-    this(Expression left, Expression right)
-    {
-        this.left = left;
-        this.right = right;
-    }
-
-    Type type() { return new Integer; }
-
-    int emit(Generator output)
-    {
-        /**
-         * result = left;
-         * if (left) result = right;
-         */
-        void* intType = output.platform.intType();
-        int result = output.fun.alloca(intType);
-
-        int leftValue = this.left.emit(output);
-        output.fun.store(intType, result, leftValue);
-
-        TestBranchRecord condBranch = output.fun.testBranch(leftValue); // if (left)
-        condBranch.resolveThen(output.fun.blockIndex());
-
-        int rightValue = this.right.emit(output);
-        output.fun.store(intType, result, rightValue);
-
-        BranchRecord exitBranch = output.fun.branch();
-        condBranch.resolveElse(output.fun.blockIndex());
-        exitBranch.resolve(output.fun.blockIndex());
-
-        return output.fun.load(intType, result);
-    }
-}
-
-class ArrayCat : Expression
-{
-    Expression left;
-
-    Expression right;
-
-    this(Expression left, Expression right) { this.left = left; this.right = right; }
-
-    Type type() {
-        Array leftArray = this.left.type().instanceOf(Array);
-        assert(!!leftArray);
-        assert(this.right.type().same(leftArray.elementType));
-
-        return leftArray;
-    }
-
-    int emit(Generator output)
-    {
-        // TODO simplify this?
-        int leftReg = this.left.emit(output);
-        Array leftType = this.left.type().instanceOf(Array);
-        assert(!!leftType);
-        int leftLen = getArrayLen(output, leftType, leftReg);
-        int leftPtr = getArrayPtr(output, leftType, leftReg);
-        int elementSize = output.fun.wordLiteral(
-            output.platform,
-            output.platform.size(leftType.elementType.emit(output.platform)));
-        // size = sizeof(T) * (array.length + 1)
-        int oldSize = output.fun.binop(
-            "*", output.platform.nativeWordSize(),
-            leftLen, elementSize);
-        int newSize = output.fun.binop(
-            "+", output.platform.nativeWordSize(),
-            oldSize, elementSize);
-        void* voidp = (new Pointer(new Void)).emit(output.platform);
-
-        int newArrayPtr = output.fun.call(voidp, "malloc", new int[](0) ~ newSize);
-        output.fun.call((new Void).emit(output.platform), "memcpy", new int[](0) ~ newArrayPtr ~ leftPtr ~ oldSize);
-        // *(ptr + prevLength) = right;
-        int newElement = output.fun.call(voidp, "ptr_offset", new int[](0) ~ newArrayPtr ~ oldSize);
-        output.fun.store(this.right.type().emit(output.platform), newElement, this.right.emit(output));
-
-        // return ptr[0 .. prevLength + 1];
-        int newArrayLen = output.fun.binop(
-            "+", output.platform.nativeWordSize(),
-            leftLen, output.fun.wordLiteral(output.platform, 1));
-        return makeArray(output, leftType.elementType, newArrayLen, newArrayPtr);
-    }
-}
-
-class ASTBinaryOp : ASTSymbol
-{
-    string op;
-
-    ASTSymbol left;
-
-    ASTSymbol right;
-
-    Loc loc;
-
-    this(string op, ASTSymbol left, ASTSymbol right, Loc loc) {
-        this.op = op;
-        this.left = left;
-        this.right = right;
-        this.loc = loc;
-    }
-
-    Expression compile(Context context)
-    {
-        Expression left = beExpression(this.left.compile(context));
-        Expression right = beExpression(this.right.compile(context));
-        if (this.op == "~")
-            return new ArrayCat(left, right);
-        if (this.op == "&&")
-            return new BoolAnd(truthy(left, this.loc), truthy(right, this.loc));
-        if (this.op == "||")
-            return new BoolOr(truthy(left, this.loc), truthy(right, this.loc));
-        if (this.op == "==" && left.type().instanceOf(Array) && right.type().instanceOf(Array))
-            return new ArrayEqual(left, right);
-
-        return new BinaryOp(this.op, left, right);
-    }
 }
 
 ASTSymbol parseAddSubCat(Parser parser, ASTSymbol left, int myLevel)
@@ -1473,26 +1035,6 @@ ASTSymbol parseBoolOr(Parser parser, ASTSymbol left, int myLevel)
     }
 }
 
-Expression truthy(Expression ex, Loc loc) {
-    Type exType = ex.type();
-    if (exType.instanceOf(Pointer) || exType.instanceOf(Class))
-    {
-        Type voidp = new Pointer(new Void);
-        Function rt_ptr_test = new Function("cxruntime_ptr_test",
-            new Integer,
-            new Argument[](0) ~ new Argument("", voidp),
-            true, null);
-        Expression ptrCast = new PointerCast(voidp, ex);
-        return new Call(rt_ptr_test, new Expression[](0) ~ ptrCast, loc);
-    }
-    loc.assert2s(ex.type().instanceOf(Integer) || ex.type().instanceOf(Long), "integer expected");
-    // (a == 0) == 0
-    return new BinaryOp(
-        "==",
-        new BinaryOp("==", ex, new Literal(0)),
-        new Literal(0));
-}
-
 class ASTNegation : ASTSymbol
 {
     ASTSymbol next;
@@ -1529,19 +1071,19 @@ ASTSymbol parseComparison(Parser parser, ASTSymbol left, int myLevel)
 
         return new ASTBinaryOp(">=", left, right, parser.loc());
     }
-    if (parser.accept(">")) // same as !(a == b)
+    if (parser.accept(">"))
     {
         ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
         return new ASTBinaryOp(">", left, right, parser.loc());
     }
-    if (parser.accept("<=")) // same as !(a == b)
+    if (parser.accept("<="))
     {
         ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
         return new ASTBinaryOp("<=", left, right, parser.loc());
     }
-    if (parser.accept("<")) // same as !(a == b)
+    if (parser.accept("<"))
     {
         ASTSymbol right = parseArithmetic(parser, myLevel + 1);
 
@@ -1580,20 +1122,6 @@ ASTSymbol parseArithmetic(Parser parser, int level)
 ASTSymbol parseExpression(Parser parser)
 {
     return parseArithmetic(parser, 0);
-}
-
-class ReturnStatement : Statement
-{
-    Expression value;
-
-    this(Expression value) { this.value = value; }
-
-    void emit(Generator output)
-    {
-        int reg = this.value.emit(output);
-
-        output.fun.ret(reg);
-    }
 }
 
 class ASTReturnStatement : ASTStatement
@@ -1647,89 +1175,6 @@ ASTReturnStatement parseReturn(Parser parser)
     }
     parser.commit();
     return new ASTReturnStatement(expr);
-}
-
-class StructMemberDeclaration
-{
-    string name;
-
-    Type type;
-
-    this(string name, Type type)
-    {
-        this.name = name;
-        this.type = type;
-    }
-}
-
-class Struct : Type
-{
-    string name;
-
-    StructMemberDeclaration[] members;
-
-    this(string name, StructMemberDeclaration[] members)
-    {
-        this.name = name;
-        this.members = members;
-    }
-
-    bool same(Type other) {
-        Struct otherStruct = other.instanceOf(Struct);
-        if (!otherStruct || otherStruct.members.length != this.members.length) return false;
-        for (int i = 0; i < this.members.length; i = i + 1)
-        {
-            if (!this.members[i].type.same(otherStruct.members[i].type)) return false;
-        }
-        return true;
-    }
-
-    void* emit(Platform platform)
-    {
-        void*[] memberTypes = new void*[](this.members.length);
-        for (int i = 0; i < this.members.length; i = i + 1)
-        {
-            memberTypes[i] = this.members[i].type.emit(platform);
-        }
-        return platform.structType(memberTypes);
-    }
-
-    string repr() { return this.name; }
-}
-
-class StructMember : Reference
-{
-    Reference base;
-
-    int index;
-
-    this(Reference base, int index)
-    {
-        this.base = base;
-        this.index = index;
-    }
-
-    Type type()
-    {
-        Type type = this.base.type();
-        Struct structType = type.instanceOf(Struct);
-        assert(!!structType);
-        return structType.members[this.index].type;
-    }
-
-    int emit(Generator output)
-    {
-        int locationReg = this.emitLocation(output);
-
-        return output.fun.load(this.type().emit(output.platform), locationReg);
-    }
-
-    int emitLocation(Generator output)
-    {
-        int reg = this.base.emitLocation(output);
-
-        return output.fun.fieldOffset(this.base.type().emit(output.platform), reg, this.index);
-    }
 }
 
 class StackFrame : Reference
@@ -1795,36 +1240,6 @@ FunctionScope findFunctionScope(Namespace namespace)
     if (functionScope) return functionScope;
     assert(!!namespace.parent);
     return findFunctionScope(namespace.parent);
-}
-
-class AssignStatement : Statement
-{
-    Reference target;
-
-    Expression value;
-
-    this(Reference target, Expression value) { this.target = target; this.value = value; }
-
-    void emit(Generator output)
-    {
-        Type targetType = this.target.type();
-        Type valueType = this.value.type();
-        assert(targetType.same(valueType)); // format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
-
-        int target_reg = this.target.emitLocation(output);
-        int value_reg = this.value.emit(output);
-
-        output.fun.store(valueType.emit(output.platform), target_reg, value_reg);
-    }
-}
-
-class NoopStatement : Statement
-{
-    this() { }
-
-    void emit(Generator generator)
-    {
-    }
 }
 
 class DeclaredVariable
@@ -1922,43 +1337,6 @@ class ASTIfStatement : ASTStatement
     }
 }
 
-class IfStatement : Statement
-{
-    Expression test;
-
-    Statement then;
-
-    Statement else_;
-
-    this(Expression test, Statement then, Statement else_)
-    {
-        this.test = test;
-        this.then = then;
-        this.else_ = else_;
-    }
-
-    void emit(Generator output)
-    {
-        int reg = this.test.emit(output);
-
-        TestBranchRecord tbrRecord = output.fun.testBranch(reg);
-
-        tbrRecord.resolveThen(output.fun.blockIndex());
-        this.then.emit(output);
-        BranchRecord brRecord = output.fun.branch();
-        tbrRecord.resolveElse(output.fun.blockIndex());
-
-        if (this.else_)
-        {
-            this.else_.emit(output);
-            BranchRecord elseBrRecord = output.fun.branch();
-
-            elseBrRecord.resolve(output.fun.blockIndex());
-        }
-        brRecord.resolve(output.fun.blockIndex());
-    }
-}
-
 ASTIfStatement parseIf(Parser parser)
 {
     parser.begin();
@@ -2000,21 +1378,6 @@ class ASTScopeStatement : ASTStatement
     }
 }
 
-class SequenceStatement : Statement
-{
-    Statement[] statements;
-
-    this(Statement[] statements) { this.statements = statements; }
-
-    void emit(Generator output)
-    {
-        for (int i = 0; i < this.statements.length; i = i + 1)
-        {
-            this.statements[i].emit(output);
-        }
-    }
-}
-
 ASTScopeStatement parseScope(Parser parser)
 {
     if (!parser.accept("{"))
@@ -2029,57 +1392,6 @@ ASTScopeStatement parseScope(Parser parser)
         statements = statements ~ stmt;
     }
     return new ASTScopeStatement(statements);
-}
-
-class ASTAssignStatement : ASTStatement
-{
-    ASTSymbol target;
-
-    ASTSymbol value;
-
-    Loc loc;
-
-    this(ASTSymbol target, ASTSymbol value, Loc loc)
-    {
-        this.target = target;
-        this.value = value;
-        this.loc = loc;
-    }
-
-    Statement compile(Context context)
-    {
-        Symbol target = this.target.compile(context);
-        Expression value = beExpression(this.value.compile(context));
-        Reference targetref = target.instanceOf(Reference);
-        value = implicitConvertTo(value, targetref.type(), this.loc);
-        if (!targetref) {
-            print("target of assignment must be a reference");
-            assert(false);
-        }
-        return new AssignStatement(targetref, value);
-    }
-}
-
-class AssignStatement : Statement
-{
-    Reference target;
-
-    Expression value;
-
-    this(Reference target, Expression value) { this.target = target; this.value = value; }
-
-    void emit(Generator output)
-    {
-        Type targetType = this.target.type();
-        Type valueType = this.value.type();
-
-        assert(targetType.same(valueType)); // format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
-
-        int target_reg = this.target.emitLocation(output);
-        int value_reg = this.value.emit(output);
-
-        output.fun.store(valueType.emit(output.platform), target_reg, value_reg);
-    }
 }
 
 ASTAssignStatement parseAssignment(Parser parser)
@@ -2186,38 +1498,6 @@ class ASTWhile : ASTStatement
     }
 }
 
-class WhileLoop : Statement
-{
-    Expression cond;
-
-    Statement body_;
-
-    this(Expression cond, Statement body_) { this.cond = cond; this.body_ = body_; }
-
-    void emit(Generator output)
-    {
-        /**
-         * start:
-         * if (cond) goto body; else goto end;
-         * body:
-         * goto start
-         * end:
-         */
-        BranchRecord start = output.fun.branch(); // start:
-        int startIndex = output.fun.blockIndex();
-
-        start.resolve(startIndex);
-
-        int condReg = this.cond.emit(output);
-        TestBranchRecord condBranch = output.fun.testBranch(condReg); // if (cond)
-
-        condBranch.resolveThen(output.fun.blockIndex()); // goto body
-        this.body_.emit(output);
-        output.fun.branch().resolve(startIndex); // goto start
-        condBranch.resolveElse(output.fun.blockIndex()); // else goto end
-    }
-}
-
 ASTWhile parseWhile(Parser parser)
 {
     if (!acceptIdentifier(parser, "while"))
@@ -2230,30 +1510,6 @@ ASTWhile parseWhile(Parser parser)
     ASTStatement body_ = parseStatement(parser);
 
     return new ASTWhile(cond, body_);
-}
-
-class ASTExprStatement : ASTStatement
-{
-    ASTSymbol value;
-
-    this(ASTSymbol value) { this.value = value; }
-
-    Statement compile(Context context)
-    {
-        return new ExprStatement(beExpression(this.value.compile(context)));
-    }
-}
-
-class ExprStatement : Statement
-{
-    Expression value;
-
-    this(Expression value) { this.value = value; }
-
-    void emit(Generator output)
-    {
-        this.value.emit(output); // discard reg
-    }
 }
 
 ASTExprStatement parseExprStatement(Parser parser)
@@ -2433,10 +1689,8 @@ class Module : Namespace
         for (int i = 0; i < this.entries.length; i = i + 1) {
             ModuleEntry entry = this.entries[i];
             Function fun = entry.value.instanceOf(Function);
-            if (fun && !fun.declaration)
-            {
+            if (fun)
                 fun.emit(generator, new Context(generator.platform, this));
-            }
             Class class_ = entry.value.instanceOf(Class);
             if (class_) {
                 for (int i = 0; i < class_.methods.length; i = i + 1)
@@ -2508,13 +1762,13 @@ class ASTExtern
         this.args = args;
     }
 
-    Function compile(Context context)
+    FunctionDeclaration compile(Context context)
     {
         Argument[] args = new Argument[](this.args.length);
         for (int i = 0; i < this.args.length; i = i + 1)
             args[i] = new Argument(this.args[i].name, this.args[i].type.compile(context));
 
-        return new Function(this.name, this.ret.compile(context), args, true, null);
+        return new FunctionDeclaration(this.name, this.ret.compile(context), args);
     }
 }
 
@@ -2701,6 +1955,36 @@ class Class : Type
         this.superClass = superClass;
         this.decl = decl;
         this.context = context;
+    }
+
+    Expression truthy(Expression value, Loc loc)
+    {
+        Type voidp = new Pointer(new Void);
+        return truthy(new PointerCast(voidp, value), loc);
+    }
+
+    Expression implicitConvertFrom(Expression from)
+    {
+        // upcast
+        if (from.type().instanceOf(Class))
+        {
+            Class currentClass = from.type().instanceOf(Class);
+
+            while (currentClass)
+            {
+                if (currentClass.same(this))
+                {
+                    return new PointerCast(this, from);
+                }
+                currentClass = currentClass.superClass;
+            }
+        }
+        // = null
+        if (from.instanceOf(NullExpr))
+        {
+            return new PointerCast(this, from);
+        }
+        return null;
     }
 
     void resolve()

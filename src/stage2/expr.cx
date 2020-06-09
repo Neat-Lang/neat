@@ -1,0 +1,358 @@
+module expr;
+
+import array;
+import backend.proxy;
+import base;
+import parser;
+import types;
+
+Expression implicitConvertTo(Expression from, Type to, Loc loc)
+{
+    if (from.type().same(to)) return from;
+    // void* casts to any pointer
+    if (to.instanceOf(Pointer) && from.type().same(new Pointer(new Void)))
+    {
+        return new PointerCast(to, from);
+    }
+    if (from.type().instanceOf(Integer) && to.instanceOf(Long))
+    {
+        return new IntToLong(from);
+    }
+    // any pointer casts to void*
+    if (from.type().instanceOf(Pointer) && to.same(new Pointer(new Void)))
+    {
+        return new PointerCast(to, from);
+    }
+    Expression typeImplicit = to.implicitConvertFrom(from);
+    if (typeImplicit) return typeImplicit;
+    loc.assert2s4(false, "todo: cast(", to.repr(), ") ", from.type().repr());
+}
+
+class BinaryOp : Expression
+{
+    string op;
+
+    Expression left;
+
+    Expression right;
+
+    this(string op, Expression left, Expression right)
+    {
+        this.op = op;
+        this.left = left;
+        this.right = right;
+    }
+
+    Type type()
+    {
+        string op = this.op;
+        if (op == "+" || op == "-" || op == "*") {
+            Type rightType = this.right.type();
+            if (rightType.instanceOf(Long)) return rightType;
+            return this.left.type();
+        }
+        if (op == "==" || op == ">=" || op == "<=" || op == ">" || op == "<")
+            return new Integer;
+        assert(false);
+    }
+
+    int emit(Generator output)
+    {
+        Expression left = this.left;
+        Expression right = this.right;
+        if (left.type().instanceOf(Integer) && right.type().instanceOf(Long)) {
+            left = new IntToLong(left);
+        }
+        if (left.type().instanceOf(Long) && right.type().instanceOf(Integer)) {
+            right = new IntToLong(right);
+        }
+        assert2s3(left.type().instanceOf(Integer) || left.type().instanceOf(Long),
+            this.op, " (l) expected int, not ", left.type().repr());
+        assert2s5(!!left.type().same(right.type()),
+            this.op, ": types don't match, ", left.type().repr(), ", ", right.type().repr());
+        int size = 4;
+        if (left.type().instanceOf(Long)) size = 8;
+        int leftreg = left.emit(output);
+        int rightreg = right.emit(output);
+        return output.fun.binop(this.op, size, leftreg, rightreg);
+    }
+}
+
+class IntToLong : Expression
+{
+    Expression intValue;
+
+    this(Expression intValue) { this.intValue = intValue; }
+
+    Type type() { return new Long; }
+
+    int emit(Generator output) {
+        assert(!!this.intValue.type().instanceOf(Integer));
+
+        int intValue = this.intValue.emit(output);
+        return output.fun.zeroExtend(intValue, 4, 8);
+    }
+}
+
+class ArrayCat : Expression
+{
+    Expression left;
+
+    Expression right;
+
+    this(Expression left, Expression right) { this.left = left; this.right = right; }
+
+    Type type() {
+        Array leftArray = this.left.type().instanceOf(Array);
+        assert(!!leftArray);
+        assert(this.right.type().same(leftArray.elementType));
+
+        return leftArray;
+    }
+
+    int emit(Generator output)
+    {
+        // TODO simplify this?
+        int leftReg = this.left.emit(output);
+        Array leftType = this.left.type().instanceOf(Array);
+        assert(!!leftType);
+        int leftLen = getArrayLen(output, leftType, leftReg);
+        int leftPtr = getArrayPtr(output, leftType, leftReg);
+        int elementSize = output.fun.wordLiteral(
+            output.platform,
+            output.platform.size(leftType.elementType.emit(output.platform)));
+        // size = sizeof(T) * (array.length + 1)
+        int oldSize = output.fun.binop(
+            "*", output.platform.nativeWordSize(),
+            leftLen, elementSize);
+        int newSize = output.fun.binop(
+            "+", output.platform.nativeWordSize(),
+            oldSize, elementSize);
+        void* voidp = (new Pointer(new Void)).emit(output.platform);
+
+        int newArrayPtr = output.fun.call(voidp, "malloc", new int[](0) ~ newSize);
+        output.fun.call((new Void).emit(output.platform), "memcpy", new int[](0) ~ newArrayPtr ~ leftPtr ~ oldSize);
+        // *(ptr + prevLength) = right;
+        int newElement = output.fun.call(voidp, "ptr_offset", new int[](0) ~ newArrayPtr ~ oldSize);
+        output.fun.store(this.right.type().emit(output.platform), newElement, this.right.emit(output));
+
+        // return ptr[0 .. prevLength + 1];
+        int newArrayLen = output.fun.binop(
+            "+", output.platform.nativeWordSize(),
+            leftLen, output.fun.wordLiteral(output.platform, 1));
+        return makeArray(output, leftType.elementType, newArrayLen, newArrayPtr);
+    }
+}
+
+class BoolOr : Expression
+{
+    Expression left;
+
+    Expression right;
+
+    this(Expression left, Expression right)
+    {
+        this.left = left;
+        this.right = right;
+    }
+
+    Type type() { return new Integer; }
+
+    int emit(Generator output)
+    {
+        /**
+         * result = left;
+         * if (left) goto past;
+         * result = right;
+         * past:
+         */
+        void* intType = output.platform.intType();
+        int result = output.fun.alloca(intType);
+
+        int leftValue = this.left.emit(output);
+        output.fun.store(intType, result, leftValue);
+
+        TestBranchRecord condBranch = output.fun.testBranch(leftValue); // if (left)
+        condBranch.resolveElse(output.fun.blockIndex());
+
+        int rightValue = this.right.emit(output);
+        output.fun.store(intType, result, rightValue);
+
+        BranchRecord exitBranch = output.fun.branch();
+        condBranch.resolveThen(output.fun.blockIndex());
+        exitBranch.resolve(output.fun.blockIndex());
+
+        return output.fun.load(intType, result);
+    }
+}
+
+class BoolAnd : Expression
+{
+    Expression left;
+
+    Expression right;
+
+    this(Expression left, Expression right)
+    {
+        this.left = left;
+        this.right = right;
+    }
+
+    Type type() { return new Integer; }
+
+    int emit(Generator output)
+    {
+        /**
+         * result = left;
+         * if (left) result = right;
+         */
+        void* intType = output.platform.intType();
+        int result = output.fun.alloca(intType);
+
+        int leftValue = this.left.emit(output);
+        output.fun.store(intType, result, leftValue);
+
+        TestBranchRecord condBranch = output.fun.testBranch(leftValue); // if (left)
+        condBranch.resolveThen(output.fun.blockIndex());
+
+        int rightValue = this.right.emit(output);
+        output.fun.store(intType, result, rightValue);
+
+        BranchRecord exitBranch = output.fun.branch();
+        condBranch.resolveElse(output.fun.blockIndex());
+        exitBranch.resolve(output.fun.blockIndex());
+
+        return output.fun.load(intType, result);
+    }
+}
+
+class Literal : Expression
+{
+    int value;
+
+    this(int value) { this.value = value; }
+
+    Type type()
+    {
+        return new Integer;
+    }
+
+    int emit(Generator output)
+    {
+        return output.fun.intLiteral(this.value);
+    }
+}
+
+class StringLiteral : Expression
+{
+    string text;
+
+    this(string text) { this.text = text; }
+
+    Type type()
+    {
+        return new Array(new Character);
+    }
+
+    int emit(Generator output)
+    {
+        int len = output.fun.wordLiteral(output.platform, this.text.length);
+        int ptr = output.fun.stringLiteral(this.text);
+
+        return makeArray(output, new Character, len, ptr);
+    }
+}
+
+class Call : Expression
+{
+    FunctionDeclaration fun;
+
+    Expression[] args;
+
+    Loc loc;
+
+    this(FunctionDeclaration fun, Expression[] args, Loc loc)
+    {
+        loc.assert2s5(
+            fun.args.length == args.length,
+            fun.name, " expected ", ltoa(fun.args.length), " args, not ", ltoa(args.length));
+
+        for (int i = 0; i < args.length; i = i + 1)
+        {
+            args[i] = implicitConvertTo(args[i], fun.args[i].type, loc);
+        }
+        this.fun = fun;
+        this.args = args;
+        this.loc = loc;
+    }
+
+    Type type()
+    {
+        return this.fun.ret;
+    }
+
+    int emit(Generator output)
+    {
+        int[] regs = new int[](this.args.length);
+        for (int i = 0; i < this.args.length; i = i + 1) {
+            regs[i] = this.args[i].emit(output);
+        }
+        return output.fun.call(this.type().emit(output.platform), this.fun.name, regs);
+    }
+}
+
+Expression truthy(Expression value, Loc loc) {
+    Type type = value.type();
+    Expression truthyExpr = type.truthy(value, loc);
+    if (truthyExpr) return truthyExpr;
+
+    if (type.instanceOf(Pointer))
+    {
+        Type voidp = new Pointer(new Void);
+        FunctionDeclaration rt_ptr_test = new FunctionDeclaration("cxruntime_ptr_test",
+            new Integer,
+            new Argument[](0) ~ new Argument("", voidp));
+        Expression ptrCast = new PointerCast(voidp, value);
+        return new Call(rt_ptr_test, new Expression[](0) ~ ptrCast, loc);
+    }
+    loc.assert2s(type.instanceOf(Integer) || type.instanceOf(Long), "integer expected");
+    // (a == 0) == 0
+    return new BinaryOp(
+        "==",
+        new BinaryOp("==", value, new Literal(0)),
+        new Literal(0));
+}
+
+class ASTBinaryOp : ASTSymbol
+{
+    string op;
+
+    ASTSymbol left;
+
+    ASTSymbol right;
+
+    Loc loc;
+
+    this(string op, ASTSymbol left, ASTSymbol right, Loc loc) {
+        this.op = op;
+        this.left = left;
+        this.right = right;
+        this.loc = loc;
+    }
+
+    Expression compile(Context context)
+    {
+        Expression left = beExpression(this.left.compile(context));
+        Expression right = beExpression(this.right.compile(context));
+        if (this.op == "~")
+            return new ArrayCat(left, right);
+        if (this.op == "&&")
+            return new BoolAnd(truthy(left, this.loc), truthy(right, this.loc));
+        if (this.op == "||")
+            return new BoolOr(truthy(left, this.loc), truthy(right, this.loc));
+        if (this.op == "==" && left.type().instanceOf(Array) && right.type().instanceOf(Array))
+            return new ArrayEqual(left, right);
+
+        return new BinaryOp(this.op, left, right);
+    }
+}

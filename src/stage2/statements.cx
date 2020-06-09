@@ -1,0 +1,219 @@
+module statements;
+
+import backend.proxy;
+import base;
+import expr;
+import parser;
+
+class ASTStatement
+{
+    Statement compile(Context context) { assert(false); }
+}
+
+class Statement
+{
+    void emit(Generator output) { assert(false); }
+}
+
+class ASTAssignStatement : ASTStatement
+{
+    ASTSymbol target;
+
+    ASTSymbol value;
+
+    Loc loc;
+
+    this(ASTSymbol target, ASTSymbol value, Loc loc)
+    {
+        this.target = target;
+        this.value = value;
+        this.loc = loc;
+    }
+
+    Statement compile(Context context)
+    {
+        Symbol target = this.target.compile(context);
+        Expression value = beExpression(this.value.compile(context));
+        Reference targetref = target.instanceOf(Reference);
+        value = implicitConvertTo(value, targetref.type(), this.loc);
+        if (!targetref) {
+            print("target of assignment must be a reference");
+            assert(false);
+        }
+        return new AssignStatement(targetref, value);
+    }
+}
+
+class AssignStatement : Statement
+{
+    Reference target;
+
+    Expression value;
+
+    this(Reference target, Expression value) { this.target = target; this.value = value; }
+
+    void emit(Generator output)
+    {
+        Type targetType = this.target.type();
+        Type valueType = this.value.type();
+        assert(targetType.same(valueType)); // format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
+
+        int target_reg = this.target.emitLocation(output);
+        int value_reg = this.value.emit(output);
+
+        output.fun.store(valueType.emit(output.platform), target_reg, value_reg);
+    }
+}
+
+class NoopStatement : Statement
+{
+    this() { }
+
+    void emit(Generator generator)
+    {
+    }
+}
+
+class ReturnStatement : Statement
+{
+    Expression value;
+
+    this(Expression value) { this.value = value; }
+
+    void emit(Generator output)
+    {
+        int reg = this.value.emit(output);
+
+        output.fun.ret(reg);
+    }
+}
+
+class IfStatement : Statement
+{
+    Expression test;
+
+    Statement then;
+
+    Statement else_;
+
+    this(Expression test, Statement then, Statement else_)
+    {
+        this.test = test;
+        this.then = then;
+        this.else_ = else_;
+    }
+
+    void emit(Generator output)
+    {
+        int reg = this.test.emit(output);
+
+        TestBranchRecord tbrRecord = output.fun.testBranch(reg);
+
+        tbrRecord.resolveThen(output.fun.blockIndex());
+        this.then.emit(output);
+        BranchRecord brRecord = output.fun.branch();
+        tbrRecord.resolveElse(output.fun.blockIndex());
+
+        if (this.else_)
+        {
+            this.else_.emit(output);
+            BranchRecord elseBrRecord = output.fun.branch();
+
+            elseBrRecord.resolve(output.fun.blockIndex());
+        }
+        brRecord.resolve(output.fun.blockIndex());
+    }
+}
+
+class AssignStatement : Statement
+{
+    Reference target;
+
+    Expression value;
+
+    this(Reference target, Expression value) { this.target = target; this.value = value; }
+
+    void emit(Generator output)
+    {
+        Type targetType = this.target.type();
+        Type valueType = this.value.type();
+
+        assert(targetType.same(valueType)); // format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
+
+        int target_reg = this.target.emitLocation(output);
+        int value_reg = this.value.emit(output);
+
+        output.fun.store(valueType.emit(output.platform), target_reg, value_reg);
+    }
+}
+
+class ASTExprStatement : ASTStatement
+{
+    ASTSymbol value;
+
+    this(ASTSymbol value) { this.value = value; }
+
+    Statement compile(Context context)
+    {
+        return new ExprStatement(beExpression(this.value.compile(context)));
+    }
+}
+
+class ExprStatement : Statement
+{
+    Expression value;
+
+    this(Expression value) { this.value = value; }
+
+    void emit(Generator output)
+    {
+        this.value.emit(output); // discard reg
+    }
+}
+
+class WhileLoop : Statement
+{
+    Expression cond;
+
+    Statement body_;
+
+    this(Expression cond, Statement body_) { this.cond = cond; this.body_ = body_; }
+
+    void emit(Generator output)
+    {
+        /**
+         * start:
+         * if (cond) goto body; else goto end;
+         * body:
+         * goto start
+         * end:
+         */
+        BranchRecord start = output.fun.branch(); // start:
+        int startIndex = output.fun.blockIndex();
+
+        start.resolve(startIndex);
+
+        int condReg = this.cond.emit(output);
+        TestBranchRecord condBranch = output.fun.testBranch(condReg); // if (cond)
+
+        condBranch.resolveThen(output.fun.blockIndex()); // goto body
+        this.body_.emit(output);
+        output.fun.branch().resolve(startIndex); // goto start
+        condBranch.resolveElse(output.fun.blockIndex()); // else goto end
+    }
+}
+
+class SequenceStatement : Statement
+{
+    Statement[] statements;
+
+    this(Statement[] statements) { this.statements = statements; }
+
+    void emit(Generator output)
+    {
+        for (int i = 0; i < this.statements.length; i = i + 1)
+        {
+            this.statements[i].emit(output);
+        }
+    }
+}

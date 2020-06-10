@@ -638,7 +638,10 @@ class ArrayCat : Expression
     override Type type() {
         auto leftArray = cast(Array) left.type;
         loc.assert_(leftArray, "array expected");
-        loc.assert_(right.type == leftArray.elementType, "type mismatch");
+        auto rightArray = cast(Array) right.type;
+        loc.assert_(
+            right.type == leftArray.elementType || rightArray && rightArray == leftArray,
+            "type mismatch");
 
         return left.type;
     }
@@ -648,28 +651,51 @@ class ArrayCat : Expression
         // TODO simplify this?
         auto leftReg = this.left.emit(output);
         auto leftType = cast(Array) this.left.type;
+        auto rightType = this.right.type;
         auto leftLen = getArrayLen(output, leftType, leftReg);
         auto leftPtr = getArrayPtr(output, leftType, leftReg);
         auto elementSize = output.fun.wordLiteral(output.platform,
             leftType.elementType.emit(output.platform).size(output.platform));
-        // size = sizeof(T) * (array.length + 1)
-        auto oldSize = output.fun.binop("*", output.platform.nativeWordSize, leftLen, elementSize);
-        auto newSize = output.fun.binop("+", output.platform.nativeWordSize, oldSize, elementSize);
-        auto voidp = (new Pointer(new Void)).emit(output.platform);
-        auto newArrayPtr = output.fun.call(voidp, "malloc", [newSize]);
-        output.fun.call((new Void).emit(output.platform), "memcpy", [newArrayPtr, leftPtr, oldSize]);
-        // *(ptr + prevLength) = right;
-        auto newElement = output.fun.call(voidp, "ptr_offset", [newArrayPtr, oldSize]);
-        output.fun.store(this.right.type.emit(output.platform), newElement, this.right.emit(output));
+        if (leftType.elementType == rightType)
+        {
+            // size = sizeof(T) * (array.length + 1)
+            auto oldSize = output.fun.binop("*", output.platform.nativeWordSize, leftLen, elementSize);
+            auto newSize = output.fun.binop("+", output.platform.nativeWordSize, oldSize, elementSize);
+            auto voidp = (new Pointer(new Void)).emit(output.platform);
+            auto newArrayPtr = output.fun.call(voidp, "malloc", [newSize]);
+            output.fun.call((new Void).emit(output.platform), "memcpy", [newArrayPtr, leftPtr, oldSize]);
+            // *(ptr + prevLength) = right;
+            auto newElement = output.fun.call(voidp, "ptr_offset", [newArrayPtr, oldSize]);
+            output.fun.store(this.right.type.emit(output.platform), newElement, this.right.emit(output));
 
-        // return ptr[0 .. prevLength + 1];
-        auto newLen = output.fun.binop(
-            "+", output.platform.nativeWordSize,
-            leftLen, output.fun.wordLiteral(output.platform, 1));
-        return (new ArrayExpression(
-            new RegExpr(new Pointer(leftType.elementType), newArrayPtr),
-            new RegExpr(new Integer, newLen))
-        ).emit(output);
+            // return ptr[0 .. prevLength + 1];
+            auto newArrayLen = output.fun.binop(
+                "+", output.platform.nativeWordSize,
+                leftLen, output.fun.wordLiteral(output.platform, 1));
+            return makeArray(output, leftType, newArrayLen, newArrayPtr);
+        }
+        if (leftType == rightType)
+        {
+            auto rightReg = this.right.emit(output);
+            auto rightLen = getArrayLen(output, rightType, rightReg);
+            auto rightPtr = getArrayPtr(output, rightType, rightReg);
+            auto newArrayLen = output.fun.binop("+", output.platform.nativeWordSize, leftLen, rightLen);
+            auto leftBytes = output.fun.binop("*", output.platform.nativeWordSize, leftLen, elementSize);
+            auto rightBytes = output.fun.binop("*", output.platform.nativeWordSize, rightLen, elementSize);
+            // size = sizeof(T) * (left.length + right.length)
+            auto newBytes = output.fun.binop("*", output.platform.nativeWordSize, newArrayLen, elementSize);
+
+            auto voidp = (new Pointer(new Void)).emit(output.platform);
+            auto newArrayPtr = output.fun.call(voidp, "malloc", [newBytes]);
+            // write left at 0
+            output.fun.call((new Void).emit(output.platform), "memcpy", [newArrayPtr, leftPtr, leftBytes]);
+            // write right at ptr + leftLen
+            auto startRightPtr = output.fun.call(voidp, "ptr_offset", [newArrayPtr, leftBytes]);
+            output.fun.call((new Void).emit(output.platform), "memcpy", [startRightPtr, rightPtr, rightBytes]);
+
+            return makeArray(output, leftType, newArrayLen, newArrayPtr);
+        }
+        assert(false);
     }
 
     mixin(GenerateThis);

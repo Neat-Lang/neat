@@ -698,22 +698,10 @@ class NewClassExpression : Expression
 
     override int emit(Generator output)
     {
-        // oh boy.
-        Struct classInfoStruct = this.classType.classInfoStruct();
+        // oh boy!
         Struct classDataStruct = this.classType.dataStruct();
         void* voidp = (new Pointer(new Void)).emit(output.platform);
-        int classInfoSize = output.platform.size(classInfoStruct.emit(output.platform));
-        int classInfoPtr = output.fun.call(
-            voidp, "malloc", new int[](0) ~ output.fun.wordLiteral(output.platform, classInfoSize));
-        void* backendStructType = classInfoStruct.emit(output.platform);
-        ClassMethod[] vtable = this.classType.vtable();
-        for (int i = 0; i < vtable.length; i = i + 1) {
-            ClassMethod method = vtable[i];
-            Type funcPtr = method.funcPtrType();
-            int target = output.fun.fieldOffset(backendStructType, classInfoPtr, i);
-            int src = output.fun.getFuncPtr(method.mangle());
-            output.fun.store(funcPtr.emit(output.platform), target, src);
-        }
+        int classInfoPtr = output.fun.symbolList(this.classType.vtableSymbol);
         int classDataSize = output.platform.size(classDataStruct.emit(output.platform));
         int classPtr = output.fun.call(
             voidp, "malloc", new int[](0) ~ output.fun.wordLiteral(output.platform, classDataSize));
@@ -1719,7 +1707,14 @@ class Module : Namespace
             ModuleEntry entry = this.entries[i];
             Class class_ = entry.value.instanceOf(Class);
             if (class_)
+            {
                 class_.resolve();
+                auto methods = new string[](class_.vtable_.length);
+                for (int i = 0; i < class_.vtable_.length; i = i + 1)
+                    methods[i] = class_.vtable_[i].mangle();
+                generator.mod.defineSymbolList(
+                    class_.vtableSymbol, methods);
+            }
         }
 
         for (int i = 0; i < this.entries.length; i = i + 1) {
@@ -1992,7 +1987,7 @@ class Class : Type
 
     ClassMethod[] vtable_; // methods appearing in the classinfo struct
 
-    bool hasVtable;
+    string vtableSymbol;
 
     this(ASTClassDecl decl, Class superClass, Context context)
     {
@@ -2001,7 +1996,6 @@ class Class : Type
         this.superClass = superClass;
         this.decl = decl;
         this.context = context;
-        this.hasVtable = false;
     }
 
     override Expression truthy(Expression value, Loc loc)
@@ -2096,7 +2090,7 @@ class Class : Type
 
     void genVtable()
     {
-        if (this.hasVtable) return;
+        if (this.vtableSymbol.length > 0) return;
 
         assert(this.vtable_.length == 0);
 
@@ -2135,7 +2129,7 @@ class Class : Type
             }
         }
         this.vtable_ = combinedMethods;
-        this.hasVtable = true;
+        this.vtableSymbol = s2join(this.name, "_vtable");
     }
 
     void genInstanceofMethod()

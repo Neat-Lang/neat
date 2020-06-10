@@ -381,6 +381,16 @@ class IpBackendFunction : BackendFunction
         return block.append(instr);
     }
 
+    override Reg symbolList(string name)
+    {
+        auto instr = Instr(Instr.Kind.Literal);
+
+        instr.literal.type = new BackendPointerType(new BackendVoidType);
+        instr.literal.value = cast(void[]) [module_.symbolLists[name].ptr];
+
+        return block.append(instr);
+    }
+
     override int call(BackendType type, string name, Reg[] args)
     {
         auto instr = Instr(Instr.Kind.Call);
@@ -692,9 +702,14 @@ private void defineIntrinsics(IpBackendModule mod)
     defineCallback(
         "_backendModule_define",
         delegate BackendFunction(
-            BackendModule mod, char[] name, BackendType ret, BackendType[] args)
+            BackendModule mod, string name, BackendType ret, BackendType[] args)
         {
-            return mod.define(name.dup, ret, args);
+            return mod.define(name, ret, args);
+        }
+    );
+    defineCallback("_backendModule_defineSymbolList",
+        (BackendModule mod, string name, string[] symbols) {
+            mod.defineSymbolList(name, symbols);
         }
     );
     defineCallback("_backendModule_backend",
@@ -741,6 +756,9 @@ private void defineIntrinsics(IpBackendModule mod)
     defineCallback(
         "_backendFunction_voidLiteral",
         delegate int(BackendFunction fun) => fun.voidLiteral);
+    defineCallback(
+        "_backendFunction_symbolList",
+        delegate int(BackendFunction fun, string name) => fun.symbolList(name));
     defineCallback(
         "_backendFunction_call",
         delegate int(BackendFunction fun, BackendType ret, char[] name, int[] args)
@@ -849,6 +867,8 @@ class IpBackendModule : BackendModule
 
     IpBackendFunction[string] functions;
 
+    void[][string] symbolLists;
+
     StackAllocator allocator;
 
     this(IpBackend backend, Platform platform)
@@ -866,6 +886,21 @@ class IpBackendModule : BackendModule
     in (name !in callbacks && name !in functions)
     {
         callbacks[name] = call;
+    }
+
+    public override void defineSymbolList(string name, string[] symbols)
+    {
+        void*[] pointers;
+        foreach (symbol; symbols)
+        {
+            if (auto value = symbol in symbolLists) pointers ~= value.ptr;
+            else
+            {
+                // assert(symbol in functions); // TODO predeclare? does llvm need this?
+                pointers ~= cast(void*) new IpFuncPtr(symbol);
+            }
+        }
+        symbolLists[name] = cast(void[]) pointers;
     }
 
     Tuple!(

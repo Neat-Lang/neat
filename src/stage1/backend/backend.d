@@ -13,6 +13,11 @@ interface Backend
 interface BackendModule
 {
     BackendFunction define(string name, BackendType ret, BackendType[] args);
+    // Symbols can be functions, globals, or other symbols. Symbol list contains a pointer to the symbol.
+    // Defining the same symbol list twice is a no-op. Defining two symbol lists with the same name but
+    // different values is undefined.
+    // This is intended for global vtables.
+    void defineSymbolList(string name, string[] symbols);
     Backend backend();
     Platform platform();
 }
@@ -26,6 +31,8 @@ interface BackendFunction
     Reg longLiteral(long value);
     Reg stringLiteral(string text);
     Reg voidLiteral();
+    // Reg contains pointer to symbol list
+    Reg symbolList(string name);
     Reg alloca(BackendType type);
     /// ops: + - * / % & | ^ < > <= >= ==
     Reg binop(string op, int size, Reg left, Reg right);

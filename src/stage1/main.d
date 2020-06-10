@@ -1765,20 +1765,10 @@ class NewClassExpression : Expression
 
     override Reg emit(Generator output)
     {
-        // oh boy.
-        auto classInfoStruct = this.classType.classInfoStruct;
+        // oh boy!
         auto classDataStruct = this.classType.dataStruct;
         auto voidp = (new Pointer(new Void)).emit(output.platform);
-        int classInfoSize = classInfoStruct.emit(output.platform).size(output.platform);
-        auto classInfoPtr = output.fun.call(voidp, "malloc", [output.fun.wordLiteral(output.platform, classInfoSize)]);
-        auto backendStructType = classInfoStruct.emit(output.platform);
-        foreach (i, method; classType.vtable)
-        {
-            auto funcPtr = method.funcPtrType;
-            auto target = output.fun.fieldOffset(backendStructType, classInfoPtr, cast(int) i);
-            auto src = output.fun.getFuncPtr(method.mangle);
-            output.fun.store(funcPtr.emit(output.platform), target, src);
-        }
+        auto classInfoPtr = output.fun.symbolList(classType.vtableSymbol);
         int classDataSize = classDataStruct.emit(output.platform).size(output.platform);
         auto classPtr = output.fun.call(voidp, "malloc", [output.fun.wordLiteral(output.platform, classDataSize)]);
         auto classInfoTarget = output.fun.fieldOffset(classDataStruct.emit(output.platform), classPtr, 0);
@@ -2300,7 +2290,7 @@ class Class : Type
 
     Method[] vtable_; // methods appearing in the classinfo
 
-    bool hasVtable;
+    string vtableSymbol;
 
     this(ASTClassDecl decl, Class superClass, Context context)
     in (decl)
@@ -2311,7 +2301,6 @@ class Class : Type
         this.context = context;
         this.members = null;
         this.methods = null;
-        this.hasVtable = false;
     }
 
     void resolve()
@@ -2377,7 +2366,7 @@ class Class : Type
 
     void genVtable()
     {
-        if (hasVtable) return;
+        if (vtableSymbol) return;
 
         assert(!vtable_);
 
@@ -2410,7 +2399,7 @@ class Class : Type
             }
         }
         vtable_ = combinedMethods;
-        hasVtable = true;
+        vtableSymbol = this.name ~ "_vtable";
     }
 
     void genInstanceofMethod()
@@ -2709,7 +2698,11 @@ class Module : Namespace
         foreach (entry; entries)
         {
             if (auto class_ = cast(Class) entry.value)
+            {
                 class_.resolve;
+                generator.mod.defineSymbolList(
+                    class_.vtableSymbol, class_.vtable.map!(method => method.mangle).array);
+            }
         }
         foreach (entry; entries)
         {

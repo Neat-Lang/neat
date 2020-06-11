@@ -41,7 +41,7 @@ class Function : FunctionDeclaration
     void emit(Generator generator, Context module_)
     {
         assert(!generator.fun);
-        void*[] argTypes = new void*[](this.args.length);
+        auto argTypes = new BackendType[](this.args.length);
         for (int i = 0; i < this.args.length; i = i + 1)
             argTypes[i] = this.args[i].type.emit(module_.platform);
         assert(!!module_);
@@ -320,7 +320,7 @@ class ASTIndexAccess : ASTSymbol
         ptrOffsetArgs[0] = new Argument("", new Pointer(new Void));
         ptrOffsetArgs[1] = new Argument("", wordType);
         auto ptr_offset = new FunctionDeclaration("ptr_offset", new Pointer(new Void), ptrOffsetArgs);
-        int size = context.platform.size(basePtr.target.emit(context.platform));
+        int size = basePtr.target.emit(context.platform).size(context.platform);
         BinaryOp offset = new BinaryOp("*", index, new Literal(size));
         assert(offset.type().same(wordType));
 
@@ -679,7 +679,7 @@ class SizeOf : Expression
 
     override int emit(Generator output)
     {
-        int size = output.platform.size(this.type_.emit(output.platform));
+        int size = this.type_.emit(output.platform).size(output.platform);
 
         return output.fun.intLiteral(size);
     }
@@ -700,9 +700,9 @@ class NewClassExpression : Expression
     {
         // oh boy!
         Struct classDataStruct = this.classType.dataStruct();
-        void* voidp = (new Pointer(new Void)).emit(output.platform);
+        BackendType voidp = (new Pointer(new Void)).emit(output.platform);
         int classInfoPtr = output.fun.symbolList(this.classType.vtableSymbol);
-        int classDataSize = output.platform.size(classDataStruct.emit(output.platform));
+        int classDataSize = classDataStruct.emit(output.platform).size(output.platform);
         int classPtr = output.fun.call(
             voidp, "malloc", new int[](0) ~ output.fun.wordLiteral(output.platform, classDataSize));
         int classInfoTarget = output.fun.fieldOffset(classDataStruct.emit(output.platform), classPtr, 0);
@@ -963,6 +963,26 @@ ASTSymbol parseExpressionBase(Parser parser)
     assert(false);
 }
 
+ASTSymbol parseBitAnd(Parser parser, ASTSymbol left, int myLevel)
+{
+    while (true)
+    {
+        parser.begin();
+        if (parser.accept("&") && !parser.accept("&"))
+        {
+            parser.commit();
+            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+
+            left = new ASTBinaryOp("&", left, right, parser.loc());
+        }
+        else
+        {
+            parser.revert();
+            return left;
+        }
+    }
+}
+
 ASTSymbol parseAddSubCat(Parser parser, ASTSymbol left, int myLevel)
 {
     while (true)
@@ -1090,26 +1110,12 @@ ASTSymbol parseArithmetic(Parser parser, int level)
 {
     ASTSymbol left = parseExpressionLeaf(parser);
 
-    if (level <= 4)
-    {
-        left = parseMul(parser, left, 4);
-    }
-    if (level <= 3)
-    {
-        left = parseAddSubCat(parser, left, 3);
-    }
-    if (level <= 2)
-    {
-        left = parseComparison(parser, left, 2);
-    }
-    if (level <= 1)
-    {
-        left = parseBoolAnd(parser, left, 1);
-    }
-    if (level <= 0)
-    {
-        left = parseBoolOr(parser, left, 0);
-    }
+    if (level <= 5) left = parseBitAnd(parser, left, 5);
+    if (level <= 4) left = parseMul(parser, left, 4);
+    if (level <= 3) left = parseAddSubCat(parser, left, 3);
+    if (level <= 2) left = parseComparison(parser, left, 2);
+    if (level <= 1) left = parseBoolAnd(parser, left, 1);
+    if (level <= 0) left = parseBoolOr(parser, left, 0);
     return left;
 }
 
@@ -1771,7 +1777,7 @@ class NullExpr : Expression
     {
         // TODO allocaless
         // exploit that alloca are zero initialized
-        void* type = this.type_.emit(generator.platform);
+        BackendType type = this.type_.emit(generator.platform);
         int reg = generator.fun.alloca(type);
 
         return generator.fun.load(type, reg);
@@ -1918,7 +1924,7 @@ class ClassMethod : Symbol
         assert(!generator.fun);
         Type voidp = new Pointer(new Void);
 
-        void*[] argTypes = new void*[](this.args.length + 1);
+        BackendType[] argTypes = new BackendType[](this.args.length + 1);
         argTypes[0] = voidp.emit(generator.platform);
         for (int i = 0; i < this.args.length; i = i + 1)
             argTypes[i + 1] = this.args[i].type.emit(generator.platform);
@@ -2036,9 +2042,9 @@ class Class : Type
 
     bool resolved() { return !this.decl; }
 
-    override void* emit(Platform platform)
+    override BackendType emit(Platform platform)
     {
-        return platform.pointerType(platform.voidType());
+        return new BackendPointerType(new BackendVoidType);
     }
 
     ClassMember[] allMembers()

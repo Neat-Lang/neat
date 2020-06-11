@@ -79,29 +79,29 @@ class ProxyBackendFunction : BackendFunction {
     override int zeroExtend(int value, int from, int to) {
         return _backendFunction_zeroExtend(this.ptr, value, from, to);
     }
-    override int call(void* ret, string name, int[] args) {
-        return _backendFunction_call(this.ptr, ret, name, args);
+    override int call(BackendType ret, string name, int[] args) {
+        return _backendFunction_call(this.ptr, proxyEncode(ret), name, args);
     }
     override int getFuncPtr(string name) {
         return _backendFunction_getFuncPtr(this.ptr, name);
     }
-    override int callFuncPtr(void* type, int reg, int[] args) {
-        return _backendFunction_callFuncPtr(this.ptr, type, reg, args);
+    override int callFuncPtr(BackendType type, int reg, int[] args) {
+        return _backendFunction_callFuncPtr(this.ptr, proxyEncode(type), reg, args);
     }
-    override int load(void* backendType, int reg) {
-        return _backendFunction_load(this.ptr, backendType, reg);
+    override int load(BackendType backendType, int reg) {
+        return _backendFunction_load(this.ptr, proxyEncode(backendType), reg);
     }
-    override int alloca(void* backendType) {
-        return _backendFunction_alloca(this.ptr, backendType);
+    override int alloca(BackendType backendType) {
+        return _backendFunction_alloca(this.ptr, proxyEncode(backendType));
     }
-    override int field(void* backendType, int reg, int index) {
-        return _backendFunction_field(this.ptr, backendType, reg, index);
+    override int field(BackendType backendType, int reg, int index) {
+        return _backendFunction_field(this.ptr, proxyEncode(backendType), reg, index);
     }
-    override int fieldOffset(void* backendType, int reg, int index) {
-        return _backendFunction_fieldOffset(this.ptr, backendType, reg, index);
+    override int fieldOffset(BackendType backendType, int reg, int index) {
+        return _backendFunction_fieldOffset(this.ptr, proxyEncode(backendType), reg, index);
     }
-    override void store(void* backendType, int target_reg, int value_reg) {
-        return _backendFunction_store(this.ptr, backendType, target_reg, value_reg);
+    override void store(BackendType backendType, int target_reg, int value_reg) {
+        return _backendFunction_store(this.ptr, proxyEncode(backendType), target_reg, value_reg);
     }
     override void ret(int reg) {
         _backendFunction_ret(this.ptr, reg);
@@ -112,10 +112,45 @@ class ProxyBackendFunction : BackendFunction {
     override TestBranchRecord testBranch(int reg) {
         return new ProxyTestBranchRecord(_backendFunction_testBranch(this.ptr, reg));
     }
-    override int blockIndex()
-    {
+    override int blockIndex() {
         return _backendFunction_blockIndex(this.ptr);
     }
+}
+
+extern(C) void* _backend_charType();
+extern(C) void* _backend_intType();
+extern(C) void* _backend_longType();
+extern(C) void* _backend_voidType();
+extern(C) void* _backend_pointerType(void*);
+extern(C) void* _backend_functionPointerType(void*, void*[]);
+extern(C) void* _backend_structType(void*[]);
+
+void* proxyEncode(BackendType type)
+{
+    if (type.instanceOf(BackendLongType)) return _backend_longType();
+    if (type.instanceOf(BackendIntType)) return _backend_intType();
+    if (type.instanceOf(BackendCharType)) return _backend_charType();
+    if (type.instanceOf(BackendVoidType)) return _backend_voidType();
+    auto backendPointerType = type.instanceOf(BackendPointerType);
+    if (backendPointerType) {
+        return _backend_pointerType(proxyEncode(backendPointerType.target));
+    }
+    auto backendStructType = type.instanceOf(BackendStructType);
+    if (backendStructType) {
+        void*[] members = new void*[](backendStructType.members.length);
+        for (int i = 0; i < backendStructType.members.length; i = i + 1)
+            members[i] = proxyEncode(backendStructType.members[i]);
+        return _backend_structType(members);
+    }
+    auto backendFpType = type.instanceOf(BackendFunctionPointerType);
+    if (backendFpType) {
+        void* ret = proxyEncode(backendFpType.ret);
+        void*[] args = new void*[](backendFpType.args.length);
+        for (int i = 0; i < backendFpType.args.length; i = i + 1)
+            args[i] = proxyEncode(backendFpType.args[i]);
+        return _backend_functionPointerType(ret, args);
+    }
+    assert(false);
 }
 
 extern(C) void* _backendModule(); // current module
@@ -130,9 +165,12 @@ extern(C) void _backendModule_dump(void*);
 class ProxyBackendModule : BackendModule {
     void* ptr;
     this(void* ptr) { this.ptr = ptr; }
-    override BackendFunction define(string name, void* ret, void*[] args)
+    override BackendFunction define(string name, BackendType ret, BackendType[] args)
     {
-        return new ProxyBackendFunction(_backendModule_define(this.ptr, name, ret, args));
+        void* proxyRet = proxyEncode(ret);
+        void*[] proxyArgs = new void*[](args.length);
+        for (int i = 0; i < args.length; i = i + 1) proxyArgs[i] = proxyEncode(args[i]);
+        return new ProxyBackendFunction(_backendModule_define(this.ptr, name, proxyRet, proxyArgs));
     }
     override void defineSymbolList(string name, string[] symbols)
     {
@@ -153,13 +191,6 @@ class ProxyBackendModule : BackendModule {
 }
 
 extern(C) void* _backend_createModule(void*, void*);
-extern(C) void* _backend_charType();
-extern(C) void* _backend_intType();
-extern(C) void* _backend_longType();
-extern(C) void* _backend_voidType();
-extern(C) void* _backend_pointerType(void*);
-extern(C) void* _backend_functionPointerType(void*, void*[]);
-extern(C) void* _backend_structType(void*[]);
 
 class ProxyBackend : Backend {
     void* ptr;
@@ -178,31 +209,7 @@ class ProxyPlatform : Platform {
     this() {
         this.platform = _backendModule_platform(_backendModule());
     }
-    override void* longType() {
-        return _backend_longType();
-    }
-    override void* intType() {
-        return _backend_intType();
-    }
-    override void* charType() {
-        return _backend_charType();
-    }
-    override void* voidType() {
-        return _backend_voidType();
-    }
-    override void* structType(void*[] members) {
-        return _backend_structType(members);
-    }
-    override void* pointerType(void* target) {
-        return _backend_pointerType(target);
-    }
-    override void* functionPointerType(void* ret, void*[] args) {
-        return _backend_functionPointerType(ret, args);
-    }
     override int nativeWordSize() {
         return _platform_nativeWordSize(this.platform);
-    }
-    override int size(void* target) {
-        return _platform_size(this.platform, target);
     }
 }

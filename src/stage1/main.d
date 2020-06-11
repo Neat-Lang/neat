@@ -597,6 +597,7 @@ enum BinaryOpType
     le,
     boolAnd,
     boolOr,
+    bitAnd,
 }
 
 class ASTBinaryOp : ASTSymbol
@@ -834,6 +835,7 @@ class BinaryOp : Expression
             case add:
             case sub:
             case mul:
+            case bitAnd:
                 // arithmetic
                 auto rightType = this.right.type;
                 if (cast(Long) rightType) return rightType;
@@ -875,6 +877,8 @@ class BinaryOp : Expression
                     return "-";
                 case mul:
                     return "*";
+                case bitAnd:
+                    return "&";
                 case eq:
                     return "==";
                 case gt:
@@ -902,26 +906,12 @@ ASTSymbol parseArithmetic(ref Parser parser, size_t level = 0)
 {
     auto left = parser.parseExpressionLeaf;
 
-    if (level <= 4)
-    {
-        parseMul(parser, left, 4);
-    }
-    if (level <= 3)
-    {
-        parseAddSubCat(parser, left, 3);
-    }
-    if (level <= 2)
-    {
-        parseComparison(parser, left, 2);
-    }
-    if (level <= 1)
-    {
-        parseBoolAnd(parser, left, 1);
-    }
-    if (level <= 0)
-    {
-        parseBoolOr(parser, left, 0);
-    }
+    if (level <= 5) parseBitAnd(parser, left, 5);
+    if (level <= 4) parseMul(parser, left, 4);
+    if (level <= 3) parseAddSubCat(parser, left, 3);
+    if (level <= 2) parseComparison(parser, left, 2);
+    if (level <= 1) parseBoolAnd(parser, left, 1);
+    if (level <= 0) parseBoolOr(parser, left, 0);
     return left;
 }
 
@@ -963,6 +953,23 @@ void parseBoolOr(ref Parser parser, ref ASTSymbol left, int myLevel)
             left = new ASTBinaryOp(BinaryOpType.boolOr, left, right, parser.loc);
             continue;
         }
+        break;
+    }
+}
+
+void parseBitAnd(ref Parser parser, ref ASTSymbol left, int myLevel)
+{
+    while (true)
+    {
+        parser.begin;
+        if (parser.accept("&") && !parser.accept("&"))
+        {
+            parser.commit;
+            auto right = parser.parseArithmetic(myLevel + 1);
+            left = new ASTBinaryOp(BinaryOpType.bitAnd, left, right, parser.loc);
+            continue;
+        }
+        parser.revert;
         break;
     }
 }

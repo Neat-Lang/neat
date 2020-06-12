@@ -83,6 +83,7 @@ struct Instr
         Literal,
         BinOp,
         ZeroExtend,
+        SignExtend,
         Alloca,
         GetField,
         FieldOffset,
@@ -136,6 +137,11 @@ struct Instr
             Reg right;
         }
         static struct ZeroExtend
+        {
+            Reg value;
+            int from, to;
+        }
+        static struct SignExtend
         {
             Reg value;
             int from, to;
@@ -195,6 +201,7 @@ struct Instr
         Arg arg;
         BinOp binop;
         ZeroExtend zeroExtend;
+        SignExtend signExtend;
         Literal literal;
         Branch branch;
         TestBranch testBranch;
@@ -216,6 +223,7 @@ struct Instr
             case Literal: return format!"(%s) %s"(literal.type, formatLiteral(literal.type, literal.value));
             case BinOp: return format!"(%s) %%%s %s %%%s"(binop.size, binop.left, binop.op, binop.right);
             case ZeroExtend: return format!"%%%s %s->%s(0)"(zeroExtend.value, zeroExtend.from, zeroExtend.to);
+            case SignExtend: return format!"%%%s %s->%s(s)"(signExtend.value, signExtend.from, signExtend.to);
             case Alloca: return format!"alloca %s"(alloca.type);
             case GetField: return format!"%%%s.%s (%s)"(
                 getField.base, getField.member, getField.structType);
@@ -259,6 +267,8 @@ struct Instr
                 }
             case ZeroExtend:
                 return zeroExtend.to;
+            case SignExtend:
+                return signExtend.to;
             // pointers
             case Alloca:
             case FieldOffset:
@@ -286,6 +296,7 @@ private bool isBlockFinisher(Instr.Kind kind)
         case Arg:
         case BinOp:
         case ZeroExtend:
+        case SignExtend:
         case Literal:
         case Alloca:
         case GetField:
@@ -339,12 +350,13 @@ class IpBackendFunction : BackendFunction
         return block.append(instr);
     }
 
-    override int intLiteral(int value)
+    override int intLiteral(long value)
     {
         auto instr = Instr(Instr.Kind.Literal);
+        assert(value <= int.max, format!"!? %s"(value));
 
         instr.literal.type = new BackendIntType;
-        instr.literal.value = cast(void[]) [value];
+        instr.literal.value = cast(void[]) [cast(int) value];
 
         return block.append(instr);
     }
@@ -466,6 +478,16 @@ class IpBackendFunction : BackendFunction
         instr.zeroExtend.value = value;
         instr.zeroExtend.from = from;
         instr.zeroExtend.to = to;
+        return block.append(instr);
+    }
+
+    override Reg signExtend(Reg value, int from, int to)
+    {
+        auto instr = Instr(Instr.Kind.SignExtend);
+
+        instr.signExtend.value = value;
+        instr.signExtend.from = from;
+        instr.signExtend.to = to;
         return block.append(instr);
     }
 
@@ -764,7 +786,7 @@ private void defineIntrinsics(IpBackendModule mod)
         delegate void(BackendModule mod, string[] args)
         {
             // TODO hardcode interpreter backend in target environment
-            (cast(IpBackendModule) mod).call("main", null, [cast(void[]) [args]]);
+            (cast(IpBackendModule) mod).call("_main", null, [cast(void[]) [args]]);
         }
     );
     defineCallback(
@@ -772,13 +794,19 @@ private void defineIntrinsics(IpBackendModule mod)
         delegate int(BackendFunction fun, int index) => fun.arg(index));
     defineCallback(
         "_backendFunction_intLiteral",
-        delegate int(BackendFunction fun, int value) => fun.intLiteral(value));
+        delegate int(BackendFunction fun, long value) => fun.intLiteral(value));
     defineCallback(
         "_backendFunction_longLiteral",
         delegate int(BackendFunction fun, long value) => fun.longLiteral(value));
     defineCallback(
         "_backendFunction_wordLiteral",
-        delegate int(BackendFunction fun, Platform platform, size_t value) => fun.wordLiteral(platform, value));
+        delegate int(BackendFunction fun, Platform platform, long value) {
+            if (platform.nativeWordSize == 4)
+                return fun.intLiteral(value);
+            else if (platform.nativeWordSize == 8)
+                return fun.longLiteral(value);
+            else assert(false);
+        });
     defineCallback(
         "_backendFunction_stringLiteral",
         delegate int(BackendFunction fun, string text) => fun.stringLiteral(text));
@@ -808,6 +836,10 @@ private void defineIntrinsics(IpBackendModule mod)
         "_backendFunction_zeroExtend",
         delegate int(BackendFunction fun, int reg, int from, int to)
             => fun.zeroExtend(reg, from, to));
+    defineCallback(
+        "_backendFunction_signExtend",
+        delegate int(BackendFunction fun, int reg, int from, int to)
+            => fun.signExtend(reg, from, to));
     defineCallback(
         "_backendFunction_alloca",
         delegate int(BackendFunction fun, BackendType type)
@@ -1095,6 +1127,15 @@ class IpBackendModule : BackendModule
                             if (instr.zeroExtend.from == 4 && instr.zeroExtend.to == 8) {
                                 int value = *cast(int*) regArrays[instr.zeroExtend.value];
                                 *cast(ulong*) regArrays[reg].ptr = cast(uint) value;
+                                break;
+                            }
+                            assert(false);
+                        case SignExtend:
+                            assert(regArrays[instr.signExtend.value].length == instr.signExtend.from);
+                            assert(regArrays[reg].length == instr.signExtend.to);
+                            if (instr.signExtend.from == 4 && instr.signExtend.to == 8) {
+                                int value = *cast(int*) regArrays[instr.signExtend.value];
+                                *cast(long*) regArrays[reg].ptr = value;
                                 break;
                             }
                             assert(false);

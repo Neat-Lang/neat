@@ -811,7 +811,7 @@ class IntToLong : Expression
         assert(cast(Integer) this.intValue.type);
         Reg intValue = this.intValue.emit(output);
 
-        return output.fun.zeroExtend(intValue, 4, 8);
+        return output.fun.signExtend(intValue, 4, 8);
     }
 
     mixin(GenerateThis);

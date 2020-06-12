@@ -2,9 +2,11 @@ module main;
 
 import array;
 import backend.base;
-import backend.proxy;
+import backend.llvm;
+// import backend.proxy;
 import base;
 import expr;
+import helpers;
 import parser;
 import statements;
 import struct_;
@@ -12,6 +14,7 @@ import types;
 
 extern(C) bool cxruntime_file_exists(string file);
 extern(C) string cxruntime_file_read(string file);
+extern(C) void cxruntime_file_write(string file, string content);
 
 class ASTArgument
 {
@@ -38,6 +41,24 @@ class Function : FunctionDeclaration
         this.statement = statement;
     }
 
+    override void declare(Generator generator)
+    {
+        auto argTypes = new BackendType[](this.args.length);
+        for (int i = 0; i < this.args.length; i = i + 1)
+            argTypes[i] = this.args[i].type.emit(generator.platform);
+
+        generator.mod.declare(
+            this.mangle(),
+            false,
+            this.ret.emit(generator.platform),
+            argTypes
+        );
+    }
+
+    override string mangle() {
+        return "_" ~ this.name;
+    }
+
     void emit(Generator generator, Context module_)
     {
         assert(!generator.fun);
@@ -46,7 +67,7 @@ class Function : FunctionDeclaration
             argTypes[i] = this.args[i].type.emit(module_.platform);
         assert(!!module_);
         generator.fun = generator.mod.define(
-            this.name,
+            this.mangle(),
             this.ret.emit(module_.platform),
             argTypes
         );
@@ -72,6 +93,7 @@ class Function : FunctionDeclaration
 
         functionBody.emit(generator);
         generator.fun.ret(generator.fun.voidLiteral());
+        generator.fun.done();
         generator.fun = null;
         generator.frameReg = 0;
     }
@@ -622,7 +644,7 @@ class FunctionReference : Expression
 
     override int emit(Generator output)
     {
-        return output.fun.getFuncPtr(this.fun.name);
+        return output.fun.getFuncPtr(this.fun.mangle());
     }
 }
 
@@ -704,7 +726,7 @@ class NewClassExpression : Expression
         int classInfoPtr = output.fun.symbolList(this.classType.vtableSymbol);
         int classDataSize = classDataStruct.emit(output.platform).size(output.platform);
         int classPtr = output.fun.call(
-            voidp, "malloc", new int[](0) ~ output.fun.wordLiteral(output.platform, classDataSize));
+            voidp, "cxruntime_alloc", new int[](0) ~ output.fun.wordLiteral(output.platform, classDataSize));
         int classInfoTarget = output.fun.fieldOffset(classDataStruct.emit(output.platform), classPtr, 0);
         output.fun.store(voidp, classInfoTarget, classInfoPtr);
 
@@ -779,15 +801,15 @@ class ASTNewExpression : ASTSymbol
             auto length = implicitConvertTo(beExpression(this.args[0].compile(context)), wordType, this.loc);
             auto byteLength = new BinaryOp("*", elementSize, length);
 
-            auto mallocArgs = new Argument[](1);
-            mallocArgs[0] = new Argument("", wordType);
-            auto malloc = new FunctionDeclaration("malloc", new Pointer(new Void), mallocArgs);
+            auto allocArgs = new Argument[](1);
+            allocArgs[0] = new Argument("", wordType);
+            auto alloc = new FunctionDeclaration("cxruntime_alloc", new Pointer(new Void), allocArgs);
 
-            auto mallocParams = new Expression[](1);
-            mallocParams[0] = byteLength;
+            auto allocParams = new Expression[](1);
+            allocParams[0] = byteLength;
             PointerCast dataPtr = new PointerCast(
                 new Pointer(arrayType.elementType),
-                call(malloc, mallocParams, this.loc));
+                call(alloc, allocParams, this.loc));
 
             return new ArrayExpression(dataPtr, length);
         }
@@ -1682,6 +1704,8 @@ class Module : Namespace
 {
     string name;
 
+    bool emitted;
+
     this(string name)
     {
         this.parent = null;
@@ -1704,6 +1728,9 @@ class Module : Namespace
 
     void emit(Generator generator)
     {
+        if (this.emitted) return;
+        this.emitted = true;
+
         assert(!generator.fun);
         // TODO each only once!
         for (int i = 0; i < this.imports.length; i = i + 1)
@@ -1711,10 +1738,16 @@ class Module : Namespace
 
         for (int i = 0; i < this.entries.length; i = i + 1) {
             ModuleEntry entry = this.entries[i];
+            Function fun = entry.value.instanceOf(Function);
+            if (fun)
+                fun.declare(generator);
             Class class_ = entry.value.instanceOf(Class);
             if (class_)
             {
                 class_.resolve();
+                for (int i = 0; i < class_.methods.length; i = i + 1)
+                    class_.methods[i].declare(generator);
+
                 auto methods = new string[](class_.vtable_.length);
                 for (int i = 0; i < class_.vtable_.length; i = i + 1)
                     methods[i] = class_.vtable_[i].mangle();
@@ -1728,6 +1761,11 @@ class Module : Namespace
             Function fun = entry.value.instanceOf(Function);
             if (fun)
                 fun.emit(generator, new Context(generator.platform, this));
+            else {
+                auto decl = entry.value.instanceOf(FunctionDeclaration);
+                if (decl)
+                    decl.declare(generator);
+            }
             Class class_ = entry.value.instanceOf(Class);
             if (class_) {
                 for (int i = 0; i < class_.methods.length; i = i + 1)
@@ -1916,6 +1954,22 @@ class ClassMethod : Symbol
         return "_" ~ this.classType.name ~ "_" ~ this.name;
     }
 
+    void declare(Generator generator) {
+        // TODO merge with emit
+        Type voidp = new Pointer(new Void);
+        BackendType[] argTypes = new BackendType[](this.args.length + 1);
+        argTypes[0] = voidp.emit(generator.platform);
+        for (int i = 0; i < this.args.length; i = i + 1)
+            argTypes[i + 1] = this.args[i].type.emit(generator.platform);
+
+        generator.mod.declare(
+            this.mangle(),
+            false,
+            this.ret.emit(generator.platform),
+            argTypes
+        );
+    }
+
     void emit(Generator generator, Namespace module_, Class thisType)
     {
         assert(!this.emitted);
@@ -1963,6 +2017,7 @@ class ClassMethod : Symbol
 
         generator.fun.ret(generator.fun.voidLiteral());
         generator.frameReg = 0;
+        generator.fun.done();
         generator.fun = null;
     }
 
@@ -2369,9 +2424,33 @@ ASTClassDecl parseClassDecl(Parser parser)
     return new ASTClassDecl(name, superClass, members, methods);
 }
 
-Module parseModule(string filename, string[] includes, Platform platform, Module[] defaultImports)
+class ModuleCacheEntry
+{
+    string path;
+    Module mod;
+    this(string path, Module mod) { this.path = path; this.mod = mod; }
+}
+
+class ModuleCache
+{
+    ModuleCacheEntry[] modules;
+    this() { }
+    Module find(string path) {
+        for (int i = 0; i < this.modules.length; i = i + 1)
+            if (this.modules[i].path == path) return this.modules[i].mod;
+        return null;
+    }
+    void add(string path, Module mod) {
+        this.modules = this.modules ~ new ModuleCacheEntry(path, mod);
+    }
+}
+
+Module parseModule(string filename, string[] includes, Platform platform, Module[] defaultImports, ModuleCache cache)
 {
     string path = findFile(filename, includes);
+    Module mod = cache.find(path);
+    if (mod) return mod;
+
     string code = cxruntime_file_read(path);
     Parser parser = new Parser(path, code);
 
@@ -2388,6 +2467,8 @@ Module parseModule(string filename, string[] includes, Platform platform, Module
         module_.addImport(defaultImports[i]);
     }
 
+    cache.add(path, module_);
+
     while (!parser.eof())
     {
         bool matched = false;
@@ -2396,7 +2477,7 @@ Module parseModule(string filename, string[] includes, Platform platform, Module
             if (import_) {
                 matched = true;
                 Module importedModule = parseModule(
-                    moduleToFile(import_.name), includes, platform, defaultImports);
+                    moduleToFile(import_.name), includes, platform, defaultImports, cache);
 
                 module_.addImport(importedModule);
             }
@@ -2464,9 +2545,11 @@ void main(string[] args)
         return;
     }
     auto builtins = new Module("");
-    auto backend = new ProxyBackend();
-    auto backendModule = backend.createModule();
-    auto platform = new ProxyPlatform();
+    // auto backend = new ProxyBackend();
+    auto backend = new LLVMBackend();
+    // auto platform = new ProxyPlatform();
+    auto platform = new DefaultPlatform();
+    auto backendModule = backend.createModule(platform);
 
     builtins.add("string", new Array(new Character));
     builtins.add("bool", new Integer);
@@ -2480,11 +2563,12 @@ void main(string[] args)
     else assert(false);
 
     auto defaultImports = new Module[](0) ~ builtins;
-
-    auto toplevel = parseModule(args[0], includes, platform, defaultImports);
+    auto cache = new ModuleCache;
+    auto toplevel = parseModule(args[0], includes, platform, defaultImports, cache);
     auto output = new Generator(platform, backendModule);
 
     toplevel.emit(output);
 
-    backendModule.callMain(nextArgs);
+    // backendModule.callMain(nextArgs);
+    cxruntime_file_write("hello2.ll", backendModule.output.text());
 }

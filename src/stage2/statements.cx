@@ -36,10 +36,7 @@ class ASTAssignStatement : ASTStatement
         Expression value = beExpression(this.value.compile(context));
         Reference targetref = target.instanceOf(Reference);
         value = implicitConvertTo(value, targetref.type(), this.loc);
-        if (!targetref) {
-            print("target of assignment must be a reference");
-            assert(false);
-        }
+        this.loc.assert2s(!!targetref, "target of assignment must be a reference");
         return new AssignStatement(targetref, value);
     }
 }
@@ -56,6 +53,7 @@ class AssignStatement : Statement
     {
         Type targetType = this.target.type();
         Type valueType = this.value.type();
+
         assert(targetType.same(valueType)); // format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
 
         int target_reg = this.target.emitLocation(output);
@@ -107,43 +105,20 @@ class IfStatement : Statement
     {
         int reg = this.test.emit(output);
 
-        TestBranchRecord tbrRecord = output.fun.testBranch(reg);
+        string label = output.fun.getLabel();
+        output.fun.testBranch(reg, label ~ "_then", label ~ "_else");
 
-        tbrRecord.resolveThen(output.fun.blockIndex());
+        output.fun.setLabel(label ~ "_then");
         this.then.emit(output);
-        BranchRecord brRecord = output.fun.branch();
-        tbrRecord.resolveElse(output.fun.blockIndex());
+        output.fun.branch(label ~ "_fin");
 
+        output.fun.setLabel(label ~ "_else");
         if (this.else_)
         {
             this.else_.emit(output);
-            BranchRecord elseBrRecord = output.fun.branch();
-
-            elseBrRecord.resolve(output.fun.blockIndex());
+            output.fun.branch(label ~ "_fin");
         }
-        brRecord.resolve(output.fun.blockIndex());
-    }
-}
-
-class AssignStatement : Statement
-{
-    Reference target;
-
-    Expression value;
-
-    this(Reference target, Expression value) { this.target = target; this.value = value; }
-
-    override void emit(Generator output)
-    {
-        Type targetType = this.target.type();
-        Type valueType = this.value.type();
-
-        assert(targetType.same(valueType)); // format!"%s - %s => %s - %s"(this.target, this.value, targetType, valueType));*/
-
-        int target_reg = this.target.emitLocation(output);
-        int value_reg = this.value.emit(output);
-
-        output.fun.store(valueType.emit(output.platform), target_reg, value_reg);
+        output.fun.setLabel(label ~ "_fin");
     }
 }
 
@@ -188,18 +163,17 @@ class WhileLoop : Statement
          * goto start
          * end:
          */
-        BranchRecord start = output.fun.branch(); // start:
-        int startIndex = output.fun.blockIndex();
+        auto label = output.fun.getLabel();
+        output.fun.branch(label ~ "_start");
 
-        start.resolve(startIndex);
-
+        output.fun.setLabel(label ~ "_start"); // start:
         int condReg = this.cond.emit(output);
-        TestBranchRecord condBranch = output.fun.testBranch(condReg); // if (cond)
+        output.fun.testBranch(condReg, label ~ "_body", label ~ "_end");
 
-        condBranch.resolveThen(output.fun.blockIndex()); // goto body
+        output.fun.setLabel(label ~ "_body");
         this.body_.emit(output);
-        output.fun.branch().resolve(startIndex); // goto start
-        condBranch.resolveElse(output.fun.blockIndex()); // else goto end
+        output.fun.branch(label ~ "_start");
+        output.fun.setLabel(label ~ "_end");
     }
 }
 

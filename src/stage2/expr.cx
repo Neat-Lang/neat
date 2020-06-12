@@ -3,6 +3,7 @@ module expr;
 import array;
 import backend.base;
 import base;
+import helpers;
 import parser;
 import types;
 
@@ -117,12 +118,14 @@ class ArrayCat : Expression
     override int emit(Generator output)
     {
         // TODO simplify this?
+        BackendType voidp = (new Pointer(new Void)).emit(output.platform);
         int leftReg = this.left.emit(output);
         Array leftType = this.left.type().instanceOf(Array);
         assert(!!leftType);
         Type rightType = this.right.type();
         int leftLen = getArrayLen(output, leftType, leftReg);
         int leftPtr = getArrayPtr(output, leftType, leftReg);
+        leftPtr = output.fun.bitcast(leftPtr, voidp);
         int elementSize = output.fun.wordLiteral(
             output.platform,
             leftType.elementType.emit(output.platform).size(output.platform));
@@ -135,18 +138,20 @@ class ArrayCat : Expression
             int newSize = output.fun.binop(
                 "+", output.platform.nativeWordSize(),
                 oldSize, elementSize);
-            BackendType voidp = (new Pointer(new Void)).emit(output.platform);
 
-            int newArrayPtr = output.fun.call(voidp, "malloc", new int[](0) ~ newSize);
-            output.fun.call((new Void).emit(output.platform), "memcpy", new int[](0) ~ newArrayPtr ~ leftPtr ~ oldSize);
+            int newArrayPtr = output.fun.call(voidp, "cxruntime_alloc", new int[](0) ~ newSize);
+            output.fun.call(voidp, "memcpy", new int[](0) ~ newArrayPtr ~ leftPtr ~ oldSize);
             // *(ptr + prevLength) = right;
             int newElement = output.fun.call(voidp, "ptr_offset", new int[](0) ~ newArrayPtr ~ oldSize);
+            newElement = output.fun.bitcast(newElement, (new Pointer(this.right.type())).emit(output.platform));
             output.fun.store(this.right.type().emit(output.platform), newElement, this.right.emit(output));
 
             // return ptr[0 .. prevLength + 1];
             int newArrayLen = output.fun.binop(
                 "+", output.platform.nativeWordSize(),
                 leftLen, output.fun.wordLiteral(output.platform, 1));
+
+            newArrayPtr = output.fun.bitcast(newArrayPtr, (new Pointer(leftType.elementType)).emit(output.platform));
             return makeArray(output, leftType.elementType, newArrayLen, newArrayPtr);
         }
         if (leftType.same(rightType))
@@ -154,6 +159,7 @@ class ArrayCat : Expression
             auto rightReg = this.right.emit(output);
             auto rightLen = getArrayLen(output, rightType, rightReg);
             auto rightPtr = getArrayPtr(output, rightType, rightReg);
+            rightPtr = output.fun.bitcast(rightPtr, voidp);
             auto newArrayLen = output.fun.binop("+", output.platform.nativeWordSize(), leftLen, rightLen);
             auto leftBytes = output.fun.binop("*", output.platform.nativeWordSize(), leftLen, elementSize);
             auto rightBytes = output.fun.binop("*", output.platform.nativeWordSize(), rightLen, elementSize);
@@ -161,16 +167,15 @@ class ArrayCat : Expression
             auto newBytes = output.fun.binop("*", output.platform.nativeWordSize(), newArrayLen, elementSize);
 
             auto voidp = (new Pointer(new Void)).emit(output.platform);
-            auto newArrayPtr = output.fun.call(voidp, "malloc", new int[](0) ~ newBytes);
+            auto newArrayPtr = output.fun.call(voidp, "cxruntime_alloc", new int[](0) ~ newBytes);
             // write left at 0
-            output.fun.call(
-                (new Void).emit(output.platform), "memcpy", new int[](0) ~ newArrayPtr ~ leftPtr ~ leftBytes);
+            output.fun.call(voidp, "memcpy", new int[](0) ~ newArrayPtr ~ leftPtr ~ leftBytes);
             // write right at ptr + leftLen
             auto startRightPtr = output.fun.call(voidp, "ptr_offset", new int[](0) ~ newArrayPtr ~ leftBytes);
-            output.fun.call(
-                (new Void).emit(output.platform), "memcpy", new int[](0) ~ startRightPtr ~ rightPtr ~ rightBytes);
+            output.fun.call(voidp, "memcpy", new int[](0) ~ startRightPtr ~ rightPtr ~ rightBytes);
 
-            return makeArray(output, leftType, newArrayLen, newArrayPtr);
+            newArrayPtr = output.fun.bitcast(newArrayPtr, (new Pointer(leftType.elementType)).emit(output.platform));
+            return makeArray(output, leftType.elementType, newArrayLen, newArrayPtr);
         }
         assert(false);
     }
@@ -204,16 +209,15 @@ class BoolOr : Expression
         int leftValue = this.left.emit(output);
         output.fun.store(intType, result, leftValue);
 
-        TestBranchRecord condBranch = output.fun.testBranch(leftValue); // if (left)
-        condBranch.resolveElse(output.fun.blockIndex());
+        auto label = output.fun.getLabel();
+        output.fun.testBranch(leftValue, label ~ "_past", label ~ "_right"); // if (left)
+        output.fun.setLabel(label ~ "_right");
 
         int rightValue = this.right.emit(output);
         output.fun.store(intType, result, rightValue);
+        output.fun.branch(label ~ "_past");
 
-        BranchRecord exitBranch = output.fun.branch();
-        condBranch.resolveThen(output.fun.blockIndex());
-        exitBranch.resolve(output.fun.blockIndex());
-
+        output.fun.setLabel(label ~ "_past");
         return output.fun.load(intType, result);
     }
 }
@@ -244,16 +248,15 @@ class BoolAnd : Expression
         int leftValue = this.left.emit(output);
         output.fun.store(intType, result, leftValue);
 
-        TestBranchRecord condBranch = output.fun.testBranch(leftValue); // if (left)
-        condBranch.resolveThen(output.fun.blockIndex());
+        auto label = output.fun.getLabel();
+        output.fun.testBranch(leftValue, label ~ "_true", label ~ "_past"); // if (left)
+        output.fun.setLabel(label ~ "_true");
 
         int rightValue = this.right.emit(output);
         output.fun.store(intType, result, rightValue);
+        output.fun.branch(label ~ "_past");
 
-        BranchRecord exitBranch = output.fun.branch();
-        condBranch.resolveElse(output.fun.blockIndex());
-        exitBranch.resolve(output.fun.blockIndex());
-
+        output.fun.setLabel(label ~ "_past");
         return output.fun.load(intType, result);
     }
 }
@@ -329,7 +332,7 @@ class Call : Expression
         for (int i = 0; i < this.args.length; i = i + 1) {
             regs[i] = this.args[i].emit(output);
         }
-        return output.fun.call(this.type().emit(output.platform), this.fun.name, regs);
+        return output.fun.call(this.type().emit(output.platform), this.fun.mangle(), regs);
     }
 }
 

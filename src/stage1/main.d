@@ -319,21 +319,21 @@ class IfStatement : Statement
     {
         Reg reg = test.emit(output);
 
-        auto tbrRecord = output.fun.testBranch(reg);
+        auto label = output.fun.getLabel;
+        output.fun.testBranch(reg, label ~ "_then", label ~ "_else");
 
-        tbrRecord.resolveThen(output.fun.blockIndex);
+        output.fun.setLabel(label ~ "_then");
         then.emit(output);
-        auto brRecord = output.fun.branch;
-        tbrRecord.resolveElse(output.fun.blockIndex);
+        output.fun.branch(label ~ "_fin");
+
+        output.fun.setLabel(label ~ "_else");
 
         if (this.else_)
         {
             else_.emit(output);
-            auto elseBrRecord = output.fun.branch;
-
-            elseBrRecord.resolve(output.fun.blockIndex);
+            output.fun.branch(label ~ "_fin");
         }
-        brRecord.resolve(output.fun.blockIndex);
+        output.fun.setLabel(label ~ "_fin");
     }
 
     mixin(GenerateThis);
@@ -377,7 +377,7 @@ class ASTAssignStatement : ASTStatement
         auto target = this.target.compile(context);
         auto value = this.value.compile(context);
         auto targetref = cast(Reference) target;
-        assert(targetref, "target of assignment must be a reference");
+        this.loc.assert_(targetref, "target of assignment must be a reference");
         return new AssignStatement(targetref, value.beExpression.implicitConvertTo(targetref.type(), loc));
     }
 
@@ -612,8 +612,8 @@ class ASTBinaryOp : ASTSymbol
 
     override Expression compile(Context context)
     {
-        auto left = this.left.compile(context).beExpression;
-        auto right = this.right.compile(context).beExpression;
+        auto left = this.left.compile(context).beExpression(loc);
+        auto right = this.right.compile(context).beExpression(loc);
         if (op == BinaryOpType.cat)
             return new ArrayCat(left, right, loc);
         if (op == BinaryOpType.boolAnd)
@@ -663,7 +663,7 @@ class ArrayCat : Expression
             auto oldSize = output.fun.binop("*", output.platform.nativeWordSize, leftLen, elementSize);
             auto newSize = output.fun.binop("+", output.platform.nativeWordSize, oldSize, elementSize);
             auto voidp = (new Pointer(new Void)).emit(output.platform);
-            auto newArrayPtr = output.fun.call(voidp, "malloc", [newSize]);
+            auto newArrayPtr = output.fun.call(voidp, "cxruntime_alloc", [newSize]);
             output.fun.call((new Void).emit(output.platform), "memcpy", [newArrayPtr, leftPtr, oldSize]);
             // *(ptr + prevLength) = right;
             auto newElement = output.fun.call(voidp, "ptr_offset", [newArrayPtr, oldSize]);
@@ -687,7 +687,7 @@ class ArrayCat : Expression
             auto newBytes = output.fun.binop("*", output.platform.nativeWordSize, newArrayLen, elementSize);
 
             auto voidp = (new Pointer(new Void)).emit(output.platform);
-            auto newArrayPtr = output.fun.call(voidp, "malloc", [newBytes]);
+            auto newArrayPtr = output.fun.call(voidp, "cxruntime_alloc", [newBytes]);
             // write left at 0
             output.fun.call((new Void).emit(output.platform), "memcpy", [newArrayPtr, leftPtr, leftBytes]);
             // write right at ptr + leftLen
@@ -723,16 +723,15 @@ class BoolOr : Expression
         Reg leftValue = this.left.emit(output);
         output.fun.store(new BackendIntType, result, leftValue);
 
-        auto condBranch = output.fun.testBranch(leftValue); // if (left)
-        condBranch.resolveElse(output.fun.blockIndex);
+        auto label = output.fun.getLabel;
+        output.fun.testBranch(leftValue, label ~ "_past", label ~ "_right"); // if (left)
+        output.fun.setLabel(label ~ "_right");
 
         Reg rightValue = this.right.emit(output);
         output.fun.store(new BackendIntType, result, rightValue);
+        output.fun.branch(label ~ "_past");
 
-        auto exitBranch = output.fun.branch;
-        condBranch.resolveThen(output.fun.blockIndex);
-        exitBranch.resolve(output.fun.blockIndex);
-
+        output.fun.setLabel(label ~ "_past");
         return output.fun.load(new BackendIntType, result);
     }
 
@@ -758,16 +757,15 @@ class BoolAnd : Expression
         Reg leftValue = this.left.emit(output);
         output.fun.store(new BackendIntType, result, leftValue);
 
-        auto condBranch = output.fun.testBranch(leftValue); // if (left)
-        condBranch.resolveThen(output.fun.blockIndex);
+        auto label = output.fun.getLabel;
+        output.fun.testBranch(leftValue, label ~ "_true", label ~ "_past"); // if (left)
+        output.fun.setLabel(label ~ "_true");
 
         Reg rightValue = this.right.emit(output);
         output.fun.store(new BackendIntType, result, rightValue);
+        output.fun.branch(label ~ "_past");
 
-        auto exitBranch = output.fun.branch;
-        condBranch.resolveElse(output.fun.blockIndex);
-        exitBranch.resolve(output.fun.blockIndex);
-
+        output.fun.setLabel(label ~ "_past");
         return output.fun.load(new BackendIntType, result);
     }
 
@@ -1069,18 +1067,17 @@ class WhileLoop : Statement
          * goto start
          * end:
          */
-        auto start = output.fun.branch; // start:
-        auto startIndex = output.fun.blockIndex;
+        auto label = output.fun.getLabel;
+        output.fun.branch(label ~ "_start");
 
-        start.resolve(startIndex);
-
+        output.fun.setLabel(label ~ "_start"); // start:
         auto condReg = cond.emit(output);
-        auto condBranch = output.fun.testBranch(condReg); // if (cond)
+        output.fun.testBranch(condReg, label ~ "_body", label ~ "_end");
 
-        condBranch.resolveThen(output.fun.blockIndex); // goto body
+        output.fun.setLabel(label ~ "_body");
         body_.emit(output);
-        output.fun.branch().resolve(startIndex); // goto start
-        condBranch.resolveElse(output.fun.blockIndex); // else goto end
+        output.fun.branch(label ~ "_start");
+        output.fun.setLabel(label ~ "_end");
     }
 
     mixin(GenerateAll);
@@ -1751,8 +1748,8 @@ class ASTNewExpression : ASTSymbol
             // TODO only compute length once
             auto length = args[0].compile(context).beExpression(loc).implicitConvertTo(wordType, loc);
             auto byteLength = new BinaryOp(BinaryOpType.mul, elementSize, length, loc);
-            auto malloc = new Function("malloc", new Pointer(new Void), [Argument("", wordType)], true, null);
-            auto dataPtr = new PointerCast(new Pointer(arrayType.elementType), call(malloc, [byteLength], loc));
+            auto alloc = new Function("cxruntime_alloc", new Pointer(new Void), [Argument("", wordType)], true, null);
+            auto dataPtr = new PointerCast(new Pointer(arrayType.elementType), call(alloc, [byteLength], loc));
             return new ArrayExpression(dataPtr, length);
         }
         loc.assert_(false, format!"don't know how to allocate %s"(type));
@@ -1803,7 +1800,7 @@ class NewClassExpression : Expression
         auto voidp = (new Pointer(new Void)).emit(output.platform);
         auto classInfoPtr = output.fun.symbolList(classType.vtableSymbol);
         int classDataSize = classDataStruct.emit(output.platform).size(output.platform);
-        auto classPtr = output.fun.call(voidp, "malloc", [output.fun.wordLiteral(output.platform, classDataSize)]);
+        auto classPtr = output.fun.call(voidp, "cxruntime_alloc", [output.fun.wordLiteral(output.platform, classDataSize)]);
         auto classInfoTarget = output.fun.fieldOffset(classDataStruct.emit(output.platform), classPtr, 0);
         output.fun.store(voidp, classInfoTarget, classInfoPtr);
 

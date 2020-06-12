@@ -311,6 +311,12 @@ class IpBackendFunction : BackendFunction
     @(This.Init!null)
     BasicBlock[] blocks;
 
+    @(This.Init!null)
+    int[string] blockIds; // maps block labels to ids
+
+    @(This.Init!null)
+    void delegate(int)[][string] labelActions; // called once a block label/id mapping is established
+
     private BasicBlock block()
     {
         if (this.blocks.empty || this.blocks.back.finished)
@@ -323,12 +329,6 @@ class IpBackendFunction : BackendFunction
         }
 
         return this.blocks[$ - 1];
-    }
-
-    override int blockIndex()
-    {
-        block;
-        return cast(int) (this.blocks.length - 1);
     }
 
     override int arg(int index)
@@ -527,45 +527,69 @@ class IpBackendFunction : BackendFunction
         return block.append(instr);
     }
 
-    override TestBranchRecord testBranch(Reg test)
+    override void testBranch(Reg test, string thenLabel, string elseLabel)
     {
         auto instr = Instr(Instr.Kind.TestBranch);
-
-        instr.testBranch.test = test;
-
         auto block = block;
 
-        block.append(instr);
+        instr.testBranch.test = test;
+        instr.testBranch.thenBlock = -1;
+        instr.testBranch.elseBlock = -1;
 
+        block.append(instr);
         assert(block.finished);
 
-        return new class TestBranchRecord {
-            override void resolveThen(int index)
-            {
-                block.instrs[$ - 1].testBranch.thenBlock = index;
-            }
-            override void resolveElse(int index)
-            {
-                block.instrs[$ - 1].testBranch.elseBlock = index;
-            }
-        };
+        resolveLabel(thenLabel, (int target) { block.instrs[$ - 1].testBranch.thenBlock = target; });
+        resolveLabel(elseLabel, (int target) { block.instrs[$ - 1].testBranch.elseBlock = target; });
     }
 
-    override BranchRecord branch()
+    override void branch(string label)
     {
         auto instr = Instr(Instr.Kind.Branch);
         auto block = block;
 
-        block.append(instr);
+        instr.branch.targetBlock = -1;
 
+        block.append(instr);
         assert(block.finished);
 
-        return new class BranchRecord {
-            override void resolve(int index)
-            {
-                block.instrs[$ - 1].branch.targetBlock = index;
-            }
-        };
+        resolveLabel(label, (int target) { block.instrs[$ - 1].branch.targetBlock = target; });
+    }
+
+    override string getLabel()
+    {
+        block; // allocate new block
+
+        auto blockId = cast(int) (this.blocks.length - 1);
+        auto label = format!"Block%s"(blockId);
+
+        this.blockIds[label] = blockId;
+        return label;
+    }
+
+    override void setLabel(string label)
+    {
+        block; // allocate new block
+
+        auto blockId = cast(int) (this.blocks.length - 1);
+
+        assert(label in this.labelActions, format!"label %s not in actions"(label));
+        foreach (action; this.labelActions[label])
+            action(blockId);
+        this.labelActions.remove(label);
+        this.blockIds[label] = blockId;
+    }
+
+    void resolveLabel(string label, void delegate(int) action)
+    {
+        this.labelActions[label] ~= action;
+        // backwards jump
+        if (auto blockId = label in this.blockIds)
+        {
+            foreach (prevAction; this.labelActions[label])
+                prevAction(*blockId);
+            this.labelActions.remove(label);
+        }
     }
 
     override string toString() const
@@ -629,9 +653,14 @@ private void defineIntrinsics(IpBackendModule mod)
 
         return name.readText;
     });
-    defineCallback("malloc", (size_t size) {
+    defineCallback("cxruntime_file_write", delegate void(string name, string data) {
+        import std.file : write;
+
+        name.write(data);
+    });
+    defineCallback("cxruntime_alloc", (size_t size) {
         // import std.stdio : writefln; writefln!"malloc %s"(size);
-        assert(size >= 0 && size < 1048576);
+        assert(size >= 0 && size < 128*1024*1024);
         return (new void[size]).ptr;
     });
     defineCallback("memcpy", (void* target, void* source, size_t size) {
@@ -650,17 +679,17 @@ private void defineIntrinsics(IpBackendModule mod)
         return cast(int) text.to!string.length;
     });
     defineCallback("strncmp", (char* text, char* cmp, int limit) { return int(text[0 .. limit] == cmp[0 .. limit]); });
-    defineCallback("atoi", (char[] text) {
+    defineCallback("cxruntime_atoi", (char[] text) {
         import std.conv : parse;
 
         return parse!int(text);
     });
-    defineCallback("itoa", (int num) {
+    defineCallback("cxruntime_itoa", (int num) {
         import std.format : format;
 
         return format!"%s"(num);
     });
-    defineCallback("ltoa", (long num) {
+    defineCallback("cxruntime_ltoa", (long num) {
         import std.format : format;
 
         return format!"%s"(num);
@@ -802,24 +831,17 @@ private void defineIntrinsics(IpBackendModule mod)
         delegate void(BackendFunction fun, int value) => fun.ret(value));
     defineCallback(
         "_backendFunction_branch",
-        delegate BranchRecord(BackendFunction fun) => fun.branch);
+        delegate void(BackendFunction fun, string label) => fun.branch(label));
     defineCallback(
         "_backendFunction_testBranch",
-        delegate TestBranchRecord(BackendFunction fun, int reg) => fun.testBranch(reg));
+        delegate void(BackendFunction fun, int reg, string thenLabel, string elseLabel)
+            => fun.testBranch(reg, thenLabel, elseLabel));
     defineCallback(
-        "_backendFunction_blockIndex",
-        delegate int(BackendFunction fun) => fun.blockIndex);
-
+        "_backendFunction_setLabel",
+        delegate void(BackendFunction fun, string label) => fun.setLabel(label));
     defineCallback(
-        "_branchRecord_resolve",
-        delegate void(BranchRecord record, int block) => record.resolve(block));
-
-    defineCallback(
-        "_testBranchRecord_resolveThen",
-        delegate void(TestBranchRecord record, int block) => record.resolveThen(block));
-    defineCallback(
-        "_testBranchRecord_resolveElse",
-        delegate void(TestBranchRecord record, int block) => record.resolveElse(block));
+        "_backendFunction_getLabel",
+        delegate string(BackendFunction fun) => fun.getLabel);
 }
 
 struct StackAllocator

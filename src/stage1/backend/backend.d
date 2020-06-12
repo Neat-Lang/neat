@@ -24,7 +24,6 @@ interface BackendModule
 
 interface BackendFunction
 {
-    int blockIndex();
     Reg arg(int index);
     Reg call(BackendType type, string name, Reg[] args);
     Reg intLiteral(int value);
@@ -46,8 +45,11 @@ interface BackendFunction
     Reg callFuncPtr(BackendType type, Reg ptr, Reg[] args);
     // block enders
     void ret(Reg);
-    BranchRecord branch();
-    TestBranchRecord testBranch(Reg test);
+    // must be first in block. Block can have multiple labels.
+    void setLabel(string label);
+    string getLabel();
+    void branch(string label);
+    void testBranch(Reg test, string thenLabel, string elseLabel);
 }
 
 Reg wordLiteral(BackendFunction fun, Platform platform, size_t size)

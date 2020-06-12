@@ -3,29 +3,6 @@ module backend.proxy;
 import backend.base;
 
 extern(C) void assert(int);
-extern(C) void _branchRecord_resolve(void*, int);
-
-class ProxyBranchRecord : BranchRecord {
-    void* ptr;
-    this(void* ptr) { this.ptr = ptr; }
-    override void resolve(int target) {
-        _branchRecord_resolve(this.ptr, target);
-    }
-}
-
-extern(C) void _testBranchRecord_resolveThen(void*, int);
-extern(C) void _testBranchRecord_resolveElse(void*, int);
-
-class ProxyTestBranchRecord : TestBranchRecord {
-    void* ptr;
-    this(void* ptr) { this.ptr = ptr; }
-    override void resolveThen(int target) {
-        _testBranchRecord_resolveThen(this.ptr, target);
-    }
-    override void resolveElse(int target) {
-        _testBranchRecord_resolveElse(this.ptr, target);
-    }
-}
 
 extern(C) int _backendFunction_arg(void*, int);
 extern(C) int _backendFunction_intLiteral(void*, int);
@@ -45,9 +22,10 @@ extern(C) int _backendFunction_field(void*, void*, int, int);
 extern(C) int _backendFunction_fieldOffset(void*, void*, int, int);
 extern(C) void _backendFunction_store(void*, void*, int, int);
 extern(C) int _backendFunction_ret(void*, int);
-extern(C) void* _backendFunction_branch(void*);
-extern(C) void* _backendFunction_testBranch(void*, int);
-extern(C) int _backendFunction_blockIndex(void*);
+extern(C) void _backendFunction_branch(void*, string);
+extern(C) void _backendFunction_testBranch(void*, int, string, string);
+extern(C) void _backendFunction_setLabel(void*, string);
+extern(C) string _backendFunction_getLabel(void*);
 
 class ProxyBackendFunction : BackendFunction {
     void* ptr;
@@ -75,6 +53,9 @@ class ProxyBackendFunction : BackendFunction {
     }
     override int binop(string op, int size, int left, int right) {
         return _backendFunction_binop(this.ptr, op, size, left, right);
+    }
+    override int bitcast(int from, BackendType to) {
+        return from; // noop in interpreter
     }
     override int zeroExtend(int value, int from, int to) {
         return _backendFunction_zeroExtend(this.ptr, value, from, to);
@@ -106,14 +87,17 @@ class ProxyBackendFunction : BackendFunction {
     override void ret(int reg) {
         _backendFunction_ret(this.ptr, reg);
     }
-    override BranchRecord branch() {
-        return new ProxyBranchRecord(_backendFunction_branch(this.ptr));
+    override void branch(string label) {
+        _backendFunction_branch(this.ptr, label);
     }
-    override TestBranchRecord testBranch(int reg) {
-        return new ProxyTestBranchRecord(_backendFunction_testBranch(this.ptr, reg));
+    override void testBranch(int reg, string thenLabel, string elseLabel) {
+        _backendFunction_testBranch(this.ptr, reg, thenLabel, elseLabel);
     }
-    override int blockIndex() {
-        return _backendFunction_blockIndex(this.ptr);
+    override void setLabel(string label) {
+        _backendFunction_setLabel(this.ptr, label);
+    }
+    override void getLabel() {
+        return _backendFunction_getLabel(this.ptr);
     }
 }
 
@@ -165,6 +149,8 @@ extern(C) void _backendModule_dump(void*);
 class ProxyBackendModule : BackendModule {
     void* ptr;
     this(void* ptr) { this.ptr = ptr; }
+    // no-op on interpreter
+    override void declare(string name, bool extern_, BackendType ret, BackendType[] args) { }
     override BackendFunction define(string name, BackendType ret, BackendType[] args)
     {
         void* proxyRet = proxyEncode(ret);
@@ -195,7 +181,7 @@ extern(C) void* _backend_createModule(void*, void*);
 class ProxyBackend : Backend {
     void* ptr;
     this() { this.ptr = _backendModule_backend(_backendModule()); }
-    override ProxyBackendModule createModule() {
+    override ProxyBackendModule createModule(Platform platform) {
         return new ProxyBackendModule(
             _backend_createModule(this.ptr, _backendModule_platform(_backendModule())));
     }

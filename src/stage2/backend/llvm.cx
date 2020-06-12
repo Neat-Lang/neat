@@ -1,0 +1,469 @@
+module backend.llvm;
+
+import backend.base;
+import helpers;
+
+class LLVMBackend : Backend {
+    this() { }
+    override LLVMBackendModule createModule(Platform platform) {
+        return new LLVMBackendModule(platform);
+    }
+}
+
+class Global {
+    string name;
+    string type;
+    this(string name, string type) {
+        this.name = name;
+        this.type = type;
+    }
+}
+
+class LLVMBackendModule : BackendModule {
+    LineWriter output;
+
+    int literalId;
+    Global[] globals;
+
+    this(Platform platform) {
+        this.output = new LineWriter;
+        defineIntrinsics(this, platform);
+    }
+
+    bool declared(string name) {
+        for (int i = 0; i < this.globals.length; i = i + 1)
+            if (this.globals[i].name == name) return true;
+        return false;
+    }
+
+    override void declare(string name, bool extern_, BackendType ret, BackendType[] args)
+    {
+        if (this.declared(name)) return;
+        if (extern_) {
+            string argstr = "(";
+            for (int i = 0; i < args.length; i = i + 1) {
+                if (i) argstr = argstr ~ ", ";
+                argstr = argstr ~ llvmFmt(args[i]) ~ " %arg" ~ itoa(i);
+            }
+            argstr = argstr ~ ")";
+            string retstr = llvmFmt(ret);
+            if (ret.instanceOf(BackendVoidType)) retstr = "void"; // TODO
+            this.output.print("declare " ~ retstr ~ " @" ~ name ~ argstr);
+        }
+        this.globals = this.globals ~ new Global(name, llvmFmt(new BackendFunctionPointerType(ret, args)));
+    }
+
+    override BackendFunction define(string name, BackendType ret, BackendType[] args)
+    {
+        if (name == "main") name = "_main"; // TODO mangle
+        this.globals = this.globals ~ new Global(name, llvmFmt(new BackendFunctionPointerType(ret, args)));
+        return new LLVMBackendFunction(this, name, ret, args);
+    }
+    override void defineSymbolList(string name, string[] symbols)
+    {
+        string symbolList;
+        for (int i = 0; i < symbols.length; i = i + 1) {
+            if (i) symbolList = symbolList ~ ", ";
+            symbolList = symbolList ~ "void()* bitcast ("
+                ~ this.globalType(symbols[i]) ~ " @" ~ symbols[i] ~ " to void()*)";
+        }
+        string globalType = "[" ~ ltoa(symbols.length) ~ " x void()*]";
+        this.output.print("@" ~ name ~ " = global " ~ globalType ~ " [ " ~ symbolList ~ " ]");
+        this.globals = this.globals ~ new Global(name, globalType);
+    }
+    string nextLiteral() {
+        string res = "@str" ~ itoa(this.literalId);
+        this.literalId = this.literalId + 1;
+        return res;
+    }
+    string globalType(string name) {
+        for (int i = 0; i < this.globals.length; i = i + 1)
+            if (this.globals[i].name == name)
+                return this.globals[i].type;
+        print("no such global " ~ name);
+        assert(false);
+    }
+}
+
+string llvmFmt(BackendType type) {
+    if (type.instanceOf(BackendLongType)) return "i64";
+    if (type.instanceOf(BackendIntType)) return "i32";
+    if (type.instanceOf(BackendCharType)) return "i8";
+    if (type.instanceOf(BackendVoidType)) return "TODOVOID";
+    auto backendPointerType = type.instanceOf(BackendPointerType);
+    if (backendPointerType) {
+        if (backendPointerType.target.instanceOf(BackendVoidType)) {
+            return "i8*";
+        }
+        return llvmFmt(backendPointerType.target) ~ "*";
+    }
+    auto backendStructType = type.instanceOf(BackendStructType);
+    if (backendStructType) {
+        string res = "{ ";
+        for (int i = 0; i < backendStructType.members.length; i = i + 1) {
+            if (i) res = res ~ ", ";
+            res = res ~ llvmFmt(backendStructType.members[i]);
+        }
+        res = res ~ " }";
+        return res;
+    }
+    auto backendFpType = type.instanceOf(BackendFunctionPointerType);
+    if (backendFpType) {
+        string res = llvmFmt(backendFpType.ret) ~ "(";
+        if (backendFpType.ret.instanceOf(BackendVoidType)) res = "void("; // TODO
+        for (int i = 0; i < backendFpType.args.length; i = i + 1) {
+            if (i) res = res ~ ", ";
+            res = res ~ llvmFmt(backendFpType.args[i]);
+        }
+        res = res ~ ")*";
+        return res;
+    }
+    assert(false);
+}
+
+class RegDefine
+{
+    int reg;
+    string type;
+    string value;
+    this(int reg, string type, string value) {
+        this.reg = reg;
+        this.type = type;
+        this.value = value;
+    }
+}
+
+class LLVMBackendFunction : BackendFunction {
+    string name;
+    LLVMBackendModule mod;
+    BackendType ret_;
+    BackendType[] args;
+
+    LineWriter output;
+    RegDefine[] regDefines;
+    int regId;
+    int blockId;
+
+    this(LLVMBackendModule mod, string name, BackendType ret, BackendType[] args)
+    {
+        this.name = name;
+        this.mod = mod;
+        this.ret_ = ret;
+        this.args = args;
+        this.output = new LineWriter;
+        this.regId = 1;
+    }
+    void print(string msg) { this.output.print("  " ~ msg); }
+    string reg(int reg) {
+        for (int i = 0; i < this.regDefines.length; i = i + 1) {
+            RegDefine def = this.regDefines[i];
+            if (def.reg == reg)
+                return def.value;
+        }
+        return "%reg" ~ itoa(reg);
+    }
+    string treg(int reg) {
+        for (int i = 0; i < this.regDefines.length; i = i + 1) {
+            RegDefine def = this.regDefines[i];
+            if (def.reg == reg)
+                return def.type ~ " " ~ def.value;
+        }
+        return "NOTFOUND %reg" ~ itoa(reg);
+    }
+    void defReg2(int reg, string type, string value) {
+        this.regDefines = this.regDefines ~ new RegDefine(reg, type, value);
+    }
+    int defReg(string type, string value) {
+        int reg = this.nextReg();
+        this.defReg2(reg, type, value);
+        return reg;
+    }
+    int nextReg() {
+        int result = this.regId;
+        this.regId = this.regId + 1;
+        return result;
+    }
+    string nextBlockLabel() {
+        string res = "Label" ~ itoa(this.blockId);
+        this.blockId = this.blockId + 1;
+        return res;
+    }
+    override string getLabel() {
+        return "Label" ~ itoa(this.blockId);
+    }
+    override void setLabel(string label) {
+        this.print("br label %" ~ label);
+        this.print(label ~ ":");
+    }
+    override int arg(int index) {
+        return this.defReg(llvmFmt(this.args[index]), "%arg" ~ itoa(index));
+    }
+    override int intLiteral(int value) {
+        return this.defReg("i32", itoa(value));
+    }
+    override int longLiteral(long value) {
+        return this.defReg("i64", ltoa(value));
+    }
+    override int wordLiteral(Platform platform, size_t value) {
+        string size;
+        if (platform.nativeWordSize() == 4) size = "i32";
+        else if (platform.nativeWordSize() == 8) size = "i64";
+        else assert(false);
+        return this.defReg(size, ltoa(value));
+    }
+    override int stringLiteral(string text) {
+        // TODO move to LLVMBackendModule
+        string literalId = this.mod.nextLiteral();
+        string type = "[" ~ ltoa(text.length) ~ " x i8]";
+        string escapedText;
+        // TODO ord()
+        for (int i = 0; i < text.length; i = i + 1) {
+            if (text[i .. i + 1] == "\"") escapedText = escapedText ~ "\\22";
+            else if (text[i .. i + 1] == "\\") escapedText = escapedText ~ "\\5C";
+            else escapedText = escapedText ~ text[i .. i + 1];
+        }
+        this.mod.output.print(
+            literalId ~ " = private unnamed_addr constant " ~ type ~ " c\"" ~ escapedText ~ "\"");
+        int reg = this.nextReg();
+        this.print("%reg" ~ itoa(reg) ~ " = bitcast " ~ type ~ "* " ~ literalId ~ " to i8*");
+        return this.defReg("i8*", "%reg" ~ itoa(reg));
+    }
+    override int voidLiteral() {
+        return this.defReg(llvmFmt(this.ret_), "zeroinitializer");
+    }
+    override int symbolList(string name) {
+        int reg = this.nextReg();
+        auto type = this.mod.globalType(name);
+        this.print("%reg" ~ itoa(reg) ~ " = bitcast " ~ type ~ "* @" ~ name ~ " to i8*");
+        return this.defReg("i8*", "%reg" ~ itoa(reg));
+    }
+    override int binop(string op, int size, int left, int right) {
+        int reg = this.nextReg();
+        string instr;
+        if (op == "+") instr = "add";
+        else if (op == "-") instr = "sub";
+        else if (op == "*") instr = "mul";
+        else if (op == "&") instr = "and";
+        else if (op == "==") instr = "icmp eq";
+        else if (op == "<") instr = "icmp slt";
+        else if (op == "<=") instr = "icmp sle";
+        else if (op == ">") instr = "icmp sgt";
+        else if (op == ">=") instr = "icmp sge";
+        else { print(op); assert(false); }
+        string sizestr;
+        if (size == 4) sizestr = "i32";
+        else if (size == 8) sizestr = "i64";
+        else { print(itoa(size)); assert(false); }
+        this.print("%reg" ~ itoa(reg) ~ " = " ~ instr ~ " " ~ sizestr ~ " " ~ this.reg(left) ~ ", " ~ this.reg(right));
+        int i1 = reg;
+        if (op == "==" || op == "<" || op == ">" || op == "<=" || op == ">=") {
+            reg = this.nextReg();
+            this.print("%reg" ~ itoa(reg) ~ " = zext i1 %reg" ~ itoa(i1) ~ " to i32");
+            this.defReg2(reg, "i32", "%reg" ~ itoa(reg));
+        } else {
+            this.defReg2(reg, sizestr, "%reg" ~ itoa(reg));
+        }
+        return reg;
+    }
+    override int bitcast(int from, BackendType to) {
+        int reg = this.nextReg();
+        string toStr = llvmFmt(to);
+        this.print("%reg" ~ itoa(reg) ~ " = bitcast " ~ this.treg(from) ~ " to " ~ toStr);
+        this.defReg2(reg, toStr, "%reg" ~ itoa(reg));
+        return reg;
+    }
+    override int zeroExtend(int value, int from, int to) {
+        int reg = this.nextReg();
+        this.print("%reg" ~ itoa(reg) ~ " = zext i" ~ itoa(from * 8) ~ " " ~ this.reg(value) ~ " to i" ~ itoa(to * 8));
+        this.defReg2(reg, "i" ~ itoa(to * 8), "%reg" ~ itoa(reg));
+        return reg;
+    }
+    override int call(BackendType ret, string name, int[] args) {
+        int reg = this.nextReg();
+        string argstr = "(";
+        for (int i = 0; i < args.length; i = i + 1) {
+            if (i) argstr = argstr ~ ", ";
+            argstr = argstr ~ this.treg(args[i]);
+        }
+        argstr = argstr ~ ")";
+        if (ret.instanceOf(BackendVoidType)) {
+            this.print("call void @" ~ name ~ argstr);
+            this.defReg2(reg, llvmFmt(ret), "TODOVOIDCALL");
+        } else {
+            this.print("%reg" ~ itoa(reg) ~ " = call " ~ llvmFmt(ret) ~ " @" ~ name ~ argstr);
+            this.defReg2(reg, llvmFmt(ret), "%reg" ~ itoa(reg));
+        }
+        return reg;
+    }
+    override int getFuncPtr(string name) {
+        auto type = this.mod.globalType(name);
+
+        return this.defReg(type, "@" ~ name);
+    }
+    override int callFuncPtr(BackendType type, int callReg, int[] args) {
+        auto backendFpType = type.instanceOf(BackendFunctionPointerType);
+        assert(!!backendFpType);
+        auto ret = backendFpType.ret;
+        int reg = this.nextReg();
+        string argstr = "(";
+        for (int i = 0; i < args.length; i = i + 1) {
+            if (i) argstr = argstr ~ ", ";
+            argstr = argstr ~ this.treg(args[i]);
+        }
+        argstr = argstr ~ ")";
+        if (ret.instanceOf(BackendVoidType)) {
+            this.print("call void " ~ this.reg(callReg) ~ argstr);
+            this.defReg2(reg, llvmFmt(ret), "TODOVOIDCALL");
+        } else {
+            this.print("%reg" ~ itoa(reg) ~ " = call " ~ llvmFmt(ret) ~ " " ~ this.reg(callReg) ~ argstr);
+            this.defReg2(reg, llvmFmt(ret), "%reg" ~ itoa(reg));
+        }
+        return reg;
+    }
+    override int load(BackendType backendType, int source) {
+        int reg = this.nextReg();
+        string typeStr = llvmFmt(backendType);
+        this.print("%reg" ~ itoa(reg) ~ " = load " ~ typeStr ~ ", " ~ typeStr ~ "* " ~ this.reg(source));
+        this.defReg2(reg, typeStr, "%reg" ~ itoa(reg));
+        return reg;
+    }
+    override int alloca(BackendType backendType) {
+        int reg = this.nextReg();
+        string typefmt = llvmFmt(backendType);
+        this.print("%reg" ~ itoa(reg) ~ " = alloca " ~ typefmt);
+        this.print("store " ~ typefmt ~ " zeroinitializer, " ~ typefmt ~ "* %reg" ~ itoa(reg));
+        this.defReg2(reg, typefmt ~ "*", "%reg" ~ itoa(reg));
+        return reg;
+    }
+    override int field(BackendType backendType, int source, int index) {
+        auto backendStructType = backendType.instanceOf(BackendStructType);
+        assert(!!backendStructType);
+
+        int reg = this.nextReg();
+        this.print("%reg" ~ itoa(reg) ~ " = extractvalue " ~ this.treg(source) ~ ", " ~ itoa(index));
+        this.defReg2(reg, llvmFmt(backendStructType.members[index]), "%reg" ~ itoa(reg));
+        return reg;
+    }
+    override int fieldOffset(BackendType backendType, int source, int index) {
+        auto backendStructType = backendType.instanceOf(BackendStructType);
+        assert(!!backendStructType);
+
+        int reg1 = this.nextReg();
+        string typeStr = llvmFmt(backendType);
+        this.print("%reg" ~ itoa(reg1) ~ " = bitcast " ~ this.treg(source) ~ " to " ~ typeStr ~ "*");
+
+        int reg2 = this.nextReg();
+        this.print("%reg" ~ itoa(reg2) ~ " = getelementptr " ~ typeStr
+            ~ ", " ~ typeStr ~ "* %reg" ~ itoa(reg1)
+            ~ ", i32 0, i32 " ~ itoa(index));
+        this.defReg2(reg2, llvmFmt(backendStructType.members[index]) ~ "*", "%reg" ~ itoa(reg2));
+        return reg2;
+    }
+    override void store(BackendType backendType, int target_reg, int value_reg) {
+        string typeStr = llvmFmt(backendType);
+        this.print("store " ~ typeStr ~ " " ~ this.reg(value_reg) ~ ", " ~ this.treg(target_reg));
+    }
+    override void ret(int reg) {
+        if (this.ret_.instanceOf(BackendVoidType)) {
+            this.print("ret void");
+        } else {
+            this.print("ret " ~ this.treg(reg));
+        }
+        this.print(this.nextBlockLabel() ~ ":");
+    }
+    override void branch(string label) {
+        this.print("br label %" ~ label);
+        this.print(this.nextBlockLabel() ~ ":");
+    }
+    override void testBranch(int reg, string thenLabel, string elseLabel) {
+        int testReg = this.nextReg();
+        this.print("%reg" ~ itoa(testReg) ~ " = icmp ne i32 " ~ this.reg(reg) ~ ", 0");
+        this.print("br i1 %reg" ~ itoa(testReg) ~ ", label %" ~ thenLabel ~ ", label %" ~ elseLabel);
+        this.print(this.nextBlockLabel() ~ ":");
+    }
+    override void done() {
+        this.print("unreachable");
+        string argstr = "(";
+        for (int i = 0; i < this.args.length; i = i + 1) {
+            if (i) argstr = argstr ~ ", ";
+            argstr = argstr ~ llvmFmt(this.args[i]) ~ " %arg" ~ itoa(i);
+        }
+        argstr = argstr ~ ")";
+        string retstr = llvmFmt(this.ret_);
+        if (this.ret_.instanceOf(BackendVoidType)) retstr = "void"; // TODO
+        this.mod.output.print("define " ~ retstr ~ " @" ~ this.name ~ argstr ~ "{");
+        this.mod.output.print(this.output.text());
+        this.mod.output.print("}");
+    }
+}
+
+class LineWriter
+{
+    string[] lines;
+    int length;
+    this() { }
+    void print(string msg) {
+        this.append(msg ~ "\n");
+    }
+    void append(string line) {
+        if (this.length == this.lines.length) {
+            size_t newLen = this.lines.length * 2;
+            if (newLen == 0) newLen = 1;
+            auto newLines = new string[](newLen);
+            for (int i = 0; i < this.length; i = i + 1) newLines[i] = this.lines[i];
+            this.lines = newLines;
+        }
+        this.lines[this.length] = line;
+        this.length = this.length + 1;
+    }
+    string text()
+    {
+        size_t sum;
+        for (int i = 0; i < this.length; i = i + 1)
+            sum = sum + this.lines[i].length;
+        string res = new char[](sum);
+        size_t offset = 0;
+        for (int i = 0; i < this.length; i = i + 1)
+        {
+            string line = this.lines[i];
+            // TODO memcpy
+            for (int k = 0; k < line.length; k = k + 1)
+                res[offset + k] = line[k];
+            offset = offset + line.length;
+        }
+        assert(offset == sum);
+        return res;
+    }
+}
+
+void defineIntrinsics(LLVMBackendModule mod, Platform platform) {
+    BackendType voidp = new BackendPointerType(new BackendVoidType);
+    BackendType sizet;
+    if (platform.nativeWordSize() == 4) sizet = new BackendIntType;
+    else if (platform.nativeWordSize() == 8) sizet = new BackendLongType;
+    else assert(false);
+    {
+        auto argTypes = new BackendType[](5);
+        argTypes[0] = voidp;
+        argTypes[1] = voidp;
+        argTypes[2] = sizet;
+        argTypes[3] = sizet;
+        argTypes[4] = sizet;
+        mod.declare("_arraycmp", true, new BackendIntType, argTypes);
+    }
+    {
+        auto argTypes = new BackendType[](3);
+        argTypes[0] = voidp;
+        argTypes[1] = voidp;
+        argTypes[2] = sizet;
+        mod.declare("memcpy", true, voidp, argTypes);
+    }
+    {
+        auto argTypes = new BackendType[](2);
+        argTypes[0] = voidp;
+        argTypes[1] = sizet;
+        mod.declare("ptr_offset", true, voidp, argTypes);
+    }
+    mod.declare("cxruntime_ptr_test", true, new BackendIntType, new BackendType[](0) ~ voidp);
+    mod.declare("cxruntime_alloc", true, voidp, new BackendType[](0) ~ sizet);
+}

@@ -1,16 +1,16 @@
 module main;
 
-import array;
 import backend.base;
 import backend.llvm;
 import backend.proxy;
-import base;
-import expr;
+import cx.array;
+import cx.base;
+import cx.expr;
+import cx.parser;
+import cx.statements;
+import cx.struct_;
+import cx.types;
 import helpers;
-import parser;
-import statements;
-import struct_;
-import types;
 
 extern(C) bool cxruntime_file_exists(string file);
 extern(C) string cxruntime_file_read(string file);
@@ -1910,7 +1910,7 @@ string moduleToFile(string module_)
     return modulePath ~ ".cx";
 }
 
-string findFile(string filename, string[] includes)
+string findFile(string filename, string[] includes, Loc loc)
 {
     if (cxruntime_file_exists(filename))
         return filename;
@@ -1921,15 +1921,16 @@ string findFile(string filename, string[] includes)
         if (cxruntime_file_exists(path))
             return path;
     }
-    print("cannot find file '" ~ filename ~ "' in includes");
-    assert(false);
+    loc.assert2s(false, "cannot find file '" ~ filename ~ "' in includes");
 }
 
 class ASTImport
 {
     string name;
 
-    this(string name) { this.name = name; }
+    Loc loc;
+
+    this(string name, Loc loc) { this.name = name; this.loc = loc; }
 }
 
 ASTImport parseImport(Parser parser)
@@ -1938,7 +1939,7 @@ ASTImport parseImport(Parser parser)
         return null;
     string modname = parseIdentifier2(parser, ".");
     parser.expect(";");
-    return new ASTImport(modname);
+    return new ASTImport(modname, parser.loc());
 }
 
 class ClassMember
@@ -2545,7 +2546,7 @@ Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
             ASTImport import_ = parseImport(parser);
             if (import_) {
                 matched = true;
-                Module importedModule = parseModule(moduleToFile(import_.name), config);
+                Module importedModule = parseModule(moduleToFile(import_.name), config, import_.loc);
 
                 module_.addImport(importedModule);
             }
@@ -2592,10 +2593,10 @@ Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
     return module_;
 }
 
-Module parseModule(string filename, ModuleParserConfig config)
+Module parseModule(string filename, ModuleParserConfig config, Loc loc)
 {
     auto macroState = new CompileMacroState;
-    string path = findFile(filename, config.includes);
+    string path = findFile(filename, config.includes, loc);
     Module mod = config.cache.find(path);
     if (mod) return mod;
 
@@ -2668,7 +2669,7 @@ void main(string[] args)
     auto defaultImports = new Module[](0) ~ builtins;
     auto cache = new ModuleCache;
     auto modParseConfig = new ModuleParserConfig(platform, includes, defaultImports, cache);
-    auto toplevel = parseModule(args[0], modParseConfig);
+    auto toplevel = parseModule(args[0], modParseConfig, null);
     auto output = new Generator(platform, backendModule);
 
     toplevel.emit(output);

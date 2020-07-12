@@ -2686,6 +2686,8 @@ class ASTImport
 {
     string name;
 
+    Loc loc;
+
     mixin(GenerateThis);
 }
 
@@ -2695,7 +2697,7 @@ ASTImport parseImport(ref Parser parser)
         return null;
     auto modname = parser.parseIdentifier(".");
     parser.expect(";");
-    return new ASTImport(modname);
+    return new ASTImport(modname, parser.loc);
 }
 
 class Module : Namespace
@@ -2825,7 +2827,8 @@ string moduleToFile(string module_)
 }
 
 Module parseModule(
-    string filename, string[] includes, Platform platform, Module[] defaultImports, ref Module[string] importCache)
+    string filename, string[] includes, Platform platform, Module[] defaultImports, ref Module[string] importCache,
+    Loc loc = Loc.init)
 {
     if (filename in importCache)
     {
@@ -2845,7 +2848,7 @@ Module parseModule(
                 break;
             }
         }
-        assert(path.exists, format!"cannot find file '%s'"(filename));
+        loc.assert_(path.exists, format!"cannot find file '%s'"(filename));
     }
     string code = readText(path);
     auto parser = new Parser(path, code);
@@ -2854,7 +2857,7 @@ Module parseModule(
     auto modname = parser.parseIdentifier(".");
     parser.expect(";");
 
-    assert(filename == modname.moduleToFile);
+    assert(filename == modname.moduleToFile, format!"expected filename %s to match module %s"(filename, modname));
     auto module_ = new Module(null, modname);
     auto context = Context(platform, module_);
 
@@ -2865,7 +2868,7 @@ Module parseModule(
         if (auto import_ = parser.parseImport)
         {
             auto importedModule = parseModule(
-                import_.name.moduleToFile, includes, platform, defaultImports, importCache);
+                import_.name.moduleToFile, includes, platform, defaultImports, importCache, import_.loc);
 
             module_.addImport(importedModule);
             continue;

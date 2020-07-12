@@ -270,6 +270,19 @@ class ASTCall : ASTSymbol
 
     override Expression compile(Context context)
     {
+        ASTIdentifier ident = this.target.instanceOf(ASTIdentifier);
+        if (ident)
+        {
+            auto macro_ = context.compileMacroState.findCallMacro(ident.name);
+            if (macro_)
+            {
+                Expression transformed = macro_.transform(this.args, context, this.loc);
+                if (transformed)
+                {
+                    return transformed;
+                }
+            }
+        }
         auto target = this.target.compile(context);
         auto args = new Expression[](this.args.length);
         for (int i = 0; i < this.args.length; i = i + 1)
@@ -657,9 +670,9 @@ class ASTReference : ASTSymbol
     override Expression compile(Context context)
     {
         // &function
-        ASTVariable var = this.base.instanceOf(ASTVariable);
-        if (var) {
-            Symbol target = context.namespace.lookup(var.name);
+        ASTIdentifier ident = this.base.instanceOf(ASTIdentifier);
+        if (ident) {
+            Symbol target = context.namespace.lookup(ident.name);
             Function fun = target.instanceOf(Function);
 
             if (fun) return new FunctionReference(fun);
@@ -856,7 +869,7 @@ ASTSymbol parseExpressionLeaf(Parser parser)
     return parseProperties(parser, currentExpr);
 }
 
-class ASTVariable : ASTSymbol
+class ASTIdentifier : ASTSymbol
 {
     string name;
 
@@ -963,7 +976,7 @@ ASTSymbol parseExpressionBase(Parser parser)
     string name = parseIdentifier(parser);
     if (name.length)
     {
-        return new ASTVariable(name);
+        return new ASTIdentifier(name);
     }
     int i;
     if (parseNumber(parser, &i))
@@ -1706,10 +1719,18 @@ class Module : Namespace
 
     bool emitted;
 
-    this(string name)
+    CompileMacroState macroState;
+
+    // whenever macro state changes, we begin a new submodule
+    // when this happens, this member references the previous module.
+    Module parentModule;
+
+    this(string name, CompileMacroState macroState, Module parentModule)
     {
-        this.parent = null;
+        this.parent = parentModule;
+        this.parentModule = parentModule;
         this.name = name;
+        this.macroState = macroState;
     }
 
     Module[] imports;
@@ -1726,16 +1747,22 @@ class Module : Namespace
         this.imports = this.imports ~ module_;
     }
 
-    void emit(Generator generator)
+    // emit the current state of the module into a target.
+    // used by macros to generate an intermediate state
+    // TODO store already-emittedness in the backend instead
+    void emitInto(Generator generator)
     {
-        if (this.emitted) return;
-        this.emitted = true;
+        if (this.parentModule)
+        {
+            this.parentModule.emitInto(generator);
+        }
 
         assert(!generator.fun);
         // TODO each only once!
         for (int i = 0; i < this.imports.length; i = i + 1)
             this.imports[i].emit(generator);
 
+        // (pre)declare everything
         for (int i = 0; i < this.entries.length; i = i + 1) {
             ModuleEntry entry = this.entries[i];
             Function fun = entry.value.instanceOf(Function);
@@ -1760,7 +1787,7 @@ class Module : Namespace
             ModuleEntry entry = this.entries[i];
             Function fun = entry.value.instanceOf(Function);
             if (fun)
-                fun.emit(generator, new Context(generator.platform, this));
+                fun.emit(generator, new Context(generator.platform, this, this.macroState));
             else {
                 auto decl = entry.value.instanceOf(FunctionDeclaration);
                 if (decl)
@@ -1769,9 +1796,17 @@ class Module : Namespace
             Class class_ = entry.value.instanceOf(Class);
             if (class_) {
                 for (int i = 0; i < class_.methods.length; i = i + 1)
-                    class_.methods[i].emit(generator, this, class_);
+                    class_.methods[i].emit(generator, this, class_, this.macroState);
             }
         }
+    }
+
+    void emit(Generator generator)
+    {
+        // only once!
+        if (!generator.once("module_" ~ this.name))
+            return;
+        this.emitInto(generator);
     }
 
     Symbol lookupPublic(string name)
@@ -1932,8 +1967,6 @@ class ClassMethod : Symbol
 
     Statement compiledStatement;
 
-    bool emitted;
-
     Loc loc;
 
     this(Loc loc, Class classType, bool override_, string name, Type ret, Argument[] args, ASTStatement statement, Statement compiledStatement)
@@ -1970,10 +2003,10 @@ class ClassMethod : Symbol
         );
     }
 
-    void emit(Generator generator, Namespace module_, Class thisType)
+    // TODO macro state should be passed in at construction
+    void emit(Generator generator, Namespace module_, Class thisType, CompileMacroState macroState)
     {
-        assert(!this.emitted);
-        this.emitted = true;
+        if (!generator.once(this.mangle())) return;
 
         assert(!generator.fun);
         Type voidp = new Pointer(new Void);
@@ -2003,7 +2036,7 @@ class ClassMethod : Symbol
                     ~ argscope.declare(this.args[i].name, this.args[i].type, argExpr, null);
             }
 
-            this.compiledStatement = this.statement.compile(new Context(generator.platform, argscope));
+            this.compiledStatement = this.statement.compile(new Context(generator.platform, argscope, macroState));
 
             generator.frameReg = generator.fun.alloca(stackframe.structType().emit(generator.platform));
 
@@ -2091,6 +2124,8 @@ class Class : Type
 
     void resolve()
     {
+        // TODO per-backend info?
+        if (this.resolved()) return;
         this.decl.compile2(this.context, this);
         this.decl = null;
     }
@@ -2445,29 +2480,63 @@ class ModuleCache
     }
 }
 
-Module parseModule(string filename, string[] includes, Platform platform, Module[] defaultImports, ModuleCache cache)
+class ModuleParserConfig
 {
-    string path = findFile(filename, includes);
-    Module mod = cache.find(path);
-    if (mod) return mod;
+    Platform platform;
 
-    string code = cxruntime_file_read(path);
-    Parser parser = new Parser(path, code);
+    string[] includes;
 
-    parser.expect("module");
-    string modname = parseIdentifier2(parser, ".");
+    Module[] defaultImports;
+
+    ModuleCache cache;
+
+    this(Platform platform, string[] includes, Module[] defaultImports, ModuleCache cache)
+    {
+        this.platform = platform;
+        this.includes = includes;
+        this.defaultImports = defaultImports;
+        this.cache = cache;
+    }
+}
+
+void* proxyCall(Module module_, string function_)
+{
+    print("# stageM");
+    auto backend = new ProxyBackend();
+    auto platform = new ProxyPlatform();
+    auto backendModule = backend.createModule(platform);
+    auto proxyOutput = new Generator(platform, backendModule);
+
+    module_.emit(proxyOutput);
+    auto fun = module_.lookup(function_).instanceOf(Function);
+    return backendModule.callArity0(fun.mangle());
+}
+
+Module parseMacroContinuation(Parser parser, Module baseModule, ModuleParserConfig config)
+{
+    if (!parser.accept("__defineCallMacro"))
+    {
+        return null;
+    }
+    parser.expect("(");
+    string identifier = parseIdentifier(parser);
+    parser.expect(")");
     parser.expect(";");
 
-    assert(filename == moduleToFile(modname));
+    CallMacro callMacro = proxyCall(baseModule, identifier);
 
-    Module module_ = new Module(modname);
-    Context context = new Context(platform, module_);
+    auto newMacroState = baseModule.macroState.dup();
+    newMacroState.addCallMacro(callMacro);
+    auto subModule = new Module(baseModule.name, newMacroState, baseModule);
+    auto newConfig = new ModuleParserConfig(
+        config.platform, config.includes, config.defaultImports, config.cache);
 
-    for (int i = 0; i < defaultImports.length; i = i + 1) {
-        module_.addImport(defaultImports[i]);
-    }
+    return parseModuleBody(parser, subModule, newConfig);
+}
 
-    cache.add(path, module_);
+Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
+{
+    Context context = new Context(config.platform, module_, module_.macroState);
 
     while (!parser.eof())
     {
@@ -2476,8 +2545,7 @@ Module parseModule(string filename, string[] includes, Platform platform, Module
             ASTImport import_ = parseImport(parser);
             if (import_) {
                 matched = true;
-                Module importedModule = parseModule(
-                    moduleToFile(import_.name), includes, platform, defaultImports, cache);
+                Module importedModule = parseModule(moduleToFile(import_.name), config);
 
                 module_.addImport(importedModule);
             }
@@ -2504,6 +2572,13 @@ Module parseModule(string filename, string[] includes, Platform platform, Module
             continue;
         }*/
         if (!matched) {
+            Module submod = parseMacroContinuation(parser, module_, config);
+            if (submod)
+            {
+                return submod;
+            }
+        }
+        if (!matched) {
             ASTFunction fun = parseFunction(parser);
             if (fun)
             {
@@ -2514,6 +2589,34 @@ Module parseModule(string filename, string[] includes, Platform platform, Module
 
         if (!matched) parser.fail("couldn't parse function or struct");
     }
+    return module_;
+}
+
+Module parseModule(string filename, ModuleParserConfig config)
+{
+    auto macroState = new CompileMacroState;
+    string path = findFile(filename, config.includes);
+    Module mod = config.cache.find(path);
+    if (mod) return mod;
+
+    string code = cxruntime_file_read(path);
+    Parser parser = new Parser(path, code);
+
+    parser.expect("module");
+    string modname = parseIdentifier2(parser, ".");
+    parser.expect(";");
+
+    assert(filename == moduleToFile(modname));
+
+    Module base = new Module(modname, macroState, null);
+    for (int i = 0; i < config.defaultImports.length; i = i + 1) {
+        base.addImport(config.defaultImports[i]);
+    }
+
+    Module module_ = parseModuleBody(parser, base, config);
+
+    config.cache.add(path, module_);
+
     return module_;
 }
 
@@ -2544,7 +2647,7 @@ void main(string[] args)
         print("Usage: stage2 [-Iincludepath]* FILE.cx");
         return;
     }
-    auto builtins = new Module("");
+    auto builtins = new Module("", new CompileMacroState, null);
     auto backend = new ProxyBackend();
     // auto backend = new LLVMBackend();
     // auto platform = new ProxyPlatform();
@@ -2564,7 +2667,8 @@ void main(string[] args)
 
     auto defaultImports = new Module[](0) ~ builtins;
     auto cache = new ModuleCache;
-    auto toplevel = parseModule(args[0], includes, platform, defaultImports, cache);
+    auto modParseConfig = new ModuleParserConfig(platform, includes, defaultImports, cache);
+    auto toplevel = parseModule(args[0], modParseConfig);
     auto output = new Generator(platform, backendModule);
 
     toplevel.emit(output);

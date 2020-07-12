@@ -397,6 +397,8 @@ class IpBackendFunction : BackendFunction
     {
         auto instr = Instr(Instr.Kind.Literal);
 
+        assert(name in module_.symbolLists, format!"symbol list '%s' not found in module"(name));
+
         instr.literal.type = new BackendPointerType(new BackendVoidType);
         instr.literal.value = cast(void[]) [module_.symbolLists[name].ptr];
 
@@ -629,6 +631,8 @@ class IpBackendFunction : BackendFunction
 
 class IpFuncPtr
 {
+    IpBackendModule mod;
+
     string name;
 
     mixin(GenerateAll);
@@ -787,6 +791,17 @@ private void defineIntrinsics(IpBackendModule mod)
         {
             // TODO hardcode interpreter backend in target environment
             (cast(IpBackendModule) mod).call("_main", null, [cast(void[]) [args]]);
+        }
+    );
+    // used for macro hooking
+    defineCallback(
+        "_backendModule_callArity0",
+        delegate void*(BackendModule mod, string name)
+        {
+            // TODO hardcode interpreter backend in target environment
+            void* target;
+            (cast(IpBackendModule) mod).call(name, cast(void[]) ((&target)[0 .. 1]), null);
+            return target;
         }
     );
     defineCallback(
@@ -950,8 +965,7 @@ class IpBackendModule : BackendModule
             if (auto value = symbol in symbolLists) pointers ~= value.ptr;
             else
             {
-                // assert(symbol in functions); // TODO predeclare? does llvm need this?
-                pointers ~= cast(void*) new IpFuncPtr(symbol);
+                pointers ~= cast(void*) new IpFuncPtr(this, symbol);
             }
         }
         symbolLists[name] = cast(void[]) pointers;
@@ -1055,12 +1069,12 @@ class IpBackendModule : BackendModule
                             foreach (k, argReg; instr.callFuncPtr.args)
                                 callArgs[k] = regArrays[argReg];
 
-                            call(funcPtr.name, regArrays[reg], callArgs);
+                            funcPtr.mod.call(funcPtr.name, regArrays[reg], callArgs);
                             break;
                         case GetFuncPtr:
                             assert(!lastInstr);
                             regArrays[reg][] = [
-                                new IpFuncPtr(instr.getFuncPtr.name)];
+                                new IpFuncPtr(this, instr.getFuncPtr.name)];
                             break;
                         case Return:
                             assert(lastInstr);

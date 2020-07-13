@@ -795,13 +795,11 @@ private void defineIntrinsics(IpBackendModule mod)
     );
     // used for macro hooking
     defineCallback(
-        "_backendModule_callArity0",
-        delegate void*(BackendModule mod, string name)
+        "_backendModule_callMacroFun",
+        delegate void(BackendModule mod, string name, void* arg)
         {
             // TODO hardcode interpreter backend in target environment
-            void* target;
-            (cast(IpBackendModule) mod).call(name, cast(void[]) ((&target)[0 .. 1]), null);
-            return target;
+            (cast(IpBackendModule) mod).call(name, null, [cast(void[]) ((&arg)[0 .. 1])]);
         }
     );
     defineCallback(

@@ -2145,17 +2145,17 @@ Expression implicitConvertTo(Expression from, Type to, Loc loc)
     {
         return new PointerCast(to, from);
     }
-    // such as 'class'
-    if (cast(Class) to && from.type == new Pointer(new Void))
-    {
-        return new PointerCast(to, from);
-    }
     if (cast(Integer) from.type && cast(Long) to)
     {
         return new IntToLong(from);
     }
     // any pointer casts to void*
     if (cast(Pointer) from.type && to == new Pointer(new Void))
+    {
+        return new PointerCast(to, from);
+    }
+    // class casts to void*
+    if (cast(Class) from.type && to == new Pointer(new Void))
     {
         return new PointerCast(to, from);
     }

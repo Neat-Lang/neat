@@ -2,9 +2,31 @@ module macrotest;
 
 import cx.base;
 import cx.expr;
+import cx.parser_base;
+import cx.statements;
+import cx.stuff;
 import cx.types;
 
 extern(C) void print(char[]);
+
+class ASTAssertion : ASTSymbol
+{
+    ASTSymbol test;
+
+    Loc loc;
+
+    this(ASTSymbol test, Loc loc) { this.test = test; this.loc = loc; }
+
+    override Expression compile(Context context)
+    {
+        auto assertArgTypes = new Argument[](0) ~ new Argument("test", new Integer);
+        auto assertFun = new FunctionDeclaration("assert", new Void, assertArgTypes);
+        auto expr = this.test.compile(context);
+        auto assertArgs = new Expression[](0) ~ truthy(beExpression(expr), this.loc);
+
+        return new Call(assertFun, assertArgs, this.loc);
+    }
+}
 
 class Assert : CallMacro
 {
@@ -14,17 +36,42 @@ class Assert : CallMacro
 
     override Expression transform(ASTSymbol[] symbols, Context context, Loc loc)
     {
-        auto assertArgTypes = new Argument[](0) ~ new Argument("test", new Integer);
-        auto assertFun = new FunctionDeclaration("assert", new Void, assertArgTypes);
-        auto expr = symbols[0].compile(context);
-        auto assertArgs = new Expression[](0) ~ truthy(beExpression(expr), loc);
-        return new Call(assertFun, assertArgs, loc);
+        return (new ASTAssertion(symbols[0], loc)).compile(context);
+    }
+}
+
+class ParseAssert : ParseStatementMacro
+{
+    this() { }
+
+    override ASTStatement parse(Parser parser, LexicalContext context)
+    {
+        parser.begin();
+        if (!parser.accept("assert"))
+        {
+            parser.revert();
+            return null;
+        }
+        // assert(foo) form
+        if (parser.accept("("))
+        {
+            parser.revert();
+            return null;
+        }
+        parser.commit();
+
+        auto expression = parseExpression(parser);
+
+        parser.expect(";");
+
+        return new ASTExprStatement(new ASTAssertion(expression, parser.loc()));
     }
 }
 
 void assertMacro(CompileMacroState macroState)
 {
     macroState.addCallMacro(new Assert);
+    macroState.addParseStatementMacro(new ParseAssert);
 }
 
 macro(assertMacro);
@@ -37,5 +84,6 @@ void main(string[] args) {
     print("macrotest");
     A a = new A;
     assert(a); // this would not have worked before, because objects are not bools
+    assert a; // this also not
     print("- success");
 }

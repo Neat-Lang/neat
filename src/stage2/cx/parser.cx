@@ -1,192 +1,13 @@
 module cx.parser;
 
 import cx.base;
+// TODO public import
+import cx.parser_base;
 import helpers;
 import cx.linenr;
 
 extern(C) int cxruntime_isAlpha(char);
 extern(C) int cxruntime_isDigit(char);
-
-class Parser
-{
-    string[] stack;
-
-    int level;
-
-    LineNumberRegistry lineNumbers;
-
-    this(string filename, string text)
-    {
-        this.stack = new string[](1);
-        this.stack[0] = text;
-        this.level = 0;
-        this.lineNumbers = new LineNumberRegistry;
-        this.lineNumbers.register(filename, text);
-        this.verify();
-    }
-
-    void verify()
-    {
-        assert(this.stack.length > 0);
-        assert(this.level <= this.stack.length);
-    }
-
-    string* textp()
-    {
-        this.verify();
-        return &this.stack[this.level];
-    }
-
-    string text()
-    {
-        return *this.textp();
-    }
-
-    void begin()
-    {
-        this.verify();
-        if (this.level == this.stack.length - 1)
-        {
-            string[] newStack = new string[](this.stack.length * 2 + 1);
-            for (int i = 0; i < this.stack.length; i = i + 1) newStack[i] = this.stack[i];
-            this.stack = newStack;
-        }
-        this.stack[this.level + 1] = this.text();
-        this.level = this.level + 1;
-    }
-
-    void commit()
-    {
-        assert(this.level > 0);
-        this.verify();
-        this.stack[this.level - 1] = this.text();
-        this.level = this.level - 1;
-        this.verify();
-    }
-
-    void revert()
-    {
-        this.verify();
-        this.level = this.level - 1;
-    }
-
-    bool accept(string match)
-    {
-        this.begin();
-        this.strip();
-        if (this.text().length < match.length)
-        {
-            this.revert();
-            return false;
-        }
-        if (this.text()[0 .. match.length] == match)
-        {
-            (*this.textp()) = this.text()[match.length .. this.text().length];
-            this.commit();
-            return true;
-        }
-        this.revert();
-        return false;
-    }
-
-    void expect(string match)
-    {
-        if (!this.accept(match))
-        {
-            this.fail("'" ~ match ~ "' expected");
-        }
-    }
-
-    bool eof()
-    {
-        this.begin();
-        this.strip();
-        if (this.text().length == 0)
-        {
-            this.commit();
-            return true;
-        }
-        this.revert();
-        return false;
-    }
-
-    void strip()
-    {
-        string text = this.text();
-        while (true)
-        {
-            /* this.text = this.text.strip; */
-            while (text.length > 0 && isWhitespace(text[0 .. 1]))
-            {
-                text = text[1 .. text.length];
-            }
-            if (startsWith(text, "//"))
-            {
-                int newline = find(text, "\n");
-                assert(newline != -1);
-                text = text[newline + 1 .. text.length];
-            }
-            else
-            {
-                if (!startsWith(text, "/*"))
-                {
-                    *this.textp() = text;
-                    return;
-                }
-                text = text["/*".length .. text.length];
-                int commentLevel = 1;
-                while (commentLevel > 0)
-                {
-                    int more = find(text, "/*");
-                    int less = find(text, "*/");
-
-                    if (more == -1 && less == -1) {
-                        *this.textp() = text;
-                        this.fail("comment spans end of file");
-                    }
-                    if (less != -1 && (more == -1 || less < more))
-                    {
-                        text = text[less + "*/".length .. text.length];
-                        commentLevel = commentLevel - 1;
-                    }
-                    if (more != -1 && (less == -1 || more < less))
-                    {
-                        text = text[more + "/*".length .. text.length];
-                        commentLevel = commentLevel + 1;
-                    }
-                }
-            }
-        }
-    }
-
-    void assert_(bool flag, string message)
-    {
-        if (!flag) this.fail(message);
-    }
-
-    void fail(string message)
-    {
-        this.strip();
-        this.lineNumbers.print(this.text(), message);
-        assert(false);
-    }
-
-    Loc loc() { return new Loc(this.lineNumbers, this.text()); }
-}
-
-bool startsWith(string haystack, string needle)
-{
-    return haystack.length >= needle.length && haystack[0 .. needle.length] == needle;
-}
-
-int find(string haystack, string needle)
-{
-    for (int i = 0; i <= haystack.length - needle.length; i = i + 1)
-    {
-        if (haystack[i .. i + needle.length] == needle) return i;
-    }
-    return -1;
-}
 
 bool parseNumber(Parser parser, int* ip)
 {
@@ -216,11 +37,6 @@ bool parseNumber(Parser parser, int* ip)
 bool isAlnum(string s)
 {
     return cxruntime_isAlpha(s[0]) || cxruntime_isDigit(s[0]);
-}
-
-bool isWhitespace(string s)
-{
-    return s == " " || s == "\t" || s == "\r" || s == "\n";
 }
 
 string parseIdentifier2(Parser parser, string allowedChars)

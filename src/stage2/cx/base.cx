@@ -1,7 +1,7 @@
 module cx.base;
 
 import backend.base;
-import cx.linenr;
+import cx.parser_base;
 import helpers;
 
 void assert2s(int test, string msg) { if (!test) { print(msg); assert(false); } }
@@ -11,30 +11,6 @@ void assert2s4(int test, string a, string b, string c, string d) {
     if (!test) { print(a ~ b ~ c ~ d); assert(false); } }
 void assert2s5(int test, string a, string b, string c, string d, string e) {
     if (!test) { print(a ~ b ~ c ~ d ~ e); assert(false); } }
-
-class Loc {
-    LineNumberRegistry lineNumbers;
-
-    string text;
-
-    this(LineNumberRegistry lineNumbers, string text) {
-        this.lineNumbers = lineNumbers;
-        this.text = text;
-    }
-
-    void fail(string message) {
-        this.lineNumbers.print(this.text, message);
-        assert(false);
-    }
-
-    void assert2s(int test, string msg) { if (!test) this.fail(msg); }
-    void assert2s2(int test, string a, string b) { if (!test) this.fail(a ~ b); }
-    void assert2s3(int test, string a, string b, string c) { if (!test) this.fail(a ~ b ~ c); }
-    void assert2s4(int test, string a, string b, string c, string d) {
-        if (!test) this.fail(a ~ b ~ c ~ d); }
-    void assert2s5(int test, string a, string b, string c, string d, string e) {
-        if (!test) this.fail(a ~ b ~ c ~ d ~ e); }
-}
 
 // something that can be referenced by a name
 class Symbol
@@ -71,9 +47,27 @@ class Context
     }
 }
 
+class LexicalContext
+{
+    CompileMacroState macroState;
+
+    this(CompileMacroState macroState) { this.macroState = macroState; }
+}
+
 class ASTSymbol
 {
     Symbol compile(Context context) { assert(false); }
+}
+
+// TODO move back to cx.statements once CompileMacroState is generic
+class ASTStatement
+{
+    Statement compile(Context context) { assert(false); }
+}
+
+class Statement
+{
+    void emit(Generator output) { assert(false); }
 }
 
 class Type : Symbol
@@ -235,10 +229,14 @@ class FunctionDeclaration : Symbol
  * A CompileMacro is a macro that hooks into the AST -> SemTree compile step.
  *
  * This is in base because it's circular with Context.
+ *
+ * TODO rename to MacroState
  */
 class CompileMacroState
 {
     CallMacro[] callMacros;
+
+    ParseStatementMacro[] parseStatementMacros;
 
     CompileMacroState[] imports;
 
@@ -246,9 +244,14 @@ class CompileMacroState
 
     CompileMacroState dup() {
         auto newState = new CompileMacroState;
+        // TODO dup, good god
+        // TODO or a generic macro overclass so this can be one array
         newState.callMacros = new CallMacro[](this.callMacros.length);
         for (int i = 0; i < this.callMacros.length; i = i + 1)
             newState.callMacros[i] = this.callMacros[i];
+        newState.parseStatementMacros = new ParseStatementMacro[](this.parseStatementMacros.length);
+        for (int i = 0; i < this.parseStatementMacros.length; i = i + 1)
+            newState.parseStatementMacros[i] = this.parseStatementMacros[i];
         newState.imports = new CompileMacroState[](this.imports.length);
         for (int i = 0; i < this.imports.length; i = i + 1)
             newState.imports[i] = this.imports[i];
@@ -256,7 +259,7 @@ class CompileMacroState
     }
 
     CallMacro findCallMacro(string identifier) {
-        CallMacro result = this.findCallMacroExported(identifier);
+        auto result = this.findCallMacroExported(identifier);
         if (result) return result;
         for (int i = 0; i < this.imports.length; i = i + 1) {
             result = this.imports[i].findCallMacroExported(identifier);
@@ -273,12 +276,26 @@ class CompileMacroState
         return null;
     }
 
+    // TODO cache or range
+    ParseStatementMacro[] visibleParseStatementMacros() {
+        ParseStatementMacro[] result;
+        result = result ~ this.parseStatementMacros;
+        for (int i = 0; i < this.imports.length; i = i + 1) {
+            result = result ~ this.imports[i].parseStatementMacros;
+        }
+        return result;
+    }
+
     void addImport(CompileMacroState target) {
         this.imports = this.imports ~ target;
     }
 
     void addCallMacro(CallMacro macro_) {
         this.callMacros = this.callMacros ~ macro_;
+    }
+
+    void addParseStatementMacro(ParseStatementMacro macro_) {
+        this.parseStatementMacros = this.parseStatementMacros ~ macro_;
     }
 }
 
@@ -288,4 +305,10 @@ class CallMacro
     string name;
 
     Expression transform(ASTSymbol[] symbols, Context context, Loc loc) { assert(false); }
+}
+
+// hook parseStatement
+class ParseStatementMacro
+{
+    ASTStatement parse(Parser parser, LexicalContext lexicalContext) { assert(false); }
 }

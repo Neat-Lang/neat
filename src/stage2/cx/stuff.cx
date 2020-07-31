@@ -1939,18 +1939,31 @@ class ASTImport
 {
     string name;
 
+    bool isMacroImport;
+
     Loc loc;
 
-    this(string name, Loc loc) { this.name = name; this.loc = loc; }
+    this(string name, bool isMacroImport, Loc loc)
+    {
+        this.name = name;
+        this.isMacroImport = isMacroImport;
+        this.loc = loc;
+    }
 }
 
 ASTImport parseImport(Parser parser)
 {
-    if (!parser.accept("import"))
+    parser.begin();
+    bool isMacroImport = acceptIdentifier(parser, "macro");
+    if (!acceptIdentifier(parser, "import"))
+    {
+        parser.revert();
         return null;
+    }
+    parser.commit();
     string modname = parseIdentifier2(parser, ".");
     parser.expect(";");
-    return new ASTImport(modname, parser.loc());
+    return new ASTImport(modname, isMacroImport, parser.loc());
 }
 
 class ClassMember
@@ -2539,11 +2552,13 @@ void proxyCall(Module module_, string function_, CompileMacroState macroState)
 
 Module parseMacroContinuation(Parser parser, Module baseModule, ModuleParserConfig config)
 {
-    if (!parser.accept("macro"))
+    parser.begin();
+    if (!acceptIdentifier(parser, "macro") || !parser.accept("("))
     {
+        parser.revert();
         return null;
     }
-    parser.expect("(");
+    parser.commit();
     string identifier = parseIdentifier(parser);
     parser.expect(")");
     parser.expect(";");
@@ -2574,6 +2589,14 @@ Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
                 Module importedModule = parseModule(moduleToFile(import_.name), config, import_.loc);
 
                 module_.addImport(importedModule);
+
+                if (import_.isMacroImport)
+                {
+                    auto newMacroState = lexicalContext.macroState.dup();
+
+                    newMacroState.addImport(importedModule.macroState);
+                    lexicalContext = new LexicalContext(newMacroState);
+                }
             }
         }
         if (!matched) {

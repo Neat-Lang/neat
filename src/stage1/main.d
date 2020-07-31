@@ -456,13 +456,13 @@ class ASTVarDeclStatement : ASTStatement
         if (this.type) type = this.type.compile(context);
         if (this.initial)
         {
-            auto initial = this.initial.compile(context).beExpression;
+            auto initial = this.initial.compile(context).beExpression(this.loc);
             if (infer) {
                 assert(!type);
                 type = initial.type();
             }
 
-            return context.namespace.find!VarDeclScope.declare(this.name, type, initial, loc);
+            return context.namespace.find!VarDeclScope.declare(this.name, type, initial, this.loc);
         }
         else
         {

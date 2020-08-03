@@ -2971,6 +2971,7 @@ else
         *cast(string[]*) modArg = nextArgs;
 
         module_.call("main", null, [modArg]);
+        module_.dumpProfile;
         return 0;
     }
 }

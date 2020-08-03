@@ -638,6 +638,8 @@ class IpFuncPtr
     mixin(GenerateAll);
 }
 
+extern(C) alias ExternCMacroFun = void function(void*);
+
 private void defineIntrinsics(IpBackendModule mod)
 {
     void defineCallback(R, T...)(string name, R delegate(T) dg)
@@ -684,6 +686,26 @@ private void defineIntrinsics(IpBackendModule mod)
 
         name.write(data);
     });
+    defineCallback("cxruntime_system", delegate void(string command) {
+        import std.process : spawnShell, wait;
+        import std.stdio : stderr, stdin, stdout;
+
+        auto pid = spawnShell(command);
+        auto ret = wait(pid);
+        assert(ret == 0);
+    });
+    defineCallback("cxruntime_dlcall", delegate void(string dlfile, string fun, void* arg) {
+        import core.sys.posix.dlfcn : dlopen, dlsym, RTLD_LAZY;
+        import std.string : toStringz;
+
+        auto handle = dlopen(toStringz(dlfile), RTLD_LAZY);
+        assert(handle);
+        auto sym = dlsym(handle, toStringz(fun));
+        assert(sym);
+
+        (cast(ExternCMacroFun) sym)(arg);
+    });
+
     defineCallback("cxruntime_alloc", (size_t size) {
         // import std.stdio : writefln; writefln!"malloc %s"(size);
         assert(size >= 0 && size < 128*1024*1024);
@@ -976,11 +998,53 @@ class IpBackendModule : BackendModule
         int[], "instrOffsets",
     )[string] regsizeCache;
 
+    struct ProfilerData
+    {
+        long cost;
+        long[string] subcost;
+    }
+
+    enum event = "nsecs";
+    static ProfilerData[string] profile;
+
+    void dumpProfile()
+    {
+        import std.stdio : File;
+
+        with (File("profile.cg", "w"))
+        {
+            writefln!"# callgrind format";
+            writefln!"events: %s"(event);
+            writefln!"";
+            writefln!"fl=file.d";
+            foreach (name, entry; profile)
+            {
+                writefln!"fn=%s"(name);
+                writefln!"1 %s"(entry.cost);
+                foreach (subname, subcost; entry.subcost)
+                {
+                    writefln!"cfn=%s"(subname);
+                    writefln!"calls=1 1";
+                    writefln!"1 %s"(subcost);
+                }
+                writefln!"";
+            }
+        }
+    }
+
     void call(string name, void[] ret, void[][] args)
     in (name in this.functions || name in this.callbacks, format!"function '%s' not found"(name))
     {
         import core.stdc.stdlib : alloca;
+        import std.datetime.stopwatch : AutoStart, StopWatch;
         import std.stdio : writefln;
+
+        auto watch = StopWatch(AutoStart.yes);
+
+        scope (success) {
+            watch.stop;
+            profile.require(name, ProfilerData.init).cost += watch.peek.total!event;
+        }
 
         scope(failure) writefln!"in %s:"(name);
 
@@ -1029,16 +1093,18 @@ class IpBackendModule : BackendModule
         scope(success) allocator.free(regArrayAllocation.offset);
         // TODO embed offset in the instrs?
 
-        int block = 0;
+        int blockId = 0;
         while (true)
         {
-            assert(block >= 0 && block < fun.blocks.length);
+            assert(blockId >= 0 && blockId < fun.blocks.length);
 
-            foreach (i, instr; fun.blocks[block].instrs)
+            const block = fun.blocks[blockId];
+
+            foreach (i, instr; block.instrs)
             {
-                const lastInstr = i == fun.blocks[block].instrs.length - 1;
+                const lastInstr = i == block.instrs.length - 1;
 
-                int reg = fun.blocks[block].regBase + cast(int) i;
+                int reg = block.regBase + cast(int) i;
                 regArrays[reg] = regData[instrOffsets[reg] .. instrOffsets[reg] + instrSizes[reg]];
 
                 // import std.stdio : writefln; writefln!"%%%s = %s"(reg, instr);
@@ -1055,7 +1121,13 @@ class IpBackendModule : BackendModule
                             )[0 .. len];
                             foreach (k, argReg; instr.call.args) callArgs[k] = regArrays[argReg];
 
+                            watch.stop;
+                            auto callWatch = StopWatch(AutoStart.yes);
                             call(instr.call.name, regArrays[reg], callArgs);
+                            callWatch.stop;
+                            profile.require(name, ProfilerData.init).subcost.require(instr.call.name, 0)
+                                += callWatch.peek.total!event;
+                            watch.start;
                             break;
                         case CallFuncPtr:
                             assert(!lastInstr);
@@ -1067,7 +1139,13 @@ class IpBackendModule : BackendModule
                             foreach (k, argReg; instr.callFuncPtr.args)
                                 callArgs[k] = regArrays[argReg];
 
+                            watch.stop;
+                            auto callWatch = StopWatch(AutoStart.yes);
                             funcPtr.mod.call(funcPtr.name, regArrays[reg], callArgs);
+                            callWatch.stop;
+                            profile.require(name, ProfilerData.init).subcost.require(funcPtr.name, 0)
+                                += callWatch.peek.total!event;
+                            watch.start;
                             break;
                         case GetFuncPtr:
                             assert(!lastInstr);
@@ -1157,7 +1235,7 @@ class IpBackendModule : BackendModule
                             break;
                         case Branch:
                             assert(lastInstr);
-                            block = instr.branch.targetBlock;
+                            blockId = instr.branch.targetBlock;
                             break;
                         case TestBranch:
                             assert(lastInstr);
@@ -1166,9 +1244,9 @@ class IpBackendModule : BackendModule
                             auto testValue = *cast(int*) regArrays[instr.testBranch.test].ptr;
 
                             if (testValue) {
-                                block = instr.testBranch.thenBlock;
+                                blockId = instr.testBranch.thenBlock;
                             } else {
-                                block = instr.testBranch.elseBlock;
+                                blockId = instr.testBranch.elseBlock;
                             }
                             break;
                         case Alloca:

@@ -1,3 +1,4 @@
+#include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +17,7 @@ struct StringArray
 };
 
 void* ptr_offset(void* p, int i) { return p + i; }
-void print(struct String str) { printf("%.*s\n", str.length, str.ptr); }
+void print(struct String str) { printf("%.*s\n", (int) str.length, str.ptr); }
 void assert(int test) { if (!test) abort(); }
 int cxruntime_ptr_test(void* ptr) { return !!ptr; }
 int _arraycmp(void* a, void* b, size_t la, size_t lb, size_t sz) {
@@ -56,7 +57,7 @@ int cxruntime_linenr(struct String haystack, struct String needle, int* linep, i
     return 1;
 }
 int cxruntime_isAlpha(char ch) {
-    return ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z';
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
 }
 int cxruntime_isDigit(char ch) {
     return ch >= '0' && ch <= '9';
@@ -90,6 +91,25 @@ void cxruntime_file_write(struct String file, struct String content) {
     fwrite(content.ptr, 1, content.length, f);
     fclose(f);
     free(fn);
+}
+
+void cxruntime_system(struct String command) {
+    char *cmd = toStringz(command);
+    int ret = system(cmd);
+    if (ret != 0) fprintf(stderr, "command failed with %i\n", ret);
+    assert(ret == 0);
+    free(cmd);
+}
+
+void cxruntime_dlcall(struct String dlfile, struct String fun, void* arg) {
+    void *handle = dlopen(toStringz(dlfile), RTLD_LAZY);
+    if (!handle) fprintf(stderr, "can't open %.*s - %s\n", (int) dlfile.length, dlfile.ptr, dlerror());
+    assert(!!handle);
+    void *sym = dlsym(handle, toStringz(fun));
+    if (!sym) fprintf(stderr, "can't load symbol '%.*s'\n", (int) fun.length, fun.ptr);
+    assert(!!sym);
+
+    ((void(*)(void*)) sym)(arg);
 }
 
 void *cxruntime_alloc(size_t size) {

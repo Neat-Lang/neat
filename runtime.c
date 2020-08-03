@@ -1,4 +1,5 @@
 #include <dlfcn.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,9 +53,25 @@ struct String cxruntime_ltoa(long long l) {
     return (struct String) { len, res };
 }
 int cxruntime_linenr(struct String haystack, struct String needle, int* linep, int* columnp) {
-    *linep = 0;
-    *columnp = 0;
-    return 1;
+    if (needle.ptr < haystack.ptr && needle.ptr >= haystack.ptr + haystack.length)
+        return false;
+    size_t lineStart = 0, lineEnd, lineNr = 0;
+    while (lineStart < haystack.length)
+    {
+        lineEnd = lineStart;
+        while (lineEnd < haystack.length && haystack.ptr[lineEnd] != '\n') lineEnd++;
+        struct String line = { lineEnd - lineStart, haystack.ptr + lineStart };
+
+        if (needle.ptr >= line.ptr && needle.ptr <= line.ptr + line.length)
+        {
+            *linep = (int) lineNr;
+            *columnp = (int) (needle.ptr - line.ptr);
+            return true;
+        }
+        lineNr++;
+        lineStart = lineEnd + 1;
+    }
+    abort();
 }
 int cxruntime_isAlpha(char ch) {
     return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');

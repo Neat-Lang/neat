@@ -742,6 +742,10 @@ private void defineIntrinsics(IpBackendModule mod)
 
         return format!"%s"(num);
     });
+    defineCallback("getpid", {
+        import core.thread.osthread : getpid;
+        return getpid();
+    });
     // helper because we don't have pointer math
     defineCallback("cxruntime_linenr", delegate int(string haystack, string needle, int* linep, int* columnp) {
         if (needle.ptr < haystack.ptr && needle.ptr >= haystack.ptr + haystack.length)

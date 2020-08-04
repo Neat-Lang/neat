@@ -234,9 +234,7 @@ class FunctionDeclaration : Symbol
  */
 class CompileMacroState
 {
-    CallMacro[] callMacros;
-
-    ParseStatementMacro[] parseStatementMacros;
+    Macro[] macros;
 
     CompileMacroState[] imports;
 
@@ -244,71 +242,79 @@ class CompileMacroState
 
     CompileMacroState dup() {
         auto newState = new CompileMacroState;
-        // TODO dup, good god
-        // TODO or a generic macro overclass so this can be one array
-        newState.callMacros = new CallMacro[](this.callMacros.length);
-        for (int i = 0; i < this.callMacros.length; i = i + 1)
-            newState.callMacros[i] = this.callMacros[i];
-        newState.parseStatementMacros = new ParseStatementMacro[](this.parseStatementMacros.length);
-        for (int i = 0; i < this.parseStatementMacros.length; i = i + 1)
-            newState.parseStatementMacros[i] = this.parseStatementMacros[i];
+        newState.macros = new Macro[](this.macros.length);
+        for (int i = 0; i < this.macros.length; i = i + 1)
+            newState.macros[i] = this.macros[i];
         newState.imports = new CompileMacroState[](this.imports.length);
         for (int i = 0; i < this.imports.length; i = i + 1)
             newState.imports[i] = this.imports[i];
         return newState;
     }
 
-    Expression callMacroTransform(string name, bool imported, ASTSymbol[] symbols, Context context, Loc loc) {
-        for (int i = 0; i < this.callMacros.length; i = i + 1) {
-            if (this.callMacros[i].name == name) {
-                Expression result = this.callMacros[i].transform(symbols, context, loc);
-                if (result) return result;
-            }
-        }
-        if (imported) return null; // non-transitive
+    void* applyMacro(MacroArgs args) {
+        this.applyMacroExported(args);
+        if (args.done()) return;
         for (int i = 0; i < this.imports.length; i = i + 1) {
-            Expression result = this.imports[i].callMacroTransform(name, true, symbols, context, loc);
-            if (result) return result;
+            this.imports[i].applyMacroExported(args);
+            if (args.done()) return;
         }
-        return null;
     }
 
-    ASTStatement parseStatementMacroParse(bool imported, Parser parser, LexicalContext lexicalContext) {
-        for (int i = 0; i < this.parseStatementMacros.length; i = i + 1) {
-            ASTStatement result = this.parseStatementMacros[i].parse(parser, lexicalContext);
-            if (result) return result;
+    void applyMacroExported(MacroArgs args) {
+        for (int i = 0; i < this.macros.length; i = i + 1) {
+            this.macros[i].apply(args);
+            if (args.done()) return;
         }
-        if (imported) return null; // non-transitive
-        for (int i = 0; i < this.imports.length; i = i + 1) {
-            ASTStatement result = this.imports[i].parseStatementMacroParse(true, parser, lexicalContext);
-            if (result) return result;
-        }
-        return null;
     }
 
     void addImport(CompileMacroState target) {
         this.imports = this.imports ~ target;
     }
 
-    void addCallMacro(CallMacro macro_) {
-        this.callMacros = this.callMacros ~ macro_;
+    void addMacro(Macro macro_) {
+        this.macros = this.macros ~ macro_;
     }
+}
 
-    void addParseStatementMacro(ParseStatementMacro macro_) {
-        this.parseStatementMacros = this.parseStatementMacros ~ macro_;
-    }
+class Macro
+{
+    void apply(MacroArgs args) { assert(false); }
+}
+
+// macro subclasses are differentiated by args
+class MacroArgs
+{
+    bool done() { assert(false); }
 }
 
 // hook the ASTCall (with ASTIdentifier) -> Call transform
-class CallMacro
+class CallMacroArgs : MacroArgs
 {
     string name;
-
-    Expression transform(ASTSymbol[] symbols, Context context, Loc loc) { assert(false); }
+    ASTSymbol[] symbols;
+    Context context;
+    Loc loc;
+    Expression transformed; // out
+    this(string name, ASTSymbol[] symbols, Context context, Loc loc) {
+        this.name = name;
+        this.symbols = symbols;
+        this.context = context;
+        this.loc = loc;
+        this.transformed = null;
+    }
+    override bool done() { return !!this.transformed; }
 }
 
 // hook parseStatement
-class ParseStatementMacro
+class ParseStatementArgs : MacroArgs
 {
-    ASTStatement parse(Parser parser, LexicalContext lexicalContext) { assert(false); }
+    Parser parser;
+    LexicalContext lexicalContext;
+    ASTStatement statement; // out
+    this(Parser parser, LexicalContext lexicalContext) {
+        this.parser = parser;
+        this.lexicalContext = lexicalContext;
+        this.statement = null;
+    }
+    override bool done() { return !!this.statement; }
 }

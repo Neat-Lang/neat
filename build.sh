@@ -1,3 +1,4 @@
-#!/bin/sh
-mkdir build -p
-ldc2 -g -i -odbuild hello.d -ofbuild/hello -Iinclude/boilerplate/src -L-Lbuild -L-lcx
+#!/bin/bash
+set -euxo pipefail
+make build/stage1
+build/stage1 -Isrc/stage2 main.cx -- -Isrc/stage2 main.cx -o build/stage2

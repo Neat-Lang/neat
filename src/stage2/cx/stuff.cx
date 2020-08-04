@@ -289,7 +289,7 @@ class ASTCall : ASTSymbol
     }
 }
 
-ASTSymbol[] parseSymbolList(Parser parser)
+ASTSymbol[] parseSymbolList(Parser parser, LexicalContext lexicalContext)
 {
     ASTSymbol[] args;
     while (!parser.accept(")"))
@@ -297,12 +297,12 @@ ASTSymbol[] parseSymbolList(Parser parser)
         if (args.length > 0)
             parser.expect(",");
 
-        args = args ~ parseExpression(parser);
+        args = args ~ parseExpression(parser, lexicalContext);
     }
     return args;
 }
 
-ASTCall parseCall(Parser parser, ASTSymbol base)
+ASTCall parseCall(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
 {
     parser.begin();
     if (!parser.accept("("))
@@ -310,7 +310,7 @@ ASTCall parseCall(Parser parser, ASTSymbol base)
         parser.revert();
         return null;
     }
-    auto args = parseSymbolList(parser);
+    auto args = parseSymbolList(parser, lexicalContext);
     parser.commit();
     return new ASTCall(base, args, parser.loc());
 }
@@ -391,7 +391,7 @@ class ASTArraySlice : ASTSymbol
     }
 }
 
-ASTIndexAccess parseIndex(Parser parser, ASTSymbol base)
+ASTIndexAccess parseIndex(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
 {
     parser.begin();
     if (!parser.accept("["))
@@ -399,12 +399,12 @@ ASTIndexAccess parseIndex(Parser parser, ASTSymbol base)
         parser.revert();
         return null;
     }
-    ASTSymbol index = parseExpression(parser);
+    ASTSymbol index = parseExpression(parser, lexicalContext);
     assert(!!index); // "index expected"
     if (parser.accept(".."))
     {
         ASTSymbol lower = index;
-        ASTSymbol upper = parseExpression(parser);
+        ASTSymbol upper = parseExpression(parser, lexicalContext);
         parser.assert_(!!upper, "slice upper bound expected");
         parser.expect("]");
         parser.commit();
@@ -556,7 +556,7 @@ ASTSymbol parseInstanceOf(Parser parser, ASTSymbol left)
     return new ASTInstanceOf(left, type, parser.loc());
 }
 
-ASTSymbol parseProperties(Parser parser, ASTSymbol current)
+ASTSymbol parseProperties(Parser parser, LexicalContext lexicalContext, ASTSymbol current)
 {
     while (true)
     {
@@ -570,7 +570,7 @@ ASTSymbol parseProperties(Parser parser, ASTSymbol current)
             }
         }
         if (!matched) {
-            ASTSymbol expr = parseCall(parser, current);
+            ASTSymbol expr = parseCall(parser, lexicalContext, current);
             if (expr)
             {
                 matched = true;
@@ -586,7 +586,7 @@ ASTSymbol parseProperties(Parser parser, ASTSymbol current)
             }
         }
         if (!matched) {
-            ASTSymbol expr = parseIndex(parser, current);
+            ASTSymbol expr = parseIndex(parser, lexicalContext, current);
             if (expr)
             {
                 matched = true;
@@ -826,18 +826,18 @@ class ASTNewExpression : ASTSymbol
     }
 }
 
-ASTSymbol parseExpressionLeaf(Parser parser)
+ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
 {
     if (parser.accept("*"))
     {
-        ASTSymbol next = parseExpressionLeaf(parser);
+        ASTSymbol next = parseExpressionLeaf(parser, lexicalContext);
 
         assert(!!next);
         return new ASTDereference(next);
     }
     if (parser.accept("&"))
     {
-        ASTSymbol next = parseExpressionLeaf(parser);
+        ASTSymbol next = parseExpressionLeaf(parser, lexicalContext);
 
         assert(!!next);
         return new ASTReference(next);
@@ -848,21 +848,21 @@ ASTSymbol parseExpressionLeaf(Parser parser)
         ASTSymbol[] args;
         if (parser.accept("("))
         {
-            args = parseSymbolList(parser);
+            args = parseSymbolList(parser, lexicalContext);
         }
 
         return new ASTNewExpression(type, args, parser.loc());
     }
     if (parser.accept("!"))
     {
-        ASTSymbol next = parseExpressionLeaf(parser);
+        ASTSymbol next = parseExpressionLeaf(parser, lexicalContext);
 
         assert(!!next);
         return new ASTNegation(next, parser.loc());
     }
-    ASTSymbol currentExpr = parseExpressionBase(parser);
+    ASTSymbol currentExpr = parseExpressionBase(parser, lexicalContext);
     assert(!!currentExpr);
-    return parseProperties(parser, currentExpr);
+    return parseProperties(parser, lexicalContext, currentExpr);
 }
 
 class ASTIdentifier : ASTSymbol
@@ -966,8 +966,13 @@ ASTStringLiteral parseStringLiteral(Parser parser, string endMarker)
     return new ASTStringLiteral(replaceEscapes(str));
 }
 
-ASTSymbol parseExpressionBase(Parser parser)
+ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
 {
+    {
+        auto args = new ParseExpressionBaseArgs(parser, lexicalContext);
+        lexicalContext.macroState.applyMacro(args);
+        if (args.symbol) return args.symbol;
+    }
     string name = parseIdentifier(parser);
     if (name.length)
     {
@@ -984,7 +989,7 @@ ASTSymbol parseExpressionBase(Parser parser)
     }
     if (parser.accept("("))
     {
-        ASTSymbol result = parseExpression(parser);
+        ASTSymbol result = parseExpression(parser, lexicalContext);
 
         parser.expect(")");
         return result;
@@ -993,7 +998,7 @@ ASTSymbol parseExpressionBase(Parser parser)
     assert(false);
 }
 
-ASTSymbol parseBitAnd(Parser parser, ASTSymbol left, int myLevel)
+ASTSymbol parseBitAnd(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
     while (true)
     {
@@ -1001,7 +1006,7 @@ ASTSymbol parseBitAnd(Parser parser, ASTSymbol left, int myLevel)
         if (parser.accept("&") && !parser.accept("&"))
         {
             parser.commit();
-            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+            ASTSymbol right = parseArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("&", left, right, parser.loc());
         }
@@ -1013,25 +1018,25 @@ ASTSymbol parseBitAnd(Parser parser, ASTSymbol left, int myLevel)
     }
 }
 
-ASTSymbol parseAddSubCat(Parser parser, ASTSymbol left, int myLevel)
+ASTSymbol parseAddSubCat(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
     while (true)
     {
         if (parser.accept("+"))
         {
-            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+            ASTSymbol right = parseArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("+", left, right, parser.loc());
         }
         else if (parser.accept("-"))
         {
-            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+            ASTSymbol right = parseArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("-", left, right, parser.loc());
         }
         else if (parser.accept("~"))
         {
-            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+            ASTSymbol right = parseArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("~", left, right, parser.loc());
         }
@@ -1039,13 +1044,13 @@ ASTSymbol parseAddSubCat(Parser parser, ASTSymbol left, int myLevel)
     }
 }
 
-ASTSymbol parseMul(Parser parser, ASTSymbol left, int myLevel)
+ASTSymbol parseMul(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
     while (true)
     {
         if (parser.accept("*"))
         {
-            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+            ASTSymbol right = parseArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("*", left, right, parser.loc());
         }
@@ -1053,26 +1058,26 @@ ASTSymbol parseMul(Parser parser, ASTSymbol left, int myLevel)
     }
 }
 
-ASTSymbol parseBoolAnd(Parser parser, ASTSymbol left, int myLevel)
+ASTSymbol parseBoolAnd(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
     while (true)
     {
         if (parser.accept("&&"))
         {
-            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+            ASTSymbol right = parseArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("&&", left, right, parser.loc());
         } else return left;
     }
 }
 
-ASTSymbol parseBoolOr(Parser parser, ASTSymbol left, int myLevel)
+ASTSymbol parseBoolOr(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
     while (true)
     {
         if (parser.accept("||"))
         {
-            ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+            ASTSymbol right = parseArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("||", left, right, parser.loc());
         } else return left;
@@ -1095,63 +1100,63 @@ class ASTNegation : ASTSymbol
     }
 }
 
-ASTSymbol parseComparison(Parser parser, ASTSymbol left, int myLevel)
+ASTSymbol parseComparison(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
     if (parser.accept("=="))
     {
-        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+        ASTSymbol right = parseArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTBinaryOp("==", left, right, parser.loc());
     }
     if (parser.accept("!=")) // same as !(a == b)
     {
-        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+        ASTSymbol right = parseArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTNegation(new ASTBinaryOp("==", left, right, parser.loc()), parser.loc());
     }
     if (parser.accept(">="))
     {
-        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+        ASTSymbol right = parseArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTBinaryOp(">=", left, right, parser.loc());
     }
     if (parser.accept(">"))
     {
-        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+        ASTSymbol right = parseArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTBinaryOp(">", left, right, parser.loc());
     }
     if (parser.accept("<="))
     {
-        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+        ASTSymbol right = parseArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTBinaryOp("<=", left, right, parser.loc());
     }
     if (parser.accept("<"))
     {
-        ASTSymbol right = parseArithmetic(parser, myLevel + 1);
+        ASTSymbol right = parseArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTBinaryOp("<", left, right, parser.loc());
     }
     return left;
 }
 
-ASTSymbol parseArithmetic(Parser parser, int level)
+ASTSymbol parseArithmetic(Parser parser, LexicalContext lexicalContext, int level)
 {
-    ASTSymbol left = parseExpressionLeaf(parser);
+    ASTSymbol left = parseExpressionLeaf(parser, lexicalContext);
 
-    if (level <= 5) left = parseBitAnd(parser, left, 5);
-    if (level <= 4) left = parseMul(parser, left, 4);
-    if (level <= 3) left = parseAddSubCat(parser, left, 3);
-    if (level <= 2) left = parseComparison(parser, left, 2);
-    if (level <= 1) left = parseBoolAnd(parser, left, 1);
-    if (level <= 0) left = parseBoolOr(parser, left, 0);
+    if (level <= 5) left = parseBitAnd(parser, lexicalContext, left, 5);
+    if (level <= 4) left = parseMul(parser, lexicalContext, left, 4);
+    if (level <= 3) left = parseAddSubCat(parser, lexicalContext, left, 3);
+    if (level <= 2) left = parseComparison(parser, lexicalContext, left, 2);
+    if (level <= 1) left = parseBoolAnd(parser, lexicalContext, left, 1);
+    if (level <= 0) left = parseBoolOr(parser, lexicalContext, left, 0);
     return left;
 }
 
-ASTSymbol parseExpression(Parser parser)
+ASTSymbol parseExpression(Parser parser, LexicalContext lexicalContext)
 {
-    return parseArithmetic(parser, 0);
+    return parseArithmetic(parser, lexicalContext, 0);
 }
 
 class ASTReturnStatement : ASTStatement
@@ -1184,7 +1189,7 @@ class VoidExpression : Expression
     }
 }
 
-ASTReturnStatement parseReturn(Parser parser)
+ASTReturnStatement parseReturn(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin();
     string identifier = parseIdentifier(parser);
@@ -1200,7 +1205,7 @@ ASTReturnStatement parseReturn(Parser parser)
     }
     else
     {
-        expr = parseExpression(parser);
+        expr = parseExpression(parser, lexicalContext);
         parser.expect(";");
     }
     parser.commit();
@@ -1380,7 +1385,7 @@ ASTIfStatement parseIf(Parser parser, LexicalContext lexicalContext)
         return null;
     }
     parser.expect("(");
-    ASTSymbol expr = parseExpression(parser);
+    ASTSymbol expr = parseExpression(parser, lexicalContext);
     parser.expect(")");
     ASTStatement thenStmt = parseStatement(parser, lexicalContext);
     ASTStatement elseStatement;
@@ -1426,23 +1431,23 @@ ASTScopeStatement parseScope(Parser parser, LexicalContext lexicalContext)
     return new ASTScopeStatement(statements);
 }
 
-ASTAssignStatement parseAssignment(Parser parser)
+ASTAssignStatement parseAssignment(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin();
-    ASTSymbol lhs = parseExpressionLeaf(parser);
+    ASTSymbol lhs = parseExpressionLeaf(parser, lexicalContext);
     if (!lhs || !parser.accept("="))
     {
         parser.revert();
         return null;
     }
-    ASTSymbol expr = parseExpression(parser);
+    ASTSymbol expr = parseExpression(parser, lexicalContext);
     parser.commit();
     return new ASTAssignStatement(lhs, expr, parser.loc());
 }
 
-ASTAssignStatement parseAssignStatement(Parser parser)
+ASTAssignStatement parseAssignStatement(Parser parser, LexicalContext lexicalContext)
 {
-    ASTAssignStatement ret = parseAssignment(parser);
+    ASTAssignStatement ret = parseAssignment(parser, lexicalContext);
     if (ret)
     {
         parser.expect(";");
@@ -1498,7 +1503,7 @@ class ASTVarDeclStatement : ASTStatement
     }
 }
 
-ASTVarDeclStatement parseVarDecl(Parser parser)
+ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin();
     bool infer = false;
@@ -1522,11 +1527,11 @@ ASTVarDeclStatement parseVarDecl(Parser parser)
     ASTSymbol initial;
     if (infer) {
         parser.expect("=");
-        initial = parseExpression(parser);
+        initial = parseExpression(parser, lexicalContext);
         assert(!!initial);
     }
     else if (parser.accept("=")) {
-        initial = parseExpression(parser);
+        initial = parseExpression(parser, lexicalContext);
         assert(!!initial);
     }
     parser.expect(";");
@@ -1565,17 +1570,17 @@ ASTWhile parseWhile(Parser parser, LexicalContext lexicalContext)
         return null;
     }
     parser.expect("(");
-    ASTSymbol cond = parseExpression(parser);
+    ASTSymbol cond = parseExpression(parser, lexicalContext);
     parser.expect(")");
     ASTStatement body_ = parseStatement(parser, lexicalContext);
 
     return new ASTWhile(cond, body_, parser.loc());
 }
 
-ASTExprStatement parseExprStatement(Parser parser)
+ASTExprStatement parseExprStatement(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin();
-    ASTSymbol value = parseExpression(parser);
+    ASTSymbol value = parseExpression(parser, lexicalContext);
     if (!value)
     {
         parser.revert();
@@ -1635,10 +1640,10 @@ ASTForLoop parseFor(Parser parser, LexicalContext lexicalContext)
         return null;
     }
     parser.expect("(");
-    ASTVarDeclStatement varDecl = parseVarDecl(parser);
-    ASTSymbol condition = parseExpression(parser);
+    ASTVarDeclStatement varDecl = parseVarDecl(parser, lexicalContext);
+    ASTSymbol condition = parseExpression(parser, lexicalContext);
     parser.expect(";");
-    ASTStatement step = parseAssignment(parser);
+    ASTStatement step = parseAssignment(parser, lexicalContext);
     parser.expect(")");
     ASTStatement body_ = parseStatement(parser, lexicalContext);
 
@@ -1653,7 +1658,7 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
         if (args.statement) return args.statement;
     }
     {
-        ASTStatement stmt = parseReturn(parser);
+        ASTStatement stmt = parseReturn(parser, lexicalContext);
         if (stmt) return stmt;
     }
     {
@@ -1673,15 +1678,15 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
         if (stmt) return stmt;
     }
     {
-        ASTStatement stmt = parseVarDecl(parser);
+        ASTStatement stmt = parseVarDecl(parser, lexicalContext);
         if (stmt) return stmt;
     }
     {
-        ASTStatement stmt = parseAssignStatement(parser);
+        ASTStatement stmt = parseAssignStatement(parser, lexicalContext);
         if (stmt) return stmt;
     }
     {
-        ASTStatement stmt = parseExprStatement(parser);
+        ASTStatement stmt = parseExprStatement(parser, lexicalContext);
         if (stmt) return stmt;
     }
     parser.fail("statement expected");

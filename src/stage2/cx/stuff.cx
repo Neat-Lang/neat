@@ -1518,21 +1518,30 @@ ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext)
             return null;
         }
     }
-    string name = parseIdentifier(parser);
-    if (!name.length)
-    {
-        parser.revert();
-        return null;
-    }
     ASTSymbol initial;
-    if (infer) {
-        parser.expect("=");
+    string name;
+    if (infer && parser.accept("="))
+    {
         initial = parseExpression(parser, lexicalContext);
         assert(!!initial);
     }
-    else if (parser.accept("=")) {
-        initial = parseExpression(parser, lexicalContext);
-        assert(!!initial);
+    else
+    {
+        name = parseIdentifier(parser);
+        if (!name.length)
+        {
+            parser.revert();
+            return null;
+        }
+        if (infer) {
+            parser.expect("=");
+            initial = parseExpression(parser, lexicalContext);
+            assert(!!initial);
+        }
+        else if (parser.accept("=")) {
+            initial = parseExpression(parser, lexicalContext);
+            assert(!!initial);
+        }
     }
     parser.expect(";");
     parser.commit();
@@ -1722,8 +1731,6 @@ class Module : Namespace
 {
     string name;
 
-    bool emitted;
-
     CompileMacroState macroState;
 
     // whenever macro state changes, we begin a new submodule
@@ -1752,14 +1759,13 @@ class Module : Namespace
         this.imports = this.imports ~ module_;
     }
 
-    // emit the current state of the module into a target.
-    // used by macros to generate an intermediate state
-    // TODO store already-emittedness in the backend instead
-    void emitInto(Generator generator)
+    void emit(Generator generator)
     {
+        if (!generator.once("module_" ~ this.name))
+            return;
         if (this.parentModule)
         {
-            this.parentModule.emitInto(generator);
+            this.parentModule.emit(generator);
         }
 
         assert(!generator.fun);
@@ -1804,14 +1810,6 @@ class Module : Namespace
                     class_.methods[i].emit(generator, this, class_, this.macroState);
             }
         }
-    }
-
-    void emit(Generator generator)
-    {
-        // only once!
-        if (!generator.once("module_" ~ this.name))
-            return;
-        this.emitInto(generator);
     }
 
     Symbol lookupPublic(string name)
@@ -2025,8 +2023,6 @@ class ClassMethod : Symbol
     // TODO macro state should be passed in at construction
     void emit(Generator generator, Namespace module_, Class thisType, CompileMacroState macroState)
     {
-        if (!generator.once(this.mangle())) return;
-
         assert(!generator.fun);
         Type voidp = new Pointer(new Void);
 
@@ -2053,9 +2049,11 @@ class ClassMethod : Symbol
                 ~ argscope.declare(this.args[i].name, this.args[i].type, argExpr, null);
         }
 
-        if (!this.compiledStatement)
+        auto compiledStatement = this.compiledStatement;
+
+        if (!compiledStatement)
         {
-            this.compiledStatement = this.statement.compile(new Context(generator.platform, argscope, macroState));
+            compiledStatement = this.statement.compile(new Context(generator.platform, argscope, macroState));
         }
 
         generator.frameReg = generator.fun.alloca(stackframe.structType().emit(generator.platform));
@@ -2065,7 +2063,7 @@ class ClassMethod : Symbol
             argAssignments[i].emit(generator);
         }
 
-        this.compiledStatement.emit(generator);
+        compiledStatement.emit(generator);
 
         generator.fun.ret(generator.fun.voidLiteral());
         generator.frameReg = 0;
@@ -2542,7 +2540,9 @@ void proxyCall(Module module_, string function_, CompileMacroState macroState)
     auto proxyOutput = new Generator(platform, backendModule);
 
     module_.emit(proxyOutput);
+
     auto fun = module_.lookup(function_).instanceOf(Function);
+
     backendModule.callMacroFun(fun.mangle(), macroState);
 }
 
@@ -2651,7 +2651,7 @@ Module parseModule(string filename, ModuleParserConfig config, Loc loc)
     string modname = parseIdentifier2(parser, ".");
     parser.expect(";");
 
-    assert(filename == moduleToFile(modname));
+    parser.loc().assert2s2(filename == moduleToFile(modname), filename, " module doesn't match filename");
 
     Module base = new Module(modname, macroState, null);
     for (int i = 0; i < config.defaultImports.length; i = i + 1) {

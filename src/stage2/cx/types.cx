@@ -87,6 +87,26 @@ class Void : Type
     override string repr() { return "void"; }
 }
 
+class ASTFloat : ASTType
+{
+    Type type;
+    this() { this.type = new Float; }
+
+    override Type compile(Context context) { return this.type; }
+}
+
+class Float : Type
+{
+    BackendType type;
+    this() { this.type = new BackendFloatType; }
+
+    override BackendType emit(Platform platform) { return this.type; }
+
+    override bool same(Type other) { return !!other.instanceOf(Float); }
+
+    override string repr() { return "float"; }
+}
+
 class ASTPointer : ASTType
 {
     ASTType subType;
@@ -143,8 +163,27 @@ class NamedType : ASTType
     }
 }
 
-ASTType parseLeafType(Parser parser)
+// hook type parsing
+class TypeMacroArgs : MacroArgs
 {
+    Parser parser;
+    LexicalContext lexicalContext;
+    ASTType astType;
+    this(Parser parser, LexicalContext lexicalContext) {
+        this.parser = parser;
+        this.lexicalContext = lexicalContext;
+        this.astType = null;
+    }
+    override bool done() { return !!this.astType; }
+}
+
+ASTType parseLeafType(Parser parser, LexicalContext lexicalContext)
+{
+    {
+        auto typeMacroArgs = new TypeMacroArgs(parser, lexicalContext);
+        lexicalContext.macroState.applyMacro(typeMacroArgs);
+        if (typeMacroArgs.astType) return typeMacroArgs.astType;
+    }
     parser.begin();
 
     string identifier = parseIdentifier(parser);
@@ -183,6 +222,13 @@ ASTType parseLeafType(Parser parser)
         return parser.cache.astvoid;
     }
 
+    if (identifier == "float")
+    {
+        parser.commit();
+        if (!parser.cache.astfloat) parser.cache.astfloat = new ASTFloat;
+        return parser.cache.astfloat;
+    }
+
     parser.commit();
     return new NamedType(identifier, parser.loc());
 }
@@ -197,7 +243,7 @@ class Array : Type
     override BackendType emit(Platform platform)
     {
         auto types = new BackendType[](2);
-        types[0] = nativeWordType(platform).emit(platform);
+        types[0] = platform.nativeWordType();
         types[1] = new BackendPointerType(this.elementType.emit(platform));
         return new BackendStructType(types);
     }
@@ -271,9 +317,9 @@ class FunctionPointer : Type
     override string repr() { return this.ret.repr() ~ "(...)"; }
 }
 
-ASTType parseType(Parser parser)
+ASTType parseType(Parser parser, LexicalContext lexicalContext)
 {
-    ASTType current = parseLeafType(parser);
+    ASTType current = parseLeafType(parser, lexicalContext);
     if (!current) return null;
     while (true)
     {
@@ -298,7 +344,7 @@ ASTType parseType(Parser parser)
                             parser.fail("',' or ')' expected");
                         }
                     }
-                    ASTType argType = parseType(parser);
+                    ASTType argType = parseType(parser, lexicalContext);
                     assert(!!argType);
 
                     args = args ~ argType;
@@ -324,8 +370,8 @@ ASTType parseType(Parser parser)
 
 Type nativeWordType(Platform platform)
 {
-    int size = platform.nativeWordSize();
-    if (size == 4) return new Integer;
-    if (size == 8) return new Long;
+    BackendType type = platform.nativeWordType();
+    if (type.instanceOf(BackendIntType)) return new Integer;
+    if (type.instanceOf(BackendLongType)) return new Long;
     assert(false);
 }

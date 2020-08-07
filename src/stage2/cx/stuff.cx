@@ -146,7 +146,7 @@ class ASTFunction
     }
 }
 
-ASTArgument[] parseIdentifierList(Parser parser)
+ASTArgument[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
 {
     ASTArgument[] args;
     while (!parser.accept(")"))
@@ -158,7 +158,7 @@ ASTArgument[] parseIdentifierList(Parser parser)
                 parser.fail("',' or ')' expected");
             }
         }
-        ASTType argtype = parseType(parser);
+        ASTType argtype = parseType(parser, lexicalContext);
         string argname = parseIdentifier(parser);
         args = args ~ new ASTArgument(argname, argtype);
     }
@@ -352,7 +352,7 @@ class ASTIndexAccess : ASTSymbol
         ptrOffsetArgs[1] = new Argument("", wordType);
         auto ptr_offset = new FunctionDeclaration("ptr_offset", new Pointer(new Void), ptrOffsetArgs);
         int size = basePtr.target.emit(context.platform).size(context.platform);
-        BinaryOp offset = new BinaryOp("*", index, new Literal(size));
+        BinaryOp offset = new BinaryOp("*", index, new Literal(size), this.loc);
         assert(offset.type().same(wordType));
 
         auto callArgs = new Expression[](2);
@@ -541,7 +541,7 @@ class ASTInstanceOf : ASTSymbol
     }
 }
 
-ASTSymbol parseInstanceOf(Parser parser, ASTSymbol left)
+ASTSymbol parseInstanceOf(Parser parser, LexicalContext lexicalContext, ASTSymbol left)
 {
     parser.begin();
     if (!(parser.accept(".") && parser.accept("instanceOf")))
@@ -550,7 +550,7 @@ ASTSymbol parseInstanceOf(Parser parser, ASTSymbol left)
         return null;
     }
     parser.expect("(");
-    ASTType type = parseType(parser);
+    ASTType type = parseType(parser, lexicalContext);
     parser.expect(")");
     parser.commit();
     return new ASTInstanceOf(left, type, parser.loc());
@@ -562,7 +562,7 @@ ASTSymbol parseProperties(Parser parser, LexicalContext lexicalContext, ASTSymbo
     {
         bool matched = false;
         if (!matched) {
-            ASTSymbol expr = parseInstanceOf(parser, current);
+            ASTSymbol expr = parseInstanceOf(parser, lexicalContext, current);
             if (expr)
             {
                 matched = true;
@@ -808,7 +808,7 @@ class ASTNewExpression : ASTSymbol
             auto elementSize = new SizeOf(arrayType.elementType);
             // TODO only compute length once
             auto length = implicitConvertTo(beExpression(this.args[0].compile(context)), wordType, this.loc);
-            auto byteLength = new BinaryOp("*", elementSize, length);
+            auto byteLength = new BinaryOp("*", elementSize, length, this.loc);
 
             auto allocArgs = new Argument[](1);
             allocArgs[0] = new Argument("", wordType);
@@ -844,7 +844,7 @@ ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
     }
     if (acceptIdentifier(parser, "new"))
     {
-        ASTType type = parseType(parser);
+        ASTType type = parseType(parser, lexicalContext);
         ASTSymbol[] args;
         if (parser.accept("("))
         {
@@ -1096,7 +1096,7 @@ class ASTNegation : ASTSymbol
     {
         Expression isTrue = truthy(beExpression(this.next.compile(context)), this.loc);
 
-        return new BinaryOp("==", isTrue, new Literal(0));
+        return new BinaryOp("==", isTrue, new Literal(0), this.loc);
     }
 }
 
@@ -1511,7 +1511,7 @@ ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext)
     if (acceptIdentifier(parser, "auto")) {
         infer = true;
     } else {
-        type = parseType(parser);
+        type = parseType(parser, lexicalContext);
         if (!type)
         {
             parser.revert();
@@ -1704,7 +1704,7 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
 ASTFunction parseFunction(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin();
-    ASTType ret = parseType(parser);
+    ASTType ret = parseType(parser, lexicalContext);
     if (!ret)
     {
         parser.revert();
@@ -1712,7 +1712,7 @@ ASTFunction parseFunction(Parser parser, LexicalContext lexicalContext)
     }
     string name = parseIdentifier(parser);
     parser.expect("(");
-    ASTArgument[] args = parseIdentifierList(parser);
+    ASTArgument[] args = parseIdentifierList(parser, lexicalContext);
     ASTStatement stmt = parseStatement(parser, lexicalContext);
     parser.commit();
     return new ASTFunction(name, ret, args, false, stmt);
@@ -1885,18 +1885,18 @@ class ASTExtern
     }
 }
 
-ASTExtern parseExtern(Parser parser)
+ASTExtern parseExtern(Parser parser, LexicalContext lexicalContext)
 {
     if (parser.accept("extern"))
     {
         parser.expect("(");
         parser.expect("C");
         parser.expect(")");
-        ASTType ret = parseType(parser);
+        ASTType ret = parseType(parser, lexicalContext);
         string name = parseIdentifier(parser);
         if (!name.length) parser.fail("identifier expected");
         parser.expect("(");
-        ASTArgument[] args = parseIdentifierList(parser);
+        ASTArgument[] args = parseIdentifierList(parser, lexicalContext);
         parser.expect(";");
         return new ASTExtern(name, ret, args);
     }
@@ -2413,7 +2413,7 @@ class ASTClassDecl : ASTType
     }
 }
 
-ASTArgument[] parseArglist(Parser parser)
+ASTArgument[] parseArglist(Parser parser, LexicalContext lexicalContext)
 {
     ASTArgument[] args;
     while (!parser.accept(")"))
@@ -2425,7 +2425,7 @@ ASTArgument[] parseArglist(Parser parser)
                 parser.fail("',' or ')' expected");
             }
         }
-        ASTType argtype = parseType(parser);
+        ASTType argtype = parseType(parser, lexicalContext);
         parser.assert_(!!argtype, "argument type expected");
         string argname = parseIdentifier(parser);
         parser.assert_(argname.length > 0, "argument name expected");
@@ -2467,14 +2467,14 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
         }
         else
         {
-            retType = parseType(parser);
+            retType = parseType(parser, lexicalContext);
             parser.assert_(!!retType, "expected member type");
             memberName = parseIdentifier(parser);
             parser.assert_(memberName.length > 0, "expected member name");
         }
         if (parser.accept("(")) // method
         {
-            ASTArgument[] args = parseArglist(parser);
+            ASTArgument[] args = parseArglist(parser, lexicalContext);
             ASTStatement stmt = parseStatement(parser, lexicalContext);
             methods = methods ~ new ASTClassDeclMethod(
                 parser.loc(), override_, memberName, retType, args, stmt);
@@ -2603,7 +2603,7 @@ Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
             }
         }
         if (!matched) {
-            ASTExtern extern_ = parseExtern(parser);
+            ASTExtern extern_ = parseExtern(parser, lexicalContext);
             if (extern_)
             {
                 matched = true;

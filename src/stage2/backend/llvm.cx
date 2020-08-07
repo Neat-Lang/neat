@@ -104,6 +104,7 @@ string llvmFmt(BackendType type) {
     if (type.instanceOf(BackendLongType)) return "i64";
     if (type.instanceOf(BackendIntType)) return "i32";
     if (type.instanceOf(BackendCharType)) return "i8";
+    if (type.instanceOf(BackendFloatType)) return "float";
     if (type.instanceOf(BackendVoidType)) return "TODOVOID";
     auto backendPointerType = type.instanceOf(BackendPointerType);
     if (backendPointerType) {
@@ -220,11 +221,11 @@ class LLVMBackendFunction : BackendFunction {
         return this.defReg("i64", ltoa(value));
     }
     override int wordLiteral(Platform platform, size_t value) {
-        string size;
-        if (platform.nativeWordSize() == 4) size = "i32";
-        else if (platform.nativeWordSize() == 8) size = "i64";
+        string sizestr;
+        if (platform.nativeWordType().instanceOf(BackendIntType)) sizestr = "i32";
+        else if (platform.nativeWordType().instanceOf(BackendLongType)) sizestr = "i64";
         else assert(false);
-        return this.defReg(size, ltoa(value));
+        return this.defReg(sizestr, ltoa(value));
     }
     override int stringLiteral(string text) {
         // TODO move to LLVMBackendModule
@@ -252,31 +253,40 @@ class LLVMBackendFunction : BackendFunction {
         this.print("%reg" ~ itoa(reg) ~ " = bitcast " ~ type ~ "* @" ~ name ~ " to i8*");
         return this.defReg("i8*", "%reg" ~ itoa(reg));
     }
-    override int binop(string op, int size, int left, int right) {
+    override int binop(string op, BackendType type, int left, int right) {
         int reg = this.nextReg();
+        string typestr = llvmFmt(type);
         string instr;
-        if (op == "+") instr = "add";
-        else if (op == "-") instr = "sub";
-        else if (op == "*") instr = "mul";
-        else if (op == "&") instr = "and";
-        else if (op == "==") instr = "icmp eq";
-        else if (op == "<") instr = "icmp slt";
-        else if (op == "<=") instr = "icmp sle";
-        else if (op == ">") instr = "icmp sgt";
-        else if (op == ">=") instr = "icmp sge";
-        else { print(op); assert(false); }
-        string sizestr;
-        if (size == 4) sizestr = "i32";
-        else if (size == 8) sizestr = "i64";
-        else { print(itoa(size)); assert(false); }
-        this.print("%reg" ~ itoa(reg) ~ " = " ~ instr ~ " " ~ sizestr ~ " " ~ this.reg(left) ~ ", " ~ this.reg(right));
+        if (typestr == "float") {
+            if (op == "+") instr = "fadd";
+            else if (op == "-") instr = "fsub";
+            else if (op == "*") instr = "fmul";
+            else if (op == "==") instr = "fcmp oeq";
+            else if (op == "<") instr = "fcmp olt";
+            else if (op == "<=") instr = "fcmp ole";
+            else if (op == ">") instr = "fcmp ogt";
+            else if (op == ">=") instr = "fcmp oge";
+            else { print(op); assert(false); }
+        } else {
+            if (op == "+") instr = "add";
+            else if (op == "-") instr = "sub";
+            else if (op == "*") instr = "mul";
+            else if (op == "&") instr = "and";
+            else if (op == "==") instr = "icmp eq";
+            else if (op == "<") instr = "icmp slt";
+            else if (op == "<=") instr = "icmp sle";
+            else if (op == ">") instr = "icmp sgt";
+            else if (op == ">=") instr = "icmp sge";
+            else { print(op); assert(false); }
+        }
+        this.print("%reg" ~ itoa(reg) ~ " = " ~ instr ~ " " ~ typestr ~ " " ~ this.reg(left) ~ ", " ~ this.reg(right));
         int i1 = reg;
         if (op == "==" || op == "<" || op == ">" || op == "<=" || op == ">=") {
             reg = this.nextReg();
             this.print("%reg" ~ itoa(reg) ~ " = zext i1 %reg" ~ itoa(i1) ~ " to i32");
             this.defReg2(reg, "i32", "%reg" ~ itoa(reg));
         } else {
-            this.defReg2(reg, sizestr, "%reg" ~ itoa(reg));
+            this.defReg2(reg, typestr, "%reg" ~ itoa(reg));
         }
         return reg;
     }
@@ -297,6 +307,12 @@ class LLVMBackendFunction : BackendFunction {
         int reg = this.nextReg();
         this.print("%reg" ~ itoa(reg) ~ " = sext i" ~ itoa(from * 8) ~ " " ~ this.reg(value) ~ " to i" ~ itoa(to * 8));
         this.defReg2(reg, "i" ~ itoa(to * 8), "%reg" ~ itoa(reg));
+        return reg;
+    }
+    override int intToFloat(int value) {
+        int reg = this.nextReg();
+        this.print("%reg" ~ itoa(reg) ~ " = sitofp " ~ this.treg(value) ~ " to float");
+        this.defReg2(reg, "float", "%reg" ~ itoa(reg));
         return reg;
     }
     override int call(BackendType ret, string name, int[] args) {
@@ -528,12 +544,53 @@ class LineWriter
     }
 }
 
+void llvmFmtInto(BackendType type, LineWriter output)
+{
+    if (type.instanceOf(BackendLongType)) { output.append("i64"); return; }
+    if (type.instanceOf(BackendIntType)) { output.append("i32"); return; }
+    if (type.instanceOf(BackendCharType)) { output.append("i8"); return; }
+    if (type.instanceOf(BackendVoidType)) { output.append("TODOVOID"); return; }
+    auto backendPointerType = type.instanceOf(BackendPointerType);
+    if (backendPointerType) {
+        if (backendPointerType.target.instanceOf(BackendVoidType)) {
+            output.append("i8*");
+            return;
+        }
+        llvmFmtInto(backendPointerType.target, output);
+        output.append("*");
+        return;
+    }
+    auto backendStructType = type.instanceOf(BackendStructType);
+    if (backendStructType) {
+        output.append("{ ");
+        for (int i = 0; i < backendStructType.members.length; i = i + 1) {
+            if (i) output.append(", ");
+            llvmFmtInto(backendStructType.members[i], output);
+        }
+        output.append(" }");
+        return;
+    }
+    auto backendFpType = type.instanceOf(BackendFunctionPointerType);
+    if (backendFpType) {
+        if (backendFpType.ret.instanceOf(BackendVoidType)) {
+            output.append("void("); // TODO
+        } else {
+            llvmFmtInto(backendFpType.ret, output);
+            output.append("(");
+        }
+        for (int i = 0; i < backendFpType.args.length; i = i + 1) {
+            if (i) output.append(", ");
+            llvmFmtInto(backendFpType.args[i], output);
+        }
+        output.append(")*");
+        return;
+    }
+    assert(false);
+}
+
 void defineIntrinsics(LLVMBackendModule mod, Platform platform) {
     BackendType voidp = new BackendPointerType(new BackendVoidType);
-    BackendType sizet;
-    if (platform.nativeWordSize() == 4) sizet = new BackendIntType;
-    else if (platform.nativeWordSize() == 8) sizet = new BackendLongType;
-    else assert(false);
+    BackendType sizet = platform.nativeWordType();
     {
         auto argTypes = new BackendType[](5);
         argTypes[0] = voidp;

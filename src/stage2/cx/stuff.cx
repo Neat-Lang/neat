@@ -35,19 +35,37 @@ class Function : FunctionDeclaration
 {
     ASTStatement statement;
 
-    this(string name, Type ret, Argument[] args, ASTStatement statement)
+    MacroState macroState;
+
+    Type thisType; // must be a pointer
+
+    Statement compiledStatement;
+
+    this(string name, Type ret, Argument[] args, ASTStatement statement, MacroState macroState)
     {
         this.name = name;
         this.ret = ret;
         this.args = args;
         this.statement = statement;
+        this.macroState = macroState;
+        this.compiledStatement = null;
+        this.thisType = null;
+    }
+
+    override string mangle()
+    {
+        return "_" ~ this.name;
     }
 
     override void declare(Generator generator)
     {
-        auto argTypes = new BackendType[](this.args.length);
+        Type voidp = new Pointer(new Void);
+        int extra = 0;
+        if (this.thisType) extra = 1;
+        auto argTypes = new BackendType[](this.args.length + extra);
+        if (this.thisType) argTypes[0] = voidp.emit(generator.platform);
         for (int i = 0; i < this.args.length; i = i + 1)
-            argTypes[i] = this.args[i].type.emit(generator.platform);
+            argTypes[extra + i] = this.args[i].type.emit(generator.platform);
 
         generator.mod.declare(
             this.mangle(),
@@ -57,35 +75,49 @@ class Function : FunctionDeclaration
         );
     }
 
-    override string mangle() {
-        return "_" ~ this.name;
-    }
-
-    void emit(Generator generator, Context module_)
+    void emit(Generator generator, Namespace module_)
     {
         assert(!generator.fun);
-        auto argTypes = new BackendType[](this.args.length);
+        Type voidp = new Pointer(new Void);
+        int extra = 0;
+        if (this.thisType) extra = 1;
+        auto argTypes = new BackendType[](this.args.length + extra);
+        if (this.thisType) argTypes[0] = voidp.emit(generator.platform);
         for (int i = 0; i < this.args.length; i = i + 1)
-            argTypes[i] = this.args[i].type.emit(module_.platform);
+            argTypes[extra + i] = this.args[i].type.emit(generator.platform);
         assert(!!module_);
         generator.fun = generator.mod.define(
             this.mangle(),
-            this.ret.emit(module_.platform),
+            this.ret.emit(generator.platform),
             argTypes
         );
-        auto stackframe = new FunctionScope(module_.namespace);
+
+        auto stackframe = new FunctionScope(module_);
         auto argscope = new VarDeclScope(stackframe, true);
-        auto argAssignments = new Statement[](this.args.length);
+        auto argAssignments = new Statement[](this.args.length + extra);
+
+        if (this.thisType)
+        {
+            argAssignments[0] = argscope.declare(
+                "this", this.thisType, new PointerCast(this.thisType, new ArgExpr(0, voidp)), null);
+        }
         for (int i = 0; i < this.args.length; i = i + 1) {
             Argument arg = this.args[i];
-            auto argExpr = new ArgExpr(i, arg.type);
+            auto argExpr = new ArgExpr(extra + i, arg.type);
 
-            argAssignments[i] = argscope.declare(arg.name, arg.type, argExpr, null);
+            argAssignments[extra + i] = argscope.declare(arg.name, arg.type, argExpr, null);
         }
 
-        Statement compiledStatement = this.statement.compile(module_.withNamespace(argscope));
+        auto compiledStatement = this.compiledStatement;
 
-        generator.frameReg = generator.fun.alloca(stackframe.structType().emit(module_.platform));
+        if (!compiledStatement)
+        {
+            auto context = new Context(generator.platform, argscope, this.macroState);
+
+            compiledStatement = this.statement.compile(context);
+        }
+
+        generator.frameReg = generator.fun.alloca(stackframe.structType().emit(generator.platform));
 
         for (int i = 0; i < argAssignments.length; i = i + 1)
         {
@@ -93,6 +125,7 @@ class Function : FunctionDeclaration
         }
 
         compiledStatement.emit(generator);
+
         generator.fun.ret(generator.fun.voidLiteral());
         generator.fun.done();
         generator.fun = null;
@@ -112,13 +145,16 @@ class ASTFunction
 
     ASTStatement statement;
 
-    this(string name, ASTType ret, ASTArgument[] args, bool isDeclaration, ASTStatement statement)
+    MacroState macroState;
+
+    this(string name, ASTType ret, ASTArgument[] args, bool isDeclaration, ASTStatement statement, MacroState macroState)
     {
         this.name = name;
         this.ret = ret;
         this.args = args;
         this.isDeclaration = isDeclaration;
         this.statement = statement;
+        this.macroState = macroState;
     }
 
     FunctionDeclaration compile(Context context)
@@ -141,7 +177,7 @@ class ASTFunction
             this.name,
             this.ret.compile(context),
             arguments,
-            this.statement);
+            this.statement, this.macroState);
     }
 }
 
@@ -1714,7 +1750,7 @@ ASTFunction parseFunction(Parser parser, LexicalContext lexicalContext)
     ASTArgument[] args = parseIdentifierList(parser, lexicalContext);
     ASTStatement stmt = parseStatement(parser, lexicalContext);
     parser.commit();
-    return new ASTFunction(name, ret, args, false, stmt);
+    return new ASTFunction(name, ret, args, false, stmt, lexicalContext.macroState);
 }
 
 class ModuleEntry
@@ -1797,7 +1833,7 @@ class Module : Namespace
             ModuleEntry entry = this.entries[i];
             Function fun = entry.value.instanceOf(Function);
             if (fun)
-                fun.emit(generator, new Context(generator.platform, this, this.macroState));
+                fun.emit(generator, this);
             else {
                 auto decl = entry.value.instanceOf(FunctionDeclaration);
                 if (decl)
@@ -1806,7 +1842,7 @@ class Module : Namespace
             Class class_ = entry.value.instanceOf(Class);
             if (class_) {
                 for (int i = 0; i < class_.methods.length; i = i + 1)
-                    class_.methods[i].emit(generator, this, class_);
+                    class_.methods[i].emit(generator, this);
             }
         }
     }
@@ -1966,117 +2002,38 @@ class ClassMember
     this(string name, Type type) { this.name = name; this.type = type; }
 }
 
-// TODO merge with class Function
-class ClassMethod : Symbol
+class ClassMethod : Function
 {
-    Class classType;
-
-    bool override_;
-
-    string name;
-
-    Type ret;
-
-    Argument[] args;
-
-    ASTStatement statement;
-
-    Statement compiledStatement;
-
     Loc loc;
 
-    MacroState macroState;
+    bool override_;
 
     this(Loc loc, Class classType, bool override_, string name, Type ret, Argument[] args, ASTStatement statement,
          Statement compiledStatement, MacroState macroState)
     {
-        this.loc = loc;
-        this.classType = classType;
-        this.override_ = override_;
+        // TODO super()
         this.name = name;
         this.ret = ret;
         this.args = args;
         this.statement = statement;
         this.compiledStatement = compiledStatement;
         this.macroState = macroState;
+
+        this.loc = loc;
+        this.thisType = classType;
+        this.override_ = override_;
     }
 
-    string mangle()
+    override string mangle()
     {
         // TODO mangle types
-        return "_" ~ this.classType.name ~ "_" ~ this.name;
-    }
-
-    void declare(Generator generator) {
-        // TODO merge with emit
-        Type voidp = new Pointer(new Void);
-        auto argTypes = new BackendType[](this.args.length + 1);
-        argTypes[0] = voidp.emit(generator.platform);
-        for (int i = 0; i < this.args.length; i = i + 1)
-            argTypes[i + 1] = this.args[i].type.emit(generator.platform);
-
-        generator.mod.declare(
-            this.mangle(),
-            false,
-            this.ret.emit(generator.platform),
-            argTypes
-        );
-    }
-
-    void emit(Generator generator, Namespace module_, Class thisType)
-    {
-        assert(!generator.fun);
-        Type voidp = new Pointer(new Void);
-
-        auto argTypes = new BackendType[](this.args.length + 1);
-        argTypes[0] = voidp.emit(generator.platform);
-        for (int i = 0; i < this.args.length; i = i + 1)
-            argTypes[i + 1] = this.args[i].type.emit(generator.platform);
-        generator.fun = generator.mod.define(
-            this.mangle(),
-            this.ret.emit(generator.platform),
-            argTypes
-        );
-
-        auto stackframe = new FunctionScope(module_);
-        auto argscope = new VarDeclScope(stackframe, true);
-        auto argAssignments = new Statement[](this.args.length + 1);
-
-        argAssignments[0] = argscope.declare(
-            "this", thisType, new PointerCast(thisType, new ArgExpr(0, voidp)), null);
-        for (int i = 0; i < this.args.length; i = i + 1) {
-            Argument arg = this.args[i];
-            auto argExpr = new ArgExpr(i + 1, arg.type);
-
-            argAssignments[i + 1] = argscope.declare(arg.name, arg.type, argExpr, null);
-        }
-
-        auto compiledStatement = this.compiledStatement;
-
-        if (!compiledStatement)
-        {
-            compiledStatement   = this.statement.compile(new Context(generator.platform, argscope, this.macroState));
-        }
-
-        generator.frameReg = generator.fun.alloca(stackframe.structType().emit(generator.platform));
-
-        for (int i = 0; i < argAssignments.length; i = i + 1)
-        {
-            argAssignments[i].emit(generator);
-        }
-
-        compiledStatement.emit(generator);
-
-        generator.fun.ret(generator.fun.voidLiteral());
-        generator.fun.done();
-        generator.fun = null;
-        generator.frameReg = -1;
+        return "_" ~ this.thisType.instanceOf(Class).name ~ "_" ~ this.name;
     }
 
     Type funcPtrType()
     {
         auto argTypes = new Type[](this.args.length + 1);
-        argTypes[0] = this.classType;
+        argTypes[0] = this.thisType;
         for (int i = 0; i < this.args.length; i = i + 1) argTypes[i + 1] = this.args[i].type;
         return new FunctionPointer(this.ret, argTypes);
     }

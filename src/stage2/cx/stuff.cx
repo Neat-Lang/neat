@@ -93,7 +93,18 @@ class Function : FunctionDeclaration
         );
 
         auto stackframe = new FunctionScope(module_);
-        auto argscope = new VarDeclScope(stackframe, true);
+        ThisScope thisScope = null;
+        Namespace scope_ = stackframe;
+        if (this.thisType)
+        {
+            thisScope = new ThisScope(scope_);
+
+            scope_ = thisScope;
+        }
+        auto argscope = new VarDeclScope(scope_);
+
+        scope_ = argscope;
+
         auto argAssignments = new Statement[](this.args.length + extra);
 
         if (this.thisType)
@@ -108,11 +119,16 @@ class Function : FunctionDeclaration
             argAssignments[extra + i] = argscope.declare(arg.name, arg.type, argExpr, null);
         }
 
+        if (this.thisType)
+        {
+            thisScope.thisExpr = beExpression(argscope.lookup("this"));
+        }
+
         auto compiledStatement = this.compiledStatement;
 
         if (!compiledStatement)
         {
-            auto context = new Context(generator.platform, argscope, this.macroState);
+            auto context = new Context(generator.platform, scope_, this.macroState);
 
             compiledStatement = this.statement.compile(context);
         }
@@ -450,57 +466,62 @@ ASTIndexAccess parseIndex(Parser parser, LexicalContext lexicalContext, ASTSymbo
     return new ASTIndexAccess(base, index, parser.loc());
 }
 
-Symbol accessMember(Symbol base, string member, Loc loc)
+Symbol accessMember(Symbol base, string member, Loc loc, bool allowUndefined)
 {
-    if (base.instanceOf(Expression))
+    if (!base.instanceOf(Expression))
     {
-        Expression baseExpr = beExpression(base);
-
-        while (baseExpr.type().instanceOf(Pointer)) {
-            baseExpr = new Dereference(baseExpr);
-        }
-        Struct structType = baseExpr.type().instanceOf(Struct);
-        if (structType)
-        {
-            loc.assert2s(!!baseExpr.instanceOf(Reference), "TODO struct member of value");
-            int memberOffset = -1;
-            for (int i = 0; i < structType.members.length; i = i + 1)
-            {
-                if (structType.members[i].name == member) memberOffset = i;
-            }
-            loc.assert2s2(memberOffset != -1, "no such member ", member);
-            return new StructMember(baseExpr.instanceOf(Reference), memberOffset);
-        }
-        Class classType = baseExpr.type().instanceOf(Class);
-        if (classType)
-        {
-            assert(classType.resolved());
-            ClassMethod[] vtable = classType.vtable();
-            int methodOffset = -1;
-            for (int i = 0; i < vtable.length; i = i + 1) {
-                if (vtable[i].name == member) methodOffset = i;
-            }
-            Expression asStructPtr = new PointerCast(new Pointer(classType.dataStruct()), baseExpr);
-            if (methodOffset != -1)
-            {
-                Reference classInfo = new Dereference(new PointerCast(
-                    new Pointer(classType.classInfoStruct()), new StructMember(new Dereference(asStructPtr), 0)));
-                // TODO dereference-into-symbol so we can '&' it again
-                auto funcPtr = new StructMember(classInfo, methodOffset);
-                return new ClassMethodPtr(funcPtr, baseExpr);
-            }
-
-            ClassMember[] members = classType.allMembers();
-            int memberOffset = -1;
-            for (int i = 0; i < members.length; i = i + 1)
-                if (members[i].name == member) memberOffset = i;
-            loc.assert2s4(memberOffset != -1, "no such member ", member, " in ", classType.name);
-            return new StructMember(new Dereference(asStructPtr), memberOffset);
-        }
-
-        loc.assert2s2(false, "expected struct/class type for member, not ", baseExpr.type().repr());
+        loc.assert2s(false, "expected expression for member access");
     }
-    assert(false); // , format!"expected expression for member access, not %s"(base));
+    Expression baseExpr = beExpression(base);
+
+    while (baseExpr.type().instanceOf(Pointer)) {
+        baseExpr = new Dereference(baseExpr);
+    }
+    Struct structType = baseExpr.type().instanceOf(Struct);
+    if (structType)
+    {
+        loc.assert2s(!!baseExpr.instanceOf(Reference), "TODO struct member of value");
+        int memberOffset = -1;
+        for (int i = 0; i < structType.members.length; i = i + 1)
+        {
+            if (structType.members[i].name == member) memberOffset = i;
+        }
+        if (!allowUndefined)
+            loc.assert2s2(memberOffset != -1, "no such member ", member);
+        if (memberOffset != -1)
+            return new StructMember(baseExpr.instanceOf(Reference), memberOffset);
+    }
+    Class classType = baseExpr.type().instanceOf(Class);
+    if (classType)
+    {
+        assert(classType.resolved());
+        ClassMethod[] vtable = classType.vtable();
+        int methodOffset = -1;
+        for (int i = 0; i < vtable.length; i = i + 1) {
+            if (vtable[i].name == member) methodOffset = i;
+        }
+        Expression asStructPtr = new PointerCast(new Pointer(classType.dataStruct()), baseExpr);
+        if (methodOffset != -1)
+        {
+            Reference classInfo = new Dereference(new PointerCast(
+                new Pointer(classType.classInfoStruct()), new StructMember(new Dereference(asStructPtr), 0)));
+            // TODO dereference-into-symbol so we can '&' it again
+            auto funcPtr = new StructMember(classInfo, methodOffset);
+            return new ClassMethodPtr(funcPtr, baseExpr);
+        }
+
+        ClassMember[] members = classType.allMembers();
+        int memberOffset = -1;
+        for (int i = 0; i < members.length; i = i + 1)
+            if (members[i].name == member) memberOffset = i;
+        if (!allowUndefined)
+            loc.assert2s4(memberOffset != -1, "no such member ", member, " in ", classType.name);
+        if (memberOffset != -1)
+            return new StructMember(new Dereference(asStructPtr), memberOffset);
+    }
+    if (!allowUndefined)
+        loc.assert2s2(false, "expected struct/class type for member, not ", baseExpr.type().repr());
+    return null;
 }
 
 class ASTMember : ASTSymbol
@@ -532,7 +553,7 @@ class ASTMember : ASTSymbol
             return new ArrayPointer(expr.type().instanceOf(Array).elementType, expr);
         }
 
-        return accessMember(base, this.member, this.loc);
+        return accessMember(base, this.member, this.loc, false);
     }
 }
 
@@ -570,7 +591,7 @@ class ASTInstanceOf : ASTSymbol
         assert(!!base.type().instanceOf(Class));
         Class target = this.target.compile(context).instanceOf(Class);
         assert(!!target);
-        Symbol instanceOf = accessMember(base, "__instanceof", this.loc);
+        Symbol instanceOf = accessMember(base, "__instanceof", this.loc, false);
         Expression name = new StringLiteral(target.name);
         return new PointerCast(target, call(instanceOf, new Expression[](0) ~ name, this.loc));
     }
@@ -802,7 +823,7 @@ class CallCtorExpression : Expression
         int reg = this.classptr.emit(output);
         RegExpr expr = new RegExpr(this.classptr.type(), reg);
 
-        call(accessMember(expr, "this", this.loc), this.args, this.loc).emit(output);
+        call(accessMember(expr, "__ctor", this.loc, false), this.args, this.loc).emit(output);
         return reg;
     }
 }
@@ -1325,12 +1346,9 @@ class VarDeclScope : Namespace
 {
     DeclaredVariable[] declarations;
 
-    bool frameBase; // base of function frame. all variables here are parameters.
-
-    this(Namespace parent, bool frameBase)
+    this(Namespace parent)
     {
         this.parent = parent;
-        this.frameBase = frameBase;
     }
 
     Statement declare(string name, Type type, Expression value, Loc loc)
@@ -1363,8 +1381,28 @@ class VarDeclScope : Namespace
                 return this.declarations[i].value;
             }
         }
-        if (this.parent)
-            return this.parent.lookup(name);
+        if (this.parent) return this.parent.lookup(name);
+        return null;
+    }
+}
+
+/**
+ * Return class variables without requiring 'this.'
+ */
+class ThisScope : VarDeclScope
+{
+    Expression thisExpr;
+
+    this(Namespace parent) {
+        this.parent = parent;
+        this.thisExpr = null;
+    }
+
+    override Symbol lookup(string name) {
+        assert(!!this.thisExpr);
+        auto result = accessMember(this.thisExpr, name, null, true);
+        if (result) return result;
+        if (this.parent) return this.parent.lookup(name);
         return null;
     }
 }
@@ -1397,12 +1435,12 @@ class ASTIfStatement : ASTStatement
 
     override Statement compile(Context context)
     {
-        auto ifscope = new VarDeclScope(context.namespace, false);
+        auto ifscope = new VarDeclScope(context.namespace);
         Symbol test = this.test.compile(context.withNamespace(ifscope));
         Statement then = this.then.compile(context.withNamespace(ifscope));
         Statement else_;
         if (this.else_) {
-            auto elsescope = new VarDeclScope(context.namespace, false);
+            auto elsescope = new VarDeclScope(context.namespace);
             else_ = this.else_.compile(context.withNamespace(elsescope));
         }
 
@@ -1440,7 +1478,7 @@ class ASTScopeStatement : ASTStatement
 
     override Statement compile(Context context)
     {
-        auto subscope = new VarDeclScope(context.namespace, false);
+        auto subscope = new VarDeclScope(context.namespace);
         auto statements = new Statement[](this.statements.length);
         for (int i = 0; i < this.statements.length; i = i + 1)
         {
@@ -1599,7 +1637,7 @@ class ASTWhile : ASTStatement
 
     override Statement compile(Context context)
     {
-        auto subscope = new VarDeclScope(context.namespace, false);
+        auto subscope = new VarDeclScope(context.namespace);
         Expression condExpr = truthy(beExpression(this.cond.compile(context.withNamespace(subscope))), this.loc);
         Statement bodyStmt = this.body_.compile(context.withNamespace(subscope));
 
@@ -1660,7 +1698,7 @@ class ASTForLoop : ASTStatement
          * for (decl; test; step) body
          * decl; while (test) { body; step; }
          */
-        Context forscope = context.withNamespace(new VarDeclScope(context.namespace, false));
+        Context forscope = context.withNamespace(new VarDeclScope(context.namespace));
 
         Statement decl = this.declareLoopVar.compile(forscope);
         Expression condition = beExpression(this.condition.compile(forscope));
@@ -2039,6 +2077,12 @@ class ClassMethod : Function
     }
 }
 
+// TODO .truthy
+Expression truthy_(Expression value, Loc loc)
+{
+    return truthy(value, loc);
+}
+
 class Class : Type
 {
     string name;
@@ -2071,7 +2115,7 @@ class Class : Type
     override Expression truthy(Expression value, Loc loc)
     {
         Type voidp = new Pointer(new Void);
-        return truthy(new PointerCast(voidp, value), loc);
+        return truthy_(new PointerCast(voidp, value), loc);
     }
 
     override Expression implicitConvertFrom(Expression from)
@@ -2195,11 +2239,11 @@ class Class : Type
             {
                 if (combinedMethods[i].name == method.name) index = i;
             }
-            bool isThis = method.name == "this"; // workaround: no final yet, no proper masking yet
+            bool isCtor = method.name == "__ctor"; // workaround: no final yet, no proper masking yet
             if (index != -1)
             {
                 if (method.loc)
-                    method.loc.assert2s(method.override_ || isThis,
+                    method.loc.assert2s(method.override_ || isCtor,
                         "Expected 'override' attribute for overriding method.");
                 // override
                 combinedMethods[index] = method;
@@ -2426,7 +2470,7 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
         {
             parser.assert_(!override_, "cannot override constructor");
             retType = new ASTVoid;
-            memberName = "this";
+            memberName = "__ctor";
         }
         else
         {

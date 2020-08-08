@@ -76,15 +76,14 @@ class Function : FunctionDeclaration
         auto stackframe = new FunctionScope(module_.namespace);
         auto argscope = new VarDeclScope(stackframe, true);
         auto argAssignments = new Statement[](this.args.length);
-        for (int i = 0; i < this.args.length; i = i + 1)
-        {
+        for (int i = 0; i < this.args.length; i = i + 1) {
             Argument arg = this.args[i];
             auto argExpr = new ArgExpr(i, arg.type);
 
             argAssignments[i] = argscope.declare(arg.name, arg.type, argExpr, null);
         }
 
-        Statement functionBody = this.statement.compile(module_.withNamespace(argscope));
+        Statement compiledStatement = this.statement.compile(module_.withNamespace(argscope));
 
         generator.frameReg = generator.fun.alloca(stackframe.structType().emit(module_.platform));
 
@@ -93,7 +92,7 @@ class Function : FunctionDeclaration
             argAssignments[i].emit(generator);
         }
 
-        functionBody.emit(generator);
+        compiledStatement.emit(generator);
         generator.fun.ret(generator.fun.voidLiteral());
         generator.fun.done();
         generator.fun = null;
@@ -1807,7 +1806,7 @@ class Module : Namespace
             Class class_ = entry.value.instanceOf(Class);
             if (class_) {
                 for (int i = 0; i < class_.methods.length; i = i + 1)
-                    class_.methods[i].emit(generator, this, class_, this.macroState);
+                    class_.methods[i].emit(generator, this, class_);
             }
         }
     }
@@ -1986,7 +1985,10 @@ class ClassMethod : Symbol
 
     Loc loc;
 
-    this(Loc loc, Class classType, bool override_, string name, Type ret, Argument[] args, ASTStatement statement, Statement compiledStatement)
+    MacroState macroState;
+
+    this(Loc loc, Class classType, bool override_, string name, Type ret, Argument[] args, ASTStatement statement,
+         Statement compiledStatement, MacroState macroState)
     {
         this.loc = loc;
         this.classType = classType;
@@ -1996,6 +1998,7 @@ class ClassMethod : Symbol
         this.args = args;
         this.statement = statement;
         this.compiledStatement = compiledStatement;
+        this.macroState = macroState;
     }
 
     string mangle()
@@ -2007,7 +2010,7 @@ class ClassMethod : Symbol
     void declare(Generator generator) {
         // TODO merge with emit
         Type voidp = new Pointer(new Void);
-        BackendType[] argTypes = new BackendType[](this.args.length + 1);
+        auto argTypes = new BackendType[](this.args.length + 1);
         argTypes[0] = voidp.emit(generator.platform);
         for (int i = 0; i < this.args.length; i = i + 1)
             argTypes[i + 1] = this.args[i].type.emit(generator.platform);
@@ -2020,13 +2023,12 @@ class ClassMethod : Symbol
         );
     }
 
-    // TODO macro state should be passed in at construction
-    void emit(Generator generator, Namespace module_, Class thisType, MacroState macroState)
+    void emit(Generator generator, Namespace module_, Class thisType)
     {
         assert(!generator.fun);
         Type voidp = new Pointer(new Void);
 
-        BackendType[] argTypes = new BackendType[](this.args.length + 1);
+        auto argTypes = new BackendType[](this.args.length + 1);
         argTypes[0] = voidp.emit(generator.platform);
         for (int i = 0; i < this.args.length; i = i + 1)
             argTypes[i + 1] = this.args[i].type.emit(generator.platform);
@@ -2036,24 +2038,24 @@ class ClassMethod : Symbol
             argTypes
         );
 
-        Statement[] argAssignments;
         auto stackframe = new FunctionScope(module_);
         auto argscope = new VarDeclScope(stackframe, true);
+        auto argAssignments = new Statement[](this.args.length + 1);
 
-        argAssignments = argAssignments ~ argscope.declare(
+        argAssignments[0] = argscope.declare(
             "this", thisType, new PointerCast(thisType, new ArgExpr(0, voidp)), null);
         for (int i = 0; i < this.args.length; i = i + 1) {
-            auto argExpr = new ArgExpr(i + 1, this.args[i].type);
+            Argument arg = this.args[i];
+            auto argExpr = new ArgExpr(i + 1, arg.type);
 
-            argAssignments = argAssignments
-                ~ argscope.declare(this.args[i].name, this.args[i].type, argExpr, null);
+            argAssignments[i + 1] = argscope.declare(arg.name, arg.type, argExpr, null);
         }
 
         auto compiledStatement = this.compiledStatement;
 
         if (!compiledStatement)
         {
-            compiledStatement = this.statement.compile(new Context(generator.platform, argscope, macroState));
+            compiledStatement   = this.statement.compile(new Context(generator.platform, argscope, this.macroState));
         }
 
         generator.frameReg = generator.fun.alloca(stackframe.structType().emit(generator.platform));
@@ -2066,9 +2068,9 @@ class ClassMethod : Symbol
         compiledStatement.emit(generator);
 
         generator.fun.ret(generator.fun.voidLiteral());
-        generator.frameReg = 0;
         generator.fun.done();
         generator.fun = null;
+        generator.frameReg = -1;
     }
 
     Type funcPtrType()
@@ -2285,7 +2287,7 @@ class Class : Type
 
         this.methods = this.methods ~ new ClassMethod(
             null, this, override_, "__instanceof",
-            voidp, new Argument[](0) ~ new Argument("target", stringType), null, stmt);
+            voidp, new Argument[](0) ~ new Argument("target", stringType), null, stmt, null);
     }
 
     override bool same(Type other) {
@@ -2360,12 +2362,16 @@ class ASTClassDecl : ASTType
 
     ASTClassDeclMethod[] methods;
 
-    this(string name, string superClass, ASTClassDeclMember[] members, ASTClassDeclMethod[] methods)
+    MacroState macroState;
+
+    this(string name, string superClass, ASTClassDeclMember[] members, ASTClassDeclMethod[] methods,
+         MacroState macroState)
     {
         this.name = name;
         this.superClass = superClass;
         this.members = members;
         this.methods = methods;
+        this.macroState = macroState;
     }
 
     override Class compile(Context context)
@@ -2407,7 +2413,7 @@ class ASTClassDecl : ASTType
                 method.name,
                 method.ret.compile(classContext),
                 methodArgs,
-                method.body_, null);
+                method.body_, null, this.macroState);
         }
         target.genVtable();
     }
@@ -2486,7 +2492,7 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
             members = members ~ new ASTClassDeclMember(memberName, retType);
         }
     }
-    return new ASTClassDecl(name, superClass, members, methods);
+    return new ASTClassDecl(name, superClass, members, methods, lexicalContext.macroState);
 }
 
 class ModuleCacheEntry

@@ -75,30 +75,17 @@ class Function : FunctionDeclaration
         );
     }
 
-    void emit(Generator generator, Namespace module_)
+    CompiledFunction compile(Platform platform, Namespace module_)
     {
-        assert(!generator.fun);
-        Type voidp = new Pointer(new Void);
-        int extra = 0;
-        if (this.thisType) extra = 1;
-        auto argTypes = new BackendType[](this.args.length + extra);
-        if (this.thisType) argTypes[0] = voidp.emit(generator.platform);
-        for (int i = 0; i < this.args.length; i = i + 1)
-            argTypes[extra + i] = this.args[i].type.emit(generator.platform);
         assert(!!module_);
-        generator.fun = generator.mod.define(
-            this.mangle(),
-            this.ret.emit(generator.platform),
-            argTypes
-        );
-
         auto stackframe = new FunctionScope(module_);
+        int extra = 0;
         ThisScope thisScope = null;
         Namespace scope_ = stackframe;
         if (this.thisType)
         {
             thisScope = new ThisScope(scope_);
-
+            extra = 1;
             scope_ = thisScope;
         }
         auto argscope = new VarDeclScope(scope_);
@@ -109,6 +96,7 @@ class Function : FunctionDeclaration
 
         if (this.thisType)
         {
+            Type voidp = new Pointer(new Void);
             argAssignments[0] = argscope.declare(
                 "this", this.thisType, new PointerCast(this.thisType, new ArgExpr(0, voidp)), null);
         }
@@ -128,19 +116,58 @@ class Function : FunctionDeclaration
 
         if (!compiledStatement)
         {
-            auto context = new Context(generator.platform, scope_, this.macroState);
+            auto context = new Context(platform, scope_, this.macroState);
 
             compiledStatement = this.statement.compile(context);
         }
 
-        generator.frameReg = generator.fun.alloca(stackframe.structType().emit(generator.platform));
+        return new CompiledFunction(this, compiledStatement, stackframe, argAssignments);
+    }
+}
 
-        for (int i = 0; i < argAssignments.length; i = i + 1)
+class CompiledFunction
+{
+    Function fun;
+
+    Statement compiledStatement;
+
+    FunctionScope stackframe;
+
+    Statement[] argAssignments;
+
+    this(Function fun, Statement compiledStatement, FunctionScope stackframe, Statement[] argAssignments)
+    {
+        this.fun = fun;
+        this.compiledStatement = compiledStatement;
+        this.stackframe = stackframe;
+        this.argAssignments = argAssignments;
+    }
+
+    void emit(Generator generator)
+    {
+        assert(!generator.fun);
+        Type voidp = new Pointer(new Void);
+        int extra = 0;
+        if (this.fun.thisType) extra = 1;
+        auto argTypes = new BackendType[](this.fun.args.length + extra);
+        if (this.fun.thisType) argTypes[0] = voidp.emit(generator.platform);
+        for (int i = 0; i < this.fun.args.length; i = i + 1)
+            argTypes[extra + i] = this.fun.args[i].type.emit(generator.platform);
+        generator.fun = generator.mod.define(
+            this.fun.mangle(),
+            this.fun.ret.emit(generator.platform),
+            argTypes
+        );
+
+
+        generator.frameReg = generator.fun.alloca(this.stackframe.structType().emit(generator.platform));
+
+        for (int i = 0; i < this.argAssignments.length; i = i + 1)
         {
-            argAssignments[i].emit(generator);
+            this.argAssignments[i].emit(generator);
         }
 
-        compiledStatement.emit(generator);
+        this.compiledStatement.emit(generator);
 
         generator.fun.ret(generator.fun.voidLiteral());
         generator.fun.done();
@@ -480,7 +507,10 @@ Symbol accessMember(Symbol base, string member, Loc loc, bool allowUndefined)
     Struct structType = baseExpr.type().instanceOf(Struct);
     if (structType)
     {
-        loc.assert2s(!!baseExpr.instanceOf(Reference), "TODO struct member of value");
+        if (!baseExpr.instanceOf(Reference))
+        {
+            loc.assert2s(false, "TODO struct member of value");
+        }
         int memberOffset = -1;
         for (int i = 0; i < structType.members.length; i = i + 1)
         {
@@ -514,8 +544,8 @@ Symbol accessMember(Symbol base, string member, Loc loc, bool allowUndefined)
         int memberOffset = -1;
         for (int i = 0; i < members.length; i = i + 1)
             if (members[i].name == member) memberOffset = i;
-        if (!allowUndefined)
-            loc.assert2s4(memberOffset != -1, "no such member ", member, " in ", classType.name);
+        if (!allowUndefined && memberOffset == -1)
+            loc.assert2s4(false, "no such member ", member, " in ", classType.name);
         if (memberOffset != -1)
             return new StructMember(new Dereference(asStructPtr), memberOffset);
     }
@@ -700,9 +730,12 @@ class FunctionReference : Expression
 
     override Type type()
     {
-        auto argTypes = new Type[](this.fun.args.length);
+        int extra = 0;
+        if (this.fun.thisType) extra = 1;
+        auto argTypes = new Type[](this.fun.args.length + extra);
+        if (this.fun.thisType) argTypes[0] = new Pointer(new Void);
         for (int i = 0; i < this.fun.args.length; i = i + 1)
-            argTypes[i] = this.fun.args[i].type;
+            argTypes[extra + i] = this.fun.args[i].type;
 
         return new FunctionPointer(this.fun.ret, argTypes);
     }
@@ -1292,16 +1325,16 @@ class StackFrame : Reference
 
 class FunctionScope : Namespace
 {
-    Type[] variableTypes;
+    StructMemberDeclaration[] variables;
 
     this(Namespace parent) { this.parent = parent; }
 
-    StructMember declare(Type type)
+    StructMember declare(string name, Type type)
     {
-        this.variableTypes = this.variableTypes ~ type;
+        this.variables = this.variables ~ new StructMemberDeclaration(name, type);
         // having cast sure would be nice...
         int len;
-        while (len < this.variableTypes.length) len = len + 1;
+        while (len < this.variables.length) len = len + 1;
 
         return new StructMember(
             new StackFrame(this.structType()),
@@ -1310,12 +1343,7 @@ class FunctionScope : Namespace
 
     Struct structType()
     {
-        auto members = new StructMemberDeclaration[](this.variableTypes.length);
-        for (int i = 0; i < this.variableTypes.length; i = i + 1)
-        {
-            members[i] = new StructMemberDeclaration("", this.variableTypes[i]);
-        }
-        return new Struct("", members);
+        return new Struct("", this.variables);
     }
 
     override Symbol lookup(string name)
@@ -1337,9 +1365,9 @@ class DeclaredVariable
 {
     string name;
 
-    Expression value;
+    Symbol symbol;
 
-    this(string name, Expression value) { this.name = name; this.value = value; }
+    this(string name, Symbol symbol) { this.name = name; this.symbol = symbol; }
 }
 
 class VarDeclScope : Namespace
@@ -1353,7 +1381,7 @@ class VarDeclScope : Namespace
 
     Statement declare(string name, Type type, Expression value, Loc loc)
     {
-        StructMember member = findFunctionScope(this).declare(type);
+        StructMember member = findFunctionScope(this).declare(name, type);
 
         this.appendDeclaration(name, member);
         return new AssignStatement(member, implicitConvertTo(value, type, loc));
@@ -1361,15 +1389,15 @@ class VarDeclScope : Namespace
 
     Statement declareZeroInit(string name, Type type)
     {
-        StructMember member = findFunctionScope(this).declare(type);
+        StructMember member = findFunctionScope(this).declare(name, type);
 
         this.appendDeclaration(name, member);
         return new NoopStatement;
     }
 
-    void appendDeclaration(string name, StructMember member)
+    void appendDeclaration(string name, Symbol symbol)
     {
-        this.declarations = this.declarations ~ new DeclaredVariable(name, member);
+        this.declarations = this.declarations ~ new DeclaredVariable(name, symbol);
     }
 
     override Symbol lookup(string name)
@@ -1378,7 +1406,7 @@ class VarDeclScope : Namespace
         {
             if (this.declarations[i].name == name)
             {
-                return this.declarations[i].value;
+                return this.declarations[i].symbol;
             }
         }
         if (this.parent) return this.parent.lookup(name);
@@ -1621,6 +1649,41 @@ ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext)
     return new ASTVarDeclStatement(name, infer, type, initial, parser.loc());
 }
 
+class ASTNestedFunctionDeclStatement : ASTStatement
+{
+    ASTFunction fun;
+
+    this(ASTFunction fun)
+    {
+        this.fun = fun;
+    }
+
+    override Statement compile(Context context)
+    {
+        auto module_ = findModule(context.namespace);
+        auto fun_ = this.fun.compile(context).instanceOf(Function);
+        auto structType = findFunctionScope(context.namespace).structType();
+        auto voidp = new Pointer(new Void);
+        auto stackPtr = new ReferenceExpression(new StackFrame(structType));
+
+        fun_.thisType = new Pointer(structType);
+
+        auto dg = new ClassMethodPtr(new FunctionReference(fun_), stackPtr);
+
+        findVarDeclScope(context.namespace).appendDeclaration(this.fun.name, dg);
+
+        module_.add("", fun_);
+        return new NoopStatement;
+    }
+}
+
+ASTNestedFunctionDeclStatement parseNestedFunctionDecl(Parser parser, LexicalContext lexicalContext)
+{
+    auto fun_ = parseFunction(parser, lexicalContext);
+    if (!fun_) return null;
+    return new ASTNestedFunctionDeclStatement(fun_);
+}
+
 class ASTWhile : ASTStatement
 {
     ASTSymbol cond;
@@ -1760,6 +1823,10 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
         if (stmt) return stmt;
     }
     {
+        ASTStatement stmt = parseNestedFunctionDecl(parser, lexicalContext);
+        if (stmt) return stmt;
+    }
+    {
         ASTStatement stmt = parseVarDecl(parser, lexicalContext);
         if (stmt) return stmt;
     }
@@ -1784,10 +1851,14 @@ ASTFunction parseFunction(Parser parser, LexicalContext lexicalContext)
         return null;
     }
     string name = parseIdentifier(parser);
-    parser.expect("(");
+    if (!name.length || !parser.accept("("))
+    {
+        parser.revert();
+        return null;
+    }
+    parser.commit();
     ASTArgument[] args = parseIdentifierList(parser, lexicalContext);
     ASTStatement stmt = parseStatement(parser, lexicalContext);
-    parser.commit();
     return new ASTFunction(name, ret, args, false, stmt, lexicalContext.macroState);
 }
 
@@ -1848,11 +1919,7 @@ class Module : Namespace
 
         // (pre)declare everything
         for (int i = 0; i < this.entries.length; i = i + 1) {
-            ModuleEntry entry = this.entries[i];
-            Function fun = entry.value.instanceOf(Function);
-            if (fun)
-                fun.declare(generator);
-            Class class_ = entry.value.instanceOf(Class);
+            Class class_ = this.entries[i].value.instanceOf(Class);
             if (class_)
             {
                 class_.resolve();
@@ -1867,11 +1934,15 @@ class Module : Namespace
             }
         }
 
+        CompiledFunction[] functions; // stage2 : functions may add more functions. TODO pull out into pre step instead
         for (int i = 0; i < this.entries.length; i = i + 1) {
             ModuleEntry entry = this.entries[i];
             Function fun = entry.value.instanceOf(Function);
             if (fun)
-                fun.emit(generator, this);
+            {
+                fun.declare(generator);
+                functions = functions ~ fun.compile(generator.platform, this);
+            }
             else {
                 auto decl = entry.value.instanceOf(FunctionDeclaration);
                 if (decl)
@@ -1880,8 +1951,11 @@ class Module : Namespace
             Class class_ = entry.value.instanceOf(Class);
             if (class_) {
                 for (int i = 0; i < class_.methods.length; i = i + 1)
-                    class_.methods[i].emit(generator, this);
+                    functions = functions ~ class_.methods[i].compile(generator.platform, this);
             }
+        }
+        for (int i = 0; i < functions.length; i = i + 1) {
+            functions[i].emit(generator);
         }
     }
 
@@ -1909,6 +1983,14 @@ class Module : Namespace
             return this.parent.lookup(name);
         return null;
     }
+}
+
+Module findModule(Namespace namespace)
+{
+    Module module_ = namespace.instanceOf(Module);
+    if (module_) return module_;
+    assert(!!namespace.parent);
+    return findModule(namespace.parent);
 }
 
 class NullExpr : Expression

@@ -41,6 +41,8 @@ class Function : FunctionDeclaration
 
     Statement compiledStatement;
 
+    Namespace parent;
+
     this(string name, Type ret, Argument[] args, ASTStatement statement, MacroState macroState)
     {
         this.name = name;
@@ -50,6 +52,7 @@ class Function : FunctionDeclaration
         this.macroState = macroState;
         this.compiledStatement = null;
         this.thisType = null;
+        this.parent = null;
     }
 
     override string mangle()
@@ -75,19 +78,13 @@ class Function : FunctionDeclaration
         );
     }
 
-    CompiledFunction compile(Platform platform, Namespace module_)
+    CompiledFunction compile(Platform platform)
     {
-        assert(!!module_);
-        auto stackframe = new FunctionScope(module_);
-        int extra = 0;
-        ThisScope thisScope = null;
+        auto stackframe = new FunctionScope(this.thisType, this.parent);
         Namespace scope_ = stackframe;
+        int extra = 0;
         if (this.thisType)
-        {
-            thisScope = new ThisScope(scope_);
             extra = 1;
-            scope_ = thisScope;
-        }
         auto argscope = new VarDeclScope(scope_);
 
         scope_ = argscope;
@@ -105,11 +102,6 @@ class Function : FunctionDeclaration
             auto argExpr = new ArgExpr(extra + i, arg.type);
 
             argAssignments[extra + i] = argscope.declare(arg.name, arg.type, argExpr, null);
-        }
-
-        if (this.thisType)
-        {
-            thisScope.thisExpr = beExpression(argscope.lookup("this"));
         }
 
         auto compiledStatement = this.compiledStatement;
@@ -216,11 +208,14 @@ class ASTFunction
                 this.name, this.ret.compile(context), arguments);
         }
 
-        return new Function(
+        auto fun = new Function(
             this.name,
             this.ret.compile(context),
             arguments,
             this.statement, this.macroState);
+
+        fun.parent = context.namespace;
+        return fun;
     }
 }
 
@@ -699,14 +694,18 @@ class Dereference : Reference
 {
     Expression base;
 
-    this(Expression base) { this.base = base; }
+    Pointer pointerType;
+
+    this(Expression base)
+    {
+        this.base = base;
+        this.pointerType = base.type().instanceOf(Pointer);
+        assert(!!this.pointerType);
+    }
 
     override Type type()
     {
-        Type superType = this.base.type();
-        Pointer pointerType = superType.instanceOf(Pointer);
-        assert(!!pointerType);
-        return pointerType.target;
+        return this.pointerType.target;
     }
 
     override int emit(Generator output)
@@ -757,7 +756,8 @@ class ASTReference : ASTSymbol
         // &function
         ASTIdentifier ident = this.base.instanceOf(ASTIdentifier);
         if (ident) {
-            Symbol target = context.namespace.lookup(ident.name);
+            auto frame = new ReferenceExpression(new StackFrame(new Void));
+            Symbol target = context.namespace.lookup(ident.name, frame);
             Function fun = target.instanceOf(Function);
 
             if (fun) return new FunctionReference(fun);
@@ -964,7 +964,8 @@ class ASTIdentifier : ASTSymbol
 
     override Symbol compile(Context context)
     {
-        Symbol symbol = context.namespace.lookup(this.name);
+        auto frame = new ReferenceExpression(new StackFrame(new Void));
+        Symbol symbol = context.namespace.lookup(this.name, frame);
         this.loc.assert2s2(!!symbol, this.name, " not found");
         return symbol;
     }
@@ -1323,22 +1324,39 @@ class StackFrame : Reference
     }
 }
 
+// variable without stackframe
+class LatentVariable
+{
+    string name;
+
+    Struct stackFrameType;
+
+    int offset;
+
+    this(string name, Struct stackFrameType, int offset)
+    {
+        this.name = name;
+        this.stackFrameType = stackFrameType;
+        this.offset = offset;
+    }
+}
+
 class FunctionScope : Namespace
 {
+    Type extra;
+
     StructMemberDeclaration[] variables;
 
-    this(Namespace parent) { this.parent = parent; }
+    this(Type extra, Namespace parent) { this.extra = extra; this.parent = parent; }
 
-    StructMember declare(string name, Type type)
+    LatentVariable declare(string name, Type type)
     {
         this.variables = this.variables ~ new StructMemberDeclaration(name, type);
         // having cast sure would be nice...
         int len;
         while (len < this.variables.length) len = len + 1;
 
-        return new StructMember(
-            new StackFrame(this.structType()),
-            len - 1);
+        return new LatentVariable(name, this.structType(), len - 1);
     }
 
     Struct structType()
@@ -1346,10 +1364,21 @@ class FunctionScope : Namespace
         return new Struct("", this.variables);
     }
 
-    override Symbol lookup(string name)
+    override Symbol lookup(string name, Expression frame)
     {
         assert(!!this.parent);
-        return this.parent.lookup(name);
+
+        Expression nextFrame;
+        if (this.extra && frame)
+        {
+            // first field in stackframe must be parent
+            // TODO better?
+            auto framePtr = new PointerCast(new Pointer(new Pointer(new Void)), frame);
+
+            nextFrame = new Dereference(framePtr);
+        }
+
+        return this.parent.lookup(name, nextFrame);
     }
 }
 
@@ -1361,18 +1390,12 @@ FunctionScope findFunctionScope(Namespace namespace)
     return findFunctionScope(namespace.parent);
 }
 
-class DeclaredVariable
-{
-    string name;
-
-    Symbol symbol;
-
-    this(string name, Symbol symbol) { this.name = name; this.symbol = symbol; }
-}
-
+// TODO one scope per variable, no mutation
 class VarDeclScope : Namespace
 {
-    DeclaredVariable[] declarations;
+    LatentVariable[] variables;
+
+    Function[] nestedFunctions;
 
     this(Namespace parent)
     {
@@ -1381,56 +1404,56 @@ class VarDeclScope : Namespace
 
     Statement declare(string name, Type type, Expression value, Loc loc)
     {
-        StructMember member = findFunctionScope(this).declare(name, type);
+        LatentVariable var = findFunctionScope(this).declare(name, type);
 
-        this.appendDeclaration(name, member);
+        this.variables = this.variables ~ var;
+
+        Expression frame = new ReferenceExpression(new StackFrame(var.stackFrameType));
+
+        frame = new PointerCast(new Pointer(var.stackFrameType), frame);
+
+        auto member = new StructMember(new Dereference(frame), var.offset);
+
         return new AssignStatement(member, implicitConvertTo(value, type, loc));
     }
 
     Statement declareZeroInit(string name, Type type)
     {
-        StructMember member = findFunctionScope(this).declare(name, type);
+        LatentVariable var = findFunctionScope(this).declare(name, type);
 
-        this.appendDeclaration(name, member);
+        this.variables = this.variables ~ var;
         return new NoopStatement;
     }
 
-    void appendDeclaration(string name, Symbol symbol)
+    void declareNestedFun(Function fun)
     {
-        this.declarations = this.declarations ~ new DeclaredVariable(name, symbol);
+        // TODO collision check
+        this.nestedFunctions = this.nestedFunctions ~ fun;
     }
 
-    override Symbol lookup(string name)
+    override Symbol lookup(string name, Expression frame)
     {
-        for (int i = 0; i < this.declarations.length; i = i + 1)
+        for (int i = 0; i < this.variables.length; i = i + 1)
         {
-            if (this.declarations[i].name == name)
+            if (this.variables[i].name == name)
             {
-                return this.declarations[i].symbol;
+                auto framePtr = new PointerCast(new Pointer(this.variables[i].stackFrameType), frame);
+
+                return new StructMember(new Dereference(framePtr), this.variables[i].offset);
             }
         }
-        if (this.parent) return this.parent.lookup(name);
-        return null;
-    }
-}
+        for (int i = 0; i < this.nestedFunctions.length; i = i + 1)
+        {
+            auto fun = this.nestedFunctions[i];
 
-/**
- * Return class variables without requiring 'this.'
- */
-class ThisScope : VarDeclScope
-{
-    Expression thisExpr;
+            if (fun.name == name)
+            {
+                auto framePtr = new PointerCast(new Pointer(new Void), frame);
 
-    this(Namespace parent) {
-        this.parent = parent;
-        this.thisExpr = null;
-    }
-
-    override Symbol lookup(string name) {
-        assert(!!this.thisExpr);
-        auto result = accessMember(this.thisExpr, name, null, true);
-        if (result) return result;
-        if (this.parent) return this.parent.lookup(name);
+                return new ClassMethodPtr(new FunctionReference(fun), framePtr);
+            }
+        }
+        if (this.parent) return this.parent.lookup(name, frame);
         return null;
     }
 }
@@ -1664,13 +1687,11 @@ class ASTNestedFunctionDeclStatement : ASTStatement
         auto fun_ = this.fun.compile(context).instanceOf(Function);
         auto structType = findFunctionScope(context.namespace).structType();
         auto voidp = new Pointer(new Void);
-        auto stackPtr = new ReferenceExpression(new StackFrame(structType));
 
         fun_.thisType = new Pointer(structType);
+        fun_.parent = context.namespace;
 
-        auto dg = new ClassMethodPtr(new FunctionReference(fun_), stackPtr);
-
-        findVarDeclScope(context.namespace).appendDeclaration(this.fun.name, dg);
+        findVarDeclScope(context.namespace).declareNestedFun(fun_);
 
         module_.add("", fun_);
         return new NoopStatement;
@@ -1941,7 +1962,7 @@ class Module : Namespace
             if (fun)
             {
                 fun.declare(generator);
-                functions = functions ~ fun.compile(generator.platform, this);
+                functions = functions ~ fun.compile(generator.platform);
             }
             else {
                 auto decl = entry.value.instanceOf(FunctionDeclaration);
@@ -1951,7 +1972,7 @@ class Module : Namespace
             Class class_ = entry.value.instanceOf(Class);
             if (class_) {
                 for (int i = 0; i < class_.methods.length; i = i + 1)
-                    functions = functions ~ class_.methods[i].compile(generator.platform, this);
+                    functions = functions ~ class_.methods[i].compile(generator.platform);
             }
         }
         for (int i = 0; i < functions.length; i = i + 1) {
@@ -1970,8 +1991,10 @@ class Module : Namespace
         return null;
     }
 
-    override Symbol lookup(string name)
+    override Symbol lookup(string name, Expression frame)
     {
+        assert(!frame);
+
         Symbol public_ = this.lookupPublic(name);
         if (public_) return public_;
         for (int i = 0; i < this.imports.length; i = i + 1)
@@ -1980,7 +2003,7 @@ class Module : Namespace
             if (entry) return entry;
         }
         if (this.parent)
-            return this.parent.lookup(name);
+            return this.parent.lookup(name, frame);
         return null;
     }
 }
@@ -2139,8 +2162,11 @@ class ClassMethod : Function
         this.compiledStatement = compiledStatement;
         this.macroState = macroState;
 
+        auto classNamespace = new ClassNamespace(classType.context.namespace, classType);
+
         this.loc = loc;
         this.thisType = classType;
+        this.parent = classNamespace;
         this.override_ = override_;
     }
 
@@ -2163,6 +2189,30 @@ class ClassMethod : Function
 Expression truthy_(Expression value, Loc loc)
 {
     return truthy(value, loc);
+}
+
+class ClassNamespace : Namespace
+{
+    Class class_;
+
+    this(Namespace parent, Class class_)
+    {
+        this.parent = parent;
+        this.class_ = class_;
+    }
+
+    override Symbol lookup(string name, Expression thisPtr)
+    {
+        thisPtr = new PointerCast(this.class_, thisPtr);
+
+        auto result = accessMember(thisPtr, name, null, true);
+
+        if (result) return result;
+
+        // TODO "outer"?
+        if (!this.parent) return null;
+        return this.parent.lookup(name, null);
+    }
 }
 
 class Class : Type
@@ -2392,13 +2442,13 @@ class ClassScope : Namespace
         this.class_ = class_;
     }
 
-    override Symbol lookup(string name)
+    override Symbol lookup(string name, Expression frame)
     {
         if (name == this.class_.name)
         {
             return this.class_;
         }
-        return this.parent.lookup(name);
+        return this.parent.lookup(name, frame);
     }
 }
 
@@ -2462,7 +2512,7 @@ class ASTClassDecl : ASTType
         Class superClass = null;
         if (this.superClass.length)
         {
-            Symbol superClassObj = context.namespace.lookup(this.superClass);
+            Symbol superClassObj = context.namespace.lookup(this.superClass, null);
             if (!superClassObj) print("super class not found: " ~ this.superClass);
             assert(!!superClassObj); // , format!"super class %s not found"(this.superClass));
             superClass = superClassObj.instanceOf(Class);
@@ -2630,7 +2680,7 @@ void proxyCall(Module module_, string function_, MacroState macroState)
 
     module_.emit(proxyOutput);
 
-    auto fun = module_.lookup(function_).instanceOf(Function);
+    auto fun = module_.lookup(function_, null).instanceOf(Function);
 
     backendModule.callMacroFun(fun.mangle(), macroState);
 }

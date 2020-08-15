@@ -140,7 +140,7 @@ int main(int argc, char **argv) {
         argc - 1,
         malloc(sizeof(struct String) * (argc - 1))
     };
-    for (int i = 0; i < argc - 1; i = i + 1) {
+    for (int i = 0; i < argc - 1; i++) {
         args.ptr[i] = (struct String) { strlen(argv[i + 1]), argv[i + 1] };
     }
     _main(args);

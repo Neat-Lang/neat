@@ -411,13 +411,26 @@ ASTAssignStatement parseAssignment(ref Parser parser)
     {
         begin;
         auto lhs = parser.parseExpressionLeaf;
-        if (!lhs || !accept("="))
+        if (!lhs)
         {
+            revert;
+            return null;
+        }
+        Nullable!BinaryOpType operator;
+        if (accept("=")) { }
+        else if (accept("+=")) operator = BinaryOpType.add;
+        else if (accept("-=")) operator = BinaryOpType.sub;
+        else if (accept("*=")) operator = BinaryOpType.mul;
+        else if (accept("~=")) operator = BinaryOpType.cat;
+        else {
             revert;
             return null;
         }
         auto expr = parser.parseExpression;
         commit;
+        if (!operator.isNull) {
+            expr = new ASTBinaryOp(operator.get, lhs, expr, loc);
+        }
         return new ASTAssignStatement(lhs, expr, loc);
     }
 }

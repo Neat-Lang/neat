@@ -2738,6 +2738,31 @@ Module parseMacroContinuation(Parser parser, Module baseModule, ModuleParserConf
     return parseModuleBody(parser, subModule, newConfig);
 }
 
+ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin();
+    if (parseIdentifier(parser) != "struct")
+    {
+        parser.revert();
+        return null;
+    }
+    string name = parseIdentifier(parser);
+    assert(!!name.length);
+    ASTStructMember[] members;
+    parser.expect("{");
+    while (!parser.accept("}"))
+    {
+        auto memberType = parseType(parser, lexicalContext);
+        if (!memberType) parser.fail("expected member type");
+        auto memberName = parseIdentifier(parser);
+        if (!memberName.length) parser.fail("expected member name");
+        parser.expect(";");
+        members ~= new ASTStructMember(memberName, memberType);
+    }
+    parser.commit();
+    return new ASTStructDecl(name, members);
+}
+
 Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
 {
     Context context = new Context(config.platform, module_, module_.macroState);
@@ -2750,7 +2775,7 @@ Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
             ASTImport import_ = parseImport(parser);
             if (import_) {
                 matched = true;
-                Module importedModule = parseModule(moduleToFile(import_.name), config, import_.loc);
+                Module importedModule = parseModule(moduleToFile(import_.name), true, config, import_.loc);
 
                 module_.addImport(importedModule);
 
@@ -2772,24 +2797,22 @@ Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
         }
         if (!matched) {
             ASTExtern extern_ = parseExtern(parser, lexicalContext);
-            if (extern_)
-            {
+            if (extern_) {
                 matched = true;
                 module_.add(extern_.name, extern_.compile(context));
             }
         }
-        /*
-        if (auto strct = parser.parseStructDecl)
-        {
-            module_.add(strct.name, strct.compile(context));
-            continue;
-        }*/
+        if (!matched) {
+            auto strct = parseStructDecl(parser, lexicalContext);
+            if (strct) {
+                matched = true;
+                module_.add(strct.name, strct.compile(context));
+            }
+        }
         if (!matched) {
             Module submod = parseMacroContinuation(parser, module_, config);
             if (submod)
-            {
                 return submod;
-            }
         }
         if (!matched) {
             ASTFunction fun = parseFunction(parser, lexicalContext);
@@ -2805,10 +2828,15 @@ Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
     return module_;
 }
 
-Module parseModule(string filename, ModuleParserConfig config, Loc loc)
+Module parseModule(string filename, bool search, ModuleParserConfig config, Loc loc)
 {
     auto macroState = new MacroState;
-    string path = findFile(filename, config.includes, loc);
+    string path = filename;
+    if (search) {
+        path = findFile(filename, config.includes, loc);
+    } else {
+        filename = findResidualFilename(filename, config.includes);
+    }
     Module mod = config.cache.find(path);
     if (mod) return mod;
 

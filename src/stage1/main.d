@@ -1162,6 +1162,38 @@ ASTForLoop parseFor(ref Parser parser)
     }
 }
 
+class StructConstructor : Expression
+{
+    Struct struct_;
+
+    Expression[] args;
+
+    Loc loc;
+
+    override Type type()
+    {
+        return struct_;
+    }
+
+    override int emit(Generator output)
+    {
+        loc.assert_(args.length == struct_.members.length, "invalid number of args for struct constructor");
+
+        auto struct_ = struct_.emit(output.platform);
+        Reg ptr = output.fun.alloca(struct_);
+        foreach (i, arg; args) {
+            // TODO conversion
+            loc.assert_(arg.type() == this.struct_.members[i].type, "invalid type in struct constructor");
+            Reg valueReg = arg.emit(output);
+            Reg offsetReg = output.fun.fieldOffset(struct_, ptr, cast(int) i);
+            output.fun.store(arg.type().emit(output.platform), offsetReg, valueReg);
+        }
+        return output.fun.load(struct_, ptr);
+    }
+
+    mixin(GenerateThis);
+}
+
 Expression call(Symbol target, Expression[] args, Loc loc)
 {
     if (auto function_ = cast(Function) target)
@@ -1176,6 +1208,10 @@ Expression call(Symbol target, Expression[] args, Loc loc)
     if (expr && cast(FunctionPointer) expr.type)
     {
         return new FuncPtrCall(expr, args, loc);
+    }
+    if (auto struct_ = cast(Struct) target)
+    {
+        return new StructConstructor(struct_, args, loc);
     }
     assert(false, format!"unknown call target %s (%s?)"(target, expr ? expr.type : null));
 }

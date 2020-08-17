@@ -18,17 +18,11 @@ extern(C) bool cxruntime_file_exists(string file);
 extern(C) string cxruntime_file_read(string file);
 extern(C) void cxruntime_file_write(string file, string content);
 
-class ASTArgument
+struct ASTArgument
 {
     string name;
 
     ASTType type;
-
-    this(string name, ASTType type)
-    {
-        this.name = name;
-        this.type = type;
-    }
 }
 
 class Function : FunctionDeclaration
@@ -233,7 +227,7 @@ ASTArgument[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
         }
         ASTType argtype = parseType(parser, lexicalContext);
         string argname = parseIdentifier(parser);
-        args ~= new ASTArgument(argname, argtype);
+        args ~= ASTArgument(argname, argtype);
     }
     return args;
 }
@@ -306,6 +300,44 @@ class ClassMethodPtr : Symbol
     this(Expression funcPtr, Expression thisPtr) { this.funcPtr = funcPtr; this.thisPtr = thisPtr; }
 }
 
+class StructConstructor : Expression
+{
+    Struct struct_;
+
+    Expression[] args;
+
+    Loc loc;
+
+    this(Struct struct_, Expression[] args, Loc loc)
+    {
+        this.struct_ = struct_;
+        this.args = args;
+        this.loc = loc;
+    }
+
+    override Type type()
+    {
+        return this.struct_;
+    }
+
+    override int emit(Generator output)
+    {
+        this.loc.assert2s(this.args.length == this.struct_.members.length, "invalid number of args for struct constructor");
+
+        auto struct_ = this.struct_.emit(output.platform);
+        int ptr = output.fun.alloca(struct_);
+        for (int i = 0; i < this.args.length; i += 1) {
+            auto arg = this.args[i];
+            // TODO conversion
+            this.loc.assert2s(arg.type().same(this.struct_.members[i].type), "invalid type in struct constructor");
+            int valueReg = arg.emit(output);
+            int offsetReg = output.fun.fieldOffset(struct_, ptr, i);
+            output.fun.store(arg.type().emit(output.platform), offsetReg, valueReg);
+        }
+        return output.fun.load(struct_, ptr);
+    }
+}
+
 Expression call(Symbol target, Expression[] args, Loc loc)
 {
     if (target.instanceOf(FunctionDeclaration))
@@ -324,6 +356,11 @@ Expression call(Symbol target, Expression[] args, Loc loc)
     if (expr && expr.type().instanceOf(FunctionPointer))
     {
         return new FuncPtrCall(expr, args, loc);
+    }
+    Struct struct_ = target.instanceOf(Struct);
+    if (struct_)
+    {
+        return new StructConstructor(struct_, args, loc);
     }
     loc.assert2s(false, "unknown call target");
 }
@@ -886,7 +923,7 @@ class ASTNewExpression : ASTSymbol
             auto argExpressions = new Expression[](this.args.length);
             for (int i = 0; i < this.args.length; i += 1)
                 argExpressions[i] = beExpression(this.args[i].compile(context));
-            assert(!!classType); // , format!"expected new <class>, not %s"(type));
+            this.loc.assert2s2(!!classType, "expected new <class>, not %s", type.repr());
             return new CallCtorExpression(classptr, argExpressions, this.loc);
         }
         Array arrayType = type.instanceOf(Array);
@@ -2597,7 +2634,7 @@ ASTArgument[] parseArglist(Parser parser, LexicalContext lexicalContext)
         parser.assert_(!!argtype, "argument type expected");
         string argname = parseIdentifier(parser);
         parser.assert_(argname.length > 0, "argument name expected");
-        args ~= new ASTArgument(argname, argtype);
+        args ~= ASTArgument(argname, argtype);
     }
     return args;
 }

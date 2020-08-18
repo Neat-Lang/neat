@@ -31,8 +31,6 @@ class Function : FunctionDeclaration
 
     MacroState macroState;
 
-    Type thisType; // must be a pointer
-
     Statement compiledStatement;
 
     Namespace parent;
@@ -548,15 +546,27 @@ Symbol accessMember(Symbol base, string member, Loc loc, bool allowUndefined)
         {
             if (structType.members[i].name == member) memberOffset = i;
         }
-        if (!allowUndefined)
-            loc.assert2s2(memberOffset != -1, "no such member ", member);
         if (memberOffset != -1)
             return new StructMember(baseExpr.instanceOf(Reference), memberOffset);
+        int methodOffset = -1;
+        for (int i = 0; i < structType.methods.length; i += 1)
+        {
+            if (structType.methods[i].name == member) methodOffset = i;
+        }
+        if (methodOffset != -1)
+        {
+            // TODO dereference-into-symbol so we can '&' it again
+            auto funcPtr = new FunctionReference(structType.methods[methodOffset]);
+            return new ClassMethodPtr(funcPtr, new ReferenceExpression(baseExpr.instanceOf(Reference)));
+        }
+        if (allowUndefined) return null;
+        loc.assert2s2(false, "no such member or method ", member);
     }
     Class classType = baseExpr.type().instanceOf(Class);
     if (classType)
     {
-        assert(classType.resolved());
+        if (loc) loc.assert2s2(classType.resolved(), "class type not resolved: ", classType.name);
+        else assert2s2(classType.resolved(), "class type not resolved: ", classType.name);
         ClassMethod[] vtable = classType.vtable();
         int methodOffset = -1;
         for (int i = 0; i < vtable.length; i += 1) {
@@ -576,10 +586,10 @@ Symbol accessMember(Symbol base, string member, Loc loc, bool allowUndefined)
         int memberOffset = -1;
         for (int i = 0; i < members.length; i += 1)
             if (members[i].name == member) memberOffset = i;
-        if (!allowUndefined && memberOffset == -1)
-            loc.assert2s4(false, "no such member ", member, " in ", classType.name);
         if (memberOffset != -1)
             return new StructMember(new Dereference(asStructPtr), memberOffset);
+        if (allowUndefined) return null;
+        loc.assert2s4(false, "no such member ", member, " in ", classType.name);
     }
     if (!allowUndefined)
         loc.assert2s2(false, "expected struct/class type for member, not ", baseExpr.type().repr());
@@ -760,9 +770,9 @@ class Dereference : Reference
 
 class FunctionReference : Expression
 {
-    Function fun;
+    FunctionDeclaration fun;
 
-    this(Function fun) { this.fun = fun; }
+    this(FunctionDeclaration fun) { this.fun = fun; }
 
     override Type type()
     {
@@ -928,7 +938,7 @@ class ASTNewExpression : ASTSymbol
         }
         Array arrayType = type.instanceOf(Array);
         if (arrayType) {
-            assert(this.args.length == 1);
+            this.loc.assert2s(this.args.length == 1, "expected one argument to loc");
 
             Type wordType = nativeWordType(context.platform);
             auto elementSize = new SizeOf(arrayType.elementType);
@@ -948,7 +958,7 @@ class ASTNewExpression : ASTSymbol
 
             return new ArrayExpression(dataPtr, length);
         }
-        assert(false); // format!"don't know how to allocate %s"(type));
+        this.loc.assert2s2(false, "don't know how to allocate ", type.repr());
     }
 }
 
@@ -1992,6 +2002,12 @@ class Module : Namespace
 
         // (pre)declare everything
         for (int i = 0; i < this.entries.length; i += 1) {
+            Struct struct_ = this.entries[i].value.instanceOf(Struct);
+            if (struct_) {
+                for (int i = 0; i < struct_.methods.length; i += 1)
+                    struct_.methods[i].instanceOf(StructMethod).declare(generator);
+            }
+
             Class class_ = this.entries[i].value.instanceOf(Class);
             if (class_)
             {
@@ -2025,6 +2041,11 @@ class Module : Namespace
             if (class_) {
                 for (int i = 0; i < class_.methods.length; i += 1)
                     functions ~= class_.methods[i].compile(generator.platform);
+            }
+            Struct struct_ = entry.value.instanceOf(Struct);
+            if (struct_) {
+                for (int i = 0; i < struct_.methods.length; i += 1)
+                    functions ~= struct_.methods[i].instanceOf(StructMethod).compile(generator.platform);
             }
         }
         for (int i = 0; i < functions.length; i += 1) {
@@ -2518,16 +2539,14 @@ class ClassScope : Namespace
     }
 }
 
-class ASTClassDeclMember
+struct ASTClassDeclMember
 {
     string name;
 
     ASTType type;
-
-    this(string name, ASTType type) { this.name = name; this.type = type; }
 }
 
-class ASTClassDeclMethod
+struct ASTClassDeclMethod
 {
     Loc loc;
 
@@ -2540,15 +2559,6 @@ class ASTClassDeclMethod
     ASTArgument[] args;
 
     ASTStatement body_;
-
-    this(Loc loc, bool override_, string name, ASTType ret, ASTArgument[] args, ASTStatement body_) {
-        this.loc = loc;
-        this.override_ = override_;
-        this.name = name;
-        this.ret = ret;
-        this.args = args;
-        this.body_ = body_;
-    }
 }
 
 class ASTClassDecl : ASTType
@@ -2681,14 +2691,14 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
         {
             ASTArgument[] args = parseArglist(parser, lexicalContext);
             ASTStatement stmt = parseStatement(parser, lexicalContext);
-            methods ~= new ASTClassDeclMethod(
+            methods ~= ASTClassDeclMethod(
                 parser.loc(), override_, memberName, retType, args, stmt);
         }
         else
         {
             parser.assert_(!override_, "cannot override class member");
             parser.expect(";");
-            members ~= new ASTClassDeclMember(memberName, retType);
+            members ~= ASTClassDeclMember(memberName, retType);
         }
     }
     return new ASTClassDecl(name, superClass, members, methods, lexicalContext.macroState);
@@ -2775,6 +2785,152 @@ Module parseMacroContinuation(Parser parser, Module baseModule, ModuleParserConf
     return parseModuleBody(parser, subModule, newConfig);
 }
 
+struct ASTStructMember
+{
+    string name;
+
+    ASTType type;
+}
+
+struct ASTStructMethod
+{
+    Loc loc;
+
+    string name;
+
+    ASTType ret;
+
+    ASTArgument[] args;
+
+    ASTStatement body_;
+}
+
+class StructNamespace : Namespace
+{
+    Struct struct_;
+
+    this(Namespace parent, Struct struct_)
+    {
+        this.parent = parent;
+        this.struct_ = struct_;
+    }
+
+    override Symbol lookup(string name, Expression thisPtr)
+    {
+        thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr);
+
+        auto result = accessMember(thisPtr, name, null, true);
+
+        if (result) return result;
+
+        // TODO "outer"?
+        if (!this.parent) return null;
+        return this.parent.lookup(name, null);
+    }
+}
+
+class StructMethod : Function
+{
+    Loc loc;
+
+    this(Loc loc, Struct structType, Context context, string name, Type ret, Argument[] args, ASTStatement statement,
+         Statement compiledStatement, MacroState macroState)
+    {
+        // TODO super()
+        this.name = name;
+        this.ret = ret;
+        this.args = args;
+        this.statement = statement;
+        this.compiledStatement = compiledStatement;
+        this.macroState = macroState;
+
+        auto structNamespace = new StructNamespace(context.namespace, structType);
+
+        this.loc = loc;
+        this.thisType = new Pointer(structType);
+        this.parent = structNamespace;
+    }
+
+    override string mangle()
+    {
+        auto ptr = this.thisType.instanceOf(Pointer);
+        // TODO mangle types
+        return "_" ~ ptr.target.instanceOf(Struct).name ~ "_" ~ this.name;
+    }
+}
+
+// TODO merge with ClassScope into AliasScope
+class StructScope : Namespace
+{
+    Struct struct_;
+
+    this(Namespace parent, Struct struct_)
+    {
+        this.parent = parent;
+        this.struct_ = struct_;
+    }
+
+    override Symbol lookup(string name, Expression frame)
+    {
+        if (name == this.struct_.name)
+        {
+            return this.struct_;
+        }
+        return this.parent.lookup(name, frame);
+    }
+}
+
+class ASTStructDecl : ASTType
+{
+    string name;
+
+    ASTStructMember[] members;
+
+    ASTStructMethod[] methods;
+
+    MacroState macroState;
+
+    this(string name, ASTStructMember[] members, ASTStructMethod[] methods, MacroState macroState)
+    {
+        this.name = name;
+        this.members = members;
+        this.methods = methods;
+        this.macroState = macroState;
+    }
+
+    override Struct compile(Context context)
+    {
+        auto members = new StructMemberDeclaration[](this.members.length);
+
+        for (int i = 0; i < this.members.length; i += 1)
+            members[i] = new StructMemberDeclaration(this.members[i].name, this.members[i].type.compile(context));
+
+        auto struct_ = new Struct(this.name, members);
+        auto structScope = new StructScope(context.namespace, struct_); // make S visibile in struct S {}
+        auto structContext = context.withNamespace(structScope);
+
+        struct_.methods = new FunctionDeclaration[](this.methods.length);
+        for (int i = 0; i < this.methods.length; i += 1)
+        {
+            auto method = this.methods[i];
+            auto methodArgs = new Argument[](method.args.length);
+
+            for (int k = 0; k < method.args.length; k = k + 1)
+                methodArgs[k] = new Argument(method.args[k].name, method.args[k].type.compile(structContext));
+
+            struct_.methods[i] = new StructMethod(
+                method.loc,
+                struct_,
+                context,
+                method.name,
+                method.ret.compile(structContext),
+                methodArgs,
+                method.body_, null, this.macroState);
+        }
+        return struct_;
+    }
+}
+
 ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin();
@@ -2786,6 +2942,7 @@ ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
     string name = parseIdentifier(parser);
     assert(!!name.length);
     ASTStructMember[] members;
+    ASTStructMethod[] methods;
     parser.expect("{");
     while (!parser.accept("}"))
     {
@@ -2793,11 +2950,21 @@ ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
         if (!memberType) parser.fail("expected member type");
         auto memberName = parseIdentifier(parser);
         if (!memberName.length) parser.fail("expected member name");
-        parser.expect(";");
-        members ~= new ASTStructMember(memberName, memberType);
+        if (parser.accept("(")) // method
+        {
+            ASTArgument[] args = parseArglist(parser, lexicalContext);
+            ASTStatement stmt = parseStatement(parser, lexicalContext);
+            methods ~= ASTStructMethod(
+                parser.loc(), memberName, memberType, args, stmt);
+        }
+        else
+        {
+            parser.expect(";");
+            members ~= ASTStructMember(memberName, memberType);
+        }
     }
     parser.commit();
-    return new ASTStructDecl(name, members);
+    return new ASTStructDecl(name, members, methods, lexicalContext.macroState);
 }
 
 Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)

@@ -8,7 +8,7 @@ while read file
 do
     echo test/runnable/"$file"...
     executable=build/test/runnable/"$file"
-    if ! build/stage2 -Isrc/stage2 -Itest/runnable test/runnable/"$file" -o "$executable" \
+    if ! build/cx -Isrc -Itest/runnable test/runnable/"$file" -o "$executable" \
         2>&1 |cat>build/out.txt
     then
         build_failed=$((build_failed+1))

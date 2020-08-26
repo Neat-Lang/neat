@@ -1,16 +1,17 @@
 #!/bin/bash
 set -euxo pipefail
 I=1
-build/stage2 -O -Isrc/stage2 src/stage2/main.cx -o build/stage2_test$I
-SUM="$(objdump -S build/stage2_test$I |grep -v file\ format |md5sum)"
+build/cx -O -Isrc src/main.cx -o build/cx_test$I
+SUM="$(objdump -S build/cx_test$I |grep -v file\ format |md5sum)"
 SUMNEXT=""
 while true
 do
     K=$((I+1))
-    build/stage2_test$I -O -Isrc/stage2 src/stage2/main.cx -o build/stage2_test$K
-    SUMNEXT="$(objdump -S build/stage2_test$K |grep -v file\ format |md5sum)"
+    build/cx_test$I -O -Isrc src/main.cx -o build/cx_test$K
+    SUMNEXT="$(objdump -S build/cx_test$K |grep -v file\ format |md5sum)"
     if [ "$SUM" == "$SUMNEXT" ]; then break; fi
     SUM="$SUMNEXT"
     I=$K
 done
-mv build/stage2_test$I build/stage2
+mv build/cx_test$I build/cx
+rm build/cx_test*

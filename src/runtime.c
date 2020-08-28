@@ -38,18 +38,36 @@ int cxruntime_atoi(struct String str) {
     // printf("atoi(%.*s) = %i\n", str.length, str.ptr, res);
     return res;
 }
+float cxruntime_atof(struct String str) {
+    char *temp = toStringz(str);
+    float res = atof(temp);
+    free(temp);
+    // printf("atof(%.*s) = %f\n", str.length, str.ptr, res);
+    return res;
+}
 struct String cxruntime_itoa(int i) {
     int len = snprintf(NULL, 0, "%i", i);
     char *res = malloc(len + 1);
     snprintf(res, len + 1, "%i", i);
-    // printf("itoa(%i) = '%.*s'\n", i, len, res);
     return (struct String) { len, res };
 }
 struct String cxruntime_ltoa(long long l) {
     int len = snprintf(NULL, 0, "%lld", l);
     char *res = malloc(len + 1);
     snprintf(res, len + 1, "%lld", l);
-    // printf("ltoa(%lld) = '%.*s'\n", l, len, res);
+    return (struct String) { len, res };
+}
+struct String cxruntime_ftoa(float f) {
+    int len = snprintf(NULL, 0, "%f", f);
+    char *res = malloc(len + 1);
+    snprintf(res, len + 1, "%f", f);
+    return (struct String) { len, res };
+}
+struct String cxruntime_ftoa_hex(float f) {
+    double d = f;
+    int len = snprintf(NULL, 0, "%llx", *(long long int*) &d);
+    char *res = malloc(len + 1);
+    snprintf(res, len + 1, "%llx", *(long long int*) &d);
     return (struct String) { len, res };
 }
 int cxruntime_linenr(struct String haystack, struct String needle, int* linep, int* columnp) {

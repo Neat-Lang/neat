@@ -2,8 +2,6 @@
 module cx.stuff;
 
 import backend.base;
-import backend.llvm;
-import backend.proxy;
 import cx.array;
 import cx.base;
 import cx.expr;
@@ -2147,6 +2145,11 @@ class Module : Namespace
     }
 }
 
+class ParserHelper
+{
+    void proxyCall(Module module_, string function_, MacroState macroState) { assert(false); }
+}
+
 Module findModule(Namespace namespace)
 {
     Module module_ = namespace.instanceOf(Module);
@@ -2832,24 +2835,7 @@ class ModuleParserConfig
     }
 }
 
-void proxyCall(Module module_, string function_, MacroState macroState)
-{
-    print("# stageM");
-    // auto backend = new ProxyBackend();
-    // auto platform = new ProxyPlatform();
-    auto platform = new DefaultPlatform();
-    auto backend = new LLVMBackend();
-    auto backendModule = backend.createModule(platform);
-    auto proxyOutput = new Generator(platform, backendModule);
-
-    module_.emit(proxyOutput);
-
-    auto fun = module_.lookup(function_, null).instanceOf(Function);
-
-    backendModule.callMacroFun(fun.mangle(), macroState);
-}
-
-Module parseMacroContinuation(Parser parser, Module baseModule, ModuleParserConfig config)
+Module parseMacroContinuation(Parser parser, ParserHelper helper, Module baseModule, ModuleParserConfig config)
 {
     parser.begin();
     if (!acceptIdentifier(parser, "macro") || !parser.accept("("))
@@ -2864,12 +2850,12 @@ Module parseMacroContinuation(Parser parser, Module baseModule, ModuleParserConf
 
     auto newMacroState = baseModule.macroState.dup();
 
-    proxyCall(baseModule, identifier, newMacroState);
+    helper.proxyCall(baseModule, identifier, newMacroState);
 
     auto subModule = new Module(baseModule.name, baseModule.pak, newMacroState, baseModule);
     auto newConfig = new ModuleParserConfig(config.platform, config.packages, config.defaultImports, config.cache);
 
-    return parseModuleBody(parser, subModule, newConfig);
+    return parseModuleBody(parser, helper, subModule, newConfig);
 }
 
 struct ASTStructMember
@@ -3062,7 +3048,7 @@ Package selectPackage(Package[] packages, string name, Loc loc)
     loc.assert2s(false, "Undefined package: '" ~ name ~ "'");
 }
 
-Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
+Module parseModuleBody(Parser parser, ParserHelper helper, Module module_, ModuleParserConfig config)
 {
     Context context = new Context(config.platform, module_, module_.macroState);
     LexicalContext lexicalContext = new LexicalContext(module_.macroState);
@@ -3082,7 +3068,7 @@ Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
                     transitive = false;
                 }
                 Module importedModule = parseModule(
-                    moduleToFile(import_.name), pak, true, config, import_.loc);
+                    moduleToFile(import_.name), pak, true, helper, config, import_.loc);
 
                 module_.addImport(importedModule);
 
@@ -3117,7 +3103,7 @@ Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
             }
         }
         if (!matched) {
-            Module submod = parseMacroContinuation(parser, module_, config);
+            Module submod = parseMacroContinuation(parser, helper, module_, config);
             if (submod)
                 return submod;
         }
@@ -3136,7 +3122,7 @@ Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
     return module_;
 }
 
-Module parseModule(string filename, Package pak, bool search, ModuleParserConfig config, Loc loc)
+Module parseModule(string filename, Package pak, bool search, ParserHelper helper, ModuleParserConfig config, Loc loc)
 {
     auto macroState = new MacroState;
     string path = filename;
@@ -3166,7 +3152,7 @@ Module parseModule(string filename, Package pak, bool search, ModuleParserConfig
         base.addImport(config.defaultImports[i]);
     }
 
-    Module module_ = parseModuleBody(parser, base, config);
+    Module module_ = parseModuleBody(parser, helper, base, config);
 
     config.cache.add(path, module_);
 

@@ -49,5 +49,7 @@ at_revision 'edde8f615d72034d7fe645226c43156238895c09' 'rebuild cx' 'build/cx'
 at_revision 'e88bcc52f621c7e47f3a667554d7401c5d72be2e' 'rebuild cx' 'build/cx'
 # package includes
 at_revision 'f6078a3470f7826b566b7eed70acd91f3c647960' 'rebuild cx' 'build/cx'
+# import package()
+at_revision 'ba44e97c4dc8b721710cfaf023a711acc75c6cfd' 'rebuild cx' 'build/cx'
 ./rebuild.sh
 echo "=== build/cx from master ==="

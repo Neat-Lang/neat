@@ -20,6 +20,11 @@ function at_revision {
     $build
     cd ../..
     cp build/$rev/$output build/cx
+    # bleeeh this should not be here, this is not generic, but meh
+    if [ -d build/$rev/build/src ]; then
+        rm -rf build/src
+        cp -R build/$rev/build/src build/
+    fi
     rm -rf build/$rev
     echo "=== build/cx from $rev ==="
     echo

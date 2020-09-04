@@ -498,7 +498,8 @@ class ASTArraySlice : ASTSymbol
         return new ArraySlice(
             beExpression(this.array.compile(context)),
             implicitConvertTo(beExpression(this.lower.compile(context)), wordType, this.loc),
-            implicitConvertTo(beExpression(this.upper.compile(context)), wordType, this.loc));
+            implicitConvertTo(beExpression(this.upper.compile(context)), wordType, this.loc),
+            this.loc);
     }
 }
 
@@ -2020,17 +2021,20 @@ class Module : Namespace
 {
     string name;
 
+    Package pak;
+
     MacroState macroState;
 
     // whenever macro state changes, we begin a new submodule
     // when this happens, this member references the previous module.
     Module parentModule;
 
-    this(string name, MacroState macroState, Module parentModule)
+    this(string name, Package pak, MacroState macroState, Module parentModule)
     {
         this.parent = parentModule;
         this.parentModule = parentModule;
         this.name = name;
+        this.pak = pak;
         this.macroState = macroState;
     }
 
@@ -2243,12 +2247,38 @@ string findFile(string filename, string[] includes, Loc loc)
     loc.assert2s(false, "cannot find file '" ~ filename ~ "' in includes");
 }
 
-string findResidualFilename(string filename, string[] includes)
+string findFileInPackage(string filename, Package pak, Loc loc, Package* foundPak)
+{
+    string fileInPackage = pak.path ~ "/" ~ filename;
+    if (cxruntime_file_exists(fileInPackage)) {
+        *foundPak = pak;
+        return fileInPackage;
+    }
+    for (int i = 0; i < pak.deps.length; i += 1) {
+        auto dep = pak.deps[i];
+        string fileInDep = dep.path ~ "/" ~ filename;
+
+        if (cxruntime_file_exists(fileInDep)) {
+            *foundPak = dep;
+            return fileInDep;
+        }
+    }
+    loc.assert2s(false, "cannot find file '" ~ filename ~ "' in package '" ~ pak.name ~ "' or dependencies");
+}
+
+string findResidualFilename(string filename, string[] includes, Package[] packages, Package* foundPackage)
 {
     // TODO split then check
     assert(cxruntime_file_exists(filename));
-    for (int i = 0; i < includes.length; i += 1)
-    {
+    for (int i = 0; i < packages.length; i += 1) {
+        string path = packages[i].path;
+        if (filename.length >= path.length
+            && filename[0 .. path.length] == path) {
+            *foundPackage = packages[i];
+            return filename[path.length + 1 .. filename.length];
+        }
+    }
+    for (int i = 0; i < includes.length; i += 1) {
         if (filename.length >= includes[i].length
             && filename[0 .. includes[i].length] == includes[i])
             return filename[includes[i].length + 1 .. filename.length];
@@ -2796,14 +2826,17 @@ class ModuleParserConfig
 
     string[] includes;
 
+    Package[] packages;
+
     Module[] defaultImports;
 
     ModuleCache cache;
 
-    this(Platform platform, string[] includes, Module[] defaultImports, ModuleCache cache)
+    this(Platform platform, string[] includes, Package[] packages, Module[] defaultImports, ModuleCache cache)
     {
         this.platform = platform;
         this.includes = includes;
+        this.packages = packages;
         this.defaultImports = defaultImports;
         this.cache = cache;
     }
@@ -2843,9 +2876,9 @@ Module parseMacroContinuation(Parser parser, Module baseModule, ModuleParserConf
 
     proxyCall(baseModule, identifier, newMacroState);
 
-    auto subModule = new Module(baseModule.name, newMacroState, baseModule);
+    auto subModule = new Module(baseModule.name, baseModule.pak, newMacroState, baseModule);
     auto newConfig = new ModuleParserConfig(
-        config.platform, config.includes, config.defaultImports, config.cache);
+        config.platform, config.includes, config.packages, config.defaultImports, config.cache);
 
     return parseModuleBody(parser, subModule, newConfig);
 }
@@ -3044,7 +3077,8 @@ Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
             ASTImport import_ = parseImport(parser);
             if (import_) {
                 matched = true;
-                Module importedModule = parseModule(moduleToFile(import_.name), true, config, import_.loc);
+                Module importedModule = parseModule(
+                    moduleToFile(import_.name), module_.pak, true, config, import_.loc);
 
                 module_.addImport(importedModule);
 
@@ -3097,14 +3131,16 @@ Module parseModuleBody(Parser parser, Module module_, ModuleParserConfig config)
     return module_;
 }
 
-Module parseModule(string filename, bool search, ModuleParserConfig config, Loc loc)
+Module parseModule(string filename, Package pak, bool search, ModuleParserConfig config, Loc loc)
 {
     auto macroState = new MacroState;
     string path = filename;
     if (search) {
-        path = findFile(filename, config.includes, loc);
+        assert2s(!!pak, "search, but no package");
+        path = findFileInPackage(filename, pak, loc, &pak);
     } else {
-        filename = findResidualFilename(filename, config.includes);
+        assert2s(!pak, "no search, but package");
+        filename = findResidualFilename(filename, config.includes, config.packages, &pak);
     }
     Module mod = config.cache.find(path);
     if (mod) return mod;
@@ -3118,9 +3154,9 @@ Module parseModule(string filename, bool search, ModuleParserConfig config, Loc 
 
     auto locAtModule = parser.loc();
 
-    locAtModule.assert2s2(filename == moduleToFile(modname), filename, " module doesn't match filename");
+    locAtModule.assert2s2(filename == moduleToFile(modname), filename, ": module doesn't match filename");
 
-    Module base = new Module(modname, macroState, null);
+    Module base = new Module(modname, pak, macroState, null);
     for (int i = 0; i < config.defaultImports.length; i += 1) {
         base.addImport(config.defaultImports[i]);
     }

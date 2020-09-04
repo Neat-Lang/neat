@@ -29,13 +29,84 @@ string removeSlashes(string s) {
     return result;
 }
 
+// "AST", lol. Package fresh off the commandline, dependencies not resolved yet.
+// Needed because we can reference future packages.
+struct ASTPackage
+{
+    string name;
+    string path;
+    string[] deps;
+}
+
+string slice(string* text, string marker)
+{
+    int pos = find(*text, marker);
+    if (pos == -1) {
+        string result = *text;
+        *text = "";
+        return result;
+    }
+    string result = (*text)[0 .. pos];
+    *text = (*text)[pos + marker.length .. (*text).length];
+    return result;
+}
+
+ASTPackage parsePackage(string arg)
+{
+    string name = slice(&arg, ":");
+    assert(name.length > 0);
+    string path = slice(&arg, ":");
+    assert(path.length > 0);
+    string[] deps;
+    while (arg.length)
+    {
+        deps ~= slice(&arg, ",");
+    }
+    return ASTPackage(name, path, deps);
+}
+
+Package[] resolvePackages(ASTPackage[] astPackages)
+{
+    Package[] result;
+    for (int i = 0; i < astPackages.length; i += 1) {
+        result ~= new Package(astPackages[i].name, astPackages[i].path);
+    }
+    for (int i = 0; i < astPackages.length; i += 1) {
+        auto astPackage = astPackages[i];
+        for (int j = 0; j < astPackage.deps.length; j += 1) {
+            Package dep;
+            for (int k = 0; k < result.length; k += 1) {
+                if (result[k].name == astPackage.deps[j])
+                {
+                    assert(!dep);
+                    dep = result[k];
+                    // TODO break;
+                }
+            }
+            if (!dep) {
+                print("Missing package dependency: " ~ astPackage.deps[j]);
+                assert(false);
+            }
+            result[i].addDependency(dep);
+        }
+    }
+    return result;
+}
+
 void main(string[] args)
 {
+    // TODO std.string
+    // TODO move to test
+    string a = "b:c";
+    assert(slice(&a, ":") == "b");
+    assert(a == "c");
+
     print("# stage2");
     string[] includes;
     string output;
     string[] nextArgs;
     string[] linkerArgs;
+    ASTPackage[] astPackages;
     bool optimize;
     {
         string[] remArgs;
@@ -44,7 +115,11 @@ void main(string[] args)
             string flag;
             if (arg.length >= 2) flag = arg[0 .. 2];
 
-            if (flag == "-I") {
+            // package: like includes, but scoped
+            // -Pname:path[:dep1[,dep2]*]?
+            if (flag == "-P") {
+                astPackages ~= parsePackage(arg[2 .. arg.length]);
+            } else if (flag == "-I") {
                 includes ~= arg[2 .. arg.length];
             } else if (flag == "-l") {
                 linkerArgs ~= arg;
@@ -65,17 +140,18 @@ void main(string[] args)
         }
         args = remArgs;
     }
+    Package[] packages = resolvePackages(astPackages);
 
     if (args.length != 1)
     {
-        print("Usage: cx [-Iincludepath]* FILE.cx");
+        print("Usage: cx [-Iincludepath]* [-Pname:path[:dep1[,dep2]*]?]* FILE.cx");
         return;
     }
     if (!output.length) output = removeExtension(args[0]);
 
     cxruntime_system("mkdir -p .obj");
 
-    auto builtins = new Module("", new MacroState, null);
+    auto builtins = new Module("", null, new MacroState, null);
     // auto backend = new ProxyBackend();
     auto backend = new LLVMBackend();
     // auto platform = new ProxyPlatform();
@@ -91,8 +167,8 @@ void main(string[] args)
 
     auto defaultImports = new Module[](0) ~ builtins;
     auto cache = new ModuleCache;
-    auto modParseConfig = new ModuleParserConfig(platform, includes, defaultImports, cache);
-    auto toplevel = parseModule(args[0], false, modParseConfig, Loc(null, ""));
+    auto modParseConfig = new ModuleParserConfig(platform, includes, packages, defaultImports, cache);
+    auto toplevel = parseModule(args[0], null, false, modParseConfig, Loc(null, ""));
     auto generator = new Generator(platform, backendModule);
 
     toplevel.emit(generator);

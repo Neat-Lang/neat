@@ -11,26 +11,45 @@ class LLVMBackend : Backend {
     }
 }
 
-class Global {
+struct Global {
     string name;
     string type;
-    this(string name, string type) {
-        this.name = name;
-        this.type = type;
+}
+
+struct Globals
+{
+    Global[] globals;
+    int used;
+    void add(Global global) {
+        if (globals.length == 0) globals = new Global[](1);
+        if (used == globals.length) {
+            auto copy = new Global[](globals.length * 2);
+            for (int i = 0; i < globals.length; i += 1)
+                copy[i] = globals[i];
+            free_(globals.ptr);
+            globals = copy;
+        }
+        globals[used] = global;
+        used += 1;
     }
+    Global[] array() {
+        return this.globals[0 .. this.used];
+    }
+    void free() { free_(globals.ptr); }
 }
 
 extern(C) void cxruntime_file_write(string file, string content);
 extern(C) void cxruntime_system(string command);
 extern(C) void cxruntime_dlcall(string soname, string name, void* arg);
 
+void free_(void* p) { free(p); }
 void print2(string s) { print(s); }
 
 class LLVMBackendModule : BackendModule {
     LineWriter output;
 
     int literalId;
-    Global[] globals;
+    Globals globals;
 
     this(Platform platform) {
         this.output = new LineWriter;
@@ -41,8 +60,9 @@ class LLVMBackendModule : BackendModule {
     }
 
     bool declared(string name) {
-        for (int i = 0; i < this.globals.length; i += 1)
-            if (this.globals[i].name == name) return true;
+        auto globals = this.globals.array();
+        for (int i = 0; i < globals.length; i += 1)
+            if (globals[i].name == name) return true;
         return false;
     }
 
@@ -60,13 +80,13 @@ class LLVMBackendModule : BackendModule {
             if (ret.instanceOf(BackendVoidType)) retstr = "void"; // TODO
             this.output.print("declare " ~ retstr ~ " @" ~ name ~ argstr);
         }
-        this.globals = this.globals ~ new Global(name, llvmFmt(new BackendFunctionPointerType(ret, args)));
+        this.globals.add(Global(name, llvmFmt(new BackendFunctionPointerType(ret, args))));
     }
 
     override BackendFunction define(string name, BackendType ret, BackendType[] args)
     {
         if (name == "main") name = "_main"; // TODO mangle
-        this.globals = this.globals ~ new Global(name, llvmFmt(new BackendFunctionPointerType(ret, args)));
+        this.globals.add(Global(name, llvmFmt(new BackendFunctionPointerType(ret, args))));
         return new LLVMBackendFunction(this, name, ret, args);
     }
     override void defineSymbolList(string name, string[] symbols)
@@ -79,7 +99,7 @@ class LLVMBackendModule : BackendModule {
         }
         string globalType = "[" ~ ltoa(symbols.length) ~ " x void()*]";
         this.output.print("@" ~ name ~ " = global " ~ globalType ~ " [ " ~ symbolList ~ " ]");
-        this.globals = this.globals ~ new Global(name, globalType);
+        this.globals.add(Global(name, globalType));
     }
     string nextLiteral() {
         string res = "@str" ~ itoa(this.literalId);
@@ -87,11 +107,15 @@ class LLVMBackendModule : BackendModule {
         return res;
     }
     string globalType(string name) {
-        for (int i = 0; i < this.globals.length; i += 1)
-            if (this.globals[i].name == name)
-                return this.globals[i].type;
+        auto globals = this.globals.array();
+        for (int i = 0; i < globals.length; i += 1)
+            if (globals[i].name == name)
+                return globals[i].type;
         print2("no such global " ~ name);
         assert(false);
+    }
+    void free() {
+        this.output.free();
     }
     void callMacroFun(string name, void* ptr)
     {
@@ -99,7 +123,10 @@ class LLVMBackendModule : BackendModule {
         auto filename = ".obj/macro_" ~ name ~ ".ll";
         auto soname = ".obj/macro_" ~ name ~ ".so";
         auto cmd = "clang -shared -fpic " ~ filename ~ " -o " ~ soname;
-        cxruntime_file_write(filename, this.output.text());
+        auto text = this.output.text();
+        cxruntime_file_write(filename, text);
+        free_(text.ptr);
+        this.output.free();
         print("$ " ~ cmd);
         cxruntime_system(cmd);
         cxruntime_dlcall(soname, name, ptr);
@@ -152,7 +179,7 @@ struct Arg { int id; }
 struct RegDefine
 {
     int reg;
-    string type;
+    Either(BackendType, string) type;
     Either(Reg, Arg, string) value;
 }
 
@@ -166,6 +193,7 @@ struct RegDefines
             auto copy = new RegDefine[](regDefines.length * 2);
             for (int i = 0; i < regDefines.length; i += 1)
                 copy[i] = regDefines[i];
+            free_(regDefines.ptr);
             regDefines = copy;
         }
         regDefines[regsDefined] = define;
@@ -174,6 +202,7 @@ struct RegDefines
     RegDefine[] array() {
         return this.regDefines[0 .. this.regsDefined];
     }
+    void free() { free_(regDefines.ptr); }
 }
 
 class LLVMBackendFunction : BackendFunction {
@@ -196,7 +225,11 @@ class LLVMBackendFunction : BackendFunction {
         this.output = new LineWriter;
         this.regId = 1;
     }
-    void print(string msg) { this.output.print("  " ~ msg); }
+    void print(string msg) {
+        this.output.append("  ");
+        this.output.append(msg);
+        this.output.endl();
+    }
     string reg(int reg) {
         auto regDefines = this.regDefines.array();
         for (int i = 0; i < regDefines.length; i += 1) {
@@ -221,12 +254,41 @@ class LLVMBackendFunction : BackendFunction {
                     Reg r: "%reg" ~ itoa(r.id),
                     Arg a: "%arg" ~ itoa(a.id),
                     string s: s);
-                return def.type ~ " " ~ val;
+                string type = def.type.case(
+                    BackendType t: llvmFmt(t),
+                    string s: s);
+                return type ~ " " ~ val;
             }
         }
         return "NOTFOUND %reg" ~ itoa(reg);
     }
-    void defReg2(int reg, string type, Either(Reg, Arg, string) value) {
+    void outputTreg(int reg) {
+        auto regDefines = this.regDefines.array();
+        for (int i = 0; i < regDefines.length; i += 1) {
+            RegDefine def = regDefines[i];
+            if (def.reg == reg)
+            {
+                // TODO def.type.case{ BackendType: this.output... }
+                int ttype = def.type.case(BackendType: 1, string: 2);
+                if (ttype == 1) llvmFmtInto(def.type.case(BackendType t: t), this.output);
+                else if (ttype == 2) this.output.append(def.type.case(string s: s));
+                else assert(false);
+
+                this.output.append(" ");
+
+                int vtype = def.value.case(Reg: 1, Arg: 2, string: 3);
+                if (vtype == 1) this.output.appendsi("%reg", def.value.case(Reg r: r.id));
+                else if (vtype == 2) this.output.appendsi("%arg", def.value.case(Arg a: a.id));
+                else if (vtype == 3) this.output.append(def.value.case(string s: s));
+                else assert(false);
+
+                return;
+            }
+        }
+        print("reg " ~ itoa(reg) ~ " not found!");
+        assert(false);
+    }
+    void defReg2(int reg, Either(BackendType, string) type, Either(Reg, Arg, string) value) {
         this.regDefines.add(RegDefine(reg, type, value));
     }
     int defReg(string type, Either(Reg, Arg, string) value) {
@@ -343,9 +405,13 @@ class LLVMBackendFunction : BackendFunction {
     }
     override int bitcast(int from, BackendType to) {
         int reg = this.nextReg();
-        string toStr = llvmFmt(to);
-        this.print("%reg" ~ itoa(reg) ~ " = bitcast " ~ this.treg(from) ~ " to " ~ toStr);
-        this.defReg2(reg, toStr, Reg(reg));
+        this.output.appendsi("%reg", reg);
+        this.output.append(" = bitcast ");
+        this.outputTreg(from);
+        this.output.append(" to ");
+        llvmFmtInto(to, output);
+        this.output.endl();
+        this.defReg2(reg, to, Reg(reg));
         return reg;
     }
     override int zeroExtend(int value, int from, int to) {
@@ -440,7 +506,9 @@ class LLVMBackendFunction : BackendFunction {
 
         int reg1 = this.nextReg();
         this.output.appendsi("  %reg", reg1);
-        this.output.append3s(" = bitcast ", this.treg(source), " to ");
+        this.output.append(" = bitcast ");
+        this.outputTreg(source);
+        this.output.append(" to ");
         llvmFmtInto(backendType, output);
         this.output.append("*");
         this.output.endl();
@@ -489,8 +557,8 @@ class LLVMBackendFunction : BackendFunction {
         this.print(this.nextBlockLabel() ~ ":");
     }
     override void done() {
-        this.print("unreachable");
         string argstr = "(";
+        this.print("unreachable");
         for (int i = 0; i < this.args.length; i += 1) {
             if (i) argstr = argstr ~ ", ";
             argstr = argstr ~ llvmFmt(this.args[i]) ~ " %arg" ~ itoa(i);
@@ -499,8 +567,13 @@ class LLVMBackendFunction : BackendFunction {
         string retstr = llvmFmt(this.ret_);
         if (this.ret_.instanceOf(BackendVoidType)) retstr = "void"; // TODO
         this.mod.output.print("define " ~ retstr ~ " @" ~ this.name ~ argstr ~ "{");
-        this.mod.output.print(this.output.text());
+        auto funtext = this.output.text();
+        this.mod.output.print(funtext);
+        free_(funtext.ptr);
+        this.output.free();
         this.mod.output.print("}");
+
+        this.regDefines.free();
     }
 }
 
@@ -525,8 +598,12 @@ class LineAppender
             size_t newBufLen = this.buffer.length * 2;
             auto newBuf = new string(newBufLen);
             for (int i = 0; i < this.used; i += 1) newBuf[i] = this.buffer[i];
+            free();
             this.buffer = newBuf;
         }
+    }
+    void free() {
+        free_(this.buffer.ptr);
     }
     string flush() {
         string result = new string(this.used);
@@ -543,6 +620,13 @@ class LineWriter
     LineAppender line;
     this() {
         this.line = new LineAppender;
+    }
+    void free() {
+        for (int i = 0; i < this.lines.length; i += 1) {
+            free_(this.lines[i].ptr);
+        }
+        free_(this.lines.ptr);
+        this.line.free();
     }
     void print(string msg) {
         this.line.appends(msg);
@@ -591,6 +675,7 @@ class LineWriter
             if (newLen == 0) newLen = 1;
             auto newLines = new string[](newLen);
             for (int i = 0; i < this.length; i += 1) newLines[i] = this.lines[i];
+            free_(this.lines.ptr);
             this.lines = newLines;
         }
         this.lines[this.length] = line;

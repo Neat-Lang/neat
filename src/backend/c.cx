@@ -1,0 +1,625 @@
+module backend.c;
+
+import backend.base;
+import helpers;
+macro import package(compiler).cx.macros.either;
+
+class CBackend : Backend {
+    this() { }
+    override CBackendModule createModule(Platform platform) {
+        return new CBackendModule(platform);
+    }
+}
+
+struct Global {
+    string name;
+    string type;
+}
+
+// TODO: Global[auto~] globals;
+struct CGlobals
+{
+    Global[] globals;
+    int used;
+    void add(Global global) {
+        if (globals.length == 0) globals = new Global[](1);
+        if (used == globals.length) {
+            auto copy = new Global[](globals.length * 2);
+            for (int i = 0; i < globals.length; i += 1)
+                copy[i] = globals[i];
+            free__(globals.ptr);
+            globals = copy;
+        }
+        globals[used] = global;
+        used += 1;
+    }
+    Global[] array() {
+        return this.globals[0 .. this.used];
+    }
+    void free() { free__(globals.ptr); }
+}
+
+extern(C) void cxruntime_file_write(string file, string content);
+extern(C) void cxruntime_system(string command);
+extern(C) void cxruntime_dlcall(string soname, string name, void* arg);
+
+void free__(void* p) { free(p); }
+void print3(string s) { print(s); }
+
+class CBackendModule : BackendModule {
+    LineWriter2 output;
+    Platform platform;
+
+    int literalId;
+    CGlobals globals;
+
+    this(Platform platform) {
+        this.output = new LineWriter2;
+        this.platform = platform;
+        this.output.print("#include <stdlib.h>");
+        this.output.print("#include <string.h>");
+        defineCIntrinsics(this, platform);
+    }
+
+    bool declared(string name) {
+        auto globals = this.globals.array();
+        for (int i = 0; i < globals.length; i += 1)
+            if (globals[i].name == name) return true;
+        return false;
+    }
+
+    override void declare(string name, bool extern_, BackendType ret, BackendType[] args)
+    {
+        if (this.declared(name)) return;
+        if (name == "memcpy" || name == "malloc") return; // in header
+        string argstr = "(";
+        for (int i = 0; i < args.length; i += 1) {
+            if (i) argstr = argstr ~ ", ";
+            argstr = argstr ~ typeFmt(this, args[i]) ~ " arg" ~ itoa(i);
+        }
+        argstr = argstr ~ ")";
+        string retstr = typeFmt(this, ret);
+        if (ret.instanceOf(BackendVoidType)) retstr = "void"; // TODO
+        this.output.print(retstr ~ " " ~ name ~ argstr ~ ";");
+        this.globals.add(Global(name, typeFmt(this, new BackendFunctionPointerType(ret, args))));
+    }
+
+    override BackendFunction define(string name, BackendType ret, BackendType[] args)
+    {
+        if (name == "main") name = "_main"; // TODO mangle
+        this.globals.add(Global(name, typeFmt(this, new BackendFunctionPointerType(ret, args))));
+        return new CBackendFunction(this, name, ret, args);
+    }
+    override void defineSymbolList(string name, string[] symbols)
+    {
+        string symbolList;
+        for (int i = 0; i < symbols.length; i += 1) {
+            if (i) symbolList = symbolList ~ ", ";
+            symbolList ~= "(void*) " ~ symbols[i];
+        }
+        string globalDecl = "void *" ~ name ~ "[" ~ ltoa(symbols.length) ~ "]";
+        this.output.print("static " ~ globalDecl ~ " = { " ~ symbolList ~ "};");
+        this.globals.add(Global(name, ""));
+    }
+    string nextLiteral() {
+        string res = "@str" ~ itoa(this.literalId);
+        this.literalId = this.literalId + 1;
+        return res;
+    }
+    void free() {
+        this.output.free();
+    }
+    override void callMacroFun(string name, void* ptr)
+    {
+        // TODO hash, cache backend
+        auto filename = ".obj/macro_" ~ name ~ ".c";
+        auto soname = ".obj/macro_" ~ name ~ ".so";
+        auto cmd = "gcc -shared -fpic " ~ filename ~ " -o " ~ soname;
+        auto text = this.output.text();
+        cxruntime_file_write(filename, text);
+        free__(text.ptr);
+        this.output.free();
+        print("$ " ~ cmd);
+        cxruntime_system(cmd);
+        cxruntime_dlcall(soname, name, ptr);
+    }
+}
+
+string typeMangle(BackendType type) {
+    if (type.instanceOf(BackendLongType)) return "l";
+    if (type.instanceOf(BackendIntType)) return "i";
+    if (type.instanceOf(BackendShortType)) return "s";
+    if (type.instanceOf(BackendCharType)) return "c";
+    if (type.instanceOf(BackendFloatType)) return "f";
+    if (type.instanceOf(BackendVoidType)) return "v";
+    auto backendSpacerType = type.instanceOf(BackendSpacerType);
+    // sure?
+    if (backendSpacerType) return "U" ~ ltoa(backendSpacerType.size_);
+    auto backendPointerType = type.instanceOf(BackendPointerType);
+    if (backendPointerType) {
+        return "P" ~ typeMangle(backendPointerType.target);
+    }
+    auto backendStructType = type.instanceOf(BackendStructType);
+    if (backendStructType) {
+        string mangle = "S" ~ ltoa(backendStructType.members.length);
+        for (int i = 0; i < backendStructType.members.length; i += 1) {
+            mangle ~= typeMangle(backendStructType.members[i]);
+        }
+        return mangle;
+    }
+    auto backendFpType = type.instanceOf(BackendFunctionPointerType);
+    if (backendFpType) {
+        string res = "F" ~ typeMangle(backendFpType.ret);
+        res ~= ltoa(backendFpType.args.length);
+        for (int i = 0; i < backendFpType.args.length; i += 1) {
+            res ~= typeMangle(backendFpType.args[i]);
+        }
+        return res;
+    }
+    assert(false);
+}
+
+string typeFmt(CBackendModule mod, BackendType type) {
+    if (type.instanceOf(BackendLongType)) return "long long int";
+    if (type.instanceOf(BackendIntType)) return "int";
+    if (type.instanceOf(BackendShortType)) return "short";
+    if (type.instanceOf(BackendCharType)) return "char";
+    if (type.instanceOf(BackendFloatType)) return "float";
+    if (type.instanceOf(BackendVoidType)) return "void";
+    auto backendSpacerType = type.instanceOf(BackendSpacerType);
+    if (backendSpacerType)
+    {
+        string mangle = typeMangle(type);
+        string typestr = "arr_" ~ mangle;
+        if (mod.declared(typestr)) return typestr;
+        string def = "typedef char " ~ typestr ~ "[" ~ ltoa(backendSpacerType.size_) ~ "];";
+        mod.output.print(def);
+        mod.globals.add(Global(typestr, ""));
+        return typestr;
+    }
+    auto backendPointerType = type.instanceOf(BackendPointerType);
+    if (backendPointerType) {
+        return typeFmt(mod, backendPointerType.target) ~ "*";
+    }
+    auto backendStructType = type.instanceOf(BackendStructType);
+    if (backendStructType) {
+        string mangle = typeMangle(type);
+        string typestr = "str_" ~ mangle;
+        if (mod.declared(typestr)) return typestr;
+        string def = "typedef struct { ";
+        for (int i = 0; i < backendStructType.members.length; i += 1) {
+            def ~= typeFmt(mod, backendStructType.members[i]) ~ " _" ~ itoa(i) ~ ";";
+        }
+        def ~= "} " ~ typestr ~ ";";
+        mod.output.print(def);
+        mod.globals.add(Global(typestr, ""));
+        return typestr;
+    }
+    auto backendFpType = type.instanceOf(BackendFunctionPointerType);
+    if (backendFpType) {
+        string mangle = typeMangle(type);
+        string typestr = "fp_" ~ mangle;
+        if (mod.declared(typestr)) return typestr;
+        string def = "typedef ";
+        def ~= typeFmt(mod, backendFpType.ret) ~ "(*" ~ typestr ~ ")(";
+        for (int i = 0; i < backendFpType.args.length; i += 1) {
+            if (i) def ~= ", ";
+            def ~= typeFmt(mod, backendFpType.args[i]);
+        }
+        def ~= ");";
+        mod.output.print(def);
+        mod.globals.add(Global(typestr, ""));
+        return typestr;
+    }
+    assert(false);
+}
+
+class CBackendFunction : BackendFunction {
+    string name;
+    CBackendModule mod;
+    BackendType ret_;
+    BackendType[] args;
+
+    LineWriter2 output;
+    int regId;
+    int blockId;
+
+    this(CBackendModule mod, string name, BackendType ret, BackendType[] args)
+    {
+        this.name = name;
+        this.mod = mod;
+        this.ret_ = ret;
+        this.args = args;
+        this.output = new LineWriter2;
+        this.regId = 1;
+    }
+    void print(string msg) {
+        this.output.append("  ");
+        this.output.append(msg);
+        this.output.endl();
+    }
+    int nextReg() {
+        int result = this.regId;
+        this.regId = this.regId + 1;
+        return result;
+    }
+    string nextBlockLabel() {
+        string res = "Label" ~ itoa(this.blockId);
+        this.blockId = this.blockId + 1;
+        return res;
+    }
+    override string getLabel() {
+        return "Label" ~ itoa(this.blockId);
+    }
+    override void setLabel(string label) {
+        this.print(label ~ ":;");
+    }
+    override int arg(int index) {
+        int reg = this.nextReg();
+        string typestr = typeFmt(mod, this.args[index]);
+        this.print(typestr ~ " reg" ~ itoa(reg) ~ " = arg" ~ itoa(index) ~ ";");
+        return reg;
+    }
+    override int intLiteral(long value) {
+        int reg = this.nextReg();
+        this.print("int reg" ~ itoa(reg) ~ " = " ~ ltoa(value) ~ ";");
+        return reg;
+    }
+    override int shortLiteral(int value) {
+        int reg = this.nextReg();
+        this.print("short reg" ~ itoa(reg) ~ " = " ~ itoa(value) ~ ";");
+        return reg;
+    }
+    override int byteLiteral(int value) {
+        int reg = this.nextReg();
+        this.print("char reg" ~ itoa(reg) ~ " = " ~ itoa(value) ~ ";");
+        return reg;
+    }
+    override int longLiteral(long value) {
+        int reg = this.nextReg();
+        this.print("long long int reg" ~ itoa(reg) ~ " = " ~ ltoa(value) ~ ";");
+        return reg;
+    }
+    override int floatLiteral(float value) {
+        int reg = this.nextReg();
+        this.print("float reg" ~ itoa(reg) ~ " = " ~ ftoa(value) ~ ";");
+        return reg;
+    }
+    override int wordLiteral(Platform platform, size_t value) {
+        int reg = this.nextReg();
+        this.print("int reg" ~ itoa(reg) ~ " = " ~ ltoa(value) ~ ";");
+        return reg;
+    }
+    override int stringLiteral(string text) {
+        string escapedText;
+        // TODO ord()
+        for (int i = 0; i < text.length; i += 1) {
+            if (text[i .. i + 1] == "\"") escapedText ~= "\\\"";
+            else if (text[i .. i + 1] == "\\") escapedText ~= "\\\\";
+            else if (text[i .. i + 1] == "\r") escapedText ~= "\\r";
+            else if (text[i .. i + 1] == "\n") escapedText ~= "\\n\\\n";
+            else escapedText ~= text[i .. i + 1];
+        }
+        int reg = this.nextReg();
+        this.print("char *reg" ~ itoa(reg) ~ " = \"" ~ escapedText ~ "\";");
+        return reg;
+    }
+    override int voidLiteral() {
+        int reg = this.nextReg();
+        if (!this.ret_.instanceOf(BackendVoidType)) {
+            string typestr = typeFmt(mod, this.ret_);
+            string init = "0";
+            if (this.ret_.instanceOf(BackendStructType)) init = "{0}";
+            this.print(typestr ~ " reg" ~ itoa(reg) ~ " = " ~ init ~ ";");
+        }
+        return reg;
+    }
+    override int symbolList(string name) {
+        int reg = this.nextReg();
+        this.print("void *reg" ~ itoa(reg) ~ " = " ~ name ~ ";");
+        return reg;
+    }
+    override int binop(string op, BackendType type, int left, int right) {
+        int reg = this.nextReg();
+        string typestr = typeFmt(mod, type);
+        this.print(typestr ~ " reg" ~ itoa(reg) ~ " = reg" ~ itoa(left) ~ " " ~ op ~ " reg" ~ itoa(right) ~ ";");
+        return reg;
+    }
+    override int bitcast(int from, BackendType to) {
+        int reg = this.nextReg();
+        this.output.append("  ");
+        typeFmtInto(mod, to, output);
+        this.output.appendsi(" reg", reg);
+        this.output.append(" = (");
+        typeFmtInto(mod, to, output);
+        this.output.appendsis(") reg", from, ";");
+        this.output.endl();
+        return reg;
+    }
+    override int zeroExtend(int value, int from, int to) {
+        int reg = this.nextReg();
+        print3("zext " ~ itoa(from) ~ ", " ~ itoa(to));
+        assert(false);
+        return reg;
+    }
+    override int signExtend(int value, int from, int to) {
+        int reg = this.nextReg();
+        if (from == 4 && to == 8) {
+            this.print("long long reg" ~ itoa(reg) ~ " = reg" ~ itoa(value) ~ ";");
+            return reg;
+        }
+        print3("sext " ~ itoa(from) ~ ", " ~ itoa(to));
+        assert(false);
+    }
+    override int intToFloat(int value) {
+        int reg = this.nextReg();
+        this.print("float reg" ~ itoa(reg) ~ " = reg" ~ itoa(value) ~ ";");
+        return reg;
+    }
+    override int call(BackendType ret, string name, int[] args) {
+        int reg = this.nextReg();
+        string argstr;
+        for (int i = 0; i < args.length; i += 1) {
+            if (i) argstr ~= ", ";
+            argstr ~= "reg" ~ itoa(args[i]);
+        }
+        if (ret.instanceOf(BackendVoidType)) {
+            this.print(name ~ "(" ~ argstr ~ ");");
+        } else {
+            this.print(typeFmt(mod, ret) ~ " reg" ~ itoa(reg) ~ " = " ~ name ~ "(" ~ argstr ~ ");");
+        }
+        return reg;
+    }
+    override int getFuncPtr(string name) {
+        int reg = this.nextReg();
+        this.print("__auto_type reg" ~ itoa(reg) ~ " = " ~ name ~ ";");
+        return reg;
+    }
+    override int callFuncPtr(BackendType type, int callReg, int[] args) {
+        auto backendFpType = type.instanceOf(BackendFunctionPointerType);
+        assert(!!backendFpType);
+        auto ret = backendFpType.ret;
+        int reg = this.nextReg();
+        string argstr;
+        for (int i = 0; i < args.length; i += 1) {
+            if (i) argstr ~= ", ";
+            argstr ~= "reg" ~ itoa(args[i]);
+        }
+        if (ret.instanceOf(BackendVoidType)) {
+            this.print("reg" ~ itoa(callReg) ~ "(" ~ argstr ~ ");");
+        } else {
+            this.print(typeFmt(mod, ret) ~ " reg" ~ itoa(reg) ~ " = reg" ~ itoa(callReg) ~ "(" ~ argstr ~ ");");
+        }
+        return reg;
+    }
+    override int load(BackendType backendType, int source) {
+        int reg = this.nextReg();
+        this.print(typeFmt(mod, backendType) ~ " reg" ~ itoa(reg) ~ " = *reg" ~ itoa(source) ~ ";");
+        return reg;
+    }
+    override int alloca(BackendType backendType) {
+        int reg = this.nextReg();
+        string typefmt = typeFmt(mod, backendType);
+        this.print(typefmt ~ " *reg" ~ itoa(reg) ~ " = (" ~ typefmt ~ "*) alloca(" ~ itoa(backendType.size(this.mod.platform)) ~ ");");
+        string init = "0";
+        if (backendType.instanceOf(BackendStructType)) init = "{0}";
+        this.print("*reg" ~ itoa(reg) ~ " = (" ~ typefmt ~ ") " ~ init ~ ";");
+        return reg;
+    }
+    override int field(BackendType backendType, int source, int index) {
+        auto backendStructType = backendType.instanceOf(BackendStructType);
+        assert(!!backendStructType);
+
+        int reg = this.nextReg();
+        string typefmt = typeFmt(mod, backendStructType.members[index]);
+        this.print(typefmt ~ " reg" ~ itoa(reg) ~ " = reg" ~ itoa(source) ~ "._" ~ itoa(index) ~ ";");
+        return reg;
+    }
+    override int fieldOffset(BackendType backendType, int source, int index) {
+        auto backendStructType = backendType.instanceOf(BackendStructType);
+        assert(!!backendStructType);
+
+        int reg = this.nextReg();
+        string typefmt = typeFmt(mod, backendStructType);
+        string memberfmt = typeFmt(mod, backendStructType.members[index]);
+        this.print(memberfmt ~ "* reg" ~ itoa(reg) ~ " = &((" ~ typefmt ~ "*) reg" ~ itoa(source) ~ ")->_" ~ itoa(index) ~ ";");
+        return reg;
+    }
+    override int saveStack() {
+        return 0;
+    }
+    override void restoreStack(int reg) {
+    }
+    override void store(BackendType backendType, int target_reg, int value_reg) {
+        string typeStr = typeFmt(mod, backendType);
+        this.print("*(" ~ typeStr ~ "*) reg" ~ itoa(target_reg) ~ " = reg" ~ itoa(value_reg) ~ ";");
+    }
+    override void ret(int reg) {
+        if (this.ret_.instanceOf(BackendVoidType)) {
+            this.print("return;");
+        } else {
+            this.print("return reg" ~ itoa(reg) ~ ";");
+        }
+        this.print(this.nextBlockLabel() ~ ":;");
+    }
+    override void branch(string label) {
+        this.print("goto " ~ label ~ ";");
+        this.print(this.nextBlockLabel() ~ ":;");
+    }
+    override void testBranch(int reg, string thenLabel, string elseLabel) {
+        this.print("if (reg" ~ itoa(reg) ~ ") goto " ~ thenLabel ~ "; else goto " ~ elseLabel ~ ";");
+        this.print(this.nextBlockLabel() ~ ":;");
+    }
+    override void done() {
+        string argstr = "(";
+        this.print("/*unreachable*/");
+        for (int i = 0; i < this.args.length; i += 1) {
+            if (i) argstr = argstr ~ ", ";
+            argstr = argstr ~ typeFmt(mod, this.args[i]) ~ " arg" ~ itoa(i);
+        }
+        argstr = argstr ~ ")";
+        string retstr = typeFmt(mod, this.ret_);
+        if (this.ret_.instanceOf(BackendVoidType)) retstr = "void"; // TODO
+        this.mod.output.print(retstr ~ " " ~ this.name ~ argstr ~ "{");
+        auto funtext = this.output.text();
+        this.mod.output.print(funtext);
+        free__(funtext.ptr);
+        this.output.free();
+        this.mod.output.print("}");
+    }
+}
+
+class LineAppender2
+{
+    string buffer;
+    size_t used;
+    this() {
+        this.buffer = new string(128);
+    }
+    void appends(string msg) {
+        this.expand(this.used + msg.length);
+        memcpy(&this.buffer[this.used], msg.ptr, msg.length);
+        this.used = this.used + msg.length;
+    }
+    void appendi(int i) {
+        this.appends(itoa(i)); // TODO
+    }
+    void expand(size_t newLength) {
+        while (newLength > this.buffer.length)
+        {
+            size_t newBufLen = this.buffer.length * 2;
+            auto newBuf = new string(newBufLen);
+            for (int i = 0; i < this.used; i += 1) newBuf[i] = this.buffer[i];
+            free();
+            this.buffer = newBuf;
+        }
+    }
+    void free() {
+        free__(this.buffer.ptr);
+    }
+    string flush() {
+        string result = new string(this.used);
+        memcpy(result.ptr, this.buffer.ptr, this.used);
+        this.used = 0;
+        return result;
+    }
+}
+
+class LineWriter2
+{
+    string[] lines;
+    int length;
+    LineAppender2 line;
+    this() {
+        this.line = new LineAppender2;
+    }
+    void free() {
+        for (int i = 0; i < this.lines.length; i += 1) {
+            free__(this.lines[i].ptr);
+        }
+        free__(this.lines.ptr);
+        this.line.free();
+    }
+    void print(string msg) {
+        this.line.appends(msg);
+        this.endl();
+    }
+    void appendsi(string s, int i)
+    {
+        this.line.appends(s);
+        this.line.appendi(i);
+    }
+    void appendsis(string s1, int i, string s2)
+    {
+        this.line.appends(s1);
+        this.line.appendi(i);
+        this.line.appends(s2);
+    }
+    void append(string a)
+    {
+        this.line.appends(a);
+    }
+    void append2s(string a, string b)
+    {
+        this.line.appends(a);
+        this.line.appends(b);
+    }
+    void append3s(string a, string b, string c)
+    {
+        this.line.appends(a);
+        this.line.appends(b);
+        this.line.appends(c);
+    }
+    void append5s(string a, string b, string c, string d, string e)
+    {
+        this.line.appends(a);
+        this.line.appends(b);
+        this.line.appends(c);
+        this.line.appends(d);
+        this.line.appends(e);
+    }
+    void append6s(string a, string b, string c, string d, string e, string f)
+    {
+        this.append5s(a, b, c, d, e);
+        this.line.appends(f);
+    }
+    void endl() {
+        this.line.appends("\n");
+        this.append_(this.line.flush());
+    }
+    void append_(string line) {
+        if (this.length == this.lines.length) {
+            size_t newLen = this.lines.length * 2;
+            if (newLen == 0) newLen = 1;
+            auto newLines = new string[](newLen);
+            for (int i = 0; i < this.length; i += 1) newLines[i] = this.lines[i];
+            free__(this.lines.ptr);
+            this.lines = newLines;
+        }
+        this.lines[this.length] = line;
+        this.length = this.length + 1;
+    }
+    string text()
+    {
+        size_t sum;
+        for (int i = 0; i < this.length; i += 1)
+            sum = sum + this.lines[i].length;
+        string res = new char[](sum);
+        size_t offset = 0;
+        for (int i = 0; i < this.length; i += 1)
+        {
+            string line = this.lines[i];
+            memcpy(&res[offset], line.ptr, line.length);
+            offset = offset + line.length;
+        }
+        assert(offset == sum);
+        return res;
+    }
+}
+
+void typeFmtInto(CBackendModule mod, BackendType type, LineWriter2 output)
+{
+    output.append(typeFmt(mod, type));
+}
+
+void defineCIntrinsics(CBackendModule mod, Platform platform) {
+    BackendType voidp = new BackendPointerType(new BackendVoidType);
+    BackendType sizet = platform.nativeWordType();
+    {
+        auto argTypes = new BackendType[](5);
+        argTypes[0] = voidp;
+        argTypes[1] = voidp;
+        argTypes[2] = sizet;
+        argTypes[3] = sizet;
+        argTypes[4] = sizet;
+        mod.declare("_arraycmp", true, new BackendIntType, argTypes);
+    }
+    {
+        auto argTypes = new BackendType[](2);
+        argTypes[0] = voidp;
+        argTypes[1] = sizet;
+        mod.declare("ptr_offset", true, voidp, argTypes);
+    }
+    mod.declare("cxruntime_ptr_test", true, new BackendIntType, new BackendType[](0) ~ voidp);
+    mod.declare("cxruntime_alloc", true, voidp, new BackendType[](0) ~ sizet);
+}

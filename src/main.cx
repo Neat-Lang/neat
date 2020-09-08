@@ -1,6 +1,7 @@
 module main;
 
 import backend.base;
+import backend.c;
 import backend.llvm;
 import backend.proxy;
 import cx.array;
@@ -31,7 +32,9 @@ string removeSlashes(string s) {
 
 class ParserHelperImpl : ParserHelper
 {
-    this() { }
+    Backend backend;
+
+    this(Backend backend) { this.backend = backend; }
 
     override void proxyCall(Module module_, string function_, MacroState macroState)
     {
@@ -39,7 +42,6 @@ class ParserHelperImpl : ParserHelper
         // auto backend = new ProxyBackend();
         // auto platform = new ProxyPlatform();
         auto platform = new DefaultPlatform();
-        auto backend = new LLVMBackend();
         auto backendModule = backend.createModule(platform);
         auto proxyOutput = new Generator(platform, backendModule);
 
@@ -117,18 +119,16 @@ Package[] resolvePackages(ASTPackage[] astPackages)
 
 void main(string[] args)
 {
-    // TODO std.string
-    // TODO move to test
-    string a = "b:c";
-    assert(slice(&a, ":") == "b");
-    assert(a == "c");
-
     print("# stage2");
     string output;
     string[] nextArgs;
     string[] linkerArgs;
     ASTPackage[] astPackages;
+    bool dontLink;
     bool optimize;
+    // auto backend = new ProxyBackend();
+    Backend backend = new LLVMBackend();
+    Backend macroBackend = backend;
     {
         string[] remArgs;
         for (size_t i = 0; i < args.length; i += 1) {
@@ -153,6 +153,12 @@ void main(string[] args)
                 i += 1;
             } else if (arg == "-O") {
                 optimize = true;
+            } else if (arg == "-c") {
+                dontLink = true;
+            } else if (arg == "-backend=c") {
+                backend = new CBackend;
+            } else if (arg == "-macro-backend=c") {
+                macroBackend = new CBackend;
             } else {
                 remArgs = remArgs ~ arg;
             }
@@ -171,8 +177,6 @@ void main(string[] args)
     cxruntime_system("mkdir -p .obj");
 
     auto builtins = new Module("", null, new MacroState, null);
-    // auto backend = new ProxyBackend();
-    auto backend = new LLVMBackend();
     // auto platform = new ProxyPlatform();
     auto platform = new DefaultPlatform();
     auto backendModule = backend.createModule(platform);
@@ -187,18 +191,33 @@ void main(string[] args)
     auto defaultImports = new Module[](0) ~ builtins;
     auto cache = new ModuleCache;
     auto modParseConfig = new ModuleParserConfig(platform, packages, defaultImports, cache);
-    auto helper = new ParserHelperImpl;
+    auto helper = new ParserHelperImpl(macroBackend);
     auto toplevel = parseModule(args[0], null, false, helper, modParseConfig, Loc(null, ""));
     auto generator = new Generator(platform, backendModule);
 
     toplevel.emit(generator);
 
     // backendModule.callMain(nextArgs);
-    auto llFile = ".obj/" ~ removeSlashes(output) ~ ".ll";
-    auto llText = backendModule.output.text();
-    cxruntime_file_write(llFile, llText);
-    free(llText.ptr);
-    backendModule.output.free();
+    auto backendModuleLLVM = backendModule.instanceOf(LLVMBackendModule);
+    auto backendModuleC = backendModule.instanceOf(CBackendModule);
+    string srcFile;
+    if (backendModuleLLVM) {
+        srcFile = ".obj/" ~ removeSlashes(output) ~ ".ll";
+        auto llText = backendModuleLLVM.output.text();
+        cxruntime_file_write(srcFile, llText);
+        free(llText.ptr);
+        backendModuleLLVM.output.free();
+    } else {
+        assert(!!backendModuleC);
+        srcFile = ".obj/" ~ removeSlashes(output) ~ ".c";
+        auto csrc = backendModuleC.output.text();
+        cxruntime_file_write(srcFile, csrc);
+        free(csrc.ptr);
+        backendModuleC.output.free();
+    }
+
+
+    if (dontLink) return;
 
     // int pid = getpid();
     // cxruntime_system("cat /proc/" ~ itoa(pid) ~ "/status");
@@ -206,7 +225,9 @@ void main(string[] args)
     if (optimize) flags ~= " -Ofast";
     string linkerFlags = " -ldl";
     for (int i = 0; i < linkerArgs.length; i += 1) linkerFlags ~= " " ~ linkerArgs[i];
-    string cmd = "clang" ~ flags ~ " " ~ llFile ~ " src/runtime.c -o " ~ output ~ linkerFlags;
+    string compiler = "clang";
+    if (backend.instanceOf(CBackend)) compiler = "gcc";
+    string cmd = compiler ~ flags ~ " " ~ srcFile ~ " src/runtime.c -o " ~ output ~ linkerFlags;
     print("$ " ~ cmd);
     cxruntime_system(cmd);
 }

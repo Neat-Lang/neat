@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 CX=build/cx
 CXFLAGS="-Pcompiler:build/src"

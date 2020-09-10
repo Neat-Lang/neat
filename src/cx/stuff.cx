@@ -27,19 +27,16 @@ class Function : FunctionDeclaration
 {
     ASTStatement statement;
 
-    MacroState macroState;
-
     Statement compiledStatement;
 
     Namespace parent;
 
-    this(string name, Type ret, Argument[] args, ASTStatement statement, MacroState macroState)
+    this(string name, Type ret, Argument[] args, ASTStatement statement)
     {
         this.name = name;
         this.ret = ret;
         this.args = args;
         this.statement = statement;
-        this.macroState = macroState;
         this.compiledStatement = null;
         this.thisType = null;
         this.parent = null;
@@ -99,7 +96,7 @@ class Function : FunctionDeclaration
 
         if (!compiledStatement)
         {
-            auto context = new Context(platform, scope_, this.macroState);
+            auto context = new Context(platform, scope_);
 
             compiledStatement = this.statement.compile(context);
         }
@@ -170,16 +167,13 @@ class ASTFunction
 
     ASTStatement statement;
 
-    MacroState macroState;
-
-    this(string name, ASTType ret, ASTArgument[] args, bool isDeclaration, ASTStatement statement, MacroState macroState)
+    this(string name, ASTType ret, ASTArgument[] args, bool isDeclaration, ASTStatement statement)
     {
         this.name = name;
         this.ret = ret;
         this.args = args;
         this.isDeclaration = isDeclaration;
         this.statement = statement;
-        this.macroState = macroState;
     }
 
     FunctionDeclaration compile(Context context)
@@ -202,7 +196,7 @@ class ASTFunction
             this.name,
             this.ret.compile(context),
             arguments,
-            this.statement, this.macroState);
+            this.statement);
 
         fun.parent = context.namespace;
         return fun;
@@ -387,7 +381,7 @@ class ASTCall : ASTSymbol
         if (ident)
         {
             auto callMacroArgs = new CallMacroArgs(ident.name, this.args, context, this.loc);
-            context.macroState.applyMacro(callMacroArgs);
+            context.namespace.applyMacro(callMacroArgs);
             if (callMacroArgs.transformed) return callMacroArgs.transformed;
         }
         auto target = this.target.compile(context);
@@ -704,7 +698,7 @@ ASTSymbol parseProperties(Parser parser, LexicalContext lexicalContext, ASTSymbo
         if (!matched) {
             auto macroArgs = new ParsePropertyArgs(parser, lexicalContext, current);
 
-            lexicalContext.macroState.applyMacro(macroArgs);
+            lexicalContext.applyMacro(macroArgs);
             if (macroArgs.result)
             {
                 matched = true;
@@ -1138,7 +1132,7 @@ ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
 {
     {
         auto args = new ParseExpressionBaseArgs(parser, lexicalContext);
-        lexicalContext.macroState.applyMacro(args);
+        lexicalContext.applyMacro(args);
         if (args.symbol) return args.symbol;
     }
     string name = parseIdentifier(parser);
@@ -1952,7 +1946,7 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
 {
     {
         auto args = new ParseStatementArgs(parser, lexicalContext);
-        lexicalContext.macroState.applyMacro(args);
+        lexicalContext.applyMacro(args);
         if (args.statement) return args.statement;
     }
     {
@@ -2012,7 +2006,7 @@ ASTFunction parseFunction(Parser parser, LexicalContext lexicalContext)
     parser.commit();
     ASTArgument[] args = parseIdentifierList(parser, lexicalContext);
     ASTStatement stmt = parseStatement(parser, lexicalContext);
-    return new ASTFunction(name, ret, args, false, stmt, lexicalContext.macroState);
+    return new ASTFunction(name, ret, args, false, stmt);
 }
 
 class ModuleEntry
@@ -2030,22 +2024,15 @@ class Module : Namespace
 
     Package pak;
 
-    MacroState macroState;
-
-    // whenever macro state changes, we begin a new submodule
-    // when this happens, this member references the previous module.
-    Module parentModule;
-
-    this(string name, Package pak, MacroState macroState, Module parentModule)
+    this(string name, Package pak)
     {
-        this.parent = parentModule;
-        this.parentModule = parentModule;
+        this.parent = null;
         this.name = name;
         this.pak = pak;
-        this.macroState = macroState;
+        this.macroState = new MacroState;
     }
 
-    Module[] imports;
+    Import[] imports;
 
     ModuleEntry[] entries;
 
@@ -2054,9 +2041,21 @@ class Module : Namespace
         this.entries ~= new ModuleEntry(name, symbol);
     }
 
-    void addImport(Module module_)
+    void addImport(Module module_, bool isMacroImport)
     {
-        this.imports ~= module_;
+        this.imports ~= Import(module_, isMacroImport);
+    }
+
+    override void applyMacro(MacroArgs args) {
+        this.macroState.applyMacro(args);
+        if (args.done()) return;
+        for (int i = 0; i < this.imports.length; i += 1) {
+            if (this.imports[i].isMacroImport)
+            {
+                this.imports[i].module_.macroState.applyMacro(args);
+                if (args.done()) return;
+            }
+        }
     }
 
     override string mangle() {
@@ -2067,15 +2066,11 @@ class Module : Namespace
     {
         if (!generator.once(mangle()))
             return;
-        if (this.parentModule)
-        {
-            this.parentModule.emit(generator);
-        }
 
         assert(!generator.fun);
         // TODO each only once!
         for (int i = 0; i < this.imports.length; i += 1)
-            this.imports[i].emit(generator);
+            this.imports[i].module_.emit(generator);
 
         // (pre)declare everything
         for (int i = 0; i < this.entries.length; i += 1) {
@@ -2149,13 +2144,20 @@ class Module : Namespace
         if (public_) return public_;
         for (int i = 0; i < this.imports.length; i += 1)
         {
-            Symbol entry = this.imports[i].lookupPublic(name);
+            Symbol entry = this.imports[i].module_.lookupPublic(name);
             if (entry) return entry;
         }
         if (this.parent)
             return this.parent.lookup(name, frame);
         return null;
     }
+}
+
+struct Import
+{
+    Module module_;
+
+    bool isMacroImport;
 }
 
 class ParserHelper
@@ -2351,7 +2353,7 @@ class ClassMethod : Function
     bool override_;
 
     this(Loc loc, Class classType, bool override_, string name, Type ret, Argument[] args, ASTStatement statement,
-         Statement compiledStatement, MacroState macroState)
+         Statement compiledStatement)
     {
         // TODO super()
         this.name = name;
@@ -2359,7 +2361,6 @@ class ClassMethod : Function
         this.args = args;
         this.statement = statement;
         this.compiledStatement = compiledStatement;
-        this.macroState = macroState;
 
         auto classNamespace = new ClassNamespace(classType.context.namespace, classType);
 
@@ -2623,7 +2624,7 @@ class Class : Type
 
         this.methods ~= new ClassMethod(
             Loc(null, ""), this, override_, "__instanceof",
-            voidp, new Argument[](0) ~ Argument("target", stringType), null, stmt, null);
+            voidp, new Argument[](0) ~ Argument("target", stringType), null, stmt);
     }
 
     override bool same(Type other) {
@@ -2687,16 +2688,12 @@ class ASTClassDecl : ASTType
 
     ASTClassDeclMethod[] methods;
 
-    MacroState macroState;
-
-    this(string name, string superClass, ASTClassDeclMember[] members, ASTClassDeclMethod[] methods,
-         MacroState macroState)
+    this(string name, string superClass, ASTClassDeclMember[] members, ASTClassDeclMethod[] methods)
     {
         this.name = name;
         this.superClass = superClass;
         this.members = members;
         this.methods = methods;
-        this.macroState = macroState;
     }
 
     override Class compile(Context context)
@@ -2738,7 +2735,7 @@ class ASTClassDecl : ASTType
                 method.name,
                 method.ret.compile(classContext),
                 methodArgs,
-                method.body_, null, this.macroState);
+                method.body_, null);
         }
         target.genVtable();
     }
@@ -2817,7 +2814,7 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
             members ~= ASTClassDeclMember(memberName, retType);
         }
     }
-    return new ASTClassDecl(name, superClass, members, methods, lexicalContext.macroState);
+    return new ASTClassDecl(name, superClass, members, methods);
 }
 
 class ModuleCacheEntry
@@ -2860,7 +2857,7 @@ class ModuleParserConfig
     }
 }
 
-Module parseMacroContinuation(Parser parser, ParserHelper helper, Module baseModule, ModuleParserConfig config)
+Module parseMacroContinuation(Parser parser, ParserHelper helper, Module module_, ModuleParserConfig config)
 {
     parser.begin();
     if (!acceptIdentifier(parser, "macro") || !parser.accept("("))
@@ -2873,14 +2870,9 @@ Module parseMacroContinuation(Parser parser, ParserHelper helper, Module baseMod
     parser.expect(")");
     parser.expect(";");
 
-    auto newMacroState = baseModule.macroState.dup();
+    helper.proxyCall(module_, identifier, module_.macroState);
 
-    helper.proxyCall(baseModule, identifier, newMacroState);
-
-    auto subModule = new Module(baseModule.name, baseModule.pak, newMacroState, baseModule);
-    auto newConfig = new ModuleParserConfig(config.platform, config.packages, config.defaultImports, config.cache);
-
-    return parseModuleBody(parser, helper, subModule, newConfig);
+    return parseModuleBody(parser, helper, module_, config);
 }
 
 struct ASTStructMember
@@ -2932,7 +2924,7 @@ class StructMethod : Function
     Loc loc;
 
     this(Loc loc, Struct structType, Context context, string name, Type ret, Argument[] args, ASTStatement statement,
-         Statement compiledStatement, MacroState macroState)
+         Statement compiledStatement)
     {
         // TODO super()
         this.name = name;
@@ -2940,7 +2932,6 @@ class StructMethod : Function
         this.args = args;
         this.statement = statement;
         this.compiledStatement = compiledStatement;
-        this.macroState = macroState;
 
         auto structNamespace = new StructNamespace(context.namespace, structType);
 
@@ -2986,14 +2977,11 @@ class ASTStructDecl : ASTType
 
     ASTStructMethod[] methods;
 
-    MacroState macroState;
-
-    this(string name, ASTStructMember[] members, ASTStructMethod[] methods, MacroState macroState)
+    this(string name, ASTStructMember[] members, ASTStructMethod[] methods)
     {
         this.name = name;
         this.members = members;
         this.methods = methods;
-        this.macroState = macroState;
     }
 
     override Struct compile(Context context)
@@ -3023,7 +3011,7 @@ class ASTStructDecl : ASTType
                 method.name,
                 method.ret.compile(structContext),
                 methodArgs,
-                method.body_, null, this.macroState);
+                method.body_, null);
         }
         return struct_;
     }
@@ -3062,7 +3050,7 @@ ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
         }
     }
     parser.commit();
-    return new ASTStructDecl(name, members, methods, lexicalContext.macroState);
+    return new ASTStructDecl(name, members, methods);
 }
 
 Package selectPackage(Package[] packages, string name, Loc loc)
@@ -3075,8 +3063,8 @@ Package selectPackage(Package[] packages, string name, Loc loc)
 
 Module parseModuleBody(Parser parser, ParserHelper helper, Module module_, ModuleParserConfig config)
 {
-    Context context = new Context(config.platform, module_, module_.macroState);
-    LexicalContext lexicalContext = new LexicalContext(module_.macroState);
+    Context context = new Context(config.platform, module_);
+    LexicalContext lexicalContext = new LexicalContext(module_);
 
     while (!parser.eof())
     {
@@ -3095,15 +3083,7 @@ Module parseModuleBody(Parser parser, ParserHelper helper, Module module_, Modul
                 Module importedModule = parseModule(
                     moduleToFile(import_.name), pak, true, helper, config, import_.loc);
 
-                module_.addImport(importedModule);
-
-                if (import_.isMacroImport)
-                {
-                    module_.macroState = module_.macroState.dup();
-                    lexicalContext = new LexicalContext(module_.macroState);
-
-                    lexicalContext.macroState.addImport(importedModule.macroState);
-                }
+                module_.addImport(importedModule, import_.isMacroImport);
             }
         }
         if (!matched) {
@@ -3149,7 +3129,6 @@ Module parseModuleBody(Parser parser, ParserHelper helper, Module module_, Modul
 
 Module parseModule(string filename, Package pak, bool search, ParserHelper helper, ModuleParserConfig config, Loc loc)
 {
-    auto macroState = new MacroState;
     string path = filename;
     if (search) {
         assert2s(!!pak, "search, but no package");
@@ -3172,9 +3151,9 @@ Module parseModule(string filename, Package pak, bool search, ParserHelper helpe
 
     locAtModule.assert2s2(filename == moduleToFile(modname), filename, ": module doesn't match filename");
 
-    Module base = new Module(modname, pak, macroState, null);
+    Module base = new Module(modname, pak);
     for (int i = 0; i < config.defaultImports.length; i += 1) {
-        base.addImport(config.defaultImports[i]);
+        base.addImport(config.defaultImports[i], true);
     }
 
     Module module_ = parseModuleBody(parser, helper, base, config);

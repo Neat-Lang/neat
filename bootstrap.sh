@@ -37,7 +37,7 @@ function dbootstrap {
 function rebuild {
     mkdir build
     cp ../../build/cx build/$1
-    ./rebuild.sh
+    bash rebuild.sh
 }
 # before structs in the compiler
 at_revision 'f65eb856f00b3016025b105c4475b1b9c623bdf3' 'dbootstrap' 'build/stage2'
@@ -51,5 +51,5 @@ at_revision 'e88bcc52f621c7e47f3a667554d7401c5d72be2e' 'rebuild cx' 'build/cx'
 at_revision 'f6078a3470f7826b566b7eed70acd91f3c647960' 'rebuild cx' 'build/cx'
 # import package()
 at_revision 'ba44e97c4dc8b721710cfaf023a711acc75c6cfd' 'rebuild cx' 'build/cx'
-./rebuild.sh
+bash rebuild.sh
 echo "=== build/cx from master ==="

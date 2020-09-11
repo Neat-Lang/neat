@@ -5,7 +5,7 @@ then
     cp -R src build/src
 fi
 I=1
-build/cx -O -Pcompiler:build/src -Pnext:src:compiler src/main.cx -o build/cx_test$I
+build/cx -O -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_test$I
 SUM="$(objdump -S build/cx_test$I |grep -v file\ format |md5sum)"
 SUMNEXT=""
 while true

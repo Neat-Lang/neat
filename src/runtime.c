@@ -137,7 +137,7 @@ void cxruntime_system(struct String command) {
 }
 
 void cxruntime_dlcall(struct String dlfile, struct String fun, void* arg) {
-    void *handle = dlopen(toStringz(dlfile), RTLD_LAZY);
+    void *handle = dlopen(toStringz(dlfile), RTLD_LAZY | RTLD_DEEPBIND);
     if (!handle) fprintf(stderr, "can't open %.*s - %s\n", (int) dlfile.length, dlfile.ptr, dlerror());
     assert(!!handle);
     void *sym = dlsym(handle, toStringz(fun));

@@ -25,17 +25,10 @@ class Namespace
 {
     Namespace parent; // lexical parent
 
-    MacroState macroState;
-
-    this(Namespace parent) {
-        this.parent = parent;
-        this.macroState = new MacroState();
-    }
+    this(Namespace parent) { this.parent = parent; }
 
     // frame is a pointer to the stack frame or what was in the 'this'/'context' parameter.
     Symbol lookup(string name, Expression frame) { assert(false); }
-
-    void applyMacro(MacroArgs args) { this.parent.applyMacro(args); }
 
     string mangle() { return this.parent.mangle(); }
 }
@@ -46,25 +39,26 @@ class Context
 
     Namespace namespace;
 
-    this(Platform platform, Namespace namespace)
+    MacroState macroState;
+
+    this(Platform platform, Namespace namespace, MacroState macroState)
     {
         this.platform = platform;
         this.namespace = namespace;
+        this.macroState = macroState;
     }
 
     Context withNamespace(Namespace namespace)
     {
-        return new Context(this.platform, namespace);
+        return new Context(this.platform, namespace, this.macroState);
     }
 }
 
 class LexicalContext
 {
-    Namespace namespace;
+    MacroState macroState;
 
-    this(Namespace namespace) { this.namespace = namespace; }
-
-    void applyMacro(MacroArgs args) { this.namespace.applyMacro(args); }
+    this(MacroState macroState) { this.macroState = macroState; }
 }
 
 class ASTSymbol
@@ -286,13 +280,39 @@ class MacroState
 {
     Macro[] macros;
 
+    MacroState[] imports;
+
     this() { }
 
+    MacroState dup() {
+        auto newState = new MacroState;
+        newState.macros = new Macro[](this.macros.length);
+        for (int i = 0; i < this.macros.length; i += 1)
+            newState.macros[i] = this.macros[i];
+        newState.imports = new MacroState[](this.imports.length);
+        for (int i = 0; i < this.imports.length; i += 1)
+            newState.imports[i] = this.imports[i];
+        return newState;
+    }
+
     void applyMacro(MacroArgs args) {
+        this.applyMacroExported(args);
+        if (args.done()) return;
+        for (int i = 0; i < this.imports.length; i += 1) {
+            this.imports[i].applyMacroExported(args);
+            if (args.done()) return;
+        }
+    }
+
+    void applyMacroExported(MacroArgs args) {
         for (int i = 0; i < this.macros.length; i += 1) {
             this.macros[i].apply(args);
             if (args.done()) return;
         }
+    }
+
+    void addImport(MacroState target) {
+        this.imports ~= target;
     }
 
     void addMacro(Macro macro_) {

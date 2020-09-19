@@ -71,7 +71,7 @@ class Function : FunctionDeclaration
 
     CompiledFunction compile(Platform platform)
     {
-        auto stackframe = new FunctionScope(this.thisType, this.parent);
+        auto stackframe = new FunctionScope(this.ret, this.thisType, this.parent);
         Namespace scope_ = stackframe;
         int extra = 0;
         if (this.thisType)
@@ -505,7 +505,7 @@ class ASTArraySlice : ASTSymbol
     }
 }
 
-ASTIndexAccess parseIndex(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
+ASTSymbol parseIndex(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
 {
     parser.begin();
     if (!parser.accept("["))
@@ -1363,11 +1363,15 @@ class ASTReturnStatement : ASTStatement
 {
     ASTSymbol value;
 
-    this(ASTSymbol value) { this.value = value; }
+    Loc loc;
+
+    this(ASTSymbol value, Loc loc) { this.value = value; this.loc = loc; }
 
     override Statement compile(Context context)
     {
         Expression expr = beExpression(this.value.compile(context));
+        Type ret = findFunctionScope(context.namespace).ret;
+        expr = implicitConvertTo(expr, ret, this.loc);
 
         return new ReturnStatement(expr);
     }
@@ -1409,7 +1413,7 @@ ASTReturnStatement parseReturn(Parser parser, LexicalContext lexicalContext)
         parser.expect(";");
     }
     parser.commit();
-    return new ASTReturnStatement(expr);
+    return new ASTReturnStatement(expr, parser.loc());
 }
 
 class StackFrame : Reference
@@ -1453,11 +1457,17 @@ class LatentVariable
 
 class FunctionScope : Namespace
 {
+    Type ret;
+
     Type extra;
 
     StructMemberDeclaration[] variables;
 
-    this(Type extra, Namespace parent) { this.extra = extra; this.parent = parent; }
+    this(Type ret, Type extra, Namespace parent) {
+        this.ret = ret;
+        this.extra = extra;
+        this.parent = parent;
+    }
 
     LatentVariable declare(string name, Type type)
     {
@@ -3318,8 +3328,11 @@ Module getModule(string filename, Package pak, bool search, ParserHelper helper,
     Module mod = config.cache.find(path);
     if (mod) return mod;
 
+    auto basicObjectCache = new BasicObjectCache(
+        new ASTVoid, new ASTCharacter, new ASTShort, new ASTInteger, new ASTLong, new ASTFloat);
+
     string code = cxruntime_file_read(path);
-    Parser parser = new Parser(path, code);
+    Parser parser = new Parser(path, code, basicObjectCache);
 
     parser.expect("module");
     string modname = parseIdentifier2(parser, ".");

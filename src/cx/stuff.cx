@@ -2117,6 +2117,14 @@ class Module : Namespace
         return this.pak.name ~ "_module_" ~ this.mangledName;
     }
 
+    void resolve()
+    {
+        for (int i = 0; i < this.entries.length; i += 1) {
+            Class class_ = this.entries[i].value.instanceOf(Class);
+            if (class_) class_.resolve();
+        }
+    }
+
     void emit(Generator generator)
     {
         if (!generator.once(mangle()))
@@ -2142,7 +2150,6 @@ class Module : Namespace
             Class class_ = this.entries[i].value.instanceOf(Class);
             if (class_)
             {
-                class_.resolve();
                 for (int i = 0; i < class_.methods.length; i += 1)
                     class_.methods[i].declare(generator);
 
@@ -2875,20 +2882,20 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
 class ModuleCacheEntry
 {
     string path;
-    Module mod;
-    this(string path, Module mod) { this.path = path; this.mod = mod; }
+    ASTModule mod;
+    this(string path, ASTModule mod) { this.path = path; this.mod = mod; }
 }
 
 class ModuleCache
 {
     ModuleCacheEntry[] modules;
     this() { }
-    Module find(string path) {
+    ASTModule find(string path) {
         for (int i = 0; i < this.modules.length; i += 1)
             if (this.modules[i].path == path) return this.modules[i].mod;
         return null;
     }
-    void add(string path, Module mod) {
+    void add(string path, ASTModule mod) {
         this.modules ~= new ModuleCacheEntry(path, mod);
     }
 }
@@ -3247,13 +3254,16 @@ Module compileImport(ASTModule module_, ASTImport import_, ParserHelper helper, 
         pak = selectPackage(config.packages, import_.pak, import_.loc);
         transitive = false;
     }
-    return getModule(
+    auto astModule = getModule(
         moduleToFile(import_.name), pak, true, helper, config, import_.loc);
+
+    return compileModule(astModule, helper, config, true);
 }
 
 Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfig config,
     bool addDefaultModules)
 {
+    // TODO caching here
     Module parent = null;
 
     if (astModule.parent)
@@ -3310,10 +3320,11 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
         }
         else assert(false);
     }
+    module_.resolve();
     return module_;
 }
 
-Module getModule(string filename, Package pak, bool search, ParserHelper helper, ModuleParserConfig config, Loc loc)
+ASTModule getModule(string filename, Package pak, bool search, ParserHelper helper, ModuleParserConfig config, Loc loc)
 {
     auto macroState = new MacroState;
     string path = filename;
@@ -3325,7 +3336,7 @@ Module getModule(string filename, Package pak, bool search, ParserHelper helper,
         filename = findResidualFilename(filename, config.packages, &pak);
     }
     assert(!!pak);
-    Module mod = config.cache.find(path);
+    ASTModule mod = config.cache.find(path);
     if (mod) return mod;
 
     auto basicObjectCache = new BasicObjectCache(
@@ -3343,8 +3354,7 @@ Module getModule(string filename, Package pak, bool search, ParserHelper helper,
     locAtModule.assert2s2(filename == moduleToFile(modname), filename, ": module doesn't match filename");
 
     ASTModule baseModule = new ASTModule(modname, pak, new MacroState, null);
-    ASTModule astModule = parseModuleBody(parser, helper, baseModule, config);
-    Module module_ = compileModule(astModule, helper, config, true);
+    ASTModule module_ = parseModuleBody(parser, helper, baseModule, config);
 
     config.cache.add(path, module_);
 

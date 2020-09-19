@@ -34,7 +34,12 @@ class ParserHelperImpl : ParserHelper
 {
     Backend backend;
 
-    this(Backend backend) { this.backend = backend; }
+    bool x86_32;
+
+    this(Backend backend, bool x86_32) {
+        this.backend = backend;
+        this.x86_32 = x86_32;
+    }
 
     // TODO why do we need 'config'?
     override void proxyCall(ASTModule astModule, string function_, MacroState macroState,
@@ -43,7 +48,7 @@ class ParserHelperImpl : ParserHelper
         print("# stageM");
         // auto backend = new ProxyBackend();
         // auto platform = new ProxyPlatform();
-        auto platform = new DefaultPlatform();
+        auto platform = new DefaultPlatform(x86_32);
         auto backendModule = backend.createModule(platform);
         auto proxyOutput = new Generator(platform, backendModule);
 
@@ -158,6 +163,8 @@ void main(string[] args)
     ASTPackage[] astPackages;
     bool dontLink;
     bool optimize;
+    bool x86_32;
+    bool macro_x86_32;
     // auto backend = new ProxyBackend();
     Backend backend = new LLVMBackend();
     Backend macroBackend = backend;
@@ -191,6 +198,10 @@ void main(string[] args)
                 backend = new CBackend;
             } else if (arg == "-macro-backend=c") {
                 macroBackend = new CBackend;
+            } else if (arg == "-m32") {
+                x86_32 = true;
+            } else if (arg == "-macro-m32") {
+                macro_x86_32 = true;
             } else {
                 remArgs = remArgs ~ arg;
             }
@@ -210,7 +221,7 @@ void main(string[] args)
 
     auto builtins = new ASTModule("", new Package("builtins", ""), new MacroState, null);
     // auto platform = new ProxyPlatform();
-    auto platform = new DefaultPlatform();
+    auto platform = new DefaultPlatform(x86_32);
     auto backendModule = backend.createModule(platform);
 
     builtins.addTypeAlias("string", new FixedTypeAlias(new Array(new Character)));
@@ -222,10 +233,10 @@ void main(string[] args)
 
     auto defaultImports = new ASTModule[](0) ~ builtins;
     auto cache = new ModuleCache;
-    auto modParseConfig = new ModuleParserConfig(platform, packages, defaultImports, cache);
-    auto helper = new ParserHelperImpl(macroBackend);
+    auto modParseConfig = new ModuleParserConfig(packages, defaultImports, cache);
+    auto helper = new ParserHelperImpl(macroBackend, macro_x86_32);
     auto astToplevel = getModule(args[0], null, false, helper, modParseConfig, Loc(null, ""));
-    auto toplevel = compileModule(astToplevel, helper, modParseConfig, true);
+    auto toplevel = compileModule(astToplevel, helper, modParseConfig, platform, true);
     auto generator = new Generator(platform, backendModule);
 
     toplevel.emit(generator);
@@ -259,6 +270,7 @@ void main(string[] args)
     for (int i = 0; i < linkerArgs.length; i += 1) linkerFlags ~= " " ~ linkerArgs[i];
     string compiler = "clang";
     if (backend.instanceOf(CBackend)) compiler = "gcc";
+    if (x86_32) flags ~= " -m32";
     string cmd = compiler ~ flags ~ " " ~ srcFile ~ " src/runtime.c -o " ~ output ~ linkerFlags;
     print("$ " ~ cmd);
     cxruntime_system(cmd);

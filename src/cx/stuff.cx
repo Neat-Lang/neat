@@ -2045,6 +2045,20 @@ class ASTModule
         this.macroState = macroState;
         this.parent = parent;
     }
+
+    void addTypeAlias(string name, ASTType type)
+    {
+        auto alias_ = new ASTTypeAlias(name, type);
+
+        this.entries ~= ASTModuleEntry(null, null, null, null, null, alias_, null);
+    }
+
+    void addExprAlias(string name, ASTSymbol symbol)
+    {
+        auto alias_ = new ASTSymbolAlias(name, symbol);
+
+        this.entries ~= ASTModuleEntry(null, null, null, null, null, null, alias_);
+    }
 }
 
 class Module : Namespace
@@ -2875,11 +2889,11 @@ class ModuleParserConfig
 
     Package[] packages;
 
-    Module[] defaultImports;
+    ASTModule[] defaultImports;
 
     ModuleCache cache;
 
-    this(Platform platform, Package[] packages, Module[] defaultImports, ModuleCache cache)
+    this(Platform platform, Package[] packages, ASTModule[] defaultImports, ModuleCache cache)
     {
         this.platform = platform;
         this.packages = packages;
@@ -2903,7 +2917,7 @@ ASTModule parseMacroContinuation(Parser parser, ParserHelper helper, ASTModule a
 
     auto newMacroState = astModule.macroState.dup();
     // throwaway compilation (TODO are we caching it right?)
-    Module module_ = compileModule(astModule, helper, config);
+    Module module_ = compileModule(astModule, helper, config, true);
 
     helper.proxyCall(module_, identifier, newMacroState);
 
@@ -3103,6 +3117,30 @@ Package selectPackage(Package[] packages, string name, Loc loc)
     loc.assert2s(false, "Undefined package: '" ~ name ~ "'");
 }
 
+class ASTTypeAlias
+{
+    string name;
+
+    ASTType type;
+
+    this(string name, ASTType type) {
+        this.name = name;
+        this.type = type;
+    }
+}
+
+class ASTSymbolAlias
+{
+    string name;
+
+    ASTSymbol symbol;
+
+    this(string name, ASTSymbol symbol) {
+        this.name = name;
+        this.symbol = symbol;
+    }
+}
+
 // TODO Either
 struct ASTModuleEntry
 {
@@ -3115,6 +3153,10 @@ struct ASTModuleEntry
     ASTExtern extern_;
 
     ASTFunction function_;
+
+    ASTTypeAlias typeAlias;
+
+    ASTSymbolAlias symbolAlias;
 }
 
 ASTModule parseModuleBody(Parser parser, ParserHelper helper, ASTModule module_, ModuleParserConfig config)
@@ -3128,7 +3170,8 @@ ASTModule parseModuleBody(Parser parser, ParserHelper helper, ASTModule module_,
             ASTImport import_ = parseImport(parser);
             if (import_) {
                 matched = true;
-                module_.entries ~= ASTModuleEntry(import_, null, null, null, null);
+                module_.entries ~= ASTModuleEntry(
+                    import_, null, null, null, null, null, null);
                 if (import_.isMacroImport)
                 {
                     auto importedModule = compileImport(module_, import_, helper, config);
@@ -3144,21 +3187,24 @@ ASTModule parseModuleBody(Parser parser, ParserHelper helper, ASTModule module_,
             ASTClassDecl classDecl = parseClassDecl(parser, lexicalContext);
             if (classDecl) {
                 matched = true;
-                module_.entries ~= ASTModuleEntry(null, classDecl, null, null, null);
+                module_.entries ~= ASTModuleEntry(
+                    null, classDecl, null, null, null, null, null);
             }
         }
         if (!matched) {
             ASTExtern extern_ = parseExtern(parser, lexicalContext);
             if (extern_) {
                 matched = true;
-                module_.entries ~= ASTModuleEntry(null, null, null, extern_, null);
+                module_.entries ~= ASTModuleEntry(
+                    null, null, null, extern_, null, null, null);
             }
         }
         if (!matched) {
             auto strct = parseStructDecl(parser, lexicalContext);
             if (strct) {
                 matched = true;
-                module_.entries ~= ASTModuleEntry(null, null, strct, null, null);
+                module_.entries ~= ASTModuleEntry(
+                    null, null, strct, null, null, null, null);
             }
         }
         if (!matched) {
@@ -3171,7 +3217,8 @@ ASTModule parseModuleBody(Parser parser, ParserHelper helper, ASTModule module_,
             if (fun)
             {
                 matched = true;
-                module_.entries ~= ASTModuleEntry(null, null, null, null, fun);
+                module_.entries ~= ASTModuleEntry(
+                    null, null, null, null, fun, null, null);
             }
         }
 
@@ -3194,21 +3241,26 @@ Module compileImport(ASTModule module_, ASTImport import_, ParserHelper helper, 
         moduleToFile(import_.name), pak, true, helper, config, import_.loc);
 }
 
-Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfig config)
+Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfig config,
+    bool addDefaultModules)
 {
     Module parent = null;
 
     if (astModule.parent)
     {
-        parent = compileModule(astModule.parent, helper, config);
+        parent = compileModule(astModule.parent, helper, config, addDefaultModules);
     }
 
     Module module_ = new Module(astModule.name, astModule.pak, astModule.macroState, parent);
     Context context = new Context(config.platform, module_, module_.macroState);
-    // TODO add to ASTModule (addImport that handles updating the macro state
-    // so that adding default macro imports works)
-    for (int i = 0; i < config.defaultImports.length; i += 1) {
-        module_.addImport(config.defaultImports[i]);
+    if (addDefaultModules)
+    {
+        // TODO add to ASTModule (addImport that handles updating the macro state
+        // so that adding default macro imports works)
+        for (int i = 0; i < config.defaultImports.length; i += 1) {
+            auto import_ = compileModule(config.defaultImports[i], helper, config, false);
+            module_.addImport(import_);
+        }
     }
 
     for (int i = 0; i < astModule.entries.length; i += 1)
@@ -3237,6 +3289,14 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
         else if (entry.function_)
         {
             module_.add(entry.function_.name, entry.function_.compile(context));
+        }
+        else if (entry.typeAlias)
+        {
+            module_.add(entry.typeAlias.name, entry.typeAlias.type.compile(context));
+        }
+        else if (entry.symbolAlias)
+        {
+            module_.add(entry.symbolAlias.name, entry.symbolAlias.symbol.compile(context));
         }
         else assert(false);
     }
@@ -3271,7 +3331,7 @@ Module getModule(string filename, Package pak, bool search, ParserHelper helper,
 
     ASTModule baseModule = new ASTModule(modname, pak, new MacroState, null);
     ASTModule astModule = parseModuleBody(parser, helper, baseModule, config);
-    Module module_ = compileModule(astModule, helper, config);
+    Module module_ = compileModule(astModule, helper, config, true);
 
     config.cache.add(path, module_);
 

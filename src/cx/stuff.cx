@@ -2222,7 +2222,11 @@ class Module : Namespace
 
 class ParserHelper
 {
-    void proxyCall(Module module_, string function_, MacroState macroState) { assert(false); }
+    void proxyCall(ASTModule astModule, string function_, MacroState macroState,
+                   ModuleParserConfig config)
+    {
+        assert(false);
+    }
 }
 
 Module findModule(Namespace namespace)
@@ -2902,17 +2906,14 @@ class ModuleCache
 
 class ModuleParserConfig
 {
-    Platform platform;
-
     Package[] packages;
 
     ASTModule[] defaultImports;
 
     ModuleCache cache;
 
-    this(Platform platform, Package[] packages, ASTModule[] defaultImports, ModuleCache cache)
+    this(Package[] packages, ASTModule[] defaultImports, ModuleCache cache)
     {
-        this.platform = platform;
         this.packages = packages;
         this.defaultImports = defaultImports;
         this.cache = cache;
@@ -2933,15 +2934,14 @@ ASTModule parseMacroContinuation(Parser parser, ParserHelper helper, ASTModule a
     parser.expect(";");
 
     auto newMacroState = astModule.macroState.dup();
-    // throwaway compilation (TODO are we caching it right?)
-    Module module_ = compileModule(astModule, helper, config, true);
 
-    helper.proxyCall(module_, identifier, newMacroState);
+    helper.proxyCall(astModule, identifier, newMacroState, config);
 
     auto subModule = new ASTModule(astModule.name, astModule.pak, newMacroState, astModule);
-    auto newConfig = new ModuleParserConfig(config.platform, config.packages, config.defaultImports, config.cache);
+    // TODO why do we want this? Where should MacroState go? Module or this?
+    auto newConfig = new ModuleParserConfig(config.packages, config.defaultImports, config.cache);
 
-    return parseModuleBody(parser, helper, subModule, newConfig);
+    return parseModuleBody(parser, helper, subModule, config);
 }
 
 struct ASTStructMember
@@ -3191,7 +3191,7 @@ ASTModule parseModuleBody(Parser parser, ParserHelper helper, ASTModule module_,
                     import_, null, null, null, null, null, null);
                 if (import_.isMacroImport)
                 {
-                    auto importedModule = compileImport(module_, import_, helper, config);
+                    auto importedModule = resolveImport(module_, import_, helper, config);
 
                     module_.macroState = module_.macroState.dup();
                     lexicalContext = new LexicalContext(module_.macroState);
@@ -3245,7 +3245,7 @@ ASTModule parseModuleBody(Parser parser, ParserHelper helper, ASTModule module_,
     return module_;
 }
 
-Module compileImport(ASTModule module_, ASTImport import_, ParserHelper helper, ModuleParserConfig config)
+ASTModule resolveImport(ASTModule module_, ASTImport import_, ParserHelper helper, ModuleParserConfig config)
 {
     auto pak = module_.pak;
     // TODO enum SearchMode { Transitive, Direct, Commandline }
@@ -3254,31 +3254,37 @@ Module compileImport(ASTModule module_, ASTImport import_, ParserHelper helper, 
         pak = selectPackage(config.packages, import_.pak, import_.loc);
         transitive = false;
     }
-    auto astModule = getModule(
+    return getModule(
         moduleToFile(import_.name), pak, true, helper, config, import_.loc);
+}
 
-    return compileModule(astModule, helper, config, true);
+Module compileImport(ASTModule module_, ASTImport import_, ParserHelper helper,
+                     ModuleParserConfig config, Platform platform)
+{
+    auto astModule = resolveImport(module_, import_, helper, config);
+
+    return compileModule(astModule, helper, config, platform, true);
 }
 
 Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfig config,
-    bool addDefaultModules)
+                     Platform platform, bool addDefaultModules)
 {
     // TODO caching here
     Module parent = null;
 
     if (astModule.parent)
     {
-        parent = compileModule(astModule.parent, helper, config, addDefaultModules);
+        parent = compileModule(astModule.parent, helper, config, platform, addDefaultModules);
     }
 
     Module module_ = new Module(astModule.name, astModule.pak, astModule.macroState, parent);
-    Context context = new Context(config.platform, module_, module_.macroState);
+    Context context = new Context(platform, module_, module_.macroState);
     if (addDefaultModules)
     {
         // TODO add to ASTModule (addImport that handles updating the macro state
         // so that adding default macro imports works)
         for (int i = 0; i < config.defaultImports.length; i += 1) {
-            auto import_ = compileModule(config.defaultImports[i], helper, config, false);
+            auto import_ = compileModule(config.defaultImports[i], helper, config, platform, false);
             module_.addImport(import_);
         }
     }
@@ -3290,7 +3296,7 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
         // (allows compilation in any order)
         if (entry.import_)
         {
-            auto importedModule = compileImport(astModule, entry.import_, helper, config);
+            auto importedModule = compileImport(astModule, entry.import_, helper, config, platform);
 
             module_.addImport(importedModule);
         }

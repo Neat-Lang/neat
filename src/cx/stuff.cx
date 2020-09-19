@@ -2222,8 +2222,7 @@ class Module : Namespace
 
 class ParserHelper
 {
-    void proxyCall(ASTModule astModule, string function_, MacroState macroState,
-                   ModuleParserConfig config)
+    void proxyCall(ASTModule astModule, string function_, MacroState macroState, ModuleParserConfig config)
     {
         assert(false);
     }
@@ -2883,16 +2882,16 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
     return new ASTClassDecl(name, superClass, members, methods, lexicalContext.macroState);
 }
 
-class ModuleCacheEntry
+class ASTModuleCacheEntry
 {
     string path;
     ASTModule mod;
     this(string path, ASTModule mod) { this.path = path; this.mod = mod; }
 }
 
-class ModuleCache
+class ASTModuleCache
 {
-    ModuleCacheEntry[] modules;
+    ASTModuleCacheEntry[] modules;
     this() { }
     ASTModule find(string path) {
         for (int i = 0; i < this.modules.length; i += 1)
@@ -2900,7 +2899,36 @@ class ModuleCache
         return null;
     }
     void add(string path, ASTModule mod) {
-        this.modules ~= new ModuleCacheEntry(path, mod);
+        this.modules ~= new ASTModuleCacheEntry(path, mod);
+    }
+}
+
+class ModuleCacheEntry
+{
+    string key;
+    Module mod;
+    this(string key, Module mod) {
+        this.key = key;
+        this.mod = mod;
+    }
+}
+
+class ModuleCache
+{
+    ModuleCacheEntry[] modules;
+    this() { }
+    string key(ASTModule mod, Platform platform) {
+        // TODO platform.key()
+        return nativeWordType(platform).repr() ~ "_" ~ mod.pak.name ~ "_" ~ mod.name;
+    }
+    Module find(ASTModule mod, Platform platform) {
+        string key = this.key(mod, platform);
+        for (int i = 0; i < this.modules.length; i += 1)
+            if (this.modules[i].key == key) return this.modules[i].mod;
+        return null;
+    }
+    void add(ASTModule astModule, Platform platform, Module module_) {
+        this.modules ~= new ModuleCacheEntry(this.key(astModule, platform), module_);
     }
 }
 
@@ -2910,12 +2938,15 @@ class ModuleParserConfig
 
     ASTModule[] defaultImports;
 
+    ASTModuleCache astCache;
+
     ModuleCache cache;
 
-    this(Package[] packages, ASTModule[] defaultImports, ModuleCache cache)
+    this(Package[] packages, ASTModule[] defaultImports, ASTModuleCache astCache, ModuleCache cache)
     {
         this.packages = packages;
         this.defaultImports = defaultImports;
+        this.astCache = astCache;
         this.cache = cache;
     }
 }
@@ -2938,8 +2969,6 @@ ASTModule parseMacroContinuation(Parser parser, ParserHelper helper, ASTModule a
     helper.proxyCall(astModule, identifier, newMacroState, config);
 
     auto subModule = new ASTModule(astModule.name, astModule.pak, newMacroState, astModule);
-    // TODO why do we want this? Where should MacroState go? Module or this?
-    auto newConfig = new ModuleParserConfig(config.packages, config.defaultImports, config.cache);
 
     return parseModuleBody(parser, helper, subModule, config);
 }
@@ -3269,7 +3298,9 @@ Module compileImport(ASTModule module_, ASTImport import_, ParserHelper helper,
 Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfig config,
                      Platform platform, bool addDefaultModules)
 {
-    // TODO caching here
+    Module mod = config.cache.find(astModule, platform);
+    if (mod) return mod;
+
     Module parent = null;
 
     if (astModule.parent)
@@ -3327,6 +3358,7 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
         else assert(false);
     }
     module_.resolve();
+    config.cache.add(astModule, platform, module_);
     return module_;
 }
 
@@ -3342,7 +3374,7 @@ ASTModule getModule(string filename, Package pak, bool search, ParserHelper help
         filename = findResidualFilename(filename, config.packages, &pak);
     }
     assert(!!pak);
-    ASTModule mod = config.cache.find(path);
+    ASTModule mod = config.astCache.find(path);
     if (mod) return mod;
 
     auto basicObjectCache = new BasicObjectCache(
@@ -3362,7 +3394,7 @@ ASTModule getModule(string filename, Package pak, bool search, ParserHelper help
     ASTModule baseModule = new ASTModule(modname, pak, new MacroState, null);
     ASTModule module_ = parseModuleBody(parser, helper, baseModule, config);
 
-    config.cache.add(path, module_);
+    config.astCache.add(path, module_);
 
     return module_;
 }

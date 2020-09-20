@@ -3,6 +3,7 @@ module cx.macros.either;
 import backend.base;
 import cx.base;
 import cx.parser;
+import cx.expr;
 import cx.parser_base;
 import cx.stuff;
 import cx.types;
@@ -146,7 +147,11 @@ ASTType parseEither(Parser parser, LexicalContext lexicalContext)
     return new ASTEitherDecl(types);
 }
 
-struct ASTEitherCase
+/**
+ * a.case(T t: 5, U u: 6)
+ */
+
+struct ASTEitherCaseExprCase
 {
     Loc loc;
 
@@ -163,9 +168,9 @@ class ASTEitherCaseExpr : ASTSymbol
 
     ASTSymbol base;
 
-    ASTEitherCase[] cases;
+    ASTEitherCaseExprCase[] cases;
 
-    this(Loc loc, ASTSymbol base, ASTEitherCase[] cases) { this.loc = loc; this.base = base; this.cases = cases; }
+    this(Loc loc, ASTSymbol base, ASTEitherCaseExprCase[] cases) { this.loc = loc; this.base = base; this.cases = cases; }
 
     override Symbol compile(Context context) {
         auto baseExpr = beExpression2(base.compile(context), loc);
@@ -174,7 +179,9 @@ class ASTEitherCaseExpr : ASTSymbol
 
         loc.assert2s(!!either, "Expected Either for case expression");
 
-        EitherCase[] cases;
+        bool[] handled = new bool[](either.types.length);
+        EitherCaseExprCase[] cases;
+        Expression mergedExpr = null;
         for (int i = 0; i < this.cases.length; i += 1) {
             auto case_ = this.cases[i];
             Type type = case_.type.compile(context);
@@ -187,18 +194,36 @@ class ASTEitherCaseExpr : ASTSymbol
                 }
             }
             case_.loc.assert2s(matched != -1, "Type is not listed in Either!");
+            handled[matched] = true;
 
             auto namespace = new VarDeclScope(context.namespace);
             auto variable = namespace.declareUnassigned(case_.identifier, type);
             Expression expr = beExpression2(case_.expr.compile(context.withNamespace(namespace)), case_.loc);
+            if (!mergedExpr) mergedExpr = expr;
+            else {
+                auto left = implicitConvertToOptional(expr, mergedExpr.type());
+                auto right = implicitConvertToOptional(mergedExpr, expr.type());
+                if (!left && !right) case_.loc.assert2s(false, "incompatible expression type");
+                else if (left && right && !left.type().same(right.type())) case_.loc.assert2s(false, "ambiguous expression type");
+                if (left) mergedExpr = left;
+                else if (right) mergedExpr = right;
+            }
 
-            cases ~= EitherCase(case_.loc, matched, variable, expr);
+            cases ~= EitherCaseExprCase(case_.loc, matched, variable, expr);
         }
-        return new EitherCaseExpr(baseExpr, cases);
+        auto mergeType = mergedExpr.type();
+        // merge exprs to the shared type
+        for (int i = 0; i < cases.length; i += 1) {
+            cases[i].expr = implicitConvertTo(cases[i].expr, mergeType, cases[i].loc);
+        }
+        for (int i = 0; i < handled.length; i += 1) {
+            loc.assert2s(handled[i], "Type " ~ either.types[i].repr() ~ " not handled!");
+        }
+        return new EitherCaseExpr(mergeType, baseExpr, cases);
     }
 }
 
-struct EitherCase
+struct EitherCaseExprCase
 {
     Loc loc;
 
@@ -211,21 +236,21 @@ struct EitherCase
 
 class EitherCaseExpr : Expression
 {
+    Type type_;
+
     Expression either;
 
-    EitherCase[] cases;
+    EitherCaseExprCase[] cases;
 
-    this(Expression either, EitherCase[] cases) { this.either = either; this.cases = cases; }
+    this(Type type_, Expression either, EitherCaseExprCase[] cases) {
+        this.type_ = type_;
+        this.either = either;
+        this.cases = cases;
+    }
 
     override Type type()
     {
-        Type result;
-        for (int i = 0; i < this.cases.length; i += 1) {
-            auto caseType = cases[i].expr.type();
-            if (!result) result = caseType;
-            else cases[i].loc.assert2s(caseType.same(result), "incompatible expression type");
-        }
-        return result;
+        return this.type_;
     }
 
     override int emit(Generator generator)
@@ -289,7 +314,7 @@ ASTSymbol parseCaseExpr(Parser parser, LexicalContext lexicalContext, ASTSymbol 
     }
     parser.commit();
 
-    ASTEitherCase[] cases;
+    ASTEitherCaseExprCase[] cases;
     while (!parser.accept(")"))
     {
         if (cases.length) parser.expect(",");
@@ -299,9 +324,171 @@ ASTSymbol parseCaseExpr(Parser parser, LexicalContext lexicalContext, ASTSymbol 
         parser.expect(":");
         Loc loc = parser.loc();
         ASTSymbol expr = parseExpression(parser, lexicalContext);
-        cases ~= ASTEitherCase(loc, type, identifier, expr);
+        cases ~= ASTEitherCaseExprCase(loc, type, identifier, expr);
     }
     return new ASTEitherCaseExpr(parser.loc(), current, cases);
+}
+
+/**
+ * a.case {
+ *   T t: foo;
+ *   U u: { bar; }
+ * }
+ */
+
+// TODO maybe merge with exprs?
+
+struct ASTEitherCaseStmtCase
+{
+    Loc loc;
+
+    ASTType type;
+
+    string identifier;
+
+    ASTStatement stmt;
+}
+
+class ASTEitherCaseStmt : ASTStatement
+{
+    Loc loc;
+
+    ASTSymbol base;
+
+    ASTEitherCaseStmtCase[] cases;
+
+    this(Loc loc, ASTSymbol base, ASTEitherCaseStmtCase[] cases) { this.loc = loc; this.base = base; this.cases = cases; }
+
+    override Statement compile(Context context) {
+        auto baseExpr = beExpression2(base.compile(context), loc);
+        auto baseType = baseExpr.type();
+        auto either = baseType.instanceOf(Either);
+
+        loc.assert2s(!!either, "Expected Either for case expression");
+
+        bool[] handled = new bool[](either.types.length);
+        EitherCaseStmtCase[] cases;
+        for (int i = 0; i < this.cases.length; i += 1) {
+            auto case_ = this.cases[i];
+            Type type = case_.type.compile(context);
+
+            int matched = -1;
+            for (int k = 0; k < either.types.length; k += 1) {
+                if (type.same(either.types[k])) {
+                    case_.loc.assert2s(matched == -1, "either type " ~ type.repr() ~ " matched twice");
+                    matched = k;
+                }
+            }
+            case_.loc.assert2s(matched != -1, "Type is not listed in Either!");
+            handled[matched] = true;
+
+            auto namespace = new VarDeclScope(context.namespace);
+            auto variable = namespace.declareUnassigned(case_.identifier, type);
+            Statement stmt = case_.stmt.compile(context.withNamespace(namespace));
+
+            cases ~= EitherCaseStmtCase(case_.loc, matched, variable, stmt);
+        }
+        for (int i = 0; i < handled.length; i += 1) {
+            loc.assert2s(handled[i], "Type " ~ either.types[i].repr() ~ " not handled!");
+        }
+        return new EitherCaseStmt(baseExpr, cases);
+    }
+}
+
+struct EitherCaseStmtCase
+{
+    Loc loc;
+
+    int offset;
+
+    Reference parameter;
+
+    Statement stmt;
+}
+
+class EitherCaseStmt : Statement
+{
+    Expression either;
+
+    EitherCaseStmtCase[] cases;
+
+    this(Expression either, EitherCaseStmtCase[] cases) {
+        this.either = either;
+        this.cases = cases;
+    }
+
+    override void emit(Generator generator)
+    {
+        auto eitherType = this.either.type().emit(generator.platform);
+
+        // ensure we have something referenceable
+        auto eitherValuePtr = generator.fun.alloca(eitherType);
+
+        int eitherValue = this.either.emit(generator);
+
+        generator.fun.store(eitherType, eitherValuePtr, eitherValue);
+
+        int eitherCase = generator.fun.field(eitherType, eitherValue, 0);
+
+        int eitherRawValuePtr = generator.fun.fieldOffset(eitherType, eitherValuePtr, 1);
+
+        string label = generator.fun.getLabel();
+        for (int i = 0; i < this.cases.length; i += 1) {
+            auto case_ = cases[i];
+            auto testReg = generator.fun.binop(
+                "==", new BackendIntType(), eitherCase, generator.fun.intLiteral(case_.offset + 1));
+            string then = label ~ "_" ~ itoa_(i) ~ "_then";
+            string else_ = label ~ "_" ~ itoa_(i) ~ "_else";
+
+            generator.fun.testBranch(testReg, then , else_);
+            generator.fun.setLabel(then);
+            // in the case: assign to the parameter field
+            // first, load the union value
+            BackendType backendValueType =
+                this.either.type().instanceOf(Either).types[case_.offset].emit(generator.platform);
+            int valuePtr = generator.fun.bitcast(eitherRawValuePtr, new BackendPointerType(backendValueType));
+            auto fieldValue = generator.fun.load(backendValueType, valuePtr);
+            // then, store it in the field
+            generator.fun.store(backendValueType, case_.parameter.emitLocation(generator), fieldValue);
+            // then, emit the statement
+            case_.stmt.emit(generator);
+            // jump to exit
+            generator.fun.branch(label ~ "_fin");
+            generator.fun.setLabel(else_);
+        }
+        // generator.fun.unreachable();
+        generator.fun.branch(label ~ "_fin");
+        generator.fun.setLabel(label ~ "_fin");
+    }
+}
+
+ASTStatement parseCaseStmt(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin();
+    auto expr = parseExpressionLeaf(parser, lexicalContext);
+    if (!expr) {
+        parser.revert();
+        return null;
+    }
+    auto member = expr.instanceOf(ASTMember);
+    if (!member || member.member != "case" || !parser.accept("{")) {
+        parser.revert();
+        return null;
+    }
+    parser.commit();
+
+    ASTEitherCaseStmtCase[] cases;
+    while (!parser.accept("}"))
+    {
+        ASTType type = parseType(parser, lexicalContext);
+        parser.assert_(!!type, "case type expected");
+        string identifier = parseIdentifier(parser);
+        parser.expect(":");
+        Loc loc = parser.loc();
+        ASTStatement stmt = parseStatement(parser, lexicalContext);
+        cases ~= ASTEitherCaseStmtCase(loc, type, identifier, stmt);
+    }
+    return new ASTEitherCaseStmt(parser.loc(), member.base, cases);
 }
 
 class EitherMacro : Macro
@@ -316,6 +503,10 @@ class EitherMacro : Macro
         auto propArgs = args.instanceOf(ParsePropertyArgs);
         if (propArgs) {
             propArgs.result = parseCaseExpr(propArgs.parser, propArgs.lexicalContext, propArgs.left);
+        }
+        auto stmtArgs = args.instanceOf(ParseStatementArgs);
+        if (stmtArgs) {
+            stmtArgs.statement = parseCaseStmt(stmtArgs.parser, stmtArgs.lexicalContext);
         }
     }
 }

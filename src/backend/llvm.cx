@@ -13,7 +13,7 @@ class LLVMBackend : Backend {
 
 struct Global {
     string name;
-    string type;
+    BackendType type;
 }
 
 struct Globals
@@ -80,13 +80,12 @@ class LLVMBackendModule : BackendModule {
             if (ret.instanceOf(BackendVoidType)) retstr = "void"; // TODO
             this.output.print("declare " ~ retstr ~ " @" ~ name ~ argstr);
         }
-        this.globals.add(Global(name, llvmFmt(new BackendFunctionPointerType(ret, args))));
+        this.globals.add(Global(name, new BackendFunctionPointerType(ret, args)));
     }
 
     override BackendFunction define(string name, BackendType ret, BackendType[] args)
     {
-        if (name == "main") name = "_main"; // TODO mangle
-        this.globals.add(Global(name, llvmFmt(new BackendFunctionPointerType(ret, args))));
+        this.globals.add(Global(name, new BackendFunctionPointerType(ret, args)));
         return new LLVMBackendFunction(this, name, ret, args);
     }
     override void defineSymbolList(string name, string[] symbols)
@@ -95,10 +94,13 @@ class LLVMBackendModule : BackendModule {
         for (int i = 0; i < symbols.length; i += 1) {
             if (i) symbolList = symbolList ~ ", ";
             symbolList = symbolList ~ "void()* bitcast ("
-                ~ this.globalType(symbols[i]) ~ " @" ~ symbols[i] ~ " to void()*)";
+                ~ llvmFmt(this.globalType(symbols[i])) ~ " @" ~ symbols[i] ~ " to void()*)";
         }
-        string globalType = "[" ~ ltoa(symbols.length) ~ " x void()*]";
-        this.output.print("@" ~ name ~ " = global " ~ globalType ~ " [ " ~ symbolList ~ " ]");
+        int ilen = 0;
+        for (int i = 0; i < symbols.length; i += 1) ilen += 1; // TODO cast
+        auto globalType = new BackendStaticArrayType(
+            new BackendFunctionPointerType(new BackendVoidType, new BackendType[](0)), ilen);
+        this.output.print("@" ~ name ~ " = global " ~ llvmFmt(globalType) ~ " [ " ~ symbolList ~ " ]");
         this.globals.add(Global(name, globalType));
     }
     string nextLiteral() {
@@ -106,7 +108,7 @@ class LLVMBackendModule : BackendModule {
         this.literalId = this.literalId + 1;
         return res;
     }
-    string globalType(string name) {
+    BackendType globalType(string name) {
         auto globals = this.globals.array();
         for (int i = 0; i < globals.length; i += 1)
             if (globals[i].name == name)
@@ -169,6 +171,10 @@ string llvmFmt(BackendType type) {
         res = res ~ ")*";
         return res;
     }
+    auto backendSAtype = type.instanceOf(BackendStaticArrayType);
+    if (backendSAtype) {
+        return "[" ~ itoa(backendSAtype.length) ~ " x " ~ llvmFmt(backendSAtype.element) ~ "]";
+    }
     assert(false);
 }
 
@@ -178,7 +184,7 @@ struct Arg { int id; }
 struct RegDefine
 {
     int reg;
-    Either(BackendType, string) type;
+    BackendType type;
     Either(Reg, Arg, string) value;
 }
 
@@ -253,9 +259,7 @@ class LLVMBackendFunction : BackendFunction {
                     Reg r: "%reg" ~ itoa(r.id),
                     Arg a: "%arg" ~ itoa(a.id),
                     string s: s);
-                string type = def.type.case(
-                    BackendType t: llvmFmt(t),
-                    string s: s);
+                string type = llvmFmt(def.type);
                 return type ~ " " ~ val;
             }
         }
@@ -265,12 +269,8 @@ class LLVMBackendFunction : BackendFunction {
         auto regDefines = this.regDefines.array();
         for (int i = 0; i < regDefines.length; i += 1) {
             RegDefine def = regDefines[i];
-            if (def.reg == reg)
-            {
-                def.type.case {
-                    BackendType t: llvmFmtInto(t, this.output);
-                    string s: this.output.append(s);
-                }
+            if (def.reg == reg) {
+                llvmFmtInto(def.type, this.output);
 
                 this.output.append(" ");
 
@@ -286,10 +286,10 @@ class LLVMBackendFunction : BackendFunction {
         print("reg " ~ itoa(reg) ~ " not found!");
         assert(false);
     }
-    void defReg2(int reg, Either(BackendType, string) type, Either(Reg, Arg, string) value) {
+    void defReg2(int reg, BackendType type, Either(Reg, Arg, string) value) {
         this.regDefines.add(RegDefine(reg, type, value));
     }
-    int defReg(string type, Either(Reg, Arg, string) value) {
+    int defReg(BackendType type, Either(Reg, Arg, string) value) {
         int reg = this.nextReg();
         this.defReg2(reg, type, value);
         return reg;
@@ -312,29 +312,25 @@ class LLVMBackendFunction : BackendFunction {
         this.print(label ~ ":");
     }
     override int arg(int index) {
-        return this.defReg(llvmFmt(this.args[index]), Arg(index));
+        return this.defReg(this.args[index], Arg(index));
     }
     override int intLiteral(long value) {
-        return this.defReg("i32", ltoa(value));
+        return this.defReg(new BackendIntType, ltoa(value));
     }
     override int shortLiteral(int value) {
-        return this.defReg("i16", itoa(value));
+        return this.defReg(new BackendShortType, itoa(value));
     }
     override int byteLiteral(int value) {
-        return this.defReg("i8", itoa(value));
+        return this.defReg(new BackendCharType, itoa(value));
     }
     override int longLiteral(long value) {
-        return this.defReg("i64", ltoa(value));
+        return this.defReg(new BackendLongType, ltoa(value));
     }
     override int floatLiteral(float value) {
-        return this.defReg("f32", "0x" ~ ftoa_hex(value));
+        return this.defReg(new BackendFloatType, "0x" ~ ftoa_hex(value));
     }
     override int wordLiteral(Platform platform, size_t value) {
-        string sizestr;
-        if (platform.nativeWordType().instanceOf(BackendIntType)) sizestr = "i32";
-        else if (platform.nativeWordType().instanceOf(BackendLongType)) sizestr = "i64";
-        else assert(false);
-        return this.defReg(sizestr, ltoa(value));
+        return this.defReg(platform.nativeWordType(), ltoa(value));
     }
     override int stringLiteral(string text) {
         // TODO move to LLVMBackendModule
@@ -351,16 +347,16 @@ class LLVMBackendFunction : BackendFunction {
             literalId ~ " = private unnamed_addr constant " ~ type ~ " c\"" ~ escapedText ~ "\"");
         int reg = this.nextReg();
         this.print("%reg" ~ itoa(reg) ~ " = bitcast " ~ type ~ "* " ~ literalId ~ " to i8*");
-        return this.defReg("i8*", Reg(reg));
+        return this.defReg(new BackendPointerType(new BackendCharType), Reg(reg));
     }
     override int voidLiteral() {
-        return this.defReg(llvmFmt(this.ret_), "zeroinitializer");
+        return this.defReg(this.ret_, "zeroinitializer");
     }
     override int symbolList(string name) {
         int reg = this.nextReg();
         auto type = this.mod.globalType(name);
-        this.print("%reg" ~ itoa(reg) ~ " = bitcast " ~ type ~ "* @" ~ name ~ " to i8*");
-        return this.defReg("i8*", Reg(reg));
+        this.print("%reg" ~ itoa(reg) ~ " = bitcast " ~ llvmFmt(type) ~ "* @" ~ name ~ " to i8*");
+        return this.defReg(new BackendPointerType(new BackendCharType), Reg(reg));
     }
     override int binop(string op, BackendType type, int left, int right) {
         int reg = this.nextReg();
@@ -395,13 +391,20 @@ class LLVMBackendFunction : BackendFunction {
         if (op == "==" || op == "<" || op == ">" || op == "<=" || op == ">=") {
             reg = this.nextReg();
             this.print("%reg" ~ itoa(reg) ~ " = zext i1 %reg" ~ itoa(i1) ~ " to i32");
-            this.defReg2(reg, "i32", Reg(reg));
+            this.defReg2(reg, new BackendIntType, Reg(reg));
         } else {
-            this.defReg2(reg, typestr, Reg(reg));
+            this.defReg2(reg, type, Reg(reg));
         }
         return reg;
     }
     override int bitcast(int from, BackendType to) {
+        auto regDefines = this.regDefines.array();
+        for (int i = 0; i < regDefines.length; i += 1) {
+            RegDefine def = regDefines[i];
+            if (def.reg == from && def.type.same(to)) {
+                return from;
+            }
+        }
         int reg = this.nextReg();
         this.output.appendsi("  %reg", reg);
         this.output.append(" = bitcast ");
@@ -412,22 +415,22 @@ class LLVMBackendFunction : BackendFunction {
         this.defReg2(reg, to, Reg(reg));
         return reg;
     }
-    override int zeroExtend(int value, int from, int to) {
+    override int zeroExtend(int value, BackendType from, BackendType to) {
         int reg = this.nextReg();
-        this.print("%reg" ~ itoa(reg) ~ " = zext i" ~ itoa(from * 8) ~ " " ~ this.reg(value) ~ " to i" ~ itoa(to * 8));
-        this.defReg2(reg, "i" ~ itoa(to * 8), Reg(reg));
+        this.print("%reg" ~ itoa(reg) ~ " = zext " ~ llvmFmt(from) ~ " " ~ this.reg(value) ~ " to " ~ llvmFmt(to));
+        this.defReg2(reg, to, Reg(reg));
         return reg;
     }
-    override int signExtend(int value, int from, int to) {
+    override int signExtend(int value, BackendType from, BackendType to) {
         int reg = this.nextReg();
-        this.print("%reg" ~ itoa(reg) ~ " = sext i" ~ itoa(from * 8) ~ " " ~ this.reg(value) ~ " to i" ~ itoa(to * 8));
-        this.defReg2(reg, "i" ~ itoa(to * 8), Reg(reg));
+        this.print("%reg" ~ itoa(reg) ~ " = sext " ~ llvmFmt(from) ~ " " ~ this.reg(value) ~ " to " ~ llvmFmt(to));
+        this.defReg2(reg, to, Reg(reg));
         return reg;
     }
     override int intToFloat(int value) {
         int reg = this.nextReg();
         this.print("%reg" ~ itoa(reg) ~ " = sitofp " ~ this.treg(value) ~ " to float");
-        this.defReg2(reg, "float", Reg(reg));
+        this.defReg2(reg, new BackendFloatType, Reg(reg));
         return reg;
     }
     override int call(BackendType ret, string name, int[] args) {
@@ -440,10 +443,10 @@ class LLVMBackendFunction : BackendFunction {
         argstr ~= ")";
         if (ret.instanceOf(BackendVoidType)) {
             this.print("call void @" ~ name ~ argstr);
-            this.defReg2(reg, llvmFmt(ret), "TODOVOIDCALL");
+            this.defReg2(reg, ret, "TODOVOIDCALL");
         } else {
             this.print("%reg" ~ itoa(reg) ~ " = call " ~ llvmFmt(ret) ~ " @" ~ name ~ argstr);
-            this.defReg2(reg, llvmFmt(ret), Reg(reg));
+            this.defReg2(reg, ret, Reg(reg));
         }
         return reg;
     }
@@ -465,10 +468,10 @@ class LLVMBackendFunction : BackendFunction {
         argstr ~= ")";
         if (ret.instanceOf(BackendVoidType)) {
             this.print("call void " ~ this.reg(callReg) ~ argstr);
-            this.defReg2(reg, llvmFmt(ret), "TODOVOIDCALL");
+            this.defReg2(reg, ret, "TODOVOIDCALL");
         } else {
             this.print("%reg" ~ itoa(reg) ~ " = call " ~ llvmFmt(ret) ~ " " ~ this.reg(callReg) ~ argstr);
-            this.defReg2(reg, llvmFmt(ret), Reg(reg));
+            this.defReg2(reg, ret, Reg(reg));
         }
         return reg;
     }
@@ -478,7 +481,7 @@ class LLVMBackendFunction : BackendFunction {
         this.output.appendsi("  %reg", reg);
         this.output.append6s(" = load ", typeFmt, ", ", typeFmt, "* ", this.reg(source));
         this.output.endl();
-        this.defReg2(reg, typeFmt, Reg(reg));
+        this.defReg2(reg, backendType, Reg(reg));
         return reg;
     }
     override int alloca(BackendType backendType) {
@@ -486,7 +489,7 @@ class LLVMBackendFunction : BackendFunction {
         string typefmt = llvmFmt(backendType);
         this.print("%reg" ~ itoa(reg) ~ " = alloca " ~ typefmt);
         this.print("store " ~ typefmt ~ " zeroinitializer, " ~ typefmt ~ "* %reg" ~ itoa(reg));
-        this.defReg2(reg, typefmt ~ "*", Reg(reg));
+        this.defReg2(reg, new BackendPointerType(backendType), Reg(reg));
         return reg;
     }
     override int field(BackendType backendType, int source, int index) {
@@ -495,22 +498,14 @@ class LLVMBackendFunction : BackendFunction {
 
         int reg = this.nextReg();
         this.print("%reg" ~ itoa(reg) ~ " = extractvalue " ~ this.treg(source) ~ ", " ~ itoa(index));
-        this.defReg2(reg, llvmFmt(backendStructType.members[index]), Reg(reg));
+        this.defReg2(reg, backendStructType.members[index], Reg(reg));
         return reg;
     }
     override int fieldOffset(BackendType backendType, int source, int index) {
         auto backendStructType = backendType.instanceOf(BackendStructType);
         assert(!!backendStructType);
 
-        int reg1 = this.nextReg();
-        this.output.appendsi("  %reg", reg1);
-        this.output.append(" = bitcast ");
-        this.outputTreg(source);
-        this.output.append(" to ");
-        llvmFmtInto(backendType, output);
-        this.output.append("*");
-        this.output.endl();
-
+        int reg1 = this.bitcast(source, new BackendPointerType(backendType));
         int reg2 = this.nextReg();
         this.output.appendsi("  %reg", reg2);
         this.output.append(" = getelementptr ");
@@ -521,7 +516,7 @@ class LLVMBackendFunction : BackendFunction {
         this.output.appendsi("%reg", reg1);
         this.output.appendsi(", i32 0, i32 ", index);
         this.output.endl();
-        this.defReg2(reg2, llvmFmt(backendStructType.members[index]) ~ "*", Reg(reg2));
+        this.defReg2(reg2, new BackendPointerType(backendStructType.members[index]), Reg(reg2));
         return reg2;
     }
     override int saveStack() {
@@ -746,6 +741,14 @@ void llvmFmtInto(BackendType type, LineWriter output)
         }
         output.append(")*");
         return;
+    }
+    auto backendSAtype = type.instanceOf(BackendStaticArrayType);
+    if (backendSAtype) {
+        output.append("[");
+        output.append(itoa(backendSAtype.length));
+        output.append(" x ");
+        llvmFmtInto(backendSAtype.element, output);
+        output.append("]");
     }
     print(type.repr());
     assert(false);

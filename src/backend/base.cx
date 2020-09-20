@@ -1,6 +1,6 @@
 module backend.base;
 
-extern(C) void assert(int);
+import helpers;
 
 class BackendFunction
 {
@@ -17,8 +17,8 @@ class BackendFunction
     int symbolList(string name) { assert(false); }
     int binop(string op, BackendType type, int left, int right) { assert(false); }
     int bitcast(int from, BackendType to) { assert(false); }
-    int zeroExtend(int value, int from, int to) { assert(false); }
-    int signExtend(int value, int from, int to) { assert(false); }
+    int zeroExtend(int value, BackendType from, BackendType to) { assert(false); }
+    int signExtend(int value, BackendType from, BackendType to) { assert(false); }
     int intToFloat(int reg) { assert(false); }
     int call(BackendType ret, string name, int[] args) { assert(false); }
     int getFuncPtr(string name) { assert(false); }
@@ -84,6 +84,7 @@ class BackendType
     string repr() { assert(false); }
     int size(Platform platform) { assert(false); }
     int alignment(Platform platform) { assert(false); }
+    bool same(BackendType other) { assert(false); }
 }
 
 class BackendLongType : BackendType
@@ -92,6 +93,7 @@ class BackendLongType : BackendType
     override string repr() { return "long"; }
     override int size(Platform platform) { return 8; }
     override int alignment(Platform platform) { return 8; }
+    override bool same(BackendType other) { return !!other.instanceOf(BackendLongType); }
 }
 
 class BackendIntType : BackendType
@@ -100,6 +102,7 @@ class BackendIntType : BackendType
     override string repr() { return "int"; }
     override int size(Platform platform) { return 4; }
     override int alignment(Platform platform) { return 4; }
+    override bool same(BackendType other) { return !!other.instanceOf(BackendIntType); }
 }
 
 class BackendShortType : BackendType
@@ -108,6 +111,7 @@ class BackendShortType : BackendType
     override string repr() { return "short"; }
     override int size(Platform platform) { return 2; }
     override int alignment(Platform platform) { return 2; }
+    override bool same(BackendType other) { return !!other.instanceOf(BackendShortType); }
 }
 
 class BackendCharType : BackendType
@@ -116,6 +120,7 @@ class BackendCharType : BackendType
     override string repr() { return "char"; }
     override int size(Platform platform) { return 1; }
     override int alignment(Platform platform) { return 1; }
+    override bool same(BackendType other) { return !!other.instanceOf(BackendCharType); }
 }
 
 class BackendVoidType : BackendType
@@ -124,6 +129,7 @@ class BackendVoidType : BackendType
     override string repr() { return "void"; }
     override int size(Platform platform) { return 0; }
     override int alignment(Platform platform) { return 1; }
+    override bool same(BackendType other) { return !!other.instanceOf(BackendVoidType); }
 }
 
 class BackendFloatType : BackendType
@@ -132,6 +138,7 @@ class BackendFloatType : BackendType
     override string repr() { return "float"; }
     override int size(Platform platform) { return 4; }
     override int alignment(Platform platform) { return 4; }
+    override bool same(BackendType other) { return !!other.instanceOf(BackendFloatType); }
 }
 
 class BackendPointerType : BackendType
@@ -143,6 +150,10 @@ class BackendPointerType : BackendType
     override string repr() { return this.target.repr() ~ "*"; }
     override int size(Platform platform) { return platform.nativeWordType().size(platform); }
     override int alignment(Platform platform) { return platform.nativeWordType().size(platform); }
+    override bool same(BackendType other) {
+        auto otherPtr = other.instanceOf(BackendPointerType);
+        return otherPtr && this.target.same(otherPtr.target);
+    }
 }
 
 class BackendFunctionPointerType : BackendType
@@ -158,6 +169,14 @@ class BackendFunctionPointerType : BackendType
     override string repr() { return "TODO fp"; }
     override int size(Platform platform) { return platform.nativeWordType().size(platform); }
     override int alignment(Platform platform) { return platform.nativeWordType().size(platform); }
+    override bool same(BackendType other) {
+        auto otherFp = other.instanceOf(BackendFunctionPointerType);
+        if (!otherFp || !this.ret.same(otherFp.ret) || this.args.length != otherFp.args.length)
+            return false;
+        for (int i = 0; i < this.args.length; i += 1)
+            if (!this.args[i].same(otherFp.args[i])) return false;
+        return true;
+    }
 }
 
 class BackendStructType : BackendType
@@ -181,6 +200,15 @@ class BackendStructType : BackendType
 
         return alignment;
     }
+
+    override bool same(BackendType other) {
+        auto otherStr = other.instanceOf(BackendStructType);
+        if (!otherStr || this.members.length != otherStr.members.length)
+            return false;
+        for (int i = 0; i < this.members.length; i += 1)
+            if (!this.members[i].same(otherStr.members[i])) return false;
+        return true;
+    }
 }
 
 class BackendSpacerType : BackendType
@@ -193,6 +221,26 @@ class BackendSpacerType : BackendType
     override string repr() { return "TODO spacer"; }
     override int size(Platform platform) { return this.size_; }
     override int alignment(Platform platform) { return this.alignment_; }
+    override bool same(BackendType other) {
+        auto otherSpacer = other.instanceOf(BackendSpacerType);
+        return otherSpacer && this.size_ == otherSpacer.size_ && this.alignment_ == otherSpacer.alignment_;
+    }
+}
+
+class BackendStaticArrayType : BackendType
+{
+    BackendType element;
+    int length;
+
+    this(BackendType element, int length) { this.element = element; this.length = length; }
+
+    override string repr() { return element.repr() ~ "[" ~ itoa(length) ~ "]"; }
+    override int size(Platform platform) { return element.size(platform) * length; }
+    override int alignment(Platform platform) { return this.element.alignment(platform); }
+    override bool same(BackendType other) {
+        auto otherSA = other.instanceOf(BackendStaticArrayType);
+        return otherSA && this.length == otherSA.length && this.element.same(otherSA.element);
+    }
 }
 
 void calcPrefix(Platform platform, BackendType[] members, int* structSize, int* structAlign)

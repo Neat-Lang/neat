@@ -46,12 +46,14 @@ void free_(void* p) { free(p); }
 void print2(string s) { print(s); }
 
 class LLVMBackendModule : BackendModule {
+    Platform platform;
     LineWriter output;
 
     int literalId;
     Globals globals;
 
     this(Platform platform) {
+        this.platform = platform;
         this.output = new LineWriter;
         this.output.print("target triple = \"x86_64-unknown-linux-gnu\"");
         this.output.print("declare i8* @llvm.stacksave()");
@@ -173,6 +175,7 @@ string llvmFmt(BackendType type) {
     if (backendSAtype) {
         return "[" ~ itoa(backendSAtype.length) ~ " x " ~ llvmFmt(backendSAtype.element) ~ "]";
     }
+    print(type.repr());
     assert(false);
 }
 
@@ -515,6 +518,23 @@ class LLVMBackendFunction : BackendFunction {
         this.defReg2(reg2, new BackendPointerType(backendStructType.members[index]), Reg(reg2));
         return reg2;
     }
+    override int ptrOffset(BackendType backendType, int ptrReg, int offsetReg) {
+        auto ptrType = new BackendPointerType(backendType);
+
+        int reg1 = this.bitcast(ptrReg, ptrType);
+        int reg2 = this.nextReg();
+        this.output.appendsi("  %reg", reg2);
+        this.output.append(" = getelementptr ");
+        llvmFmtInto(backendType, this.output);
+        this.output.append(", ");
+        llvmFmtInto(ptrType, this.output);
+        this.output.appendsis("%reg", reg1, ", ");
+        llvmFmtInto(this.mod.platform.nativeWordType(), this.output);
+        this.output.appendsi(" %reg", offsetReg);
+        this.output.endl();
+        this.defReg2(reg2, ptrType, Reg(reg2));
+        return reg2;
+    }
     override int saveStack() {
         int reg = this.nextReg();
         this.print("%reg" ~ itoa(reg) ~ " = call i8* @llvm.stacksave()");
@@ -624,6 +644,12 @@ class LineWriter
     {
         this.line.appends(s);
         this.line.appendi(i);
+    }
+    void appendsis(string s1, int i, string s2)
+    {
+        this.line.appends(s1);
+        this.line.appendi(i);
+        this.line.appends(s2);
     }
     void append(string a)
     {
@@ -763,12 +789,6 @@ void defineIntrinsics(LLVMBackendModule mod, Platform platform) {
         argTypes[1] = voidp;
         argTypes[2] = sizet;
         mod.declare("memcpy", true, voidp, argTypes);
-    }
-    {
-        auto argTypes = new BackendType[](2);
-        argTypes[0] = voidp;
-        argTypes[1] = sizet;
-        mod.declare("ptr_offset", true, voidp, argTypes);
     }
     mod.declare("cxruntime_ptr_test", true, new BackendIntType, new BackendType[](0) ~ voidp);
     mod.declare("cxruntime_alloc", true, voidp, new BackendType[](0) ~ sizet);

@@ -17,7 +17,6 @@ struct StringArray
     struct String* ptr;
 };
 
-void* ptr_offset(void* p, int i) { return p + i; }
 void print(struct String str) { printf("%.*s\n", (int) str.length, str.ptr); }
 void assert(int test) { if (!test) exit(1); }
 int cxruntime_ptr_test(void* ptr) { return !!ptr; }

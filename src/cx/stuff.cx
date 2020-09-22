@@ -99,7 +99,7 @@ class Function : FunctionDeclaration
 
         if (!compiledStatement)
         {
-            auto context = new Context(platform, scope_, this.macroState);
+            auto context = new Context(platform, scope_, null, this.macroState, null);
 
             compiledStatement = this.statement.compile(context);
         }
@@ -1632,6 +1632,26 @@ ASTIfStatement parseIf(Parser parser, LexicalContext lexicalContext)
     return new ASTIfStatement(expr, thenStmt, elseStatement, parser.loc());
 }
 
+ASTStatement parseBreakCont(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin();
+    string identifier = parseIdentifier(parser);
+    if (identifier == "break")
+    {
+        parser.expect(";");
+        parser.commit();
+        return new ASTBreakStatement(parser.loc());
+    }
+    if (identifier == "continue")
+    {
+        parser.expect(";");
+        parser.commit();
+        return new ASTContinueStatement(parser.loc());
+    }
+    parser.revert();
+    return null;
+}
+
 class ASTScopeStatement : ASTStatement
 {
     ASTStatement[] statements;
@@ -1847,11 +1867,15 @@ class ASTWhile : ASTStatement
 
     override Statement compile(Context context)
     {
+        auto label = context.getLabel();
         auto subscope = new VarDeclScope(context.namespace);
-        Expression condExpr = truthy(beExpression(this.cond.compile(context.withNamespace(subscope))), this.loc);
-        Statement bodyStmt = this.body_.compile(context.withNamespace(subscope));
+        auto scopeContext = context.withNamespace(subscope);
+        auto declScope = new LoopScopeImpl(label, context.scope_);
+        auto breakContContext = scopeContext.withDeclScope(declScope);
+        auto condExpr = truthy(beExpression(this.cond.compile(scopeContext)), this.loc);
+        auto bodyStmt = this.body_.compile(breakContContext);
 
-        return new WhileLoop(condExpr, bodyStmt);
+        return new Loop(label, null, condExpr, bodyStmt, null);
     }
 }
 
@@ -1903,25 +1927,17 @@ class ASTForLoop : ASTStatement
 
     override Statement compile(Context context)
     {
-        /*
-         * hack until break/continue:
-         * for (decl; test; step) body
-         * decl; while (test) { body; step; }
-         */
-        Context forscope = context.withNamespace(new VarDeclScope(context.namespace));
+        string label = context.getLabel();
+        DeclarationScope declScope = new LoopScopeImpl(label, context.scope_);
+        Context forScope = context.withNamespace(new VarDeclScope(context.namespace));
+        Context breakContScope = forScope.withDeclScope(declScope);
 
-        Statement decl = this.declareLoopVar.compile(forscope);
-        Expression condition = beExpression(this.condition.compile(forscope));
-        auto loopStatements = new Statement[](2);
-        loopStatements[0] = this.body_.compile(forscope);
-        loopStatements[1] = this.step.compile(forscope);
-        Statement loop = new WhileLoop(condition, new SequenceStatement(loopStatements));
+        Statement decl = this.declareLoopVar.compile(forScope);
+        Expression condition = beExpression(this.condition.compile(forScope));
+        Statement body_ = this.body_.compile(breakContScope);
+        Statement step = this.step.compile(forScope);
 
-        auto sequenceStatements = new Statement[](2);
-        sequenceStatements[0] = decl;
-        sequenceStatements[1] = loop;
-
-        return new SequenceStatement(sequenceStatements);
+        return new Loop(label, decl, condition, body_, step);
     }
 }
 
@@ -1953,6 +1969,10 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
     }
     {
         ASTStatement stmt = parseIf(parser, lexicalContext);
+        if (stmt) return stmt;
+    }
+    {
+        ASTStatement stmt = parseBreakCont(parser, lexicalContext);
         if (stmt) return stmt;
     }
     {
@@ -3296,7 +3316,7 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
     }
 
     Module module_ = new Module(astModule.name, astModule.pak, astModule.macroState, parent);
-    Context context = new Context(platform, module_, module_.macroState);
+    Context context = new Context(platform, module_, null, module_.macroState, null);
     if (addDefaultModules)
     {
         // TODO add to ASTModule (addImport that handles updating the macro state

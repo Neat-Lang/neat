@@ -114,6 +114,48 @@ class IfStatement : Statement
     }
 }
 
+class ASTBreakStatement : ASTStatement
+{
+    Loc loc;
+
+    this(Loc loc) { this.loc = loc; }
+
+    override Statement compile(Context context)
+    {
+        auto loopScope = findLoopScope(context.scope_);
+        this.loc.assert2s(!!loopScope, "Cannot 'break': not in a loop.");
+        // TODO add cleanup statements from intervening scopes
+        return loopScope.breakFrom(context);
+    }
+}
+
+class ASTContinueStatement : ASTStatement
+{
+    Loc loc;
+
+    this(Loc loc) { this.loc = loc; }
+
+    override Statement compile(Context context)
+    {
+        auto loopScope = findLoopScope(context.scope_);
+        this.loc.assert2s(!!loopScope, "Cannot 'continue': not in a loop.");
+        // TODO add cleanup statements from intervening scopes
+        return loopScope.continueFrom(context);
+    }
+}
+
+class Branch : Statement
+{
+    string label;
+
+    this(string label) { this.label = label; }
+
+    override void emit(Generator output)
+    {
+        output.fun.branch(this.label);
+    }
+}
+
 class ASTExprStatement : ASTStatement
 {
     ASTSymbol value;
@@ -138,34 +180,71 @@ class ExprStatement : Statement
     }
 }
 
-class WhileLoop : Statement
+/**
+ * Generic loop class, covering For and While.
+ *
+ *  setup // may be null for while loop
+ * start:
+ *  if (!condition) goto break
+ *  body
+ * continue:
+ *  loopstep // may be null for while loop
+ *  goto start
+ * break:
+ */
+class Loop : Statement
 {
-    Expression cond;
+    string label;
+
+    Statement setup;
+
+    Expression condition;
 
     Statement body_;
 
-    this(Expression cond, Statement body_) { this.cond = cond; this.body_ = body_; }
+    Statement loopstep;
+
+    this(string label, Statement setup, Expression condition, Statement body_, Statement loopstep) {
+        this.label = label;
+        this.setup = setup;
+        this.condition = condition;
+        this.body_ = body_;
+        this.loopstep = loopstep;
+    }
 
     override void emit(Generator output)
     {
-        /**
-         * start:
-         * if (cond) goto body; else goto end;
-         * body:
-         * goto start
-         * end:
-         */
-        auto label = output.fun.getLabel();
+        if (this.setup) this.setup.emit(output);
+
         output.fun.branch(label ~ "_start");
 
         output.fun.setLabel(label ~ "_start"); // start:
-        int condReg = this.cond.emit(output);
-        output.fun.testBranch(condReg, label ~ "_body", label ~ "_end");
+        int condReg = this.condition.emit(output);
+        output.fun.testBranch(condReg, label ~ "_body", label ~ "_break");
 
         output.fun.setLabel(label ~ "_body");
         this.body_.emit(output);
+        output.fun.branch(label ~ "_continue");
+        output.fun.setLabel(label ~ "_continue");
+        if (this.loopstep) this.loopstep.emit(output);
         output.fun.branch(label ~ "_start");
-        output.fun.setLabel(label ~ "_end");
+        output.fun.setLabel(label ~ "_break");
+    }
+}
+
+class LoopScopeImpl : LoopScope
+{
+    string label;
+    this(string label, DeclarationScope parent)
+    {
+        this.label = label;
+        this.parent = parent;
+    }
+    override Statement breakFrom(Context context) {
+        return new Branch(this.label ~ "_break");
+    }
+    override Statement continueFrom(Context context) {
+        return new Branch(this.label ~ "_continue");
     }
 }
 

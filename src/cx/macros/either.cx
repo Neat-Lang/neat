@@ -5,14 +5,9 @@ import cx.base;
 import cx.parser;
 import cx.expr;
 import cx.parser_base;
+import cx.statements;
 import cx.stuff;
 import cx.types;
-
-extern(C) void print(string);
-extern(C) string cxruntime_itoa(int);
-
-// TODO module mangling
-string itoa_(int i) { return cxruntime_itoa(i); }
 
 class ASTEitherDecl : ASTType
 {
@@ -64,6 +59,59 @@ class EitherExpr : Expression
         generator.fun.store(backendValueType, valueTarget, value);
 
         return generator.fun.load(eitherType, reg);
+    }
+}
+
+class EitherType : Expression
+{
+    Expression value;
+
+    this(Expression value) { this.value = value; }
+
+    override Type type()
+    {
+        return new Integer;
+    }
+
+    override int emit(Generator generator)
+    {
+        auto eitherType = this.value.type().emit(generator.platform);
+        int eitherValue = this.value.emit(generator);
+        return generator.fun.field(eitherType, eitherValue, 0);
+    }
+}
+
+class EitherMember : Expression
+{
+    Expression value;
+
+    int offset;
+
+    this(Expression value, int offset) { this.value = value; this.offset = offset; }
+
+    override Type type()
+    {
+        return this.value.type().instanceOf(Either).types[this.offset];
+    }
+
+    override int emit(Generator generator)
+    {
+        int stack = generator.fun.saveStack();
+
+        BackendType eitherType = this.value.type().emit(generator.platform);
+        int eitherValuePtr = generator.fun.alloca(eitherType);
+
+        int eitherValue = this.value.emit(generator);
+        generator.fun.store(eitherType, eitherValuePtr, eitherValue);
+
+        int eitherUnionPtr = generator.fun.fieldOffset(eitherType, eitherValuePtr, 1);
+        // load the union value
+        BackendType backendValueType = this.type().emit(generator.platform);
+        int valuePtr = generator.fun.bitcast(eitherUnionPtr, new BackendPointerType(backendValueType));
+        int result = generator.fun.load(backendValueType, valuePtr);
+
+        generator.fun.restoreStack(stack);
+        return result;
     }
 }
 
@@ -162,6 +210,23 @@ struct ASTEitherCaseExprCase
     ASTSymbol expr;
 }
 
+class StatementExpression : Expression
+{
+    Statement statement;
+
+    Expression expression;
+
+    this(Statement statement, Expression expression) { this.statement = statement; this.expression = expression; }
+
+    override Type type() { return this.expression.type(); }
+
+    override int emit(Generator generator)
+    {
+        this.statement.emit(generator);
+        return this.expression.emit(generator);
+    }
+}
+
 class ASTEitherCaseExpr : ASTSymbol
 {
     Loc loc;
@@ -174,17 +239,43 @@ class ASTEitherCaseExpr : ASTSymbol
 
     override Symbol compile(Context context) {
         auto baseExpr = beExpression2(base.compile(context), loc);
-        auto baseType = baseExpr.type();
-        auto either = baseType.instanceOf(Either);
+        auto either = baseExpr.type().instanceOf(Either);
 
         loc.assert2s(!!either, "Expected Either for case expression");
 
         bool[] handled = new bool[](either.types.length);
-        EitherCaseExprCase[] cases;
+
         Expression mergedExpr = null;
+        // TODO merge types directly
         for (int i = 0; i < this.cases.length; i += 1) {
             auto case_ = this.cases[i];
-            Type type = case_.type.compile(context);
+
+            auto namespace = new VarDeclScope(context.namespace);
+            auto subContext = context.withNamespace(namespace);
+            namespace.declareUnassigned(case_.identifier, case_.type.compile(subContext));
+
+            Expression expr = beExpression2(case_.expr.compile(subContext), case_.loc);
+
+            if (!mergedExpr) mergedExpr = expr;
+            else {
+                auto left = implicitConvertToOptional(expr, mergedExpr.type());
+                auto right = implicitConvertToOptional(mergedExpr, expr.type());
+                if (!left && !right) case_.loc.assert2s(false, "incompatible expression type");
+                else if (left && right && !left.type().same(right.type())) case_.loc.assert2s(false, "ambiguous expression type");
+                if (left) mergedExpr = left;
+                else if (right) mergedExpr = right;
+            }
+        }
+
+        auto mergeType = mergedExpr.type();
+        auto resultNamespace = new VarDeclScope(context.namespace);
+        auto resultContext = context.withNamespace(resultNamespace);
+        Reference resultVar = resultNamespace.declareUnassigned("", mergeType);
+        Statement ifTree;
+
+        for (int i = 0; i < this.cases.length; i += 1) {
+            auto case_ = this.cases[i];
+            Type type = case_.type.compile(resultContext);
 
             int matched = -1;
             for (int k = 0; k < either.types.length; k += 1) {
@@ -196,111 +287,22 @@ class ASTEitherCaseExpr : ASTSymbol
             case_.loc.assert2s(matched != -1, "Type is not listed in Either!");
             handled[matched] = true;
 
-            auto namespace = new VarDeclScope(context.namespace);
-            auto variable = namespace.declareUnassigned(case_.identifier, type);
-            Expression expr = beExpression2(case_.expr.compile(context.withNamespace(namespace)), case_.loc);
-            if (!mergedExpr) mergedExpr = expr;
-            else {
-                auto left = implicitConvertToOptional(expr, mergedExpr.type());
-                auto right = implicitConvertToOptional(mergedExpr, expr.type());
-                if (!left && !right) case_.loc.assert2s(false, "incompatible expression type");
-                else if (left && right && !left.type().same(right.type())) case_.loc.assert2s(false, "ambiguous expression type");
-                if (left) mergedExpr = left;
-                else if (right) mergedExpr = right;
-            }
+            VarDeclScope namespace = new VarDeclScope(resultContext.namespace);
+            Reference variable = namespace.declareUnassigned(case_.identifier, type);
+            Statement assignment = new AssignStatement(variable, new EitherMember(baseExpr, matched));
+            Expression userExpr = beExpression2(case_.expr.compile(resultContext.withNamespace(namespace)), case_.loc);
+            Expression typeCorrectedUserExpr = implicitConvertTo(userExpr, mergeType, case_.loc);
+            Statement userStmt = new AssignStatement(resultVar, typeCorrectedUserExpr);
+            Statement then = new SequenceStatement(new Statement[](0) ~ assignment ~ userStmt);
+            Expression test = new BinaryOp("==", new EitherType(baseExpr), new IntLiteral(matched + 1), this.loc);
 
-            cases ~= EitherCaseExprCase(case_.loc, matched, variable, expr);
-        }
-        auto mergeType = mergedExpr.type();
-        // merge exprs to the shared type
-        for (int i = 0; i < cases.length; i += 1) {
-            cases[i].expr = implicitConvertTo(cases[i].expr, mergeType, cases[i].loc);
+            ifTree = new IfStatement(test, then, ifTree);
         }
         for (int i = 0; i < handled.length; i += 1) {
             loc.assert2s(handled[i], "Type " ~ either.types[i].repr() ~ " not handled!");
         }
-        return new EitherCaseExpr(mergeType, baseExpr, cases);
-    }
-}
 
-struct EitherCaseExprCase
-{
-    Loc loc;
-
-    int offset;
-
-    Reference parameter;
-
-    Expression expr;
-}
-
-class EitherCaseExpr : Expression
-{
-    Type type_;
-
-    Expression either;
-
-    EitherCaseExprCase[] cases;
-
-    this(Type type_, Expression either, EitherCaseExprCase[] cases) {
-        this.type_ = type_;
-        this.either = either;
-        this.cases = cases;
-    }
-
-    override Type type()
-    {
-        return this.type_;
-    }
-
-    override int emit(Generator generator)
-    {
-        auto type = this.type().emit(generator.platform);
-        auto eitherType = this.either.type().emit(generator.platform);
-
-        // ensure we have something referenceable
-        auto eitherValuePtr = generator.fun.alloca(eitherType);
-        int result = generator.fun.alloca(type);
-
-        int eitherValue = this.either.emit(generator);
-
-        generator.fun.store(eitherType, eitherValuePtr, eitherValue);
-
-        int eitherCase = generator.fun.field(eitherType, eitherValue, 0);
-
-        int eitherRawValuePtr = generator.fun.fieldOffset(eitherType, eitherValuePtr, 1);
-
-        string label = generator.fun.getLabel();
-        for (int i = 0; i < this.cases.length; i += 1) {
-            auto case_ = cases[i];
-            auto testReg = generator.fun.binop(
-                "==", new BackendIntType(), eitherCase, generator.fun.intLiteral(case_.offset + 1));
-            string then = label ~ "_" ~ itoa_(i) ~ "_then";
-            string else_ = label ~ "_" ~ itoa_(i) ~ "_else";
-
-            generator.fun.testBranch(testReg, then , else_);
-            generator.fun.setLabel(then);
-            // in the case: assign to the parameter field
-            // first, load the union value
-            BackendType backendValueType =
-                this.either.type().instanceOf(Either).types[case_.offset].emit(generator.platform);
-            int valuePtr = generator.fun.bitcast(eitherRawValuePtr, new BackendPointerType(backendValueType));
-            auto fieldValue = generator.fun.load(backendValueType, valuePtr);
-            // then, store it in the field
-            generator.fun.store(backendValueType, case_.parameter.emitLocation(generator), fieldValue);
-            // then, emit the expression
-            auto expr = case_.expr.emit(generator);
-            // finally, store it in the result
-            generator.fun.store(type, result, expr);
-            // jump to exit
-            generator.fun.branch(label ~ "_fin");
-            generator.fun.setLabel(else_);
-        }
-        // generator.fun.unreachable();
-        generator.fun.branch(label ~ "_fin");
-        generator.fun.setLabel(label ~ "_fin");
-
-        return generator.fun.load(type, result);
+        return new StatementExpression(ifTree, resultVar);
     }
 }
 
@@ -336,8 +338,6 @@ ASTSymbol parseCaseExpr(Parser parser, LexicalContext lexicalContext, ASTSymbol 
  * }
  */
 
-// TODO maybe merge with exprs?
-
 struct ASTEitherCaseStmtCase
 {
     Loc loc;
@@ -367,7 +367,7 @@ class ASTEitherCaseStmt : ASTStatement
         loc.assert2s(!!either, "Expected Either for case expression");
 
         bool[] handled = new bool[](either.types.length);
-        EitherCaseStmtCase[] cases;
+        Statement ifTree = null;
         for (int i = 0; i < this.cases.length; i += 1) {
             auto case_ = this.cases[i];
             Type type = case_.type.compile(context);
@@ -382,83 +382,19 @@ class ASTEitherCaseStmt : ASTStatement
             case_.loc.assert2s(matched != -1, "Type is not listed in Either!");
             handled[matched] = true;
 
-            auto namespace = new VarDeclScope(context.namespace);
-            auto variable = namespace.declareUnassigned(case_.identifier, type);
-            Statement stmt = case_.stmt.compile(context.withNamespace(namespace));
+            VarDeclScope namespace = new VarDeclScope(context.namespace);
+            Reference variable = namespace.declareUnassigned(case_.identifier, type);
+            Statement assignment = new AssignStatement(variable, new EitherMember(baseExpr, matched));
+            Statement userStmt = case_.stmt.compile(context.withNamespace(namespace));
+            Statement then = new SequenceStatement(new Statement[](0) ~ assignment ~ userStmt);
+            Expression test = new BinaryOp("==", new EitherType(baseExpr), new IntLiteral(matched + 1), this.loc);
 
-            cases ~= EitherCaseStmtCase(case_.loc, matched, variable, stmt);
+            ifTree = new IfStatement(test, then, ifTree);
         }
         for (int i = 0; i < handled.length; i += 1) {
             loc.assert2s(handled[i], "Type " ~ either.types[i].repr() ~ " not handled!");
         }
-        return new EitherCaseStmt(baseExpr, cases);
-    }
-}
-
-struct EitherCaseStmtCase
-{
-    Loc loc;
-
-    int offset;
-
-    Reference parameter;
-
-    Statement stmt;
-}
-
-class EitherCaseStmt : Statement
-{
-    Expression either;
-
-    EitherCaseStmtCase[] cases;
-
-    this(Expression either, EitherCaseStmtCase[] cases) {
-        this.either = either;
-        this.cases = cases;
-    }
-
-    override void emit(Generator generator)
-    {
-        auto eitherType = this.either.type().emit(generator.platform);
-
-        // ensure we have something referenceable
-        auto eitherValuePtr = generator.fun.alloca(eitherType);
-
-        int eitherValue = this.either.emit(generator);
-
-        generator.fun.store(eitherType, eitherValuePtr, eitherValue);
-
-        int eitherCase = generator.fun.field(eitherType, eitherValue, 0);
-
-        int eitherRawValuePtr = generator.fun.fieldOffset(eitherType, eitherValuePtr, 1);
-
-        string label = generator.fun.getLabel();
-        for (int i = 0; i < this.cases.length; i += 1) {
-            auto case_ = cases[i];
-            auto testReg = generator.fun.binop(
-                "==", new BackendIntType(), eitherCase, generator.fun.intLiteral(case_.offset + 1));
-            string then = label ~ "_" ~ itoa_(i) ~ "_then";
-            string else_ = label ~ "_" ~ itoa_(i) ~ "_else";
-
-            generator.fun.testBranch(testReg, then , else_);
-            generator.fun.setLabel(then);
-            // in the case: assign to the parameter field
-            // first, load the union value
-            BackendType backendValueType =
-                this.either.type().instanceOf(Either).types[case_.offset].emit(generator.platform);
-            int valuePtr = generator.fun.bitcast(eitherRawValuePtr, new BackendPointerType(backendValueType));
-            auto fieldValue = generator.fun.load(backendValueType, valuePtr);
-            // then, store it in the field
-            generator.fun.store(backendValueType, case_.parameter.emitLocation(generator), fieldValue);
-            // then, emit the statement
-            case_.stmt.emit(generator);
-            // jump to exit
-            generator.fun.branch(label ~ "_fin");
-            generator.fun.setLabel(else_);
-        }
-        // generator.fun.unreachable();
-        generator.fun.branch(label ~ "_fin");
-        generator.fun.setLabel(label ~ "_fin");
+        return ifTree;
     }
 }
 

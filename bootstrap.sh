@@ -37,6 +37,11 @@ function dbootstrap {
 function rebuild {
     mkdir build
     cp ../../build/cx build/$1
+    # also not generic, see above
+    if [ -d ../../build/src ]; then
+        cp -R ../../build/src build
+    fi
+    sed -i -e 's/-O//' rebuild.sh
     bash rebuild.sh
 }
 # before structs in the compiler
@@ -51,5 +56,23 @@ at_revision 'e88bcc52f621c7e47f3a667554d7401c5d72be2e' 'rebuild cx' 'build/cx'
 at_revision 'f6078a3470f7826b566b7eed70acd91f3c647960' 'rebuild cx' 'build/cx'
 # import package()
 at_revision 'ba44e97c4dc8b721710cfaf023a711acc75c6cfd' 'rebuild cx' 'build/cx'
+# idk but it crashes otherwise
+at_revision '56ff9817e5e4de1aa9100f27a29565bb2a2272b8' 'rebuild cx' 'build/cx'
+# mangling
+at_revision 'e434a668cebd814cbac7a2bfcb6d53417a40a3db' 'rebuild cx' 'build/cx'
+# case prep
+at_revision '5df536b089ccdce32d30618b5f926199b0575c48' 'rebuild cx' 'build/cx'
+# use case{}
+at_revision 'd7d4bfa5ee92cdc13b5a6021983f39f120ce675a' 'rebuild cx' 'build/cx'
+# remove ptr_offset
+function rebuild_patch_ptr_offset {
+    # has it, but doesn't use it
+    echo "void* ptr_offset(void* p, int i) { return p + i; }" >> src/runtime.c
+    rebuild "$@"
+}
+at_revision 'df8d6192c2ee16f5d3061e10d876452d0f9290e0' 'rebuild_patch_ptr_offset cx' 'build/cx'
+at_revision 'df8d6192c2ee16f5d3061e10d876452d0f9290e0' 'rebuild cx' 'build/cx'
+# add break/continue
+at_revision 'd456abb76b28efc98f188e97a47ad6a2703a931a' 'rebuild cx' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

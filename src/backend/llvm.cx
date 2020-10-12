@@ -127,7 +127,6 @@ class LLVMBackendModule : BackendModule {
         auto cmd = "clang -shared -fpic " ~ filename ~ " -o " ~ soname;
         auto text = this.output.text();
         cxruntime_file_write(filename, text);
-        free_(text.ptr);
         this.output.free();
         print("$ " ~ cmd);
         cxruntime_system(cmd);
@@ -266,6 +265,22 @@ class LLVMBackendFunction : BackendFunction {
         }
         return "NOTFOUND %reg" ~ itoa(reg);
     }
+    void outputReg(int reg) {
+        auto regDefines = this.regDefines.array();
+        for (int i = 0; i < regDefines.length; i += 1) {
+            RegDefine def = regDefines[i];
+            if (def.reg == reg) {
+                def.value.case {
+                    Reg r: this.output.appendsi("%reg", r.id);
+                    Arg a: this.output.appendsi("%arg", a.id);
+                    string s: this.output.append(s);
+                }
+                return;
+            }
+        }
+        this.output.appendsi("%reg", reg);
+        return;
+    }
     void outputTreg(int reg) {
         auto regDefines = this.regDefines.array();
         for (int i = 0; i < regDefines.length; i += 1) {
@@ -387,11 +402,18 @@ class LLVMBackendFunction : BackendFunction {
             else if (op == ">=") instr = "icmp sge";
             else { print2(op); assert(false); }
         }
-        this.print("%reg" ~ itoa(reg) ~ " = " ~ instr ~ " " ~ typestr ~ " " ~ this.reg(left) ~ ", " ~ this.reg(right));
+        this.output.appendsi("  %reg", reg);
+        this.output.append5s(" = ", instr, " ", typestr, " ");
+        this.outputReg(left);
+        this.output.append(", ");
+        this.outputReg(right);
+        this.output.endl();
         int i1 = reg;
         if (op == "==" || op == "<" || op == ">" || op == "<=" || op == ">=") {
             reg = this.nextReg();
-            this.print("%reg" ~ itoa(reg) ~ " = zext i1 %reg" ~ itoa(i1) ~ " to i32");
+            this.output.appendsi("  %reg", reg);
+            this.output.appendsis(" = zext i1 %reg", i1, " to i32");
+            this.output.endl();
             this.defReg2(reg, new BackendIntType, Reg(reg));
         } else {
             this.defReg2(reg, type, Reg(reg));
@@ -577,7 +599,6 @@ class LLVMBackendFunction : BackendFunction {
         this.mod.output.print("define " ~ retstr ~ " @" ~ this.name ~ argstr ~ "{");
         auto funtext = this.output.text();
         this.mod.output.print(funtext);
-        free_(funtext.ptr);
         this.output.free();
         this.mod.output.print("}");
 
@@ -585,7 +606,7 @@ class LLVMBackendFunction : BackendFunction {
     }
 }
 
-class LineAppender
+class LineWriter
 {
     string buffer;
     size_t used;
@@ -598,7 +619,25 @@ class LineAppender
         this.used = this.used + msg.length;
     }
     void appendi(int i) {
-        this.appends(itoa(i)); // TODO
+        if (i == 0) {
+            this.appends("0");
+            return;
+        }
+        if (i < 0)
+        {
+            this.appends("-");
+            appendi(0 - i);
+            return;
+        }
+        int k = 1;
+        while (k <= i) k *= 10;
+        while (k >= 10)
+        {
+            k /= 10;
+            int digit = i / k;
+            this.appends("0123456789"[digit .. digit + 1]);
+            i -= digit * k;
+        }
     }
     void expand(size_t newLength) {
         while (newLength > this.buffer.length)
@@ -613,103 +652,54 @@ class LineAppender
     void free() {
         free_(this.buffer.ptr);
     }
-    string flush() {
-        string result = new string(this.used);
-        memcpy(result.ptr, this.buffer.ptr, this.used);
-        this.used = 0;
-        return result;
-    }
-}
-
-class LineWriter
-{
-    string[] lines;
-    int length;
-    LineAppender line;
-    this() {
-        this.line = new LineAppender;
-    }
-    void free() {
-        for (int i = 0; i < this.lines.length; i += 1) {
-            free_(this.lines[i].ptr);
-        }
-        free_(this.lines.ptr);
-        this.line.free();
+    string text() {
+        return this.buffer[0 .. this.used];
     }
     void print(string msg) {
-        this.line.appends(msg);
+        this.appends(msg);
         this.endl();
     }
     void appendsi(string s, int i)
     {
-        this.line.appends(s);
-        this.line.appendi(i);
+        this.appends(s);
+        this.appendi(i);
     }
     void appendsis(string s1, int i, string s2)
     {
-        this.line.appends(s1);
-        this.line.appendi(i);
-        this.line.appends(s2);
+        this.appends(s1);
+        this.appendi(i);
+        this.appends(s2);
     }
     void append(string a)
     {
-        this.line.appends(a);
+        this.appends(a);
     }
     void append2s(string a, string b)
     {
-        this.line.appends(a);
-        this.line.appends(b);
+        this.appends(a);
+        this.appends(b);
     }
     void append3s(string a, string b, string c)
     {
-        this.line.appends(a);
-        this.line.appends(b);
-        this.line.appends(c);
+        this.appends(a);
+        this.appends(b);
+        this.appends(c);
     }
     void append5s(string a, string b, string c, string d, string e)
     {
-        this.line.appends(a);
-        this.line.appends(b);
-        this.line.appends(c);
-        this.line.appends(d);
-        this.line.appends(e);
+        this.appends(a);
+        this.appends(b);
+        this.appends(c);
+        this.appends(d);
+        this.appends(e);
     }
     void append6s(string a, string b, string c, string d, string e, string f)
     {
         this.append5s(a, b, c, d, e);
-        this.line.appends(f);
+        this.appends(f);
     }
     void endl() {
-        this.line.appends("\n");
-        this.append_(this.line.flush());
-    }
-    void append_(string line) {
-        if (this.length == this.lines.length) {
-            size_t newLen = this.lines.length * 2;
-            if (newLen == 0) newLen = 1;
-            auto newLines = new string[](newLen);
-            for (int i = 0; i < this.length; i += 1) newLines[i] = this.lines[i];
-            free_(this.lines.ptr);
-            this.lines = newLines;
-        }
-        this.lines[this.length] = line;
-        this.length = this.length + 1;
-    }
-    string text()
-    {
-        size_t sum;
-        for (int i = 0; i < this.length; i += 1)
-            sum = sum + this.lines[i].length;
-        string res = new char[](sum);
-        size_t offset = 0;
-        for (int i = 0; i < this.length; i += 1)
-        {
-            string line = this.lines[i];
-            memcpy(&res[offset], line.ptr, line.length);
-            offset = offset + line.length;
-        }
-        assert(offset == sum);
-        return res;
+        this.appends("\n");
     }
 }
 

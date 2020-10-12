@@ -76,5 +76,7 @@ at_revision 'df8d6192c2ee16f5d3061e10d876452d0f9290e0' 'rebuild cx' 'build/cx'
 at_revision 'd456abb76b28efc98f188e97a47ad6a2703a931a' 'rebuild cx' 'build/cx'
 # change Context to struct
 at_revision '109aed34bef153352c27a3db641fc446c13727b6' 'rebuild cx' 'build/cx'
+# fix '/' to be sdiv
+at_revision '49c99d8c805f84377fff747c51d20c840d695fb5' 'rebuild cx' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

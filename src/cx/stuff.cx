@@ -108,9 +108,10 @@ class Function : FunctionDeclaration
 
         if (!compiledStatement)
         {
-            auto context = new Context(platform, scope_, null, this.macroState, null);
+            auto context = Context(platform, scope_, null, this.macroState, (new int[](1)).ptr);
+            auto pair = this.statement.compile(context);
 
-            compiledStatement = this.statement.compile(context);
+            compiledStatement = pair.statement;
         }
 
         return new CompiledFunction(this, compiledStatement, stackframe, argAssignments);
@@ -1358,13 +1359,15 @@ class ASTReturnStatement : ASTStatement
 
     this(ASTSymbol value, Loc loc) { this.value = value; this.loc = loc; }
 
-    override Statement compile(Context context)
+    override StatementCompileResult compile(Context context)
     {
         Expression expr = beExpression(this.value.compile(context));
         Type ret = findFunctionScope(context.namespace).ret;
         expr = implicitConvertTo(expr, ret, this.loc);
 
-        return new ReturnStatement(expr);
+        return StatementCompileResult(
+            new ReturnStatement(expr),
+            context);
     }
 }
 
@@ -1577,18 +1580,20 @@ class ASTIfStatement : ASTStatement
         this.loc = loc;
     }
 
-    override Statement compile(Context context)
+    override StatementCompileResult compile(Context context)
     {
-        auto ifscope = context.dup();
-        Symbol test = this.test.compile(ifscope);
-        Statement then = this.then.compile(ifscope);
+        Symbol test = this.test.compile(context);
+        auto thenPair = this.then.compile(context);
+        Statement then = thenPair.statement;
         Statement else_;
         if (this.else_) {
-            auto elsescope = context.dup();
-            else_ = this.else_.compile(elsescope);
+            auto elsePair = this.else_.compile(context);
+            else_ = elsePair.statement;
         }
 
-        return new IfStatement(truthy(beExpression(test), this.loc), then, else_);
+        return StatementCompileResult(
+            new IfStatement(truthy(beExpression(test), this.loc), then, else_),
+            context);
     }
 }
 
@@ -1640,15 +1645,20 @@ class ASTScopeStatement : ASTStatement
 
     this(ASTStatement[] statements) { this.statements = statements; }
 
-    override Statement compile(Context context)
+    override StatementCompileResult compile(Context context)
     {
-        auto subscope = context.dup();
         auto statements = new Statement[](this.statements.length);
+        auto subContext = context;
         for (int i = 0; i < this.statements.length; i += 1)
         {
-            statements[i] = this.statements[i].compile(subscope);
+            auto pair = this.statements[i].compile(subContext);
+
+            subContext = pair.context;
+            statements[i] = pair.statement;
         }
-        return new SequenceStatement(statements);
+        return StatementCompileResult(
+            new SequenceStatement(statements),
+            context); // scope ends here
     }
 }
 
@@ -1732,7 +1742,7 @@ class ASTVarDeclStatement : ASTStatement
         this.loc = loc;
     }
 
-    override Statement compile(Context context)
+    override StatementCompileResult compile(Context context)
     {
         Type type;
         if (this.type) type = this.type.compile(context);
@@ -1749,15 +1759,17 @@ class ASTVarDeclStatement : ASTStatement
 
             auto decl = new VariableDeclaration(context.namespace, this.name, type);
 
-            context.namespace = decl;
-            return new AssignStatement(decl.accessLocal(), initial, this.loc);
+            return StatementCompileResult(
+                new AssignStatement(decl.accessLocal(), initial, this.loc),
+                context.withNamespace(decl));
         }
         else
         {
             auto decl = new VariableDeclaration(context.namespace, this.name, type);
 
-            context.namespace = decl;
-            return new AssignStatement(decl.accessLocal(), new NullExpr(type), this.loc);
+            return StatementCompileResult(
+                new AssignStatement(decl.accessLocal(), new NullExpr(type), this.loc),
+                context.withNamespace(decl));
         }
     }
 }
@@ -1816,7 +1828,7 @@ class ASTNestedFunctionDeclStatement : ASTStatement
         this.fun = fun;
     }
 
-    override Statement compile(Context context)
+    override StatementCompileResult compile(Context context)
     {
         auto module_ = findModule(context.namespace);
         auto fun_ = this.fun.compile(context).instanceOf(Function);
@@ -1826,10 +1838,12 @@ class ASTNestedFunctionDeclStatement : ASTStatement
         fun_.thisType = new Pointer(structType);
         fun_.parent = context.namespace;
 
-        context.namespace = new NestedFunctionDeclaration(context.namespace, fun_);
+        auto namespace = new NestedFunctionDeclaration(context.namespace, fun_);
 
         module_.add("", fun_);
-        return new NoopStatement;
+        return StatementCompileResult(
+            new NoopStatement,
+            context.withNamespace(namespace));
     }
 }
 
@@ -1854,16 +1868,16 @@ class ASTWhile : ASTStatement
         this.loc = loc;
     }
 
-    override Statement compile(Context context)
+    override StatementCompileResult compile(Context context)
     {
         auto label = context.getLabel();
+        auto loopContext = context.withDeclScope(new LoopScopeImpl(label, context.scope_));
+        auto condExpr = truthy(beExpression(this.cond.compile(loopContext)), this.loc);
+        auto bodyPair = this.body_.compile(loopContext);
 
-        context = context.withDeclScope(new LoopScopeImpl(label, context.scope_));
-
-        auto condExpr = truthy(beExpression(this.cond.compile(context)), this.loc);
-        auto bodyStmt = this.body_.compile(context);
-
-        return new Loop(label, null, condExpr, bodyStmt, null);
+        return StatementCompileResult(
+            new Loop(label, null, condExpr, bodyPair.statement, null),
+            context);
     }
 }
 
@@ -1913,20 +1927,21 @@ class ASTForLoop : ASTStatement
         this.body_ = body_;
     }
 
-    override Statement compile(Context context)
+    override StatementCompileResult compile(Context context)
     {
+        auto declPair = this.declareLoopVar.compile(context);
+        auto forScope = declPair.context;
+        Expression condition = beExpression(this.condition.compile(forScope));
+        auto stepPair = this.step.compile(forScope);
+
         string label = context.getLabel();
         DeclarationScope declScope = new LoopScopeImpl(label, context.scope_);
-        Context forScope = context.dup();
-
-        Statement decl = this.declareLoopVar.compile(forScope);
-        Expression condition = beExpression(this.condition.compile(forScope));
-        Statement step = this.step.compile(forScope);
-
         Context breakContScope = forScope.withDeclScope(declScope);
-        Statement body_ = this.body_.compile(breakContScope);
+        auto bodyPair = this.body_.compile(breakContScope);
 
-        return new Loop(label, decl, condition, body_, step);
+        return StatementCompileResult(
+            new Loop(label, declPair.statement, condition, bodyPair.statement, stepPair.statement),
+            context);
     }
 }
 
@@ -3305,7 +3320,7 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
     }
 
     Module module_ = new Module(astModule.name, astModule.pak, astModule.macroState, parent);
-    Context context = new Context(platform, module_, null, module_.macroState, null);
+    Context context = Context(platform, module_, null, module_.macroState, (new int[](1)).ptr);
     if (addDefaultModules)
     {
         // TODO add to ASTModule (addImport that handles updating the macro state

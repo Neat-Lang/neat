@@ -2439,8 +2439,10 @@ class ClassMethod : Function
 
     bool override_;
 
-    this(Loc loc, Class classType, bool override_, string name, Type ret, Argument[] args, ASTStatement statement,
-         Statement compiledStatement, MacroState macroState)
+    bool abstract_;
+
+    this(Loc loc, Class classType, bool override_, bool abstract_, string name, Type ret, Argument[] args,
+         ASTStatement statement, Statement compiledStatement, MacroState macroState)
     {
         // TODO super()
         this.name = name;
@@ -2456,6 +2458,7 @@ class ClassMethod : Function
         this.thisType = classType;
         this.parent = classNamespace;
         this.override_ = override_;
+        this.abstract_ = abstract_;
     }
 
     override string mangle()
@@ -2507,6 +2510,8 @@ class Class : Type
 {
     string name;
 
+    bool abstract_; // may contain abstract methods
+
     Class superClass;
 
     // will resolve members and methods as required
@@ -2527,6 +2532,7 @@ class Class : Type
     {
         assert(!!decl);
         this.name = decl.name;
+        this.abstract_ = decl.abstract_;
         this.superClass = superClass;
         this.decl = decl;
         this.context = context;
@@ -2677,6 +2683,14 @@ class Class : Type
                 combinedMethods ~= method;
             }
         }
+        if (!this.abstract_)
+        {
+            for (int i = 0; i < combinedMethods.length; i += 1) {
+                auto method = combinedMethods[i];
+                if (method.abstract_)
+                    method.loc.fail("Abstract method not overridden in non-abstract class " ~ this.name);
+            }
+        }
         this.vtable_ = combinedMethods;
         this.vtableSymbol = this.mangle() ~ "_vtable";
     }
@@ -2708,7 +2722,7 @@ class Class : Type
         if (this.superClass) override_ = true;
 
         this.methods ~= new ClassMethod(
-            Loc(null, ""), this, override_, "__instanceof",
+            Loc(null, ""), this, override_, false /* abstract */, "__instanceof",
             voidp, new Argument[](0) ~ Argument("target", stringType), null, stmt, null);
     }
 
@@ -2754,6 +2768,8 @@ struct ASTClassDeclMethod
 
     bool override_;
 
+    bool abstract_;
+
     string name;
 
     ASTType ret;
@@ -2769,17 +2785,20 @@ class ASTClassDecl : ASTType
 
     string superClass;
 
+    bool abstract_;
+
     ASTClassDeclMember[] members;
 
     ASTClassDeclMethod[] methods;
 
     MacroState macroState;
 
-    this(string name, string superClass, ASTClassDeclMember[] members, ASTClassDeclMethod[] methods,
+    this(string name, string superClass, bool abstract_, ASTClassDeclMember[] members, ASTClassDeclMethod[] methods,
          MacroState macroState)
     {
         this.name = name;
         this.superClass = superClass;
+        this.abstract_ = abstract_;
         this.members = members;
         this.methods = methods;
         this.macroState = macroState;
@@ -2821,6 +2840,7 @@ class ASTClassDecl : ASTType
                 method.loc,
                 target,
                 method.override_,
+                method.abstract_,
                 method.name,
                 method.ret.compile(classContext),
                 methodArgs,
@@ -2853,10 +2873,17 @@ ASTArgument[] parseArglist(Parser parser, LexicalContext lexicalContext)
 
 ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
 {
+    bool classAbstract = false;
+    parser.begin();
+    if (acceptIdentifier(parser, "abstract"))
+        classAbstract = true;
     if (!acceptIdentifier(parser, "class"))
     {
+        parser.revert();
         return null;
     }
+    parser.commit();
+
     string name = parseIdentifier(parser);
     string superClass;
     if (parser.accept(":")) {
@@ -2874,7 +2901,19 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
 
         ASTType retType;
         string memberName;
-        bool override_ = acceptIdentifier(parser, "override");
+        bool override_ = false;
+        bool abstract_ = false;
+        while (true) {
+            if (acceptIdentifier(parser, "override")) {
+                override_ = true;
+                continue;
+            }
+            if (acceptIdentifier(parser, "abstract")) {
+                abstract_ = true;
+                continue;
+            }
+            break;
+        }
 
         if (parser.accept("this"))
         {
@@ -2894,16 +2933,17 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
             ASTArgument[] args = parseArglist(parser, lexicalContext);
             ASTStatement stmt = parseStatement(parser, lexicalContext);
             methods ~= ASTClassDeclMethod(
-                parser.loc(), override_, memberName, retType, args, stmt);
+                parser.loc(), override_, abstract_, memberName, retType, args, stmt);
         }
         else
         {
             parser.assert_(!override_, "cannot override class member");
+            parser.assert_(!abstract_, "cannot declare class member abstract");
             parser.expect(";");
             members ~= ASTClassDeclMember(memberName, retType);
         }
     }
-    return new ASTClassDecl(name, superClass, members, methods, lexicalContext.macroState);
+    return new ASTClassDecl(name, superClass, classAbstract, members, methods, lexicalContext.macroState);
 }
 
 class ASTModuleCacheEntry

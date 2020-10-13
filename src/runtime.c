@@ -163,3 +163,44 @@ int main(int argc, char **argv) {
     _main(args);
     return 0;
 }
+
+//
+// fnv hash
+//
+
+typedef long long int FNVState;
+
+void *fnv_init()
+{
+    void *ret = malloc(sizeof(FNVState));
+    *(long long int*) ret = 14695981039346656037UL; // offset basis
+    return ret;
+}
+
+void fnv_add_string(void *state, struct String s)
+{
+#define HASH (*(long long int*) state)
+    for (int i = 0; i < s.length; i++) {
+        HASH = HASH ^ s.ptr[i];
+        HASH = HASH * 1099511628211;
+    }
+#undef HASH
+}
+
+void fnv_add_long(void *state, long long int value)
+{
+#define HASH (*(long long int*) state)
+    for (int i = 0; i < sizeof(long long int); i++) {
+        HASH = HASH ^ (value & 0xff);
+        HASH = HASH * 1099511628211;
+        value >>= 8;
+    }
+#undef HASH
+}
+
+struct String fnv_hex_value(void *state)
+{
+    char *ptr = malloc(sizeof(FNVState));
+    snprintf(ptr, sizeof(FNVState), "%.*llX", (int) sizeof(FNVState), *(long long int*) state);
+    return (struct String) { .length = sizeof(FNVState), .ptr = ptr };
+}

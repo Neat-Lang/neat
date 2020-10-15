@@ -45,9 +45,19 @@ extern(C) void cxruntime_dlcall(string soname, string name, void* arg);
 void free_(void* p) { free(p); }
 void print2(string s) { print(s); }
 
+struct DeclarationEntry
+{
+    string name;
+    string value;
+}
+
 class LLVMBackendModule : BackendModule {
     Platform platform;
     LineWriter output;
+
+    // LLVM can't have a symbol both declared and defined, so hold declared lines until the end;
+    // remove entries that get defined.
+    DeclarationEntry[] pendingDeclarations;
 
     int literalId;
     Globals globals;
@@ -61,36 +71,62 @@ class LLVMBackendModule : BackendModule {
         defineIntrinsics(this, platform);
     }
 
-    bool declared(string name) {
+    override bool declared(string name) {
         auto globals = this.globals.array();
         for (int i = 0; i < globals.length; i += 1)
             if (globals[i].name == name) return true;
         return false;
     }
 
-    override void declare(string name, bool extern_, BackendType ret, BackendType[] args)
+    override void declare(string name, BackendType ret, BackendType[] args)
     {
+        // TODO assert(false), move the check to the caller so we can skip creating ret/args
         if (this.declared(name)) return;
-        if (extern_) {
-            string argstr = "(";
-            for (int i = 0; i < args.length; i += 1) {
-                if (i) argstr = argstr ~ ", ";
-                argstr = argstr ~ llvmFmt(args[i]) ~ " %arg" ~ itoa(i);
-            }
-            argstr = argstr ~ ")";
-            string retstr = llvmFmt(ret);
-            this.output.print("declare " ~ retstr ~ " @" ~ name ~ argstr);
+        string argstr = "(";
+        for (int i = 0; i < args.length; i += 1) {
+            if (i) argstr = argstr ~ ", ";
+            argstr = argstr ~ llvmFmt(args[i]) ~ " %arg" ~ itoa(i);
         }
+        argstr = argstr ~ ")";
+        string retstr = llvmFmt(ret);
+        string outputLine = "declare " ~ retstr ~ " @" ~ name ~ argstr;
+        pendingDeclarations ~= DeclarationEntry(name, outputLine);
         this.globals.add(Global(name, new BackendFunctionPointerType(ret, args)));
+    }
+
+    void removePendingDecl(string name)
+    {
+        for (int i = 0; i < pendingDeclarations.length; i += 1) {
+            if (pendingDeclarations[i].name == name) {
+                // remove entry
+                pendingDeclarations[i] = pendingDeclarations[pendingDeclarations.length - 1];
+                pendingDeclarations = pendingDeclarations[0 .. pendingDeclarations.length - 1];
+                break;
+            }
+        }
     }
 
     override BackendFunction define(string name, BackendType ret, BackendType[] args)
     {
+        removePendingDecl(name);
         this.globals.add(Global(name, new BackendFunctionPointerType(ret, args)));
         return new LLVMBackendFunction(this, name, ret, args);
     }
+
+    override void declareSymbolList(string name, size_t length)
+    {
+        int ilen = 0;
+        for (int i = 0; i < length; i += 1) ilen += 1; // TODO cast
+        auto globalType = new BackendStaticArrayType(
+            new BackendFunctionPointerType(new BackendVoidType, new BackendType[](0)), ilen);
+        string outputLine = "@" ~ name ~ " = external global " ~ llvmFmt(globalType);
+        pendingDeclarations ~= DeclarationEntry(name, outputLine);
+        this.globals.add(Global(name, globalType));
+    }
+
     override void defineSymbolList(string name, string[] symbols)
     {
+        removePendingDecl(name);
         string symbolList;
         for (int i = 0; i < symbols.length; i += 1) {
             if (i) symbolList = symbolList ~ ", ";
@@ -104,11 +140,13 @@ class LLVMBackendModule : BackendModule {
         this.output.print("@" ~ name ~ " = global " ~ llvmFmt(globalType) ~ " [ " ~ symbolList ~ " ]");
         this.globals.add(Global(name, globalType));
     }
+
     string nextLiteral() {
         string res = "@str" ~ itoa(this.literalId);
         this.literalId = this.literalId + 1;
         return res;
     }
+
     BackendType globalType(string name) {
         auto globals = this.globals.array();
         for (int i = 0; i < globals.length; i += 1)
@@ -117,20 +155,16 @@ class LLVMBackendModule : BackendModule {
         print2("no such global " ~ name);
         assert(false);
     }
+
+    override void done()
+    {
+        for (int i = 0; i < pendingDeclarations.length; i += 1) {
+            this.output.print(pendingDeclarations[i].value);
+        }
+    }
+
     void free() {
         this.output.free();
-    }
-    override void callMacroFun(string name, void* ptr) {
-        // TODO hash, cache backend
-        auto filename = ".obj/macro_" ~ name ~ ".ll";
-        auto soname = ".obj/macro_" ~ name ~ ".so";
-        auto cmd = "clang -shared -fpic " ~ filename ~ " -o " ~ soname;
-        auto text = this.output.text();
-        cxruntime_file_write(filename, text);
-        this.output.free();
-        print("$ " ~ cmd);
-        cxruntime_system(cmd);
-        cxruntime_dlcall(soname, name, ptr);
     }
 }
 
@@ -457,6 +491,7 @@ class LLVMBackendFunction : BackendFunction {
         return reg;
     }
     override int call(BackendType ret, string name, int[] args) {
+        if (!mod.declared(name)) { print2(name ~ " not declared"); assert(false); }
         int reg = this.nextReg();
         string argstr = "(";
         for (int i = 0; i < args.length; i += 1) {
@@ -771,15 +806,15 @@ void defineIntrinsics(LLVMBackendModule mod, Platform platform) {
         argTypes[2] = sizet;
         argTypes[3] = sizet;
         argTypes[4] = sizet;
-        mod.declare("_arraycmp", true, new BackendIntType, argTypes);
+        mod.declare("_arraycmp", new BackendIntType, argTypes);
     }
     {
         auto argTypes = new BackendType[](3);
         argTypes[0] = voidp;
         argTypes[1] = voidp;
         argTypes[2] = sizet;
-        mod.declare("memcpy", true, voidp, argTypes);
+        mod.declare("memcpy", voidp, argTypes);
     }
-    mod.declare("cxruntime_ptr_test", true, new BackendIntType, new BackendType[](0) ~ voidp);
-    mod.declare("cxruntime_alloc", true, voidp, new BackendType[](0) ~ sizet);
+    mod.declare("cxruntime_ptr_test", new BackendIntType, new BackendType[](0) ~ voidp);
+    mod.declare("cxruntime_alloc", voidp, new BackendType[](0) ~ sizet);
 }

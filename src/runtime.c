@@ -200,7 +200,7 @@ void fnv_add_long(void *state, long long int value)
 
 struct String fnv_hex_value(void *state)
 {
-    char *ptr = malloc(sizeof(FNVState));
-    snprintf(ptr, sizeof(FNVState), "%.*llX", (int) sizeof(FNVState), *(long long int*) state);
+    char *ptr = malloc(sizeof(FNVState) + 1);
+    snprintf(ptr, sizeof(FNVState) + 1, "%.*llX", (int) sizeof(FNVState), *(long long int*) state);
     return (struct String) { .length = sizeof(FNVState), .ptr = ptr };
 }

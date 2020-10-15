@@ -7,6 +7,7 @@ import backend.proxy;
 import cx.array;
 import cx.base;
 import cx.expr;
+import cx.hash;
 import cx.parser_base;
 import cx.stuff;
 import cx.types;
@@ -30,6 +31,49 @@ string removeSlashes(string s) {
     return result;
 }
 
+string emitModule(Backend backend, Platform platform, Module module_, string baseCmd)
+{
+    auto hash = new Hash;
+
+    hash.adds(baseCmd);
+    // TODO add compiler checksum (generation number?)
+
+    hash.adds(module_.mangle());
+
+    auto symbols = module_.compile(platform);
+    for (int i = 0; i < symbols.length; i += 1)
+        symbols[i].hash(hash);
+
+    string objFile = ".obj/" ~ hash.text() ~ ".o";
+
+    if (cxruntime_file_exists(objFile))
+        return objFile;
+
+    auto backendModule = backend.createModule(platform);
+    auto generator = new Generator(platform, backendModule);
+    auto backendModuleLLVM = backendModule.instanceOf(LLVMBackendModule);
+    auto backendModuleC = backendModule.instanceOf(CBackendModule);
+    module_.emit(generator, symbols);
+    backendModule.done();
+    string srcFile;
+    if (backendModuleLLVM) {
+        srcFile = ".obj/" ~ removeSlashes(module_.mangle()) ~ ".ll";
+        auto llText = backendModuleLLVM.output.text();
+        cxruntime_file_write(srcFile, llText);
+        backendModuleLLVM.output.free();
+    } else {
+        assert(!!backendModuleC);
+        srcFile = ".obj/" ~ removeSlashes(module_.mangle()) ~ ".c";
+        auto csrc = backendModuleC.output.text();
+        cxruntime_file_write(srcFile, csrc);
+        backendModuleC.output.free();
+    }
+    string cmd = baseCmd ~ " " ~ srcFile ~ " -c -o " ~ objFile;
+    print("$ " ~ cmd);
+    cxruntime_system(cmd);
+    return objFile;
+}
+
 class ParserHelperImpl : ParserHelper
 {
     Backend backend;
@@ -48,17 +92,43 @@ class ParserHelperImpl : ParserHelper
         // auto backend = new ProxyBackend();
         // auto platform = new ProxyPlatform();
         auto platform = new DefaultPlatform(x86_32);
-        auto backendModule = backend.createModule(platform);
-        auto proxyOutput = new Generator(platform, backendModule);
 
         // throwaway compilation (TODO cache?)
         Module module_ = compileModule(astModule, this, config, platform, true);
+        Module[] allModules = module_.allModules();
+        BackendModule[] backendModules;
 
-        module_.emit(proxyOutput);
+        string baseCmd;
+        if (backend.instanceOf(LLVMBackend)) baseCmd = "clang -Wno-unused-command-line-argument -fpic";
+        else if (backend.instanceOf(CBackend)) baseCmd = "gcc -fpic";
+        else assert(false);
+        if (x86_32) baseCmd ~= " -m32";
+
+        string objFiles;
+        for (int i = 0; i < allModules.length; i += 1) {
+            string objFile = emitModule(backend, platform, allModules[i], baseCmd);
+            objFiles ~= " " ~ objFile;
+        }
 
         auto fun = module_.lookup(function_, null).instanceOf(Function);
+        string name = fun.mangle();
+        string soname;
+        string cmd;
+        if (backend.instanceOf(LLVMBackend)) {
+            soname = ".obj/macro_" ~ name ~ ".so";
+            cmd = baseCmd ~ " -shared" ~ objFiles ~ " -o " ~ soname;
+        }
+        else if (backend.instanceOf(CBackend)) {
+            soname = ".obj/macro_" ~ name ~ ".so";
+            string flags = " -shared -g src/runtime.c";
+            if (platform.nativeWordType().instanceOf(BackendIntType)) flags ~= " -m32";
+            cmd = baseCmd ~ flags ~ objFiles ~ " -o " ~ soname;
+        }
+        else assert(false);
 
-        backendModule.callMacroFun(fun.mangle(), macroState);
+        print("$ " ~ cmd);
+        cxruntime_system(cmd);
+        cxruntime_dlcall(soname, name, macroState);
     }
 }
 
@@ -221,7 +291,6 @@ void main(string[] args)
     auto builtins = new ASTModule("", new Package("builtins", ""), new MacroState, null);
     // auto platform = new ProxyPlatform();
     auto platform = new DefaultPlatform(x86_32);
-    auto backendModule = backend.createModule(platform);
 
     builtins.addTypeAlias("string", new FixedTypeAlias(new Array(new Character)));
     builtins.addTypeAlias("bool", new FixedTypeAlias(new Integer));
@@ -237,39 +306,30 @@ void main(string[] args)
     auto helper = new ParserHelperImpl(macroBackend, macro_x86_32);
     auto astToplevel = getModule(args[0], null, false, helper, modParseConfig, Loc(null, ""));
     auto toplevel = compileModule(astToplevel, helper, modParseConfig, platform, true);
-    auto generator = new Generator(platform, backendModule);
 
-    toplevel.emit(generator);
+    string baseFlags;
+    if (optimize) baseFlags ~= " -Ofast";
+    if (x86_32) baseFlags ~= " -m32";
 
-    // backendModule.callMain(nextArgs); // TODO -run
-    auto backendModuleLLVM = backendModule.instanceOf(LLVMBackendModule);
-    auto backendModuleC = backendModule.instanceOf(CBackendModule);
-    string srcFile;
-    if (backendModuleLLVM) {
-        srcFile = ".obj/" ~ removeSlashes(output) ~ ".ll";
-        auto llText = backendModuleLLVM.output.text();
-        cxruntime_file_write(srcFile, llText);
-        backendModuleLLVM.output.free();
-    } else {
-        assert(!!backendModuleC);
-        srcFile = ".obj/" ~ removeSlashes(output) ~ ".c";
-        auto csrc = backendModuleC.output.text();
-        cxruntime_file_write(srcFile, csrc);
-        backendModuleC.output.free();
+    string compiler = "clang -Wno-unused-command-line-argument";
+    if (backend.instanceOf(CBackend)) compiler = "gcc";
+
+    auto modules = toplevel.allModules();
+
+    string fileArgs;
+    for (int i = 0; i < modules.length; i += 1) {
+        string objFile = emitModule(backend, platform, modules[i], compiler ~ baseFlags);
+        fileArgs ~= " " ~ objFile;
     }
 
     if (dontLink) return;
 
     // int pid = getpid();
     // cxruntime_system("cat /proc/" ~ itoa(pid) ~ "/status");
-    string flags = " -rdynamic";
-    if (optimize) flags ~= " -Ofast";
+    string flags = baseFlags ~ " -rdynamic";
     string linkerFlags = " -ldl";
     for (int i = 0; i < linkerArgs.length; i += 1) linkerFlags ~= " " ~ linkerArgs[i];
-    string compiler = "clang";
-    if (backend.instanceOf(CBackend)) compiler = "gcc";
-    if (x86_32) flags ~= " -m32";
-    string cmd = compiler ~ flags ~ " " ~ srcFile ~ " src/runtime.c -o " ~ output ~ linkerFlags;
+    string cmd = compiler ~ flags ~ fileArgs ~ " src/runtime.c -o " ~ output ~ linkerFlags;
     print("$ " ~ cmd);
     cxruntime_system(cmd);
 }

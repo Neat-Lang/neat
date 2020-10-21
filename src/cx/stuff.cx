@@ -74,7 +74,7 @@ class Function : FunctionDeclaration
 
     CompiledFunction compile(Platform platform)
     {
-        auto stackframe = new FunctionScope(this.ret, this.thisType, this.parent);
+        auto stackframe = new FunctionScope(this.ret, this.thisType, this.parent, this.loc);
         Namespace scope_ = stackframe;
         int extra = 0;
         if (this.thisType)
@@ -111,7 +111,7 @@ class Function : FunctionDeclaration
             auto context = Context(platform, scope_, null, this.macroState, (new int[](1)).ptr);
             auto pair = this.statement.compile(context);
 
-            compiledStatement = pair.statement;
+            compiledStatement = unwindScope(pair.context.namespace, stackframe, pair.statement);
         }
 
         return new CompiledFunction(this, compiledStatement, stackframe, argAssignments);
@@ -172,7 +172,7 @@ class CompiledFunction : FinishedSymbol
         Type voidp = new Pointer(new Void);
         int extra = 0;
         if (this.fun.thisType) extra = 1;
-        auto argTypes = new BackendType[](this.fun.args.length + extra);
+        auto argTypes = new BackendType[](this.fun.numArgs());
         if (this.fun.thisType) argTypes[0] = voidp.emit(generator.platform);
         for (int i = 0; i < this.fun.args.length; i += 1)
             argTypes[extra + i] = this.fun.args[i].type.emit(generator.platform);
@@ -201,13 +201,13 @@ class CompiledFunction : FinishedSymbol
         hash.adds("fndef");
         hash.adds(fun.mangle());
         fun.ret.hash(hash);
+        if (fun.thisType) fun.thisType.hash(hash);
+        else hash.adds("null");
         hash.addl(fun.args.length);
         for (int i = 0; i < fun.args.length; i += 1) {
             hash.adds(fun.args[i].name);
             fun.args[i].type.hash(hash);
         }
-        if (fun.thisType) fun.thisType.hash(hash);
-        else hash.adds("null");
         this.compiledStatement.hash(hash);
     }
 }
@@ -845,7 +845,7 @@ class FunctionReference : Expression
     {
         int extra = 0;
         if (this.fun.thisType) extra = 1;
-        auto argTypes = new Type[](this.fun.args.length + extra);
+        auto argTypes = new Type[](this.fun.numArgs());
         if (this.fun.thisType) argTypes[0] = new Pointer(new Void);
         for (int i = 0; i < this.fun.args.length; i += 1)
             argTypes[extra + i] = this.fun.args[i].type;
@@ -888,27 +888,6 @@ class ASTReference : ASTSymbol
 
         return new ReferenceExpression(baseExpression.instanceOf(Reference));
     }
-}
-
-class ReferenceExpression : Expression
-{
-    Reference base;
-
-    this(Reference base) { this.base = base; }
-
-    override Type type()
-    {
-        Type superType = this.base.type();
-
-        return new Pointer(superType);
-    }
-
-    override int emit(Generator output)
-    {
-        return this.base.emitLocation(output);
-    }
-
-    override void hash(Hash hash) { hash.adds("ReferenceExpression"); base.hash(hash); }
 }
 
 class SizeOf : Expression
@@ -1553,10 +1532,13 @@ class FunctionScope : Namespace
 
     StructMemberDeclaration[] variables;
 
-    this(Type ret, Type extra, Namespace parent) {
+    Loc loc;
+
+    this(Type ret, Type extra, Namespace parent, Loc loc) {
         this.ret = ret;
         this.extra = extra;
         this.parent = parent;
+        this.loc = loc;
     }
 
     LatentVariable declare(string name, Type type)
@@ -1571,7 +1553,7 @@ class FunctionScope : Namespace
 
     Struct structType()
     {
-        return new Struct("", this.variables);
+        return new Struct("", this.variables, this.loc);
     }
 
     override Symbol lookup(string name, Expression frame)
@@ -1658,6 +1640,25 @@ class NestedFunctionDeclaration : Namespace
     }
 }
 
+Statement unwindScope(Namespace current, Namespace target, Statement body_)
+{
+    // TODO for
+    // for (; current !is target; current = current.parent) {
+    Statement result = body_;
+    while (current !is target) {
+        auto varDecl = current.instanceOf(VariableDeclaration);
+        if (varDecl)
+        {
+            auto var = varDecl.accessLocal();
+            auto type = var.type();
+            auto destroy = type.endLifetime(var);
+            result = sequence(result, destroy);
+        }
+        current = current.parent;
+    }
+    return result;
+}
+
 class ASTIfStatement : ASTStatement
 {
     ASTSymbol test;
@@ -1680,11 +1681,11 @@ class ASTIfStatement : ASTStatement
     {
         Symbol test = this.test.compile(context);
         auto thenPair = this.then.compile(context);
-        Statement then = thenPair.statement;
+        Statement then = unwindScope(thenPair.context.namespace, context.namespace, thenPair.statement);
         Statement else_;
         if (this.else_) {
             auto elsePair = this.else_.compile(context);
-            else_ = elsePair.statement;
+            else_ = unwindScope(elsePair.context.namespace, context.namespace, elsePair.statement);
         }
 
         return StatementCompileResult(
@@ -1753,7 +1754,7 @@ class ASTScopeStatement : ASTStatement
             statements[i] = pair.statement;
         }
         return StatementCompileResult(
-            new SequenceStatement(statements),
+            unwindScope(subContext.namespace, context.namespace, new SequenceStatement(statements)),
             context); // scope ends here
     }
 }
@@ -1970,9 +1971,10 @@ class ASTWhile : ASTStatement
         auto loopContext = context.withDeclScope(new LoopScopeImpl(label, context.scope_));
         auto condExpr = truthy(beExpression(this.cond.compile(loopContext)), this.loc);
         auto bodyPair = this.body_.compile(loopContext);
+        auto bodyStmt = unwindScope(bodyPair.context.namespace, context.namespace, bodyPair.statement);
 
         return StatementCompileResult(
-            new Loop(label, null, condExpr, bodyPair.statement, null),
+            new Loop(label, null, condExpr, bodyStmt, null),
             context);
     }
 }
@@ -2691,7 +2693,6 @@ class Class : Type
         // TODO per-backend info?
         if (this.vtableSymbol.length > 0) return;
         this.decl.compile2(this.context, this);
-        this.decl = null;
     }
 
     override BackendType emit(Platform platform)
@@ -2723,7 +2724,7 @@ class Class : Type
         for (int i = 0; i < allMembers.length; i += 1)
             structMembers[i] = new StructMemberDeclaration(allMembers[i].name, allMembers[i].type);
 
-        return new Struct("", structMembers);
+        return new Struct("", structMembers, this.decl.loc);
     }
 
     Struct classInfoStructCache;
@@ -2739,7 +2740,7 @@ class Class : Type
         for (int i = 0; i < vtable_.length; i += 1)
             vtableMembers[i] = new StructMemberDeclaration(vtable_[i].name, vtable_[i].funcPtrType());
 
-        classInfoStructCache = new Struct("", vtableMembers);
+        classInfoStructCache = new Struct("", vtableMembers, this.decl.loc);
         return classInfoStructCache;
     }
 
@@ -3279,12 +3280,15 @@ class ASTStructDecl : ASTType
 
     MacroState macroState;
 
-    this(string name, ASTStructMember[] members, ASTStructMethod[] methods, MacroState macroState)
+    Loc loc;
+
+    this(string name, ASTStructMember[] members, ASTStructMethod[] methods, MacroState macroState, Loc loc)
     {
         this.name = name;
         this.members = members;
         this.methods = methods;
         this.macroState = macroState;
+        this.loc = loc;
     }
 
     override Struct compile(Context context)
@@ -3294,7 +3298,7 @@ class ASTStructDecl : ASTType
         for (int i = 0; i < this.members.length; i += 1)
             members[i] = new StructMemberDeclaration(this.members[i].name, this.members[i].type.compile(context));
 
-        auto struct_ = new Struct(this.name, members);
+        auto struct_ = new Struct(this.name, members, this.loc);
         auto structScope = new StructScope(context.namespace, struct_); // make S visibile in struct S {}
         auto structContext = context.withNamespace(structScope);
 
@@ -3322,6 +3326,7 @@ class ASTStructDecl : ASTType
 
 ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
 {
+    Loc loc = parser.loc();
     parser.begin();
     if (parseIdentifier(parser) != "struct")
     {
@@ -3335,25 +3340,44 @@ ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
     parser.expect("{");
     while (!parser.accept("}"))
     {
-        auto memberType = parseType(parser, lexicalContext);
-        if (!memberType) parser.fail("expected member type");
-        auto memberName = parseIdentifier(parser);
-        if (!memberName.length) parser.fail("expected member name");
+        ASTType memberType;
+        string memberName;
+        if (parser.accept("this"))
+        {
+            memberType = new ASTVoid;
+            memberName = "__ctor";
+        }
+        else if (parser.accept("~this"))
+        {
+            memberType = new ASTVoid;
+            memberName = "__dtor";
+        }
+        else
+        {
+            memberType = parseType(parser, lexicalContext);
+            if (!memberType) parser.fail("expected member type");
+            memberName = parseIdentifier(parser);
+            if (!memberName.length) parser.fail("expected member name");
+        }
         if (parser.accept("(")) // method
         {
             ASTArgument[] args = parseArglist(parser, lexicalContext);
+            parser.assert_(
+                memberName != "__dtor" || args.length == 0, "destructor cannot take parameters");
             ASTStatement stmt = parseStatement(parser, lexicalContext);
             methods ~= ASTStructMethod(
                 parser.loc(), memberName, memberType, args, stmt);
         }
         else
         {
+            parser.assert_(memberName != "__ctor", "constructor cannot be member");
+            parser.assert_(memberName != "__dtor", "destructor cannot be member");
             parser.expect(";");
             members ~= ASTStructMember(memberName, memberType);
         }
     }
     parser.commit();
-    return new ASTStructDecl(name, members, methods, lexicalContext.macroState);
+    return new ASTStructDecl(name, members, methods, lexicalContext.macroState, loc);
 }
 
 Package selectPackage(Package[] packages, string name, Loc loc)

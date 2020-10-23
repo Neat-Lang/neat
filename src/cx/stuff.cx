@@ -111,7 +111,7 @@ class Function : FunctionDeclaration
             auto context = Context(platform, scope_, null, this.macroState, (new int[](1)).ptr);
             auto pair = this.statement.compile(context);
 
-            compiledStatement = unwindScope(pair.context.namespace, stackframe, pair.statement);
+            compiledStatement = unwindScope(pair.context.namespace, scope_, pair.statement);
         }
 
         return new CompiledFunction(this, compiledStatement, stackframe, argAssignments);
@@ -367,6 +367,47 @@ class ClassMethodPtr : Symbol
     this(Expression funcPtr, Expression thisPtr) { this.funcPtr = funcPtr; this.thisPtr = thisPtr; }
 }
 
+class Temporary : Reference
+{
+    Expression expr;
+
+    string label;
+
+    this(Expression expr)
+    {
+        this.expr = expr;
+        this.label = ptrId(this);
+    }
+
+    override Type type() { return expr.type(); }
+
+    override int emitLocation(Generator output)
+    {
+        if (output.fun.hasNamedReg(label))
+            return output.fun.getNamedReg(label);
+
+        BackendType type = this.type().emit(output.platform);
+        int ptr = output.fun.alloca(type);
+        int value = this.expr.emit(output);
+        output.fun.store(type, ptr, value);
+
+        output.fun.setNamedReg(label, ptr);
+        return ptr;
+    }
+
+    override int emit(Generator output)
+    {
+        auto type = this.type().emit(output.platform);
+
+        return output.fun.load(type, emitLocation(output));
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("temporary");
+        expr.hash(hash);
+    }
+}
+
 class StructConstructor : Expression
 {
     Struct struct_;
@@ -387,6 +428,7 @@ class StructConstructor : Expression
         return this.struct_;
     }
 
+    // TODO emitInto to avoid alloca duplication with Temporary
     override int emit(Generator output)
     {
         this.loc.assert2s(this.args.length == this.struct_.members.length, "invalid number of args for struct constructor");
@@ -394,6 +436,7 @@ class StructConstructor : Expression
         auto struct_ = this.struct_.emit(output.platform);
         auto stack = output.fun.saveStack();
         int ptr = output.fun.alloca(struct_);
+
         for (int i = 0; i < this.args.length; i += 1) {
             auto arg = this.args[i];
 
@@ -403,7 +446,7 @@ class StructConstructor : Expression
             int offsetReg = output.fun.fieldOffset(struct_, ptr, i);
             output.fun.store(arg.type().emit(output.platform), offsetReg, valueReg);
         }
-        auto ret = output.fun.load(struct_, ptr);
+        int ret = output.fun.load(struct_, ptr);
         output.fun.restoreStack(stack);
         return ret;
     }
@@ -439,7 +482,7 @@ Expression call(Symbol target, Expression[] args, Loc loc)
     Struct struct_ = target.instanceOf(Struct);
     if (struct_)
     {
-        return new StructConstructor(struct_, args, loc);
+        return new Temporary(new StructConstructor(struct_, args, loc));
     }
     loc.assert2s(false, "unknown call target");
 }
@@ -1602,7 +1645,10 @@ class VariableDeclaration : Namespace
     {
         Type stackFrameType = variable.stackFrameType;
         frame = new PointerCast(new Pointer(stackFrameType), frame);
-        return new StructMember(new Dereference(frame), variable.offset);
+        Reference member = new StructMember(new Dereference(frame), variable.offset);
+        // TODO bool isTemporary() in expression
+        // for now, make a copy
+        return new Temporary(member);
     }
 
     override Symbol lookup(string name, Expression frame)
@@ -1857,7 +1903,7 @@ class ASTVarDeclStatement : ASTStatement
             auto decl = new VariableDeclaration(context.namespace, this.name, type);
 
             return StatementCompileResult(
-                new AssignStatement(decl.accessLocal(), initial, this.loc),
+                move(decl.accessLocal(), initial, this.loc),
                 context.withNamespace(decl));
         }
         else
@@ -1869,6 +1915,18 @@ class ASTVarDeclStatement : ASTStatement
                 context.withNamespace(decl));
         }
     }
+}
+
+Statement move(Reference target, Expression source, Loc loc)
+{
+    auto type = target.type();
+    auto copyInto = type.copyInto(target, source);
+    if (!copyInto)
+    {
+        copyInto = new AssignStatement(target, source, loc);
+    }
+    auto cleanup = type.endLifetime(source);
+    return sequence(copyInto, cleanup);
 }
 
 ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext)

@@ -69,6 +69,14 @@ struct String cxruntime_ftoa_hex(float f) {
     snprintf(res, len + 1, "%llx", *(long long int*) &d);
     return (struct String) { len, res };
 }
+struct String cxruntime_ptr_id(void* ptr) {
+    int len = snprintf(NULL, 0, "%p", ptr);
+    char *res = malloc(len + 1);
+    snprintf(res, len + 1, "%p", ptr);
+    return (struct String) { len, res };
+}
+
+
 int cxruntime_linenr(struct String haystack, struct String needle, int* linep, int* columnp) {
     if (needle.ptr < haystack.ptr && needle.ptr >= haystack.ptr + haystack.length)
         return false;

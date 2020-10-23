@@ -1,46 +1,55 @@
 module cx.macros.assert;
 
+import cx.array;
 import cx.base;
 import cx.expr;
 import cx.parser_base;
 import cx.statements;
 import cx.stuff;
 import cx.types;
+import helpers;
 
-class ASTAssertion : ASTSymbol
+class ASTAssertion : ASTStatement
 {
     ASTSymbol test;
 
+    string exprText;
+
     Loc loc;
 
-    this(ASTSymbol test, Loc loc) { this.test = test; this.loc = loc; }
+    this(ASTSymbol test, string exprText, Loc loc) {
+        this.test = test;
+        this.exprText = exprText;
+        this.loc = loc;
+    }
 
-    override Expression compile(Context context)
+    override StatementCompileResult compile(Context context)
     {
+        auto printArgTypes = new Argument[](0) ~ Argument("str", new Array(new Character));
+        auto printFun = new FunctionDeclaration("print", new Void, printArgTypes);
+
         auto assertArgTypes = new Argument[](0) ~ Argument("test", new Integer);
         auto assertFun = new FunctionDeclaration("assert", new Void, assertArgTypes);
 
-        findModule(context.namespace).add("assert", assertFun);
+        auto test = this.test.compile(context);
+        auto expr = beExpression2(test, this.loc);
+        auto texpr = truthy(expr, this.loc);
+        auto nexpr = new BinaryOp("==", texpr, new IntLiteral(0), this.loc);
 
-        auto expr = this.test.compile(context);
-        auto assertArgs = new Expression[](0) ~ truthy(beExpression(expr), this.loc);
-
-        return new Call(assertFun, assertArgs, this.loc);
-    }
-}
-
-class Assert : Macro
-{
-    this() { }
-    override void apply(MacroArgs args) {
-        auto args = args.instanceOf(CallMacroArgs);
-        if (args && args.name == "assert") {
-            args.transformed = this.transform(args.symbols, args.context, args.loc);
-        }
-    }
-    Expression transform(ASTSymbol[] symbols, Context context, Loc loc)
-    {
-        return (new ASTAssertion(symbols[0], loc)).compile(context);
+        Expression failStr = new ArrayCat(
+                new StringLiteral(this.loc.location()),
+                new StringLiteral(": '" ~ this.exprText ~ "' was false"),
+                this.loc);
+        Expression false_ = new IntLiteral(0);
+        Statement printSt = new ExprStatement(new Call(printFun, new Expression[](0) ~ failStr, this.loc));
+        Statement failSt = new ExprStatement(new Call(assertFun, new Expression[](0) ~ false_, this.loc));
+        // `if (!$expression) { print($assertLocStr ~ ": '" ~ $exprText ~ "' was false."); assert(false); }`
+        return StatementCompileResult(
+            new IfStatement(
+                nexpr,
+                new SequenceStatement(new Statement[](0) ~ printSt ~ failSt),
+                null),
+            context);
     }
 }
 
@@ -57,30 +66,33 @@ class ParseAssert : Macro
     ASTStatement parse(Parser parser, LexicalContext context)
     {
         parser.begin();
+        parser.strip();
+        auto assertLoc = parser.loc();
         if (!parser.accept("assert"))
         {
             parser.revert();
             return null;
         }
-        // assert(foo) form
-        if (parser.accept("("))
+        if (!parser.accept("("))
         {
             parser.revert();
             return null;
         }
         parser.commit();
-
+        auto exprStartLoc = parser.loc();
         auto expression = parseExpression(parser, context);
+        auto exprEndLoc = parser.loc();
+        auto exprText = exprStartLoc.text[0 .. exprStartLoc.text.length - exprEndLoc.text.length];
 
+        parser.expect(")");
         parser.expect(";");
 
-        return new ASTExprStatement(new ASTAssertion(expression, parser.loc()));
+        return new ASTAssertion(expression, exprText, exprStartLoc);
     }
 }
 
 void assertMacro(MacroState macroState)
 {
-    macroState.addMacro(new Assert);
     macroState.addMacro(new ParseAssert);
 }
 

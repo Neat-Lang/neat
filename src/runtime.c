@@ -82,7 +82,7 @@ int cxruntime_linenr(struct String haystack, struct String needle, int* linep, i
         if (needle.ptr >= line.ptr && needle.ptr <= line.ptr + line.length)
         {
             *linep = (int) lineNr;
-            *columnp = (int) (needle.ptr - line.ptr);
+            *columnp = (int) (needle.ptr - line.ptr - 1);
             return true;
         }
         lineNr++;

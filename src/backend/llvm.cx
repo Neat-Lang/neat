@@ -48,7 +48,8 @@ void print2(string s) { print(s); }
 struct DeclarationEntry
 {
     string name;
-    string value;
+    bool function_;
+    BackendType type;
 }
 
 class LLVMBackendModule : BackendModule {
@@ -82,16 +83,9 @@ class LLVMBackendModule : BackendModule {
     {
         // TODO assert(false), move the check to the caller so we can skip creating ret/args
         if (this.declared(name)) return;
-        string argstr = "(";
-        for (int i = 0; i < args.length; i += 1) {
-            if (i) argstr = argstr ~ ", ";
-            argstr = argstr ~ llvmFmt(args[i]) ~ " %arg" ~ itoa(i);
-        }
-        argstr = argstr ~ ")";
-        string retstr = llvmFmt(ret);
-        string outputLine = "declare " ~ retstr ~ " @" ~ name ~ argstr;
-        pendingDeclarations ~= DeclarationEntry(name, outputLine);
-        this.globals.add(Global(name, new BackendFunctionPointerType(ret, args)));
+        auto type = new BackendFunctionPointerType(ret, args);
+        pendingDeclarations ~= DeclarationEntry(name, true, type);
+        this.globals.add(Global(name, type));
     }
 
     void removePendingDecl(string name)
@@ -119,25 +113,30 @@ class LLVMBackendModule : BackendModule {
         for (int i = 0; i < length; i += 1) ilen += 1; // TODO cast
         auto globalType = new BackendStaticArrayType(
             new BackendFunctionPointerType(new BackendVoidType, new BackendType[](0)), ilen);
-        string outputLine = "@" ~ name ~ " = external global " ~ llvmFmt(globalType);
-        pendingDeclarations ~= DeclarationEntry(name, outputLine);
+        pendingDeclarations ~= DeclarationEntry(name, false, globalType);
         this.globals.add(Global(name, globalType));
     }
 
     override void defineSymbolList(string name, string[] symbols)
     {
         removePendingDecl(name);
-        string symbolList;
-        for (int i = 0; i < symbols.length; i += 1) {
-            if (i) symbolList = symbolList ~ ", ";
-            symbolList = symbolList ~ "void()* bitcast ("
-                ~ llvmFmt(this.globalType(symbols[i])) ~ " @" ~ symbols[i] ~ " to void()*)";
-        }
         int ilen = 0;
         for (int i = 0; i < symbols.length; i += 1) ilen += 1; // TODO cast
         auto globalType = new BackendStaticArrayType(
             new BackendFunctionPointerType(new BackendVoidType, new BackendType[](0)), ilen);
-        this.output.print("@" ~ name ~ " = global " ~ llvmFmt(globalType) ~ " [ " ~ symbolList ~ " ]");
+
+        this.output.append3s("@", name, " = global ");
+        llvmFmtInto(globalType, this.output);
+        this.output.appends(" [ ");
+        string symbolList;
+        for (int i = 0; i < symbols.length; i += 1) {
+            if (i) this.output.appends(", ");
+            this.output.appends("void()* bitcast (");
+            llvmFmtInto(this.globalType(symbols[i]), this.output);
+            this.output.append3s(" @", symbols[i], " to void()*)");
+        }
+        this.output.appends(" ]");
+        this.output.endl();
         this.globals.add(Global(name, globalType));
     }
 
@@ -159,7 +158,23 @@ class LLVMBackendModule : BackendModule {
     override void done()
     {
         for (int i = 0; i < pendingDeclarations.length; i += 1) {
-            this.output.print(pendingDeclarations[i].value);
+            auto decl = pendingDeclarations[i];
+            if (decl.function_) {
+                auto type = decl.type.instanceOf(BackendFunctionPointerType);
+                this.output.appends("declare ");
+                llvmFmtInto(type.ret, this.output);
+                this.output.append3s(" @", decl.name, "(");
+                for (int i = 0; i < type.args.length; i += 1) {
+                    if (i) this.output.appends(", ");
+                    llvmFmtInto(type.args[i], this.output);
+                    this.output.appendsi(" %arg", i);
+                }
+                this.output.appends(")");
+            } else {
+                this.output.append3s("@", decl.name, " = external global ");
+                llvmFmtInto(decl.type, this.output);
+            }
+            this.output.endl();
         }
     }
 
@@ -518,17 +533,23 @@ class LLVMBackendFunction : BackendFunction {
         auto ret = backendFpType.ret;
         int reg = this.nextReg();
         string argstr = "(";
-        for (int i = 0; i < args.length; i += 1) {
-            if (i) argstr ~= ", ";
-            argstr ~= this.treg(args[i]);
-        }
-        argstr ~= ")";
         if (ret.instanceOf(BackendVoidType)) {
-            this.print("call void " ~ this.reg(callReg) ~ argstr);
+            this.output.appends("call void ");
+            this.outputReg(callReg);
         } else {
-            this.print("%reg" ~ itoa(reg) ~ " = call " ~ llvmFmt(ret) ~ " " ~ this.reg(callReg) ~ argstr);
+            this.output.appendsis("%reg", reg, " = call ");
+            llvmFmtInto(ret, this.output);
+            this.output.appends(" ");
+            this.outputReg(callReg);
             this.defReg2(reg, ret, Reg(reg));
         }
+        output.append("(");
+        for (int i = 0; i < args.length; i += 1) {
+            if (i) output.append(", ");
+            this.outputTreg(args[i]);
+        }
+        this.output.appends(")");
+        this.output.endl();
         return reg;
     }
     override int load(BackendType backendType, int source) {
@@ -553,7 +574,10 @@ class LLVMBackendFunction : BackendFunction {
         assert(!!backendStructType);
 
         int reg = this.nextReg();
-        this.print("%reg" ~ itoa(reg) ~ " = extractvalue " ~ this.treg(source) ~ ", " ~ itoa(index));
+        this.output.appendsis("%reg", reg, " = extractvalue ");
+        this.outputTreg(source);
+        this.output.appendsi(", ", index);
+        this.output.endl();
         this.defReg2(reg, backendStructType.members[index], Reg(reg));
         return reg;
     }
@@ -601,8 +625,13 @@ class LLVMBackendFunction : BackendFunction {
         this.print("call void @llvm.stackrestore(i8* %reg" ~ itoa(reg) ~ ")");
     }
     override void store(BackendType backendType, int target_reg, int value_reg) {
-        string typeStr = llvmFmt(backendType);
-        this.print("store " ~ typeStr ~ " " ~ this.reg(value_reg) ~ ", " ~ this.treg(target_reg));
+        this.output.appends("store ");
+        llvmFmtInto(backendType, this.output);
+        this.output.appends(" ");
+        this.outputReg(value_reg);
+        this.output.appends(", ");
+        this.outputTreg(target_reg);
+        this.output.endl();
     }
     override void ret(int reg) {
         if (this.ret_.instanceOf(BackendVoidType)) {
@@ -791,13 +820,14 @@ void llvmFmtInto(BackendType type, LineWriter output)
         output.append(" x ");
         llvmFmtInto(backendSAtype.element, output);
         output.append("]");
+        return;
     }
     print(type.repr());
     assert(false);
 }
 
 void defineIntrinsics(LLVMBackendModule mod, Platform platform) {
-    BackendType voidp = new BackendPointerType(new BackendVoidType);
+    BackendType voidp = platform.voidp();
     BackendType sizet = platform.nativeWordType();
     {
         auto argTypes = new BackendType[](5);

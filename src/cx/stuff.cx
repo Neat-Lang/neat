@@ -74,7 +74,7 @@ class Function : FunctionDeclaration
 
     CompiledFunction compile(Platform platform)
     {
-        auto stackframe = new FunctionScope(this.ret, this.thisType, this.parent, this.loc);
+        auto stackframe = new FunctionScope(this.ret, this.thisType, this.parent, this.mangle(), this.loc);
         Namespace scope_ = stackframe;
         int extra = 0;
         if (this.thisType)
@@ -91,18 +91,19 @@ class Function : FunctionDeclaration
 
             argAssignments[0] = new AssignStatement(
                 thisDecl.accessLocal(),
-                new PointerCast(this.thisType, new ArgExpr(0, voidp)),
-                this.loc);
+                new PointerCast(this.thisType, new ArgExpr(0, voidp)));
         }
         for (int i = 0; i < this.args.length; i += 1) {
             Argument arg = this.args[i];
             auto argExpr = new ArgExpr(extra + i, arg.type);
             auto argDecl = new VariableDeclaration(scope_, arg.name, arg.type);
 
-            argAssignments[extra + i] = new AssignStatement(argDecl.accessLocal(), argExpr, this.loc);
+            argAssignments[extra + i] = new AssignStatement(argDecl.accessLocal(), argExpr);
 
             scope_ = argDecl;
         }
+
+        scope_ = new FunctionScopeStart(scope_);
 
         auto compiledStatement = this.compiledStatement;
 
@@ -166,7 +167,7 @@ class CompiledFunction : FinishedSymbol
 
     override void emit(Generator generator)
     {
-        assert(generator.once(this.fun.mangle()));
+        if (!generator.once(this.fun.mangle())) { print("double-emit " ~ this.fun.mangle()); assert(false); }
 
         assert(!generator.fun);
         Type voidp = new Pointer(new Void);
@@ -367,47 +368,6 @@ class ClassMethodPtr : Symbol
     this(Expression funcPtr, Expression thisPtr) { this.funcPtr = funcPtr; this.thisPtr = thisPtr; }
 }
 
-class Temporary : Reference
-{
-    Expression expr;
-
-    string label;
-
-    this(Expression expr)
-    {
-        this.expr = expr;
-        this.label = ptrId(this);
-    }
-
-    override Type type() { return expr.type(); }
-
-    override int emitLocation(Generator output)
-    {
-        if (output.fun.hasNamedReg(label))
-            return output.fun.getNamedReg(label);
-
-        BackendType type = this.type().emit(output.platform);
-        int ptr = output.fun.alloca(type);
-        int value = this.expr.emit(output);
-        output.fun.store(type, ptr, value);
-
-        output.fun.setNamedReg(label, ptr);
-        return ptr;
-    }
-
-    override int emit(Generator output)
-    {
-        auto type = this.type().emit(output.platform);
-
-        return output.fun.load(type, emitLocation(output));
-    }
-
-    override void hash(Hash hash) {
-        hash.adds("temporary");
-        expr.hash(hash);
-    }
-}
-
 class StructConstructor : Expression
 {
     Struct struct_;
@@ -482,9 +442,42 @@ Expression call(Symbol target, Expression[] args, Loc loc)
     Struct struct_ = target.instanceOf(Struct);
     if (struct_)
     {
-        return new Temporary(new StructConstructor(struct_, args, loc));
+        return new StructConstructor(struct_, args, loc);
     }
     loc.assert2s(false, "unknown call target");
+}
+
+class WrapExpression : Expression
+{
+    Statement pre;
+    Expression value;
+    Statement post;
+
+    this(Statement pre, Expression value, Statement post)
+    {
+        this.pre = pre;
+        this.value = value;
+        this.post = post;
+    }
+
+    override Type type() { return value.type(); }
+
+    override int emit(Generator generator)
+    {
+        if (pre) pre.emit(generator);
+        int result = value.emit(generator);
+        if (post) post.emit(generator);
+        return result;
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("WrapExpression");
+        if (pre) pre.hash(hash);
+        else hash.adds("null");
+        value.hash(hash);
+        if (post) post.hash(hash);
+        else hash.adds("null");
+    }
 }
 
 class ASTCall : ASTSymbol
@@ -505,19 +498,28 @@ class ASTCall : ASTSymbol
     override Expression compile(Context context)
     {
         ASTIdentifier ident = this.target.instanceOf(ASTIdentifier);
-        if (ident)
-        {
+        if (ident) {
             auto callMacroArgs = new CallMacroArgs(ident.name, this.args, context, this.loc);
             context.macroState.applyMacro(callMacroArgs);
             if (callMacroArgs.transformed) return callMacroArgs.transformed;
         }
         auto target = this.target.compile(context);
         auto args = new Expression[](this.args.length);
-        for (int i = 0; i < this.args.length; i += 1)
-        {
-            args[i] = beExpression2(this.args[i].compile(context), this.loc);
+        Statement post;
+        for (int i = 0; i < this.args.length; i += 1) {
+            auto arg = beExpression2(this.args[i].compile(context), this.loc);
+            // we must free arg after the call, so make a copy
+            if (arg.temporary()) {
+                auto temp = new Temporary(arg);
+                auto destructor = arg.type().endLifetime(temp);
+                if (destructor) {
+                    post = sequence(post, destructor);
+                    arg = temp;
+                }
+            }
+            args[i] = arg;
         }
-        return call(target, args, this.loc);
+        return new WrapExpression(null, call(target, args, this.loc), post);
     }
 }
 
@@ -875,6 +877,8 @@ class Dereference : Reference
         return this.base.emit(output);
     }
 
+    override bool temporary() { return base.temporary(); }
+
     override void hash(Hash hash) { hash.adds("Dereference"); base.hash(hash); }
 }
 
@@ -1002,11 +1006,9 @@ class CallCtorExpression : Expression
 
     override int emit(Generator output)
     {
-        int reg = this.classptr.emit(output);
-        RegExpr expr = new RegExpr(this.classptr.type(), reg);
-
-        call(accessMember(expr, "__ctor", this.loc, false), this.args, this.loc).emit(output);
-        return reg;
+        auto classptrTemp = new Temporary(classptr);
+        call(accessMember(classptrTemp, "__ctor", this.loc, false), this.args, this.loc).emit(output);
+        return classptrTemp.emit(output);
     }
 
     override void hash(Hash hash) {
@@ -1480,9 +1482,19 @@ class ASTReturnStatement : ASTStatement
         Type ret = findFunctionScope(context.namespace).ret;
         expr = implicitConvertTo(expr, ret, this.loc);
 
-        return StatementCompileResult(
-            new ReturnStatement(expr),
-            context);
+        Statement returnStmt;
+        Statement escapeValueStmt;
+        if (expr.temporary()) {
+            returnStmt = new ReturnStatement(expr);
+        } else { // scoped value, take a copy
+            Reference temp = new Temporary(new NullExpr(ret));
+            escapeValueStmt = ret.copyInto(temp, expr);
+            if (!escapeValueStmt) escapeValueStmt = new AssignStatement(temp, expr);
+            returnStmt = new ReturnStatement(temp);
+        }
+        escapeValueStmt = unwindScope(context.namespace, findFunctionScopeStart(context.namespace), escapeValueStmt);
+
+        return StatementCompileResult(sequence(escapeValueStmt, returnStmt), context);
     }
 }
 
@@ -1547,6 +1559,8 @@ class StackFrame : Reference
         return generator.frameReg;
     }
 
+    override bool temporary() { return false; }
+
     override void hash(Hash hash) { hash.adds("StackFrame"); targetType.hash(hash); }
 }
 
@@ -1575,11 +1589,14 @@ class FunctionScope : Namespace
 
     StructMemberDeclaration[] variables;
 
+    string mangle_;
+
     Loc loc;
 
-    this(Type ret, Type extra, Namespace parent, Loc loc) {
+    this(Type ret, Type extra, Namespace parent, string mangle, Loc loc) {
         this.ret = ret;
         this.extra = extra;
+        this.mangle_ = mangle;
         this.parent = parent;
         this.loc = loc;
     }
@@ -1598,6 +1615,8 @@ class FunctionScope : Namespace
     {
         return new Struct("", this.variables, this.loc);
     }
+
+    override string mangle() { return this.mangle_; }
 
     override Symbol lookup(string name, Expression frame)
     {
@@ -1625,6 +1644,24 @@ FunctionScope findFunctionScope(Namespace namespace)
     return findFunctionScope(namespace.parent);
 }
 
+// No-op marker namespace: this is the point that Return unrolls to.
+class FunctionScopeStart : Namespace
+{
+    this(Namespace parent) { this.parent = parent; }
+
+    override Symbol lookup(string name, Expression frame) { return parent.lookup(name, frame); }
+}
+
+FunctionScopeStart findFunctionScopeStart(Namespace namespace)
+{
+    while (true) {
+        auto functionScopeStart = namespace.instanceOf(FunctionScopeStart);
+        if (functionScopeStart) return functionScopeStart;
+        assert(!!namespace.parent);
+        namespace = namespace.parent;
+    }
+}
+
 class VariableDeclaration : Namespace
 {
     LatentVariable variable;
@@ -1645,11 +1682,7 @@ class VariableDeclaration : Namespace
     {
         Type stackFrameType = variable.stackFrameType;
         frame = new PointerCast(new Pointer(stackFrameType), frame);
-        Reference member = new StructMember(new Dereference(frame), variable.offset);
-        // TODO bool isTemporary() in expression
-        // We can't tmpize here because then a = b breaks, lol
-        // so we actually *need* isTemporary.
-        return member;
+        return new StructMember(new Dereference(frame), variable.offset);
     }
 
     override Symbol lookup(string name, Expression frame)
@@ -1904,7 +1937,7 @@ class ASTVarDeclStatement : ASTStatement
             auto decl = new VariableDeclaration(context.namespace, this.name, type);
 
             return StatementCompileResult(
-                move(decl.accessLocal(), initial, this.loc),
+                move(decl.accessLocal(), initial),
                 context.withNamespace(decl));
         }
         else
@@ -1912,22 +1945,10 @@ class ASTVarDeclStatement : ASTStatement
             auto decl = new VariableDeclaration(context.namespace, this.name, type);
 
             return StatementCompileResult(
-                new AssignStatement(decl.accessLocal(), new NullExpr(type), this.loc),
+                new AssignStatement(decl.accessLocal(), new NullExpr(type)),
                 context.withNamespace(decl));
         }
     }
-}
-
-Statement move(Reference target, Expression source, Loc loc)
-{
-    auto type = target.type();
-    auto copyInto = type.copyInto(target, source);
-    if (!copyInto)
-    {
-        copyInto = new AssignStatement(target, source, loc);
-    }
-    auto cleanup = type.endLifetime(source);
-    return sequence(copyInto, cleanup);
 }
 
 ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext)
@@ -2418,33 +2439,6 @@ Module findModule(Namespace namespace)
     return findModule(namespace.parent);
 }
 
-class NullExpr : Expression
-{
-    Type type_;
-
-    this(Type type_) { this.type_ = type_; }
-
-    override Type type()
-    {
-        return this.type_;
-    }
-
-    override int emit(Generator generator)
-    {
-        // TODO allocaless
-        // exploit that alloca are zero initialized
-        BackendType type = this.type_.emit(generator.platform);
-        auto stack = generator.fun.saveStack();
-        int reg = generator.fun.alloca(type);
-
-        auto res = generator.fun.load(type, reg);
-        generator.fun.restoreStack(stack);
-        return res;
-    }
-
-    override void hash(Hash hash) { hash.adds("NullExpr"); type_.hash(hash); }
-}
-
 class ASTExtern
 {
     string name;
@@ -2856,7 +2850,8 @@ class Class : Type
             for (int i = 0; i < combinedMethods.length; i += 1) {
                 auto method = combinedMethods[i];
                 if (method.abstract_)
-                    this.decl.loc.fail("Abstract method not overridden in non-abstract class " ~ this.name);
+                    this.decl.loc.fail(
+                        "Abstract method '" ~ method.name ~ "' not overridden in non-abstract class " ~ this.name);
             }
         }
         this.vtable_ = combinedMethods;
@@ -3006,8 +3001,7 @@ class ASTClassDecl : ASTType
         if (this.superClass.length)
         {
             Symbol superClassObj = context.namespace.lookup(this.superClass, null);
-            if (!superClassObj) print("super class not found: " ~ this.superClass);
-            assert(!!superClassObj); // , format!"super class %s not found"(this.superClass));
+            this.loc.assert2s(!!superClassObj, "super class not found: " ~ this.superClass);
             superClass = superClassObj.instanceOf(Class);
             assert(!!superClass);
         }
@@ -3070,8 +3064,9 @@ ASTArgument[] parseArglist(Parser parser, LexicalContext lexicalContext)
 ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
 {
     bool classAbstract = false;
-    auto loc = parser.loc();
     parser.begin();
+    parser.strip();
+    auto loc = parser.loc();
     if (acceptIdentifier(parser, "abstract"))
         classAbstract = true;
     if (!acceptIdentifier(parser, "class"))

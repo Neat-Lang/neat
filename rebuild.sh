@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-set -euxo pipefail
+# kdevelop build mode
+if [ ! -z "${BUILD+x}" ]
+then
+    FAST=1
+    # no log spam
+    set -euo pipefail
+else
+    set -euxo pipefail
+fi
 FLAGS="-O"
 # FLAGS=""
 # new compiler, reset cache

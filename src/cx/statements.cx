@@ -44,7 +44,7 @@ class ASTAssignStatement : ASTStatement
         this.loc.assert2s(!!targetref, "target of assignment must be a reference");
         value = implicitConvertTo(value, targetref.type(), this.loc);
         return StatementCompileResult(
-            new AssignStatement(targetref, value, this.loc),
+            new AssignStatement(targetref, value),
             context);
     }
 }
@@ -55,17 +55,15 @@ class AssignStatement : Statement
 
     Expression value;
 
-    Loc loc;
-
-    this(Reference target, Expression value, Loc loc) { this.target = target; this.value = value; this.loc = loc; }
+    this(Reference target, Expression value) {
+        assert(target.type().same(value.type()));
+        this.target = target;
+        this.value = value;
+    }
 
     override void emit(Generator output)
     {
-        Type targetType = this.target.type();
         Type valueType = this.value.type();
-
-        this.loc.assert2s(targetType.same(valueType), "cannot assign " ~ valueType.repr() ~ " to " ~ targetType.repr());
-
         int target_reg = this.target.emitLocation(output);
         int value_reg = this.value.emit(output);
 
@@ -199,13 +197,21 @@ class ASTExprStatement : ASTStatement
     override StatementCompileResult compile(Context context)
     {
         auto expr = beExpression(this.value.compile(context));
-        // TODO fix double-evaluation
-        return StatementCompileResult(
-            sequence(
-                new ExprStatement(expr),
-                expr.type().endLifetime(expr)),
-            context);
+        return StatementCompileResult(discard(expr), context);
     }
+}
+
+Statement move(Reference target, Expression source)
+{
+    auto type = target.type();
+    // create referenceable copy for destructor call
+    // TODO hasElaborateDestructor
+    if (source.temporary() && !source.type().same(new Void))
+        source = new Temporary(source);
+    auto copyInto = type.copyInto(target, source);
+    if (!copyInto) copyInto = new AssignStatement(target, source);
+    if (source.temporary()) copyInto = sequence(copyInto, type.endLifetime(source.instanceOf(Reference)));
+    return copyInto;
 }
 
 class ExprStatement : Statement
@@ -216,10 +222,23 @@ class ExprStatement : Statement
 
     override void emit(Generator output)
     {
-        this.value.emit(output); // discard reg
+        this.value.emit(output);
     }
 
     override void hash(Hash hash) { hash.adds("ExprStatement"); value.hash(hash); }
+}
+
+Statement discard(Expression expr)
+{
+    auto type = expr.type();
+    // TODO hasElaborateDestructor?
+    if (expr.temporary() && !type.same(new Void)) {
+        Reference temp = new Temporary(new NullExpr(type));
+        // call destructor on result
+        return sequence(new AssignStatement(temp, expr), type.endLifetime(temp));
+    } else {
+        return new ExprStatement(expr);
+    }
 }
 
 /**
@@ -326,6 +345,7 @@ class SequenceStatement : Statement
 
 Statement sequence(Statement left, Statement right)
 {
+    if (!left) return right;
     if (!right) return left;
     auto prevSequence = left.instanceOf(SequenceStatement);
     if (prevSequence) return new SequenceStatement(prevSequence.statements ~ right);

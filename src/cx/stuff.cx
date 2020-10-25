@@ -1839,6 +1839,30 @@ class ASTScopeStatement : ASTStatement
     }
 }
 
+// just a bunch of statements after each other
+// (used for int a, b)
+class ASTSequenceStatement : ASTStatement
+{
+    ASTStatement[] statements;
+
+    this(ASTStatement[] statements) { this.statements = statements; }
+
+    override StatementCompileResult compile(Context context)
+    {
+        auto statements = new Statement[](this.statements.length);
+        auto subContext = context;
+        for (int i = 0; i < this.statements.length; i += 1)
+        {
+            auto pair = this.statements[i].compile(subContext);
+
+            subContext = pair.context;
+            statements[i] = pair.statement;
+        }
+        // not a scope!
+        return StatementCompileResult(new SequenceStatement(statements), subContext);
+    }
+}
+
 ASTScopeStatement parseScope(Parser parser, LexicalContext lexicalContext)
 {
     if (!parser.accept("{"))
@@ -1951,21 +1975,9 @@ class ASTVarDeclStatement : ASTStatement
     }
 }
 
-ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext)
+ASTVarDeclStatement parseVarInitialization(Parser parser, LexicalContext lexicalContext, bool infer, ASTType type)
 {
     parser.begin();
-    bool infer = false;
-    ASTType type;
-    if (acceptIdentifier(parser, "auto")) {
-        infer = true;
-    } else {
-        type = parseType(parser, lexicalContext);
-        if (!type)
-        {
-            parser.revert();
-            return null;
-        }
-    }
     ASTSymbol initial;
     string name;
     if (infer && parser.accept("="))
@@ -1991,9 +2003,64 @@ ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext)
             assert(!!initial);
         }
     }
-    parser.expect(";");
     parser.commit();
     return new ASTVarDeclStatement(name, infer, type, initial, parser.loc());
+}
+
+ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin();
+    bool infer = false;
+    ASTType type;
+    if (acceptIdentifier(parser, "auto")) {
+        infer = true;
+    } else {
+        type = parseType(parser, lexicalContext);
+        if (!type)
+        {
+            parser.revert();
+            return null;
+        }
+    }
+    auto decl = parseVarInitialization(parser, lexicalContext, infer, type);
+    if (!decl) {
+        parser.revert();
+        return null;
+    }
+    parser.commit();
+    parser.expect(";");
+    return decl;
+}
+
+ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin();
+    bool infer = false;
+    ASTType type;
+    if (acceptIdentifier(parser, "auto")) {
+        infer = true;
+    } else {
+        type = parseType(parser, lexicalContext);
+        if (!type)
+        {
+            parser.revert();
+            return null;
+        }
+    }
+    ASTStatement[] decls;
+    while (true) {
+        if (decls.length) parser.expect(",");
+        ASTStatement decl = parseVarInitialization(parser, lexicalContext, infer, type);
+        if (!decl) {
+            parser.assert_(decls.length == 0, "couldn't parse continuing variable declaration");
+            parser.revert();
+            return null;
+        }
+        decls ~= decl;
+        if (parser.accept(";")) break;
+    }
+    parser.commit();
+    return new ASTSequenceStatement(decls);
 }
 
 class ASTNestedFunctionDeclStatement : ASTStatement
@@ -2187,7 +2254,7 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
         if (stmt) return stmt;
     }
     {
-        ASTStatement stmt = parseVarDecl(parser, lexicalContext);
+        ASTStatement stmt = parseMultiVarDecl(parser, lexicalContext);
         if (stmt) return stmt;
     }
     {

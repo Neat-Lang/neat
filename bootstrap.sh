@@ -82,5 +82,11 @@ at_revision '49c99d8c805f84377fff747c51d20c840d695fb5' 'rebuild cx' 'build/cx'
 at_revision '9b90edfd9eee4b088725cb811d76dd2eb36e009b' 'rebuild cx' 'build/cx'
 # add char == char
 at_revision '442e0c295870b44313f1d46973b2cca6a18eb84e' 'rebuild cx' 'build/cx'
+# "is" syntax
+at_revision '44f528fa50dd08ed4bd2b18dd847dd60286df88b' 'rebuild cx' 'build/cx'
+# multivar declarations
+at_revision '3e0e97794c6ee897dd142f7633131cfc15eb6a01' 'rebuild cx' 'build/cx'
+# add this(this.i) syntax
+at_revision '5429ed0d7f37a9405e12a414065937e9e8fe1024' 'rebuild cx' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

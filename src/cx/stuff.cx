@@ -17,8 +17,11 @@ extern(C) bool cxruntime_file_exists(string file);
 extern(C) string cxruntime_file_read(string file);
 extern(C) void cxruntime_file_write(string file, string content);
 
+// this really wants to be an Either()
 struct ASTArgument
 {
+    bool isThisAssignment; // then type will be null
+
     string name;
 
     ASTType type;
@@ -82,9 +85,11 @@ class Function : FunctionDeclaration
 
         auto argAssignments = new Statement[](this.args.length + extra);
 
+        VariableDeclaration thisDecl;
         if (this.thisType)
         {
-            auto thisDecl = new VariableDeclaration(scope_, "this", this.thisType);
+            thisDecl = new VariableDeclaration(scope_, "this", this.thisType);
+
             Type voidp = new Pointer(new Void);
 
             scope_ = thisDecl;
@@ -96,11 +101,22 @@ class Function : FunctionDeclaration
         for (int i = 0; i < this.args.length; i += 1) {
             Argument arg = this.args[i];
             auto argExpr = new ArgExpr(extra + i, arg.type);
-            auto argDecl = new VariableDeclaration(scope_, arg.name, arg.type);
 
-            argAssignments[extra + i] = new AssignStatement(argDecl.accessLocal(), argExpr);
+            if (arg.isThisAssignment) {
+                assert(!!this.thisType);
 
-            scope_ = argDecl;
+                auto target = accessMember(thisDecl.accessLocal(), arg.name, this.loc, false)
+                    .instanceOf(Reference);
+                this.loc.assert2s2(!!target, "not a reference: ", arg.name);
+
+                argAssignments[extra + i] = new AssignStatement(target, argExpr);
+            } else {
+                auto argDecl = new VariableDeclaration(scope_, arg.name, arg.type);
+
+                argAssignments[extra + i] = new AssignStatement(argDecl.accessLocal(), argExpr);
+
+                scope_ = argDecl;
+            }
         }
 
         scope_ = new FunctionScopeStart(scope_);
@@ -248,8 +264,9 @@ class ASTFunction
         for (int i = 0; i < this.args.length; i += 1)
         {
             ASTArgument arg = this.args[i];
+            assert(!arg.isThisAssignment);
             Type type = arg.type.compile(context);
-            arguments[i] = Argument(arg.name, type);
+            arguments[i] = Argument(false, arg.name, type);
         }
 
         if (this.isDeclaration)
@@ -285,7 +302,7 @@ ASTArgument[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
             parser.fail("type expected");
         }
         string argname = parseIdentifier(parser);
-        args ~= ASTArgument(argname, argtype);
+        args ~= ASTArgument(false, argname, argtype);
     }
     return args;
 }
@@ -1059,7 +1076,7 @@ class ASTNewExpression : ASTSymbol
             auto byteLength = new BinaryOp("*", elementSize, length, this.loc);
 
             auto allocArgs = new Argument[](1);
-            allocArgs[0] = Argument("", wordType);
+            allocArgs[0] = Argument(false, "", wordType);
             auto alloc = new FunctionDeclaration("cxruntime_alloc", new Pointer(new Void), allocArgs);
 
             auto allocParams = new Expression[](1);
@@ -2525,7 +2542,7 @@ class ASTExtern
     {
         auto args = new Argument[](this.args.length);
         for (int i = 0; i < this.args.length; i += 1)
-            args[i] = Argument(this.args[i].name, this.args[i].type.compile(context));
+            args[i] = Argument(false, this.args[i].name, this.args[i].type.compile(context));
 
         return new FunctionDeclaration(this.name, this.ret.compile(context), args);
     }
@@ -2972,7 +2989,7 @@ class Class : Type
 
         this.methods ~= new ClassMethod(
             Loc(null, ""), this, override_, false /* abstract */, "__instanceof",
-            voidp, new Argument[](0) ~ Argument("target", stringType), null, stmt, null);
+            voidp, new Argument[](0) ~ Argument(false, "target", stringType), null, stmt, null);
     }
 
     override bool same(Type other) {
@@ -3016,6 +3033,7 @@ struct ASTClassDeclMember
 
     ASTType type;
 }
+
 
 struct ASTClassDeclMethod
 {
@@ -3091,7 +3109,23 @@ class ASTClassDecl : ASTType
 
             auto methodArgs = new Argument[](method.args.length);
             for (int k = 0; k < method.args.length; k = k + 1)
-                methodArgs[k] = Argument(method.args[k].name, method.args[k].type.compile(classContext));
+            {
+                auto arg = method.args[k];
+                if (arg.isThisAssignment)
+                {
+                    ClassMember[] members = target.allMembers();
+                    int member = -1;
+                    for (int i = 0; i < members.length; i += 1)
+                        if (members[i].name == arg.name) { member = i; break; }
+                    // TODO specific loc
+                    method.loc.assert2s2(member != -1, "no such member: ", arg.name);
+                    methodArgs[k] = Argument(true, arg.name, members[member].type);
+                }
+                else
+                {
+                    methodArgs[k] = Argument(false, arg.name, arg.type.compile(classContext));
+                }
+            }
 
             target.methods[i] = new ClassMethod(
                 method.loc,
@@ -3119,11 +3153,19 @@ ASTArgument[] parseArglist(Parser parser, LexicalContext lexicalContext)
                 parser.fail("',' or ')' expected");
             }
         }
-        ASTType argtype = parseType(parser, lexicalContext);
-        parser.assert_(!!argtype, "argument type expected");
-        string argname = parseIdentifier(parser);
-        parser.assert_(argname.length > 0, "argument name expected");
-        args ~= ASTArgument(argname, argtype);
+        if (parser.accept("this."))
+        {
+            string argname = parseIdentifier(parser);
+            args ~= ASTArgument(true, argname, null);
+        }
+        else
+        {
+            ASTType argtype = parseType(parser, lexicalContext);
+            parser.assert_(!!argtype, "argument type expected");
+            string argname = parseIdentifier(parser);
+            parser.assert_(argname.length > 0, "argument name expected");
+            args ~= ASTArgument(false, argname, argtype);
+        }
     }
     return args;
 }
@@ -3429,8 +3471,11 @@ class ASTStructDecl : ASTType
             auto method = this.methods[i];
             auto methodArgs = new Argument[](method.args.length);
 
-            for (int k = 0; k < method.args.length; k = k + 1)
-                methodArgs[k] = Argument(method.args[k].name, method.args[k].type.compile(structContext));
+            // TODO this.foo
+            for (int k = 0; k < method.args.length; k = k + 1) {
+                assert(!method.args[k].isThisAssignment);
+                methodArgs[k] = Argument(false, method.args[k].name, method.args[k].type.compile(structContext));
+            }
 
             struct_.methods[i] = new StructMethod(
                 method.loc,

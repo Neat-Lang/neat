@@ -69,7 +69,7 @@ class Function : FunctionDeclaration
         );
     }
 
-    CompiledFunction compile(Platform platform)
+    CompiledFunction compile(CompilerBase compiler, Platform platform)
     {
         auto stackframe = new FunctionScope(this.ret, this.thisType, this.parent, this.mangle(), this.loc);
         Namespace scope_ = stackframe;
@@ -119,7 +119,7 @@ class Function : FunctionDeclaration
 
         if (!compiledStatement)
         {
-            auto context = Context(platform, scope_, null, this.macroState, (new int[](1)).ptr);
+            auto context = Context(compiler, platform, scope_, null, this.macroState, (new int[](1)).ptr);
             auto pair = this.statement.compile(context);
 
             compiledStatement = unwindScope(pair.context.namespace, scope_, pair.statement);
@@ -672,16 +672,8 @@ Symbol accessMember(Symbol base, string member, Loc loc, bool allowUndefined)
     return null;
 }
 
-class ASTMember : ASTSymbol
+class ASTMember : ASTMemberBase
 {
-    ASTSymbol base;
-
-    string member;
-
-    Loc loc;
-
-    this(this.base, this.member, this.loc) { }
-
     override Symbol compile(Context context)
     {
         Symbol base = this.base.compile(context);
@@ -1599,7 +1591,7 @@ FunctionScopeStart findFunctionScopeStart(Namespace namespace)
     }
 }
 
-class VariableDeclaration : Namespace
+class VariableDeclaration : VariableDeclarationBase
 {
     LatentVariable variable;
 
@@ -1608,7 +1600,7 @@ class VariableDeclaration : Namespace
         this.variable = findFunctionScope(this).declare(name, type);
     }
 
-    Reference accessLocal()
+    override Reference accessLocal()
     {
         Expression frame = new ReferenceExpression(new StackFrame(variable.stackFrameType));
         return access(frame);
@@ -2117,17 +2109,6 @@ ASTForLoop parseFor(Parser parser, LexicalContext lexicalContext)
     return new ASTForLoop(varDecl, condition, step, body_);
 }
 
-class ParseStatementArgs : MacroArgs
-{
-    Parser parser;
-    LexicalContext lexicalContext;
-    ASTStatement statement; // out
-    this(this.parser, this.lexicalContext) {
-        this.statement = null;
-    }
-    override bool done() { return !!this.statement; }
-}
-
 ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
 {
     {
@@ -2310,7 +2291,7 @@ class Module : Namespace
         return result;
     }
 
-    FinishedSymbol[] compile(Platform platform)
+    FinishedSymbol[] compile(CompilerBase compiler, Platform platform)
     {
         FinishedSymbol[] symbols;
 
@@ -2319,7 +2300,7 @@ class Module : Namespace
             Function fun = entry.value.instanceOf(Function);
             if (fun)
             {
-                FinishedSymbol funSymbol = fun.compile(platform);
+                FinishedSymbol funSymbol = fun.compile(compiler, platform);
                 symbols ~= funSymbol; // TODO implcast
             }
             Class class_ = entry.value.instanceOf(Class);
@@ -2329,7 +2310,7 @@ class Module : Namespace
                 // class_.define(generator);
                 for (int k = 0; k < class_.methods.length; k += 1) {
                     // TODO implcast
-                    FinishedSymbol method = class_.methods[k].compile(platform);
+                    FinishedSymbol method = class_.methods[k].compile(compiler, platform);
                     symbols ~= method;
                 }
             }
@@ -2337,7 +2318,7 @@ class Module : Namespace
             if (struct_) {
                 for (int i = 0; i < struct_.methods.length; i += 1) {
                     // TODO implcast
-                    FinishedSymbol method = struct_.methods[i].instanceOf(StructMethod).compile(platform);
+                    FinishedSymbol method = struct_.methods[i].instanceOf(StructMethod).compile(compiler, platform);
                     symbols ~= method;
                 }
             }
@@ -3143,7 +3124,8 @@ class ModuleParserConfig
     this(this.packages, this.defaultImports, this.astCache, this.cache) { }
 }
 
-ASTModule parseMacroContinuation(Parser parser, ParserHelper helper, ASTModule astModule, ModuleParserConfig config)
+ASTModule parseMacroContinuation(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule astModule,
+    ModuleParserConfig config)
 {
     parser.begin();
     if (!acceptIdentifier(parser, "macro") || !parser.accept("("))
@@ -3162,7 +3144,7 @@ ASTModule parseMacroContinuation(Parser parser, ParserHelper helper, ASTModule a
 
     auto subModule = new ASTModule(astModule.name, astModule.pak, newMacroState, astModule);
 
-    return parseModuleBody(parser, helper, subModule, config);
+    return parseModuleBody(compiler, parser, helper, subModule, config);
 }
 
 struct ASTStructMember
@@ -3394,9 +3376,10 @@ struct ASTModuleEntry
     ASTSymbolAlias symbolAlias;
 }
 
-ASTModule parseModuleBody(Parser parser, ParserHelper helper, ASTModule module_, ModuleParserConfig config)
+ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule module_,
+    ModuleParserConfig config)
 {
-    LexicalContext lexicalContext = new LexicalContext(module_.macroState);
+    LexicalContext lexicalContext = new LexicalContext(compiler, module_.macroState);
 
     while (!parser.eof())
     {
@@ -3404,10 +3387,10 @@ ASTModule parseModuleBody(Parser parser, ParserHelper helper, ASTModule module_,
         if (import_) {
             if (import_.isMacroImport)
             {
-                auto importedModule = resolveImport(module_, import_, helper, config);
+                auto importedModule = resolveImport(compiler, module_, import_, helper, config);
 
                 module_.macroState = module_.macroState.dup();
-                lexicalContext = new LexicalContext(module_.macroState);
+                lexicalContext = new LexicalContext(compiler, module_.macroState);
 
                 lexicalContext.macroState.addImport(importedModule.macroState);
             }
@@ -3436,7 +3419,7 @@ ASTModule parseModuleBody(Parser parser, ParserHelper helper, ASTModule module_,
                 null, null, strct, null, null, null, null);
             continue;
         }
-        ASTModule submod = parseMacroContinuation(parser, helper, module_, config);
+        ASTModule submod = parseMacroContinuation(compiler, parser, helper, module_, config);
         if (submod)
             return submod;
         ASTFunction fun = parseFunction(parser, lexicalContext);
@@ -3453,7 +3436,8 @@ ASTModule parseModuleBody(Parser parser, ParserHelper helper, ASTModule module_,
     return module_;
 }
 
-ASTModule resolveImport(ASTModule module_, ASTImport import_, ParserHelper helper, ModuleParserConfig config)
+ASTModule resolveImport(CompilerBase compiler, ASTModule module_, ASTImport import_, ParserHelper helper,
+    ModuleParserConfig config)
 {
     auto pak = module_.pak;
     // TODO enum SearchMode { Transitive, Direct, Commandline }
@@ -3463,19 +3447,19 @@ ASTModule resolveImport(ASTModule module_, ASTImport import_, ParserHelper helpe
         transitive = false;
     }
     return getModule(
-        moduleToFile(import_.name), pak, true, helper, config, import_.loc);
+        compiler, moduleToFile(import_.name), pak, true, helper, config, import_.loc);
 }
 
 Module compileImport(ASTModule module_, ASTImport import_, ParserHelper helper,
-                     ModuleParserConfig config, Platform platform)
+                     CompilerBase compiler, ModuleParserConfig config, Platform platform)
 {
-    auto astModule = resolveImport(module_, import_, helper, config);
+    auto astModule = resolveImport(compiler, module_, import_, helper, config);
 
-    return compileModule(astModule, helper, config, platform, true);
+    return compileModule(astModule, helper, config, compiler, platform, true);
 }
 
 Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfig config,
-                     Platform platform, bool addDefaultModules)
+                     CompilerBase compiler, Platform platform, bool addDefaultModules)
 {
     Module mod = config.cache.find(astModule, platform);
     if (mod) return mod;
@@ -3484,18 +3468,18 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
 
     if (astModule.parent)
     {
-        parent = compileModule(astModule.parent, helper, config, platform, addDefaultModules);
+        parent = compileModule(astModule.parent, helper, config, compiler, platform, addDefaultModules);
     }
 
     Module module_ = new Module(astModule.name, astModule.pak, astModule.macroState, parent);
-    Context context = Context(platform, module_, null, module_.macroState, (new int[](1)).ptr);
+    Context context = Context(compiler, platform, module_, null, module_.macroState, (new int[](1)).ptr);
     if (addDefaultModules)
     {
         // TODO add to ASTModule (addImport that handles updating the macro state
         // so that adding default macro imports works)
         // NOTE once these are in ASTModule, we can take out ModuleParserConfig here and also from proxyCall.
         for (int i = 0; i < config.defaultImports.length; i += 1) {
-            auto import_ = compileModule(config.defaultImports[i], helper, config, platform, false);
+            auto import_ = compileModule(config.defaultImports[i], helper, config, compiler, platform, false);
             module_.addImport(import_);
         }
     }
@@ -3507,7 +3491,7 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
         // (allows compilation in any order)
         if (entry.import_)
         {
-            auto importedModule = compileImport(astModule, entry.import_, helper, config, platform);
+            auto importedModule = compileImport(astModule, entry.import_, helper, compiler, config, platform);
 
             module_.addImport(importedModule);
         }
@@ -3542,7 +3526,8 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
     return module_;
 }
 
-ASTModule getModule(string filename, Package pak, bool search, ParserHelper helper, ModuleParserConfig config, Loc loc)
+ASTModule getModule(CompilerBase compiler, string filename, Package pak, bool search, ParserHelper helper,
+    ModuleParserConfig config, Loc loc)
 {
     auto macroState = new MacroState;
     string path = filename;
@@ -3572,7 +3557,7 @@ ASTModule getModule(string filename, Package pak, bool search, ParserHelper help
     locAtModule.assert2s2(filename == moduleToFile(modname), filename, ": module doesn't match filename");
 
     ASTModule baseModule = new ASTModule(modname, pak, new MacroState, null);
-    ASTModule module_ = parseModuleBody(parser, helper, baseModule, config);
+    ASTModule module_ = parseModuleBody(compiler, parser, helper, baseModule, config);
 
     config.astCache.add(path, module_);
 

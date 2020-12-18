@@ -36,9 +36,11 @@ abstract class Namespace
 
 class LexicalContext
 {
+    CompilerBase compiler;
+
     MacroState macroState;
 
-    this(this.macroState) { }
+    this(this.compiler, this.macroState) { }
 }
 
 /**
@@ -73,6 +75,17 @@ LoopScope findLoopScope(DeclarationScope scope_)
 abstract class ASTSymbol
 {
     abstract Symbol compile(Context context) { assert(false); }
+}
+
+abstract class ASTMemberBase : ASTSymbol
+{
+    ASTSymbol base;
+
+    string member;
+
+    Loc loc;
+
+    this(this.base, this.member, this.loc) { }
 }
 
 abstract class Statement
@@ -339,9 +352,52 @@ class MacroState
     }
 }
 
+abstract class VariableDeclarationBase : Namespace
+{
+    abstract Reference accessLocal() { assert(false); }
+}
+
+/**
+ * Helper class used to break dependency loops between cx.base, macros and the rest of the compiler.
+ */
+abstract class CompilerBase
+{
+    // parser
+    abstract ASTSymbol parseExpression(Parser parser, LexicalContext lexicalContext) { assert(false); }
+
+    abstract ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext) { assert(false); }
+
+    abstract ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext) { assert(false); }
+
+    // expressions and statements
+    abstract Expression implicitConvertToOptional(Expression from, Type to) { assert(false); }
+
+    abstract Expression binaryOp(string op, Expression left, Expression right, Loc loc) { assert(false); }
+
+    abstract Expression intLiteral(int value) { assert(false); }
+
+    abstract Statement assignStatement(Reference target, Expression value) { assert(false); }
+
+    abstract Statement sequenceStatement(Statement[] stmts) { assert(false); }
+
+    abstract Statement ifStatement(Expression test, Statement then, Statement else_) { assert(false); }
+
+    abstract VariableDeclarationBase variableDeclaration(Namespace parent, string name, Type type) { assert(false); }
+
+    Expression implicitConvertTo(Expression from, Type to, Loc loc)
+    {
+        auto result = implicitConvertToOptional(from, to);
+        if (result) return result;
+        loc.assert2s4(false, "todo: cast(", to.repr(), ") ", from.type().repr());
+    }
+}
+
+// TODO document where exactly this is used
 struct Context
 {
     // all members should be treated as immutable
+
+    CompilerBase compiler;
 
     Platform platform;
 
@@ -355,15 +411,28 @@ struct Context
 
     Context withNamespace(Namespace namespace)
     {
-        return Context(this.platform, namespace, this.scope_, this.macroState, this.idCounter);
+        return Context(this.compiler, this.platform, namespace, this.scope_, this.macroState, this.idCounter);
     }
 
     Context withDeclScope(DeclarationScope scope_)
     {
-        return Context(this.platform, this.namespace, scope_, this.macroState, this.idCounter);
+        return Context(this.compiler, this.platform, this.namespace, scope_, this.macroState, this.idCounter);
     }
 
     string getLabel() { int i = *this.idCounter; *this.idCounter += 1; return "uniq" ~ itoa(i); }
+}
+
+// TODO Statement, Context multi-return
+struct StatementCompileResult
+{
+    Statement statement;
+
+    Context context;
+}
+
+abstract class ASTStatement
+{
+    StatementCompileResult compile(Context context) { assert(false); }
 }
 
 abstract class Macro
@@ -416,12 +485,16 @@ class ParsePropertyArgs : MacroArgs
     override bool done() { return !!this.result; }
 }
 
-/**
- * Helper class to break dependency cycles.
- */
-class Compiler
+// hook parseStatement
+class ParseStatementArgs : MacroArgs
 {
-    // parser
+    Parser parser;
+    LexicalContext lexicalContext;
+    ASTStatement statement; // out
+    this(this.parser, this.lexicalContext) {
+        this.statement = null;
+    }
+    override bool done() { return !!this.statement; }
 }
 
 class Package

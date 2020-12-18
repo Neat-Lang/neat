@@ -9,6 +9,7 @@ import cx.base;
 import cx.expr;
 import cx.hash;
 import cx.parser_base;
+import cx.statements;
 import cx.stuff;
 import cx.types;
 import helpers;
@@ -31,14 +32,14 @@ string removeSlashes(string s) {
     return result;
 }
 
-string emitModule(Backend backend, Platform platform, Module module_, string baseCmd)
+string emitModule(CompilerBase compiler, Backend backend, Platform platform, Module module_, string baseCmd)
 {
     auto hash = new Hash;
 
     hash.adds(baseCmd);
     // TODO add compiler checksum (generation number?)
 
-    auto symbols = module_.compile(platform);
+    auto symbols = module_.compile(compiler, platform);
     for (int i = 0; i < symbols.length; i += 1)
         symbols[i].hash(hash);
 
@@ -74,11 +75,13 @@ string emitModule(Backend backend, Platform platform, Module module_, string bas
 
 class ParserHelperImpl : ParserHelper
 {
+    CompilerBase compiler;
+
     Backend backend;
 
     bool x86_32;
 
-    this(this.backend, this.x86_32) { }
+    this(this.compiler, this.backend, this.x86_32) { }
 
     // TODO why do we need 'config'?
     override void proxyCall(ASTModule astModule, string function_, MacroState macroState, ModuleParserConfig config)
@@ -89,7 +92,7 @@ class ParserHelperImpl : ParserHelper
         auto platform = new DefaultPlatform(x86_32);
 
         // throwaway compilation (TODO cache?)
-        Module module_ = compileModule(astModule, this, config, platform, true);
+        Module module_ = compileModule(astModule, this, config, compiler, platform, true);
         Module[] allModules = module_.allModules();
         BackendModule[] backendModules;
 
@@ -101,7 +104,7 @@ class ParserHelperImpl : ParserHelper
 
         string objFiles;
         for (int i = 0; i < allModules.length; i += 1) {
-            string objFile = emitModule(backend, platform, allModules[i], baseCmd);
+            string objFile = emitModule(compiler, backend, platform, allModules[i], baseCmd);
             objFiles ~= " " ~ objFile;
         }
 
@@ -218,6 +221,84 @@ class ASTSizeT : ASTType
     }
 }
 
+// TODO fqn calls, .name calls
+Expression implicitConvertToOptionalProxy(Expression from, Type to)
+{
+    return implicitConvertToOptional(from, to);
+}
+
+// TODO fqn calls, .name calls
+ASTSymbol parseExpressionProxy(Parser parser, LexicalContext lexicalContext)
+{
+    return parseExpression(parser, lexicalContext);
+}
+
+// TODO fqn calls, .name calls
+ASTSymbol parseExpressionLeafProxy(Parser parser, LexicalContext lexicalContext)
+{
+    return parseExpressionLeaf(parser, lexicalContext);
+}
+
+// TODO fqn calls, .name calls
+ASTStatement parseStatementProxy(Parser parser, LexicalContext lexicalContext)
+{
+    return parseStatement(parser, lexicalContext);
+}
+
+class CompilerImpl : CompilerBase
+{
+    this() { }
+
+    // parser
+    override ASTSymbol parseExpression(Parser parser, LexicalContext lexicalContext)
+    {
+        return parseExpressionProxy(parser, lexicalContext);
+    }
+
+    override ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
+    {
+        return parseExpressionLeafProxy(parser, lexicalContext);
+    }
+
+    override ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
+    {
+        return parseStatementProxy(parser, lexicalContext);
+    }
+
+    // expressions and statements
+    override Expression implicitConvertToOptional(Expression from, Type to)
+    {
+        return implicitConvertToOptionalProxy(from, to);
+    }
+
+    override Expression intLiteral(int value) { return new IntLiteral(value); }
+
+    override Expression binaryOp(string op, Expression left, Expression right, Loc loc)
+    {
+        return new BinaryOp(op, left, right, loc);
+    }
+
+    override Statement assignStatement(Reference target, Expression value)
+    {
+        return new AssignStatement(target, value);
+    }
+
+    override Statement sequenceStatement(Statement[] stmts)
+    {
+        return new SequenceStatement(stmts);
+    }
+
+    override Statement ifStatement(Expression test, Statement then, Statement else_)
+    {
+        return new IfStatement(test, then, else_);
+    }
+
+    override VariableDeclarationBase variableDeclaration(Namespace parent, string name, Type type)
+    {
+        return new VariableDeclaration(parent, name, type);
+    }
+}
+
 void main(string[] args)
 {
     print("# stage2");
@@ -229,6 +310,7 @@ void main(string[] args)
     bool optimize;
     bool x86_32;
     bool macro_x86_32;
+    CompilerBase compilerImpl = new CompilerImpl();
     // auto backend = new ProxyBackend();
     Backend backend = new LLVMBackend();
     Backend macroBackend = backend;
@@ -298,9 +380,9 @@ void main(string[] args)
     auto astCache = new ASTModuleCache;
     auto cache = new ModuleCache;
     auto modParseConfig = new ModuleParserConfig(packages, defaultImports, astCache, cache);
-    auto helper = new ParserHelperImpl(macroBackend, macro_x86_32);
-    auto astToplevel = getModule(args[0], null, false, helper, modParseConfig, Loc(null, ""));
-    auto toplevel = compileModule(astToplevel, helper, modParseConfig, platform, true);
+    auto helper = new ParserHelperImpl(compilerImpl, macroBackend, macro_x86_32);
+    auto astToplevel = getModule(compilerImpl, args[0], null, false, helper, modParseConfig, Loc(null, ""));
+    auto toplevel = compileModule(astToplevel, helper, modParseConfig, compilerImpl, platform, true);
 
     string baseFlags;
     if (optimize) baseFlags ~= " -Ofast";
@@ -313,7 +395,7 @@ void main(string[] args)
 
     string fileArgs;
     for (int i = 0; i < modules.length; i += 1) {
-        string objFile = emitModule(backend, platform, modules[i], compiler ~ baseFlags);
+        string objFile = emitModule(compilerImpl, backend, platform, modules[i], compiler ~ baseFlags);
         fileArgs ~= " " ~ objFile;
     }
 

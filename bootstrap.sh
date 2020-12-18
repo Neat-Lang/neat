@@ -88,5 +88,7 @@ at_revision '44f528fa50dd08ed4bd2b18dd847dd60286df88b' 'rebuild cx' 'build/cx'
 at_revision '3e0e97794c6ee897dd142f7633131cfc15eb6a01' 'rebuild cx' 'build/cx'
 # add this(this.i) syntax
 at_revision '5429ed0d7f37a9405e12a414065937e9e8fe1024' 'rebuild cx' 'build/cx'
+# add CompilerBase/CompilerImpl separation
+at_revision 'f65bca79cad32b7e68facebb4b68e21905691f43' 'rebuild cx' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

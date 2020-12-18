@@ -3,11 +3,8 @@ module cx.macros.either;
 import package(compiler).backend.base;
 import package(compiler).cx.base;
 import package(compiler).cx.parser;
-import package(compiler).cx.expr;
 import package(compiler).cx.hash;
 import package(compiler).cx.parser_base;
-import package(compiler).cx.statements;
-import package(compiler).cx.stuff;
 import package(compiler).cx.types;
 
 class ASTEitherDecl : ASTType
@@ -271,15 +268,15 @@ class ASTEitherCaseExpr : ASTSymbol
             auto case_ = this.cases[i];
             auto caseType = case_.type.compile(context);
 
-            auto namespace = new VariableDeclaration(context.namespace, case_.identifier, caseType);
+            auto namespace = context.compiler.variableDeclaration(context.namespace, case_.identifier, caseType);
             auto subContext = context.withNamespace(namespace);
 
             Expression expr = beExpression2(case_.expr.compile(subContext), case_.loc);
 
             if (!mergedExpr) mergedExpr = expr;
             else {
-                auto left = implicitConvertToOptional(expr, mergedExpr.type());
-                auto right = implicitConvertToOptional(mergedExpr, expr.type());
+                auto left = context.compiler.implicitConvertToOptional(expr, mergedExpr.type());
+                auto right = context.compiler.implicitConvertToOptional(mergedExpr, expr.type());
                 if (!left && !right) case_.loc.assert2s(false, "incompatible expression type");
                 else if (left && right && !left.type().same(right.type())) case_.loc.assert2s(false, "ambiguous expression type");
                 if (left) mergedExpr = left;
@@ -288,7 +285,7 @@ class ASTEitherCaseExpr : ASTSymbol
         }
 
         auto mergeType = mergedExpr.type();
-        auto resultNamespace = new VariableDeclaration(context.namespace, "", mergeType);
+        auto resultNamespace = context.compiler.variableDeclaration(context.namespace, "", mergeType);
         auto resultContext = context.withNamespace(resultNamespace);
         Reference resultVar = resultNamespace.accessLocal();
         Statement ifTree;
@@ -307,16 +304,17 @@ class ASTEitherCaseExpr : ASTSymbol
             case_.loc.assert2s(matched != -1, "Type is not listed in Either!");
             handled[matched] = true;
 
-            auto namespace = new VariableDeclaration(resultContext.namespace, case_.identifier, type);
+            auto namespace = context.compiler.variableDeclaration(resultContext.namespace, case_.identifier, type);
             Reference variable = namespace.accessLocal();
-            Statement assignment = new AssignStatement(variable, new EitherMember(baseExpr, matched));
+            Statement assignment = context.compiler.assignStatement(variable, new EitherMember(baseExpr, matched));
             Expression userExpr = beExpression2(case_.expr.compile(resultContext.withNamespace(namespace)), case_.loc);
-            Expression typeCorrectedUserExpr = implicitConvertTo(userExpr, mergeType, case_.loc);
-            Statement userStmt = new AssignStatement(resultVar, typeCorrectedUserExpr);
-            Statement then = new SequenceStatement(new Statement[](0) ~ assignment ~ userStmt);
-            Expression test = new BinaryOp("==", new EitherType(baseExpr), new IntLiteral(matched + 1), this.loc);
+            Expression typeCorrectedUserExpr = context.compiler.implicitConvertTo(userExpr, mergeType, case_.loc);
+            Statement userStmt = context.compiler.assignStatement(resultVar, typeCorrectedUserExpr);
+            Statement then = context.compiler.sequenceStatement(new Statement[](0) ~ assignment ~ userStmt);
+            Expression test = context.compiler.binaryOp(
+                "==", new EitherType(baseExpr), context.compiler.intLiteral(matched + 1), this.loc);
 
-            ifTree = new IfStatement(test, then, ifTree);
+            ifTree = context.compiler.ifStatement(test, then, ifTree);
         }
         for (int i = 0; i < handled.length; i += 1) {
             loc.assert2s(handled[i], "Type " ~ either.types[i].repr() ~ " not handled!");
@@ -345,7 +343,7 @@ ASTSymbol parseCaseExpr(Parser parser, LexicalContext lexicalContext, ASTSymbol 
         string identifier = parseIdentifier(parser);
         parser.expect(":");
         Loc loc = parser.loc();
-        ASTSymbol expr = parseExpression(parser, lexicalContext);
+        ASTSymbol expr = lexicalContext.compiler.parseExpression(parser, lexicalContext);
         cases ~= ASTEitherCaseExprCase(loc, type, identifier, expr);
     }
     return new ASTEitherCaseExpr(parser.loc(), current, cases);
@@ -402,14 +400,15 @@ class ASTEitherCaseStmt : ASTStatement
             case_.loc.assert2s(matched != -1, "Type is not listed in Either!");
             handled[matched] = true;
 
-            auto namespace = new VariableDeclaration(context.namespace, case_.identifier, type);
+            auto namespace = context.compiler.variableDeclaration(context.namespace, case_.identifier, type);
             Reference variable = namespace.accessLocal();
-            Statement assignment = new AssignStatement(variable, new EitherMember(baseExpr, matched));
+            Statement assignment = context.compiler.assignStatement(variable, new EitherMember(baseExpr, matched));
             auto userStmtPair = case_.stmt.compile(context.withNamespace(namespace));
-            Statement then = new SequenceStatement(new Statement[](0) ~ assignment ~ userStmtPair.statement);
-            Expression test = new BinaryOp("==", new EitherType(baseExpr), new IntLiteral(matched + 1), this.loc);
+            Statement then = context.compiler.sequenceStatement(new Statement[](0) ~ assignment ~ userStmtPair.statement);
+            Expression test = context.compiler.binaryOp(
+                "==", new EitherType(baseExpr), context.compiler.intLiteral(matched + 1), this.loc);
 
-            ifTree = new IfStatement(test, then, ifTree);
+            ifTree = context.compiler.ifStatement(test, then, ifTree);
         }
         for (int i = 0; i < handled.length; i += 1) {
             loc.assert2s(handled[i], "Type " ~ either.types[i].repr() ~ " not handled!");
@@ -423,12 +422,12 @@ class ASTEitherCaseStmt : ASTStatement
 ASTStatement parseCaseStmt(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin();
-    auto expr = parseExpressionLeaf(parser, lexicalContext);
+    auto expr = lexicalContext.compiler.parseExpressionLeaf(parser, lexicalContext);
     if (!expr) {
         parser.revert();
         return null;
     }
-    auto member = expr.instanceOf(ASTMember);
+    auto member = expr.instanceOf(ASTMemberBase);
     if (!member || member.member != "case" || !parser.accept("{")) {
         parser.revert();
         return null;
@@ -443,7 +442,7 @@ ASTStatement parseCaseStmt(Parser parser, LexicalContext lexicalContext)
         string identifier = parseIdentifier(parser);
         parser.expect(":");
         Loc loc = parser.loc();
-        ASTStatement stmt = parseStatement(parser, lexicalContext);
+        ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext);
         cases ~= ASTEitherCaseStmtCase(loc, type, identifier, stmt);
     }
     return new ASTEitherCaseStmt(parser.loc(), member.base, cases);

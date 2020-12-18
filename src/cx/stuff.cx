@@ -1,6 +1,8 @@
 // TODO distribute into more appropriate modules
 module cx.stuff;
 
+macro import cx.macros.either;
+
 import backend.base;
 import cx.array;
 import cx.base;
@@ -17,11 +19,8 @@ extern(C) bool cxruntime_file_exists(string file);
 extern(C) string cxruntime_file_read(string file);
 extern(C) void cxruntime_file_write(string file, string content);
 
-// this really wants to be an Either()
 struct ASTArgument
 {
-    bool isThisAssignment; // then type will be null
-
     string name;
 
     ASTType type;
@@ -241,7 +240,6 @@ class ASTFunction
         for (int i = 0; i < this.args.length; i += 1)
         {
             ASTArgument arg = this.args[i];
-            assert(!arg.isThisAssignment);
             Type type = arg.type.compile(context);
             arguments[i] = Argument(false, arg.name, type);
         }
@@ -279,7 +277,7 @@ ASTArgument[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
             parser.fail("type expected");
         }
         string argname = parseIdentifier(parser);
-        args ~= ASTArgument(false, argname, argtype);
+        args ~= ASTArgument(argname, argtype);
     }
     return args;
 }
@@ -2201,22 +2199,18 @@ class ASTModule
     // because we hit a macro declaration
     ASTModule parent;
 
-    ASTModuleEntry[] entries;
+    Either(ASTImport, ASTClassDecl, ASTStructDecl, ASTExtern, ASTFunction, ASTTypeAlias, ASTSymbolAlias)[] entries;
 
     this(this.name, this.pak, this.macroState, this.parent) { }
 
     void addTypeAlias(string name, ASTType type)
     {
-        auto alias_ = new ASTTypeAlias(name, type);
-
-        this.entries ~= ASTModuleEntry(null, null, null, null, null, alias_, null);
+        this.entries ~= new ASTTypeAlias(name, type);
     }
 
     void addExprAlias(string name, ASTSymbol symbol)
     {
-        auto alias_ = new ASTSymbolAlias(name, symbol);
-
-        this.entries ~= ASTModuleEntry(null, null, null, null, null, null, alias_);
+        this.entries ~= new ASTSymbolAlias(name, symbol);
     }
 }
 
@@ -2300,26 +2294,20 @@ class Module : Namespace
             Function fun = entry.value.instanceOf(Function);
             if (fun)
             {
-                FinishedSymbol funSymbol = fun.compile(compiler, platform);
-                symbols ~= funSymbol; // TODO implcast
+                symbols ~= fun.compile(compiler, platform);
             }
             Class class_ = entry.value.instanceOf(Class);
             if (class_) {
-                FinishedSymbol defineClass = new DefineClass(class_); // TODO implcast
-                symbols ~= defineClass;
+                symbols ~= new DefineClass(class_);
                 // class_.define(generator);
                 for (int k = 0; k < class_.methods.length; k += 1) {
-                    // TODO implcast
-                    FinishedSymbol method = class_.methods[k].compile(compiler, platform);
-                    symbols ~= method;
+                    symbols ~= class_.methods[k].compile(compiler, platform);
                 }
             }
             Struct struct_ = entry.value.instanceOf(Struct);
             if (struct_) {
                 for (int i = 0; i < struct_.methods.length; i += 1) {
-                    // TODO implcast
-                    FinishedSymbol method = struct_.methods[i].instanceOf(StructMethod).compile(compiler, platform);
-                    symbols ~= method;
+                    symbols ~= struct_.methods[i].instanceOf(StructMethod).compile(compiler, platform);
                 }
             }
         }
@@ -2861,6 +2849,10 @@ struct ASTClassDeclMember
     ASTType type;
 }
 
+struct ASTThisAssignment
+{
+    string name;
+}
 
 struct ASTClassDeclMethod
 {
@@ -2874,7 +2866,7 @@ struct ASTClassDeclMethod
 
     ASTType ret;
 
-    ASTArgument[] args;
+    Either(ASTArgument, ASTThisAssignment)[] args;
 
     ASTStatement body_;
 }
@@ -2928,19 +2920,19 @@ class ASTClassDecl : ASTType
             for (int k = 0; k < method.args.length; k = k + 1)
             {
                 auto arg = method.args[k];
-                if (arg.isThisAssignment)
-                {
-                    ClassMember[] members = target.allMembers();
-                    int member = -1;
-                    for (int i = 0; i < members.length; i += 1)
-                        if (members[i].name == arg.name) { member = i; break; }
-                    // TODO specific loc
-                    method.loc.assert2s2(member != -1, "no such member: ", arg.name);
-                    methodArgs[k] = Argument(true, arg.name, members[member].type);
-                }
-                else
-                {
-                    methodArgs[k] = Argument(false, arg.name, arg.type.compile(classContext));
+                arg.case {
+                    ASTThisAssignment arg:
+                    {
+                        ClassMember[] members = target.allMembers();
+                        int member = -1;
+                        for (int i = 0; i < members.length; i += 1)
+                            if (members[i].name == arg.name) { member = i; break; }
+                        // TODO specific loc
+                        method.loc.assert2s2(member != -1, "no such member: ", arg.name);
+                        methodArgs[k] = Argument(true, arg.name, members[member].type);
+                    }
+                    ASTArgument arg:
+                        methodArgs[k] = Argument(false, arg.name, arg.type.compile(classContext));
                 }
             }
 
@@ -2958,9 +2950,9 @@ class ASTClassDecl : ASTType
     }
 }
 
-ASTArgument[] parseArglist(Parser parser, LexicalContext lexicalContext)
+Either(ASTArgument, ASTThisAssignment)[] parseArglist(Parser parser, LexicalContext lexicalContext)
 {
-    ASTArgument[] args;
+    Either(ASTArgument, ASTThisAssignment)[] args;
     while (!parser.accept(")"))
     {
         if (args.length > 0)
@@ -2973,7 +2965,7 @@ ASTArgument[] parseArglist(Parser parser, LexicalContext lexicalContext)
         if (parser.accept("this."))
         {
             string argname = parseIdentifier(parser);
-            args ~= ASTArgument(true, argname, null);
+            args ~= ASTThisAssignment(argname);
         }
         else
         {
@@ -2981,7 +2973,7 @@ ASTArgument[] parseArglist(Parser parser, LexicalContext lexicalContext)
             parser.assert_(!!argtype, "argument type expected");
             string argname = parseIdentifier(parser);
             parser.assert_(argname.length > 0, "argument name expected");
-            args ~= ASTArgument(false, argname, argtype);
+            args ~= ASTArgument(argname, argtype);
         }
     }
     return args;
@@ -3048,7 +3040,7 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
         }
         if (parser.accept("(")) // method
         {
-            ASTArgument[] args = parseArglist(parser, lexicalContext);
+            auto args = parseArglist(parser, lexicalContext);
             ASTStatement stmt = parseStatement(parser, lexicalContext);
             methods ~= ASTClassDeclMethod(
                 parser.loc(), override_, abstract_, memberName, retType, args, stmt);
@@ -3162,7 +3154,7 @@ struct ASTStructMethod
 
     ASTType ret;
 
-    ASTArgument[] args;
+    Either(ASTArgument, ASTThisAssignment)[] args;
 
     ASTStatement body_;
 }
@@ -3257,10 +3249,13 @@ class ASTStructDecl : ASTType
             auto method = this.methods[i];
             auto methodArgs = new Argument[](method.args.length);
 
-            // TODO this.foo
             for (int k = 0; k < method.args.length; k = k + 1) {
-                assert(!method.args[k].isThisAssignment);
-                methodArgs[k] = Argument(false, method.args[k].name, method.args[k].type.compile(structContext));
+                method.args[k].case {
+                    ASTArgument arg:
+                        methodArgs[k] = Argument(false, arg.name, arg.type.compile(structContext));
+                    ASTThisAssignment arg:
+                        assert(false); // TODO this.foo
+                }
             }
 
             struct_.methods[i] = new StructMethod(
@@ -3313,7 +3308,7 @@ ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
         }
         if (parser.accept("(")) // method
         {
-            ASTArgument[] args = parseArglist(parser, lexicalContext);
+            auto args = parseArglist(parser, lexicalContext);
             parser.assert_(
                 memberName != "__dtor" || args.length == 0, "destructor cannot take parameters");
             ASTStatement stmt = parseStatement(parser, lexicalContext);
@@ -3358,24 +3353,6 @@ class ASTSymbolAlias
     this(this.name, this.symbol) { }
 }
 
-// TODO Either
-struct ASTModuleEntry
-{
-    ASTImport import_;
-
-    ASTClassDecl classDecl;
-
-    ASTStructDecl structDecl;
-
-    ASTExtern extern_;
-
-    ASTFunction function_;
-
-    ASTTypeAlias typeAlias;
-
-    ASTSymbolAlias symbolAlias;
-}
-
 ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule module_,
     ModuleParserConfig config)
 {
@@ -3396,27 +3373,23 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             }
             else
             {
-                module_.entries ~= ASTModuleEntry(
-                    import_, null, null, null, null, null, null);
+                module_.entries ~= import_;
             }
             continue;
         }
         ASTClassDecl classDecl = parseClassDecl(parser, lexicalContext);
         if (classDecl) {
-            module_.entries ~= ASTModuleEntry(
-                null, classDecl, null, null, null, null, null);
+            module_.entries ~= classDecl;
             continue;
         }
         ASTExtern extern_ = parseExtern(parser, lexicalContext);
         if (extern_) {
-            module_.entries ~= ASTModuleEntry(
-                null, null, null, extern_, null, null, null);
+            module_.entries ~= extern_;
             continue;
         }
         auto strct = parseStructDecl(parser, lexicalContext);
         if (strct) {
-            module_.entries ~= ASTModuleEntry(
-                null, null, strct, null, null, null, null);
+            module_.entries ~= strct;
             continue;
         }
         ASTModule submod = parseMacroContinuation(compiler, parser, helper, module_, config);
@@ -3425,8 +3398,7 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
         ASTFunction fun = parseFunction(parser, lexicalContext);
         if (fun)
         {
-            module_.entries ~= ASTModuleEntry(
-                null, null, null, null, fun, null, null);
+            module_.entries ~= fun;
             continue;
         }
 
@@ -3489,37 +3461,26 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
         auto entry = astModule.entries[i];
         // TODO lazily resolve members only once they're looked up
         // (allows compilation in any order)
-        if (entry.import_)
-        {
-            auto importedModule = compileImport(astModule, entry.import_, helper, compiler, config, platform);
+        entry.case {
+            ASTImport import_:
+            {
+                auto importedModule = compileImport(astModule, import_, helper, compiler, config, platform);
 
-            module_.addImport(importedModule);
+                module_.addImport(importedModule);
+            }
+            ASTClassDecl classDecl:
+                module_.add(classDecl.name, classDecl.compile(context));
+            ASTStructDecl structDecl:
+                module_.add(structDecl.name, structDecl.compile(context));
+            ASTExtern extern_:
+                module_.add(extern_.name, extern_.compile(context));
+            ASTFunction function_:
+                module_.add(function_.name, function_.compile(context));
+            ASTTypeAlias typeAlias:
+                module_.add(typeAlias.name, typeAlias.type.compile(context));
+            ASTSymbolAlias symbolAlias:
+                module_.add(symbolAlias.name, symbolAlias.symbol.compile(context));
         }
-        else if (entry.classDecl)
-        {
-            module_.add(entry.classDecl.name, entry.classDecl.compile(context));
-        }
-        else if (entry.structDecl)
-        {
-            module_.add(entry.structDecl.name, entry.structDecl.compile(context));
-        }
-        else if (entry.extern_)
-        {
-            module_.add(entry.extern_.name, entry.extern_.compile(context));
-        }
-        else if (entry.function_)
-        {
-            module_.add(entry.function_.name, entry.function_.compile(context));
-        }
-        else if (entry.typeAlias)
-        {
-            module_.add(entry.typeAlias.name, entry.typeAlias.type.compile(context));
-        }
-        else if (entry.symbolAlias)
-        {
-            module_.add(entry.symbolAlias.name, entry.symbolAlias.symbol.compile(context));
-        }
-        else assert(false);
     }
     module_.resolve();
     config.cache.add(astModule, platform, module_);

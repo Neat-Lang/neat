@@ -90,7 +90,9 @@ at_revision '3e0e97794c6ee897dd142f7633131cfc15eb6a01' 'rebuild cx' 'build/cx'
 at_revision '5429ed0d7f37a9405e12a414065937e9e8fe1024' 'rebuild cx' 'build/cx'
 # add CompilerBase/CompilerImpl separation
 at_revision 'f65bca79cad32b7e68facebb4b68e21905691f43' 'rebuild cx' 'build/cx'
-# implicitConvertTo rename
+# implicitConvertTo rename dance 1
 at_revision '77666c50bfa2b3e13b373d50e20cfd3b8cd7d311' 'rebuild cx' 'build/cx'
+# implicitConvertTo rename dance 2
+at_revision 'ce7e5ad951e2f8cc332d48ef555d3af22c42687c' 'rebuild cx' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

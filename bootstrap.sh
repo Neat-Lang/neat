@@ -53,7 +53,7 @@ at_revision 'edde8f615d72034d7fe645226c43156238895c09' 'rebuild cx' 'build/cx'
 # float literals
 at_revision 'e88bcc52f621c7e47f3a667554d7401c5d72be2e' 'rebuild cx' 'build/cx'
 # package includes
-at_revision 'f6078a3470f7826b566b7eed70acd91f3c647960' 'rebuild cx' 'build/cx'
+at_revision '8a9cdec868d643703ba6b2f8be73ffd9bc3e76fe' 'rebuild cx' 'build/cx'
 # import package()
 at_revision 'ba44e97c4dc8b721710cfaf023a711acc75c6cfd' 'rebuild cx' 'build/cx'
 # idk but it crashes otherwise
@@ -70,11 +70,11 @@ function rebuild_patch_ptr_offset {
     echo "void* ptr_offset(void* p, int i) { return p + i; }" >> src/runtime.c
     rebuild "$@"
 }
+# progressively add a flag to the compiler invocation
 function transition {
-    BIN="$1"
-    TRANSITION="$2"
+    TRANSITION="$1"
     mkdir build
-    cp ../../build/cx build/$1
+    cp ../../build/cx build/cx
     cp -R ../../build/src build
     build/cx -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_1 -transition=$TRANSITION
     rm -rf .obj
@@ -83,11 +83,11 @@ function transition {
     rm -rf build/src
     cp -R src build/
 }
+# remove a flag that has become the default
 function detransition {
-    BIN="$1"
-    TRANSITION="$2"
+    TRANSITION="$1"
     mkdir build
-    cp ../../build/cx build/$1
+    cp ../../build/cx build/cx
     cp -R ../../build/src build
     build/cx -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_1 -transition=$TRANSITION -macro-transition=$TRANSITION
     rm -rf .obj
@@ -122,10 +122,12 @@ at_revision '77666c50bfa2b3e13b373d50e20cfd3b8cd7d311' 'rebuild cx' 'build/cx'
 at_revision 'ce7e5ad951e2f8cc332d48ef555d3af22c42687c' 'rebuild cx' 'build/cx'
 # implicitConvertTo rename dance 2
 at_revision '2366a53b8cb67b18df4ad7aeaf4f97ee59bd3448' 'rebuild cx' 'build/cx'
-# cabi transition
-at_revision 'd76c8c948248ddbc3a069c3f265ec3a2fba66d23' 'transition cx new-cabi' 'build/cx'
-# cabi detransition
-at_revision '294fea36eb76c5c394fcac65f69dd05d62e80a93' 'detransition cx new-cabi' 'build/cx'
-at_revision '294fea36eb76c5c394fcac65f69dd05d62e80a93' 'transition cx new-arrays' 'build/cx'
+# CABI change to make structs > 8 bytes passed and returned as pointers
+at_revision 'd76c8c948248ddbc3a069c3f265ec3a2fba66d23' 'rebuild cx' 'build/cx'
+at_revision 'd76c8c948248ddbc3a069c3f265ec3a2fba66d23' 'transition new-cabi' 'build/cx'
+at_revision '294fea36eb76c5c394fcac65f69dd05d62e80a93' 'detransition new-cabi' 'build/cx'
+# array layout change: add a third pointer to the base of the array
+at_revision '294fea36eb76c5c394fcac65f69dd05d62e80a93' 'transition new-arrays' 'build/cx'
+at_revision '93d56a97db909a1e7a4d6fb6c0e30908479522fd' 'detransition new-arrays' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

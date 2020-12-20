@@ -1,12 +1,30 @@
 module cx.array;
 
 import backend.base;
-// import backend.proxy;
 import cx.base;
 import cx.hash;
 import cx.parser_base;
 import cx.types;
 import helpers;
+
+/**
+ * There are two things called "array": T[] and the data structure it references.
+ * We will call the first an "array value" and the second the "array object".
+ *
+ * Array values have the following layout:
+ * {
+ *      size_t length;
+ *      T* ptr;
+ *      T* base;
+ * }
+ *
+ * Array objects have the following layout:
+ * {
+ *      size_t references;
+ *      size_t capacity; // total length
+ * }
+ * They are followed directly by the array data.
+ */
 
 int getArrayLen(Generator output, Type arrayType, int arrayReg)
 {
@@ -64,10 +82,36 @@ class ArrayPointer : Expression
     override void hash(Hash hash) { hash.adds("ArrayPointer"); this.arrayValue.hash(hash); }
 }
 
+int getArrayBase(Generator output, Type arrayType, int arrayReg)
+{
+    return output.fun.field(arrayType.emit(output.platform), arrayReg, 2);
+}
+
+class ArrayBase : Expression
+{
+    Expression arrayValue;
+
+    this(this.arrayValue) { }
+
+    override Type type()
+    {
+        return new Pointer(new Void);
+    }
+
+    override int emit(Generator output)
+    {
+        int arrayReg = this.arrayValue.emit(output);
+
+        return getArrayBase(output, this.arrayValue.type(), arrayReg);
+    }
+
+    override void hash(Hash hash) { hash.adds("ArrayBase"); this.arrayValue.hash(hash); }
+}
+
 int makeArray(Generator output, Type elementType, int lenReg, int ptrReg)
 {
     BackendType elemp = (new Pointer(elementType)).emit(output.platform);
-    BackendType wordType = output.platform.nativeWordType();
+    BackendType wordType = output.platform.nativeWordType;
 
     // TODO allocaless
     BackendType structType = (new Array(elementType)).emit(output.platform);
@@ -143,7 +187,7 @@ class ArraySlice : Expression
         int newPtr = output.fun.ptrOffset(elementType, ptr, lowerReg);
         // len = upper - lower
         int newLen = output.fun.binop(
-            "-", output.platform.nativeWordType(),
+            "-", output.platform.nativeWordType,
             upperReg, lowerReg);
 
         return makeArray(output, arrayType.elementType, newLen, newPtr);
@@ -230,13 +274,13 @@ class ArrayCat : Expression
         {
             // newLen = array.length + 1
             int newLen = output.fun.binop(
-                "+", output.platform.nativeWordType(),
+                "+", output.platform.nativeWordType,
                 leftLen, output.fun.wordLiteral(output.platform, 1));
             int oldSize = output.fun.binop(
-                "*", output.platform.nativeWordType(),
+                "*", output.platform.nativeWordType,
                 leftLen, elementSizeReg);
             int newSize = output.fun.binop(
-                "*", output.platform.nativeWordType(),
+                "*", output.platform.nativeWordType,
                 newLen, elementSizeReg);
 
             int newArrayPtr = output.fun.call(voidp, "cxruntime_alloc", new int[](0) ~ newSize);
@@ -247,7 +291,7 @@ class ArrayCat : Expression
 
             // return ptr[0 .. prevLength + 1];
             int newArrayLen = output.fun.binop(
-                "+", output.platform.nativeWordType(),
+                "+", output.platform.nativeWordType,
                 leftLen, output.fun.wordLiteral(output.platform, 1));
 
             newArrayPtr = output.fun.bitcast(newArrayPtr, new BackendPointerType(leftElementType));
@@ -259,11 +303,11 @@ class ArrayCat : Expression
             auto rightLen = getArrayLen(output, rightType, rightReg);
             auto rightPtr = getArrayPtr(output, rightType, rightReg);
             rightPtr = output.fun.bitcast(rightPtr, voidp);
-            auto newArrayLen = output.fun.binop("+", output.platform.nativeWordType(), leftLen, rightLen);
-            auto leftBytes = output.fun.binop("*", output.platform.nativeWordType(), leftLen, elementSizeReg);
-            auto rightBytes = output.fun.binop("*", output.platform.nativeWordType(), rightLen, elementSizeReg);
+            auto newArrayLen = output.fun.binop("+", output.platform.nativeWordType, leftLen, rightLen);
+            auto leftBytes = output.fun.binop("*", output.platform.nativeWordType, leftLen, elementSizeReg);
+            auto rightBytes = output.fun.binop("*", output.platform.nativeWordType, rightLen, elementSizeReg);
             // size = sizeof(T) * (left.length + right.length)
-            auto newBytes = output.fun.binop("+", output.platform.nativeWordType(), leftBytes, rightBytes);
+            auto newBytes = output.fun.binop("+", output.platform.nativeWordType, leftBytes, rightBytes);
 
             auto voidp = (new Pointer(new Void)).emit(output.platform);
             auto newArrayPtr = output.fun.call(voidp, "cxruntime_alloc", new int[](0) ~ newBytes);

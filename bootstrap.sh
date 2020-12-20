@@ -83,6 +83,19 @@ function transition {
     rm -rf build/src
     cp -R src build/
 }
+function detransition {
+    BIN="$1"
+    TRANSITION="$2"
+    mkdir build
+    cp ../../build/cx build/$1
+    cp -R ../../build/src build
+    build/cx -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_1 -transition=$TRANSITION -macro-transition=$TRANSITION
+    rm -rf .obj
+    build/cx_1 -Pcompiler:src src/main.cx -o build/cx_2
+    mv build/cx_2 build/cx
+    rm -rf build/src
+    cp -R src build/
+}
 at_revision 'df8d6192c2ee16f5d3061e10d876452d0f9290e0' 'rebuild_patch_ptr_offset cx' 'build/cx'
 at_revision 'df8d6192c2ee16f5d3061e10d876452d0f9290e0' 'rebuild cx' 'build/cx'
 # add break/continue
@@ -109,7 +122,10 @@ at_revision '77666c50bfa2b3e13b373d50e20cfd3b8cd7d311' 'rebuild cx' 'build/cx'
 at_revision 'ce7e5ad951e2f8cc332d48ef555d3af22c42687c' 'rebuild cx' 'build/cx'
 # implicitConvertTo rename dance 2
 at_revision '2366a53b8cb67b18df4ad7aeaf4f97ee59bd3448' 'rebuild cx' 'build/cx'
-# switch to three-value arrays
+# cabi transition
 at_revision 'd76c8c948248ddbc3a069c3f265ec3a2fba66d23' 'transition cx new-cabi' 'build/cx'
+# cabi detransition
+at_revision '294fea36eb76c5c394fcac65f69dd05d62e80a93' 'detransition cx new-cabi' 'build/cx'
+at_revision '294fea36eb76c5c394fcac65f69dd05d62e80a93' 'transition cx new-arrays' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

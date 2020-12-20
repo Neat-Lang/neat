@@ -9,18 +9,14 @@ struct String
 {
     size_t length;
     char *ptr;
-#ifdef TRANSITION_NEW_ARRAYS
     void *base;
-#endif
 };
 
 struct StringArray
 {
     size_t length;
     struct String *ptr;
-#ifdef TRANSITION_NEW_ARRAYS
     void *base;
-#endif
 };
 
 void print(struct String str) { printf("%.*s\n", (int) str.length, str.ptr); }

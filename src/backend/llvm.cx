@@ -52,6 +52,13 @@ struct DeclarationEntry
     BackendType type;
 }
 
+bool passByMemory(BackendType type, Platform platform) {
+    // AMD64 ABI, rule 5c: aggregates over 16 bytes that are not SSE are passed in memory (byval).
+    if (platform.newCABI && type.instanceOf(BackendStructType) && type.size(platform) > 16)
+        return true;
+    return false;
+}
+
 class LLVMBackendModule : BackendModule {
     Platform platform;
     LineWriter output;
@@ -126,13 +133,13 @@ class LLVMBackendModule : BackendModule {
             new BackendFunctionPointerType(new BackendVoidType, new BackendType[](0)), ilen);
 
         this.output.append3s("@", name, " = global ");
-        llvmFmtInto(globalType, this.output);
+        llvmFmtInto(globalType, this.output, this.platform);
         this.output.appends(" [ ");
         string symbolList;
         for (int i = 0; i < symbols.length; i += 1) {
             if (i) this.output.appends(", ");
             this.output.appends("void()* bitcast (");
-            llvmFmtInto(this.globalType(symbols[i]), this.output);
+            llvmFmtInto(this.globalType(symbols[i]), this.output, this.platform);
             this.output.append3s(" @", symbols[i], " to void()*)");
         }
         this.output.appends(" ]");
@@ -162,17 +169,32 @@ class LLVMBackendModule : BackendModule {
             if (decl.function_) {
                 auto type = decl.type.instanceOf(BackendFunctionPointerType);
                 this.output.appends("declare ");
-                llvmFmtInto(type.ret, this.output);
+                bool retByMemory = passByMemory(type.ret, this.platform);
+                if (retByMemory) {
+                    this.output.appends("void ");
+                } else {
+                    llvmFmtInto(type.ret, this.output, this.platform);
+                }
                 this.output.append3s(" @", decl.name, "(");
+                if (retByMemory) {
+                    llvmFmtInto(type.ret, this.output, this.platform);
+                    this.output.appends("* sret %ret");
+                    if (type.args.length) this.output.appends(", ");
+                }
                 for (int i = 0; i < type.args.length; i += 1) {
                     if (i) this.output.appends(", ");
-                    llvmFmtInto(type.args[i], this.output);
+                    if (passByMemory(type.args[i], this.platform)) {
+                        llvmFmtInto(type.args[i], this.output, this.platform);
+                        this.output.appends("* byval");
+                    } else {
+                        llvmFmtInto(type.args[i], this.output, this.platform);
+                    }
                     this.output.appendsi(" %arg", i);
                 }
                 this.output.appends(")");
             } else {
                 this.output.append3s("@", decl.name, " = external global ");
-                llvmFmtInto(decl.type, this.output);
+                llvmFmtInto(decl.type, this.output, this.platform);
             }
             this.output.endl();
         }
@@ -183,7 +205,7 @@ class LLVMBackendModule : BackendModule {
     }
 }
 
-string llvmFmt(BackendType type) {
+string llvmFmt(BackendType type, Platform platform) {
     if (type.instanceOf(BackendLongType)) return "i64";
     if (type.instanceOf(BackendIntType)) return "i32";
     if (type.instanceOf(BackendShortType)) return "i16";
@@ -197,31 +219,42 @@ string llvmFmt(BackendType type) {
         if (backendPointerType.target.instanceOf(BackendVoidType)) {
             return "i8*";
         }
-        return llvmFmt(backendPointerType.target) ~ "*";
+        return llvmFmt(backendPointerType.target, platform) ~ "*";
     }
     auto backendStructType = type.instanceOf(BackendStructType);
     if (backendStructType) {
         string res = "{ ";
         for (int i = 0; i < backendStructType.members.length; i += 1) {
-            if (i) res = res ~ ", ";
-            res = res ~ llvmFmt(backendStructType.members[i]);
+            if (i) res ~= ", ";
+            res ~= llvmFmt(backendStructType.members[i], platform);
         }
-        res = res ~ " }";
+        res ~= " }";
         return res;
     }
     auto backendFpType = type.instanceOf(BackendFunctionPointerType);
     if (backendFpType) {
-        string res = llvmFmt(backendFpType.ret) ~ "(";
+        bool sret = passByMemory(backendFpType.ret, platform);
+        string res;
+        if (sret) res ~= "void";
+        else res ~= llvmFmt(backendFpType.ret, platform);
+        res ~= "(";
+        if (sret) {
+            res ~= llvmFmt(backendFpType.ret, platform) ~ "*";
+            if (backendFpType.args.length) res ~= ", ";
+        }
         for (int i = 0; i < backendFpType.args.length; i += 1) {
-            if (i) res = res ~ ", ";
-            res = res ~ llvmFmt(backendFpType.args[i]);
+            if (i) res ~= ", ";
+            if (passByMemory(backendFpType.args[i], platform))
+                res ~= llvmFmt(backendFpType.args[i], platform) ~ "*";
+            else
+                res ~= llvmFmt(backendFpType.args[i], platform);
         }
         res = res ~ ")*";
         return res;
     }
     auto backendSAtype = type.instanceOf(BackendStaticArrayType);
     if (backendSAtype) {
-        return "[" ~ itoa(backendSAtype.length) ~ " x " ~ llvmFmt(backendSAtype.element) ~ "]";
+        return "[" ~ itoa(backendSAtype.length) ~ " x " ~ llvmFmt(backendSAtype.element, platform) ~ "]";
     }
     print(type.repr());
     assert(false);
@@ -308,7 +341,7 @@ class LLVMBackendFunction : BackendFunction {
                     Reg r: "%reg" ~ itoa(r.id),
                     Arg a: "%arg" ~ itoa(a.id),
                     string s: s);
-                string type = llvmFmt(def.type);
+                string type = llvmFmt(def.type, this.mod.platform);
                 return type ~ " " ~ val;
             }
         }
@@ -335,7 +368,7 @@ class LLVMBackendFunction : BackendFunction {
         for (int i = 0; i < regDefines.length; i += 1) {
             RegDefine def = regDefines[i];
             if (def.reg == reg) {
-                llvmFmtInto(def.type, this.output);
+                llvmFmtInto(def.type, this.output, this.mod.platform);
 
                 this.output.append(" ");
 
@@ -348,7 +381,7 @@ class LLVMBackendFunction : BackendFunction {
                 return;
             }
         }
-        print("reg " ~ itoa(reg) ~ " not found!");
+        print2("reg " ~ itoa(reg) ~ " not found!");
         assert(false);
     }
     void defReg2(int reg, BackendType type, Either(Reg, Arg, string) value) {
@@ -420,12 +453,14 @@ class LLVMBackendFunction : BackendFunction {
     override int symbolList(string name) {
         int reg = this.nextReg();
         auto type = this.mod.globalType(name);
-        this.print("%reg" ~ itoa(reg) ~ " = bitcast " ~ llvmFmt(type) ~ "* @" ~ name ~ " to i8*");
+        this.print(
+            "%reg" ~ itoa(reg)
+            ~ " = bitcast " ~ llvmFmt(type, this.mod.platform) ~ "* @" ~ name ~ " to i8*");
         return this.defReg(new BackendPointerType(new BackendCharType), Reg(reg));
     }
     override int binop(string op, BackendType type, int left, int right) {
         int reg = this.nextReg();
-        string typestr = llvmFmt(type);
+        string typestr = llvmFmt(type, this.mod.platform);
         string instr;
         if (typestr == "float") {
             if (op == "+") instr = "fadd";
@@ -482,20 +517,26 @@ class LLVMBackendFunction : BackendFunction {
         this.output.append(" = bitcast ");
         this.outputTreg(from);
         this.output.append(" to ");
-        llvmFmtInto(to, output);
+        llvmFmtInto(to, output, this.mod.platform);
         this.output.endl();
         this.defReg2(reg, to, Reg(reg));
         return reg;
     }
     override int zeroExtend(int value, BackendType from, BackendType to) {
         int reg = this.nextReg();
-        this.print("%reg" ~ itoa(reg) ~ " = zext " ~ llvmFmt(from) ~ " " ~ this.reg(value) ~ " to " ~ llvmFmt(to));
+        this.print(
+            "%reg" ~ itoa(reg)
+            ~ " = zext " ~ llvmFmt(from, this.mod.platform) ~ " " ~ this.reg(value)
+            ~ " to " ~ llvmFmt(to, this.mod.platform));
         this.defReg2(reg, to, Reg(reg));
         return reg;
     }
     override int signExtend(int value, BackendType from, BackendType to) {
         int reg = this.nextReg();
-        this.print("%reg" ~ itoa(reg) ~ " = sext " ~ llvmFmt(from) ~ " " ~ this.reg(value) ~ " to " ~ llvmFmt(to));
+        this.print(
+            "%reg" ~ itoa(reg)
+            ~ " = sext " ~ llvmFmt(from, this.mod.platform) ~ " " ~ this.reg(value)
+            ~ " to " ~ llvmFmt(to, this.mod.platform));
         this.defReg2(reg, to, Reg(reg));
         return reg;
     }
@@ -508,18 +549,51 @@ class LLVMBackendFunction : BackendFunction {
     override int call(BackendType ret, string name, int[] args) {
         if (!mod.declared(name)) { print2(name ~ " not declared"); assert(false); }
         int reg = this.nextReg();
+        auto type = this.mod.globalType(name).instanceOf(BackendFunctionPointerType);
+        assert(!!type);
+        string coerceReg(int i) {
+            return "%reg" ~ itoa(reg) ~ ".coerce" ~ itoa(i);
+        }
+        for (int i = 0; i < args.length; i += 1) {
+            if (passByMemory(type.args[i], this.mod.platform)) {
+                string coerceReg = coerceReg(i);
+                string typeFmt = llvmFmt(type.args[i], this.mod.platform);
+                // TODO wrap allocas in a stack push/pop?
+                this.print(coerceReg ~ " = alloca " ~ typeFmt);
+                this.print("store " ~ this.treg(args[i]) ~ ", " ~ typeFmt ~ "* " ~ coerceReg);
+            }
+        }
+        string retFmt = llvmFmt(ret, this.mod.platform);
+        bool sret = passByMemory(ret, this.mod.platform);
+        if (sret) this.print("%reg" ~ itoa(reg) ~ ".ret = alloca " ~ retFmt);
         string argstr = "(";
+        if (sret) {
+            argstr ~= retFmt ~ "* sret %reg" ~ itoa(reg) ~ ".ret";
+            if (args.length) argstr ~= ", ";
+        }
         for (int i = 0; i < args.length; i += 1) {
             if (i) argstr ~= ", ";
-            argstr ~= this.treg(args[i]);
+            if (passByMemory(type.args[i], this.mod.platform))
+                argstr ~= llvmFmt(type.args[i], this.mod.platform) ~ "* byval " ~ coerceReg(i);
+            else
+                argstr ~= this.treg(args[i]);
         }
         argstr ~= ")";
         if (ret.instanceOf(BackendVoidType)) {
             this.print("call void @" ~ name ~ argstr);
+        } else if (sret) {
+            this.print("call void @" ~ name ~ argstr);
+            this.defReg2(reg, ret, Reg(reg));
         } else {
-            this.print("%reg" ~ itoa(reg) ~ " = call " ~ llvmFmt(ret) ~ " @" ~ name ~ argstr);
+            this.print(
+                "%reg" ~ itoa(reg)
+                ~ " = call " ~ retFmt ~ " @" ~ name ~ argstr);
             this.defReg2(reg, ret, Reg(reg));
         }
+        if (sret)
+            this.print(
+                "%reg" ~ itoa(reg)
+                ~ " = load " ~ retFmt ~ ", " ~ retFmt ~ "* %reg" ~ itoa(reg) ~ ".ret");
         return reg;
     }
     override int getFuncPtr(string name) {
@@ -527,33 +601,66 @@ class LLVMBackendFunction : BackendFunction {
 
         return this.defReg(type, "@" ~ name);
     }
+    // TODO merge with call()
     override int callFuncPtr(BackendType type, int callReg, int[] args) {
         auto backendFpType = type.instanceOf(BackendFunctionPointerType);
         assert(!!backendFpType);
         auto ret = backendFpType.ret;
         int reg = this.nextReg();
+        string coerceReg(int i) {
+            return "%reg" ~ itoa(reg) ~ ".coerce" ~ itoa(i);
+        }
+        for (int i = 0; i < args.length; i += 1) {
+            if (passByMemory(backendFpType.args[i], this.mod.platform)) {
+                string coerceReg = coerceReg(i);
+                string typeFmt = llvmFmt(backendFpType.args[i], this.mod.platform);
+                this.print(coerceReg ~ " = alloca " ~ typeFmt);
+                this.print("store " ~ this.treg(args[i]) ~ ", " ~ typeFmt ~ "* " ~ coerceReg);
+            }
+        }
+        bool sret = passByMemory(ret, this.mod.platform);
+        string retFmt = llvmFmt(ret, this.mod.platform);
+        if (sret) this.print("%reg" ~ itoa(reg) ~ ".ret = alloca " ~ retFmt);
         if (ret.instanceOf(BackendVoidType)) {
             this.output.appends("  call void ");
             this.outputReg(callReg);
+        } else if (sret) {
+            this.output.appends("  call void ");
+            this.outputReg(callReg);
+            this.defReg2(reg, ret, Reg(reg));
         } else {
             this.output.appendsis("  %reg", reg, " = call ");
-            llvmFmtInto(ret, this.output);
+            llvmFmtInto(ret, this.output, this.mod.platform);
             this.output.appends(" ");
             this.outputReg(callReg);
             this.defReg2(reg, ret, Reg(reg));
         }
         output.append("(");
+        if (sret) {
+            llvmFmtInto(backendFpType.ret, this.output, this.mod.platform);
+            this.output.appendsis("* sret %reg", reg, ".ret");
+            if (args.length) this.output.appends(", ");
+        }
         for (int i = 0; i < args.length; i += 1) {
             if (i) output.append(", ");
-            this.outputTreg(args[i]);
+            if (passByMemory(backendFpType.args[i], this.mod.platform)) {
+                llvmFmtInto(backendFpType.args[i], this.output, this.mod.platform);
+                this.output.append2s("* byval ", coerceReg(i));
+            }
+            else
+                this.outputTreg(args[i]);
         }
         this.output.appends(")");
         this.output.endl();
+        if (sret)
+            this.print(
+                "%reg" ~ itoa(reg)
+                ~ " = load " ~ retFmt ~ ", " ~ retFmt ~ "* %reg" ~ itoa(reg) ~ ".ret");
         return reg;
     }
     override int load(BackendType backendType, int source) {
         int reg = this.nextReg();
-        string typeFmt = llvmFmt(backendType);
+        string typeFmt = llvmFmt(backendType, this.mod.platform);
         this.output.appendsi("  %reg", reg);
         this.output.append6s(" = load ", typeFmt, ", ", typeFmt, "* ", this.reg(source));
         this.output.endl();
@@ -562,7 +669,7 @@ class LLVMBackendFunction : BackendFunction {
     }
     override int alloca(BackendType backendType) {
         int reg = this.nextReg();
-        string typefmt = llvmFmt(backendType);
+        string typefmt = llvmFmt(backendType, this.mod.platform);
         this.print("%reg" ~ itoa(reg) ~ " = alloca " ~ typefmt);
         this.print("store " ~ typefmt ~ " zeroinitializer, " ~ typefmt ~ "* %reg" ~ itoa(reg));
         this.defReg2(reg, new BackendPointerType(backendType), Reg(reg));
@@ -588,9 +695,9 @@ class LLVMBackendFunction : BackendFunction {
         int reg2 = this.nextReg();
         this.output.appendsi("  %reg", reg2);
         this.output.append(" = getelementptr ");
-        llvmFmtInto(backendType, this.output);
+        llvmFmtInto(backendType, this.output, this.mod.platform);
         this.output.append(", ");
-        llvmFmtInto(backendType, this.output);
+        llvmFmtInto(backendType, this.output, this.mod.platform);
         this.output.append("* ");
         this.output.appendsi("%reg", reg1);
         this.output.appendsi(", i32 0, i32 ", index);
@@ -605,11 +712,11 @@ class LLVMBackendFunction : BackendFunction {
         int reg2 = this.nextReg();
         this.output.appendsi("  %reg", reg2);
         this.output.append(" = getelementptr ");
-        llvmFmtInto(backendType, this.output);
+        llvmFmtInto(backendType, this.output, this.mod.platform);
         this.output.append(", ");
-        llvmFmtInto(ptrType, this.output);
+        llvmFmtInto(ptrType, this.output, this.mod.platform);
         this.output.appendsis("%reg", reg1, ", ");
-        llvmFmtInto(this.mod.platform.nativeWordType, this.output);
+        llvmFmtInto(this.mod.platform.nativeWordType, this.output, this.mod.platform);
         this.output.appendsi(" %reg", offsetReg);
         this.output.endl();
         this.defReg2(reg2, ptrType, Reg(reg2));
@@ -625,7 +732,7 @@ class LLVMBackendFunction : BackendFunction {
     }
     override void store(BackendType backendType, int target_reg, int value_reg) {
         this.output.appends("  store ");
-        llvmFmtInto(backendType, this.output);
+        llvmFmtInto(backendType, this.output, this.mod.platform);
         this.output.appends(" ");
         this.outputReg(value_reg);
         this.output.appends(", ");
@@ -633,7 +740,13 @@ class LLVMBackendFunction : BackendFunction {
         this.output.endl();
     }
     override void ret(int reg) {
+        bool sret = passByMemory(this.ret_, this.mod.platform);
         if (this.ret_.instanceOf(BackendVoidType)) {
+            this.print("ret void");
+        } else if (sret) {
+            this.print(
+                "store " ~ this.treg(reg) ~ ", "
+                ~ llvmFmt(this.ret_, this.mod.platform) ~ " *%ret");
             this.print("ret void");
         } else {
             this.print("ret " ~ this.treg(reg));
@@ -653,13 +766,34 @@ class LLVMBackendFunction : BackendFunction {
     override void done() {
         string argstr = "(";
         this.print("unreachable");
+        bool sret = passByMemory(this.ret_, this.mod.platform);
+        string retFmt = llvmFmt(this.ret_, this.mod.platform);
+        if (sret) {
+            argstr ~= retFmt ~ "* sret %ret";
+            if (this.args.length) argstr ~= ", ";
+        }
         for (int i = 0; i < this.args.length; i += 1) {
             if (i) argstr = argstr ~ ", ";
-            argstr = argstr ~ llvmFmt(this.args[i]) ~ " %arg" ~ itoa(i);
+            if (passByMemory(this.args[i], this.mod.platform))
+                argstr ~= llvmFmt(this.args[i], this.mod.platform)
+                    ~ "* byval %arg" ~ itoa(i) ~ ".coerce";
+            else
+                argstr ~= llvmFmt(this.args[i], this.mod.platform) ~ " %arg" ~ itoa(i);
         }
+        string retstr;
+        if (sret)
+            retstr = "void";
+        else
+            retstr = retFmt;
         argstr = argstr ~ ")";
-        string retstr = llvmFmt(this.ret_);
         this.mod.output.print("define " ~ retstr ~ " @" ~ this.name ~ argstr ~ "{");
+        for (int i = 0; i < this.args.length; i += 1) {
+            string argFmt = llvmFmt(this.args[i], this.mod.platform);
+            if (passByMemory(this.args[i], this.mod.platform))
+                this.mod.output.print(
+                    "%arg" ~ itoa(i)
+                    ~ " = load " ~ argFmt ~ ", " ~ argFmt ~ "* %arg" ~ itoa(i) ~ ".coerce");
+        }
         auto funtext = this.output.text();
         this.mod.output.print(funtext);
         this.output.free();
@@ -766,7 +900,7 @@ class LineWriter
     }
 }
 
-void llvmFmtInto(BackendType type, LineWriter output)
+void llvmFmtInto(BackendType type, LineWriter output, Platform platform)
 {
     if (type.instanceOf(BackendLongType)) { output.append("i64"); return; }
     if (type.instanceOf(BackendIntType)) { output.append("i32"); return; }
@@ -787,7 +921,7 @@ void llvmFmtInto(BackendType type, LineWriter output)
             output.append("i8*");
             return;
         }
-        llvmFmtInto(backendPointerType.target, output);
+        llvmFmtInto(backendPointerType.target, output, platform);
         output.append("*");
         return;
     }
@@ -796,18 +930,31 @@ void llvmFmtInto(BackendType type, LineWriter output)
         output.append("{ ");
         for (int i = 0; i < backendStructType.members.length; i += 1) {
             if (i) output.append(", ");
-            llvmFmtInto(backendStructType.members[i], output);
+            llvmFmtInto(backendStructType.members[i], output, platform);
         }
         output.append(" }");
         return;
     }
     auto backendFpType = type.instanceOf(BackendFunctionPointerType);
     if (backendFpType) {
-        llvmFmtInto(backendFpType.ret, output);
+        bool sret = passByMemory(backendFpType.ret, platform);
+        if (sret)
+            output.append("void");
+        else
+            llvmFmtInto(backendFpType.ret, output, platform);
         output.append("(");
+        if (sret) {
+            llvmFmtInto(backendFpType.ret, output, platform);
+            if (backendFpType.args.length) output.append("*,");
+            else output.append("*");
+        }
         for (int i = 0; i < backendFpType.args.length; i += 1) {
             if (i) output.append(", ");
-            llvmFmtInto(backendFpType.args[i], output);
+            if (passByMemory(backendFpType.args[i], platform)) {
+                llvmFmtInto(backendFpType.args[i], output, platform);
+                output.appends("*");
+            } else
+                llvmFmtInto(backendFpType.args[i], output, platform);
         }
         output.append(")*");
         return;
@@ -817,7 +964,7 @@ void llvmFmtInto(BackendType type, LineWriter output)
         output.append("[");
         output.append(itoa(backendSAtype.length));
         output.append(" x ");
-        llvmFmtInto(backendSAtype.element, output);
+        llvmFmtInto(backendSAtype.element, output, platform);
         output.append("]");
         return;
     }

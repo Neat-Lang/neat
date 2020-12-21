@@ -98,7 +98,7 @@ class Function : FunctionDeclaration
             if (arg.isThisAssignment) {
                 assert(!!this.thisType);
 
-                auto target = accessMember(thisDecl.accessLocal(), arg.name, this.loc, false)
+                auto target = accessMember(null, thisDecl.accessLocal(), arg.name, this.loc, false)
                     .instanceOf(Reference);
                 this.loc.assert2s2(!!target, "not a reference: ", arg.name);
 
@@ -599,7 +599,7 @@ ASTSymbol parseIndex(Parser parser, LexicalContext lexicalContext, ASTSymbol bas
     return new ASTIndexAccess(base, index, parser.loc());
 }
 
-Symbol accessMember(Symbol base, string member, Loc loc, bool allowUndefined)
+Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool allowUndefined)
 {
     if (!base.instanceOf(Expression))
     {
@@ -610,6 +610,18 @@ Symbol accessMember(Symbol base, string member, Loc loc, bool allowUndefined)
     while (baseExpr.type().instanceOf(Pointer)) {
         baseExpr = new Dereference(baseExpr);
     }
+
+    Array arrayType = baseExpr.type().instanceOf(Array);
+    if (platform && arrayType)
+    {
+        if (member == "length")
+            return new ArrayLength(baseExpr, nativeWordType(platform));
+        if (member == "ptr")
+            return new ArrayPointer(arrayType.elementType, baseExpr);
+        if (member == "base")
+            return new ArrayBase(baseExpr);
+    }
+
     Struct structType = baseExpr.type().instanceOf(Struct);
     if (structType)
     {
@@ -674,20 +686,7 @@ class ASTMember : ASTMemberBase
 {
     override Symbol compile(Context context)
     {
-        Symbol base = this.base.compile(context);
-        Expression expr = base.instanceOf(Expression);
-
-        if (expr && expr.type().instanceOf(Array) && this.member == "length")
-        {
-            return new ArrayLength(expr, nativeWordType(context.platform));
-        }
-
-        if (expr && expr.type().instanceOf(Array) && this.member == "ptr")
-        {
-            return new ArrayPointer(expr.type().instanceOf(Array).elementType, expr);
-        }
-
-        return accessMember(base, this.member, this.loc, false);
+        return accessMember(context.platform, this.base.compile(context), this.member, this.loc, false);
     }
 }
 
@@ -721,7 +720,7 @@ class ASTInstanceOf : ASTSymbol
         assert(!!base.type().instanceOf(Class));
         Class target = this.target.compile(context).instanceOf(Class);
         assert(!!target);
-        Symbol instanceOf = accessMember(base, "__instanceof", this.loc, false);
+        Symbol instanceOf = accessMember(context.platform, base, "__instanceof", this.loc, false);
         Expression name = new StringLiteral(target.name);
         return new PointerCast(target, call(instanceOf, new Expression[](0) ~ name, this.loc));
     }
@@ -949,7 +948,8 @@ class CallCtorExpression : Expression
     override int emit(Generator output)
     {
         auto classptrTemp = new Temporary(classptr);
-        call(accessMember(classptrTemp, "__ctor", this.loc, false), this.args, this.loc).emit(output);
+        call(accessMember(output.platform, classptrTemp, "__ctor", this.loc, false), this.args, this.loc)
+            .emit(output);
         return classptrTemp.emit(output);
     }
 
@@ -982,7 +982,7 @@ class ASTNewExpression : ASTSymbol
 
             auto argExpressions = new Expression[](this.args.length);
             for (int i = 0; i < this.args.length; i += 1)
-                argExpressions[i] = beExpression(this.args[i].compile(context));
+                argExpressions[i] = beExpression2(this.args[i].compile(context), this.loc);
             this.loc.assert2s2(!!classType, "expected new <class>, not %s", type.repr());
             return new CallCtorExpression(classptr, argExpressions, this.loc);
         }
@@ -991,23 +991,9 @@ class ASTNewExpression : ASTSymbol
             this.loc.assert2s(this.args.length == 1, "expected one argument to loc");
 
             Type wordType = nativeWordType(context.platform);
-            auto elementSize = new SizeOf(arrayType.elementType);
-            // TODO only compute length once
             auto length = expectImplicitConvertTo(
-                beExpression(this.args[0].compile(context)), wordType, this.loc);
-            auto byteLength = new BinaryOp("*", elementSize, length, this.loc);
-
-            auto allocArgs = new Argument[](1);
-            allocArgs[0] = Argument(false, "", wordType);
-            auto alloc = new FunctionDeclaration("cxruntime_alloc", new Pointer(new Void), allocArgs);
-
-            auto allocParams = new Expression[](1);
-            allocParams[0] = byteLength;
-            PointerCast dataPtr = new PointerCast(
-                new Pointer(arrayType.elementType),
-                call(alloc, allocParams, this.loc));
-
-            return new ArrayExpression(dataPtr, length);
+                beExpression2(this.args[0].compile(context), this.loc), wordType, this.loc);
+            return new ArrayAllocation(arrayType.elementType, length);
         }
         this.loc.assert2s2(false, "don't know how to allocate ", type.repr());
     }
@@ -2557,7 +2543,7 @@ class ClassNamespace : Namespace
     {
         thisPtr = new PointerCast(this.class_, thisPtr);
 
-        auto result = accessMember(thisPtr, name, Loc(null, ""), true);
+        auto result = accessMember(null, thisPtr, name, Loc(null, ""), true);
 
         if (result) return result;
 
@@ -3170,7 +3156,7 @@ class StructNamespace : Namespace
     {
         thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr);
 
-        auto result = accessMember(thisPtr, name, Loc(null, ""), true);
+        auto result = accessMember(null, thisPtr, name, Loc(null, ""), true);
 
         if (result) return result;
 

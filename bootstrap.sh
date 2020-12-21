@@ -129,5 +129,7 @@ at_revision '294fea36eb76c5c394fcac65f69dd05d62e80a93' 'detransition new-cabi' '
 # array layout change: add a third pointer to the base of the array
 at_revision '294fea36eb76c5c394fcac65f69dd05d62e80a93' 'transition new-arrays' 'build/cx'
 at_revision '93d56a97db909a1e7a4d6fb6c0e30908479522fd' 'detransition new-arrays' 'build/cx'
+# array base property
+at_revision '3dc9aeb39c188a637be8f9357cc770b22f681fb3' 'rebuild cx' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

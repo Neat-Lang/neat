@@ -252,27 +252,22 @@ class ArrayEqual : Expression
     override void hash(Hash hash) { hash.adds("ArrayEqual"); left.hash(hash); right.hash(hash); }
 }
 
-class ArrayCat : Expression
+/**
+ * Note: does not call constructors/destructors!
+ */
+class ArrayResize : Expression
 {
-    Expression left;
+    Expression array;
 
-    Expression right;
+    // positive offset
+    Expression lengthChange;
 
     Loc loc;
 
-    this(this.left, this.right, this.loc) { }
+    this(this.array, this.lengthChange, this.loc) { }
 
     override Type type() {
-        Array leftArray = this.left.type().instanceOf(Array);
-        this.loc.assert2s(!!leftArray, "left type is not an array");
-        Array rightArray = this.right.type().instanceOf(Array);
-        this.loc.assert2s(
-            this.right.type().same(leftArray.elementType)
-            || rightArray && rightArray.same(leftArray),
-            "right array is incompatible with left"
-        );
-
-        return leftArray;
+        return this.array.type();
     }
 
     override int emit(Generator output)
@@ -280,91 +275,112 @@ class ArrayCat : Expression
         // TODO simplify this?
         auto size_t = output.platform.nativeWordType;
         BackendType voidp = (new Pointer(new Void)).emit(output.platform);
-        int leftReg = this.left.emit(output);
-        Array leftType = this.left.type().instanceOf(Array);
-        this.loc.assert2s(!!leftType, "left expression is not an array");
-        Type rightType = this.right.type();
-        int leftLen = getArrayLen(output, leftType, leftReg);
-        int leftPtr = getArrayPtr(output, leftType, leftReg);
-        leftPtr = output.fun.bitcast(leftPtr, voidp);
-        auto leftElementType = leftType.elementType.emit(output.platform);
-        int elementSizeReg = output.fun.wordLiteral(output.platform, leftElementType.size(output.platform));
+        int arrayReg = this.array.emit(output);
+        Array arrayType = this.array.type().instanceOf(Array);
+        this.loc.assert2s(!!arrayType, "ArrayResize called on non-array!");
+        int arrayLen = getArrayLen(output, arrayType, arrayReg);
+        int arrayPtr = getArrayPtr(output, arrayType, arrayReg);
+        int lengthChangeReg = this.lengthChange.emit(output);
+        auto elementType = arrayType.elementType.emit(output.platform);
+        int elementSizeReg = output.fun.wordLiteral(output.platform, elementType.size(output.platform));
         int twoWordSizeReg = output.fun.wordLiteral(output.platform, size_t.size(output.platform) * 2);
+
         int oneReg = output.fun.wordLiteral(output.platform, 1);
         int twoReg = output.fun.wordLiteral(output.platform, 2);
-        if (leftType.elementType.same(rightType))
-        {
-            // newLen = array.length + 1
-            int newLen = output.fun.binop(
-                "+", size_t,
-                leftLen, output.fun.wordLiteral(output.platform, 1));
-            int oldSize = output.fun.binop(
-                "*", size_t,
-                leftLen, elementSizeReg);
-            int newSize = output.fun.binop(
-                "*", size_t,
-                newLen, elementSizeReg);
+        // newArrayLen = array.length + lengthChange
+        int newArrayLen = output.fun.binop("+", size_t, arrayLen, lengthChangeReg);
+        int oldSize = output.fun.binop("*", size_t, arrayLen, elementSizeReg);
+        int newSize = output.fun.binop("*", size_t, newArrayLen, elementSizeReg);
 
-            // reserve space for references, capacity
-            int totalSize = output.fun.binop("+", size_t, newSize, twoWordSizeReg);
+        // reserve space for references, capacity
+        int totalSize = output.fun.binop("+", size_t, newSize, twoWordSizeReg);
 
-            int newArrayBase = output.fun.call(voidp, "cxruntime_alloc", new int[](0) ~ totalSize);
-            // ptr = base + 2
-            int newArrayPtr = output.fun.bitcast(output.fun.ptrOffset(size_t, newArrayBase, twoReg), voidp);
+        int newArrayBase = output.fun.call(voidp, "cxruntime_alloc", new int[](0) ~ totalSize);
+        // ptr = base + 2
+        int newArrayPtr = output.fun.bitcast(output.fun.ptrOffset(size_t, newArrayBase, twoReg), voidp);
 
-            // base[0] = 1 (refs)
-            // base[1] = allocated length (in elements)
-            output.fun.store(size_t, output.fun.bitcast(newArrayBase, new BackendPointerType(size_t)), oneReg);
-            output.fun.store(size_t, output.fun.ptrOffset(size_t, newArrayBase, oneReg), newSize);
+        // base[0] = 1 (refs)
+        // base[1] = allocated length (in elements)
+        output.fun.store(size_t, output.fun.bitcast(newArrayBase, new BackendPointerType(size_t)), oneReg);
+        output.fun.store(size_t, output.fun.ptrOffset(size_t, newArrayBase, oneReg), newSize);
 
-            output.fun.call(voidp, "memcpy", new int[](0) ~ newArrayPtr ~ leftPtr ~ oldSize);
-            // *(ptr + prevLength) = right;
-            int newElement = output.fun.ptrOffset(leftElementType, newArrayPtr, leftLen);
-            output.fun.store(this.right.type().emit(output.platform), newElement, this.right.emit(output));
+        arrayPtr = output.fun.bitcast(arrayPtr, voidp);
 
-            // return ptr[0 .. prevLength + 1];
-            int newArrayLen = output.fun.binop(
-                "+", size_t,
-                leftLen, output.fun.wordLiteral(output.platform, 1));
+        // TODO copy ctors
+        output.fun.call(voidp, "memcpy", new int[](0) ~ newArrayPtr ~ arrayPtr ~ oldSize);
 
-            newArrayPtr = output.fun.bitcast(newArrayPtr, new BackendPointerType(leftElementType));
-            return makeArray(output, leftType.elementType, newArrayLen, newArrayPtr, newArrayBase);
-        }
-        if (leftType.same(rightType))
-        {
-            auto rightReg = this.right.emit(output);
-            auto rightLen = getArrayLen(output, rightType, rightReg);
-            auto rightPtr = getArrayPtr(output, rightType, rightReg);
-            rightPtr = output.fun.bitcast(rightPtr, voidp);
-            auto newArrayLen = output.fun.binop("+", output.platform.nativeWordType, leftLen, rightLen);
-            auto leftBytes = output.fun.binop("*", output.platform.nativeWordType, leftLen, elementSizeReg);
-            auto rightBytes = output.fun.binop("*", output.platform.nativeWordType, rightLen, elementSizeReg);
-            // size = sizeof(T) * (left.length + right.length)
-            auto newBytes = output.fun.binop("+", output.platform.nativeWordType, leftBytes, rightBytes);
-            // reserve space for references, capacity
-            auto totalBytes = output.fun.binop("+", size_t, newBytes, twoWordSizeReg);
+        newArrayPtr = output.fun.bitcast(newArrayPtr, new BackendPointerType(elementType));
 
-            auto voidp = (new Pointer(new Void)).emit(output.platform);
-            auto newArrayBase = output.fun.call(voidp, "cxruntime_alloc", new int[](0) ~ totalBytes);
-            // ptr = base + 2
-            auto newArrayPtr = output.fun.bitcast(output.fun.ptrOffset(size_t, newArrayBase, twoReg), voidp);
-            // base[0] = 1 (refs)
-            // base[1] = allocated length (in elements)
-            output.fun.store(size_t, output.fun.bitcast(newArrayBase, new BackendPointerType(size_t)), oneReg);
-            output.fun.store(size_t, output.fun.ptrOffset(size_t, newArrayBase, oneReg), newArrayLen);
-
-            // write left at 0
-            output.fun.call(voidp, "memcpy", new int[](0) ~ newArrayPtr ~ leftPtr ~ leftBytes);
-            // write right at ptr + leftLen
-            auto startRightPtr = output.fun.ptrOffset(leftElementType, newArrayPtr, leftLen);
-            startRightPtr = output.fun.bitcast(startRightPtr, output.platform.voidp());
-            output.fun.call(voidp, "memcpy", new int[](0) ~ startRightPtr ~ rightPtr ~ rightBytes);
-
-            newArrayPtr = output.fun.bitcast(newArrayPtr, new BackendPointerType(leftElementType));
-            return makeArray(output, leftType.elementType, newArrayLen, newArrayPtr, newArrayBase);
-        }
-        this.loc.assert2s(false, "left and right types don't match");
+        return makeArray(output, arrayType.elementType, newArrayLen, newArrayPtr, newArrayBase);
     }
 
-    override void hash(Hash hash) { hash.adds("ArrayCat"); left.hash(hash); right.hash(hash); }
+    override void hash(Hash hash) { hash.adds("ArrayResize"); array.hash(hash); lengthChange.hash(hash); }
+}
+
+// TODO move this all into a runtime function
+Expression arrayCat(Context context, Expression left, Expression right, Loc loc) {
+    Type size_t = nativeWordType(context.platform);
+    auto compiler = context.compiler;
+    Array leftArray = left.type().instanceOf(Array);
+    loc.assert2s(!!leftArray, "left expression is not an array");
+
+    auto tempLeft = compiler.temporaryPair(left);
+    auto tempRight = compiler.temporaryPair(right);
+
+    Expression leftLength = new ArrayLength(tempLeft.reference, size_t);
+    Expression rightLength;
+
+    bool singleElement;
+    if (leftArray.elementType.same(right.type())) {
+        singleElement = true;
+        rightLength = compiler.intLiteral(1);
+    } else {
+        Array rightArray = right.type().instanceOf(Array);
+        loc.assert2s(
+            rightArray && rightArray.same(leftArray),
+            "right array is incompatible with left"
+        );
+        rightLength = new ArrayLength(tempRight.reference, size_t);
+    }
+
+    auto newArray = new ArrayResize(tempLeft.reference, rightLength, loc);
+    auto tempArray = compiler.temporaryPair(newArray);
+
+    Statement initializers = compiler.sequenceStatement(
+        new Statement[](0) ~ tempLeft.initialize ~ tempRight.initialize ~ tempArray.initialize);
+
+    if (singleElement) {
+        auto lastElement = compiler.dereference(
+            compiler.pointerOffset(new ArrayPointer(leftArray.elementType, tempArray.reference), leftLength));
+        if (!lastElement.type().same(right.type())) {
+            print("1 A " ~ lastElement.type().repr() ~ " B " ~ right.type().repr());
+            assert(false);
+        }
+
+        auto moveStmt = compiler.move(lastElement, tempRight.reference);
+        auto statement = compiler.sequenceStatement(new Statement[](0) ~ initializers ~ moveStmt);
+        return compiler.statementExpression(statement, tempArray.reference);
+    } else {
+        auto sourceBase = new ArrayPointer(right.type().instanceOf(Array).elementType, tempRight.reference);
+        auto targetBase = compiler.pointerOffset(
+            new ArrayPointer(leftArray.elementType, tempArray.reference), leftLength);
+        auto indexPair = compiler.temporaryPair(compiler.intLiteral(0));
+        auto index = indexPair.reference;
+
+        initializers = compiler.sequenceStatement(new Statement[](0) ~ initializers ~ indexPair.initialize);
+
+        auto sourceElement = compiler.dereference(compiler.pointerOffset(sourceBase, index));
+        auto targetElement = compiler.dereference(compiler.pointerOffset(targetBase, index));
+        if (!targetElement.type().same(sourceElement.type())) {
+            print("2 A " ~ targetElement.type().repr() ~ " B " ~ sourceElement.type().repr());
+            assert(false);
+        }
+        auto assignStep = compiler.move(targetElement, sourceElement);
+        auto increment = compiler.assignStatement(index,
+            compiler.binaryOp2("+", context, index, compiler.intLiteral(1), loc));
+        auto loopStmt = compiler.loopStatement(
+            context, initializers, compiler.binaryOp2(
+                "<", context, index, rightLength, loc), assignStep, increment);
+        return compiler.statementExpression(loopStmt, tempArray.reference);
+    }
 }

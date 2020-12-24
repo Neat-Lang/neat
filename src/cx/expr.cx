@@ -486,9 +486,9 @@ class ASTBinaryOp : ASTSymbol
         {
             auto converted = implicitConvertTo(right, left.type().instanceOf(Array).elementType);
             if (converted)
-                return new ArrayCat(left, converted, this.loc);
+                return context.compiler.binaryOp2("~", context, left, converted, this.loc);
 
-            return new ArrayCat(left, right, this.loc);
+            return context.compiler.binaryOp2("~", context, left, right, this.loc);
         }
         if (this.op == "&&")
             return new BoolAnd(truthy(left, this.loc), truthy(right, this.loc));
@@ -522,6 +522,44 @@ class ReferenceExpression : Expression
     override bool temporary() { return base.temporary(); }
 
     override void hash(Hash hash) { hash.adds("ReferenceExpression"); base.hash(hash); }
+}
+
+class UninitializedTemporary : Reference
+{
+    Type type_;
+
+    string label;
+
+    this(this.type_)
+    {
+        this.label = ptrId(this);
+    }
+
+    override Type type() { return this.type_; }
+
+    override int emitLocation(Generator output)
+    {
+        if (output.fun.hasNamedReg(label))
+            return output.fun.getNamedReg(label);
+
+        BackendType type = this.type_.emit(output.platform);
+        int ptr = output.fun.alloca(type);
+
+        output.fun.setNamedReg(label, ptr);
+        return ptr;
+    }
+
+    override int emit(Generator output)
+    {
+        auto type = this.type().emit(output.platform);
+
+        return output.fun.load(type, emitLocation(output));
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("temporary");
+        type_.hash(hash);
+    }
 }
 
 class Temporary : Reference
@@ -577,6 +615,10 @@ class NullExpr : Expression
 
     override int emit(Generator generator)
     {
+        if (type_.instanceOf(Integer))
+            return generator.fun.intLiteral(0);
+        if (type_.instanceOf(Long))
+            return generator.fun.longLiteral(0);
         // TODO allocaless
         // exploit that alloca are zero initialized
         BackendType type = this.type_.emit(generator.platform);

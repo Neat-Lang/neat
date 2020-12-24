@@ -32,9 +32,23 @@ string removeSlashes(string s) {
     return result;
 }
 
-string emitModule(CompilerBase compiler, Backend backend, Platform platform, Module module_, string baseCmd)
+string emitModule(CompilerBase compiler, Backend backend, Platform platform, Module module_, bool opt, bool m32)
 {
+    auto backendModule = backend.createModule(platform);
+    auto backendModuleLLVM = backendModule.instanceOf(LLVMBackendModule);
+    auto backendModuleC = backendModule.instanceOf(CBackendModule);
     auto hash = new Hash;
+
+    string baseCmd;
+    if (backendModuleLLVM) {
+        baseCmd = "llc --filetype=obj --relocation-model=pic";
+        if (opt) baseCmd ~= " -O3";
+        assert(!m32);
+    } else {
+        baseCmd = "gcc -fpic";
+        if (opt) baseCmd ~= " -O3";
+        if (m32) baseCmd ~= " -m32";
+    }
 
     hash.adds(baseCmd);
     // TODO add compiler checksum (generation number?)
@@ -48,26 +62,24 @@ string emitModule(CompilerBase compiler, Backend backend, Platform platform, Mod
     if (cxruntime_file_exists(objFile))
         return objFile;
 
-    auto backendModule = backend.createModule(platform);
     auto generator = new Generator(platform, backendModule);
-    auto backendModuleLLVM = backendModule.instanceOf(LLVMBackendModule);
-    auto backendModuleC = backendModule.instanceOf(CBackendModule);
     module_.emit(generator, symbols);
     backendModule.done();
-    string srcFile;
+    string cmd;
     if (backendModuleLLVM) {
-        srcFile = ".obj/" ~ removeSlashes(module_.mangle()) ~ ".ll";
+        string srcFile = ".obj/" ~ removeSlashes(module_.mangle()) ~ ".ll";
         auto llText = backendModuleLLVM.output.text();
         cxruntime_file_write(srcFile, llText);
         backendModuleLLVM.output.free();
+        cmd = baseCmd ~ " " ~ srcFile ~ " -o=" ~ objFile;
     } else {
         assert(!!backendModuleC);
-        srcFile = ".obj/" ~ removeSlashes(module_.mangle()) ~ ".c";
+        string srcFile = ".obj/" ~ removeSlashes(module_.mangle()) ~ ".c";
         auto csrc = backendModuleC.output.text();
         cxruntime_file_write(srcFile, csrc);
         backendModuleC.output.free();
+        cmd = baseCmd ~ " " ~ srcFile ~ " -c -o " ~ objFile;
     }
-    string cmd = baseCmd ~ " " ~ srcFile ~ " -c -o " ~ objFile;
     print("$ " ~ cmd);
     cxruntime_system(cmd);
     return objFile;
@@ -105,7 +117,7 @@ class ParserHelperImpl : ParserHelper
 
         string objFiles;
         for (int i = 0; i < allModules.length; i += 1) {
-            string objFile = emitModule(compiler, backend, platform, allModules[i], baseCmd);
+            string objFile = emitModule(compiler, backend, platform, allModules[i], false, x86_32);
             objFiles ~= " " ~ objFile;
         }
 
@@ -418,14 +430,11 @@ void main(string[] args)
     if (optimize) baseFlags ~= " -Ofast";
     if (x86_32) baseFlags ~= " -m32";
 
-    string compiler = "clang -Wno-unused-command-line-argument";
-    if (backend.instanceOf(CBackend)) compiler = "gcc";
-
     auto modules = toplevel.allModules();
 
     string fileArgs;
     for (int i = 0; i < modules.length; i += 1) {
-        string objFile = emitModule(compilerImpl, backend, platform, modules[i], compiler ~ baseFlags);
+        string objFile = emitModule(compilerImpl, backend, platform, modules[i], optimize, x86_32);
         fileArgs ~= " " ~ objFile;
     }
 
@@ -436,6 +445,8 @@ void main(string[] args)
     string flags = baseFlags ~ " -rdynamic";
     string linkerFlags = " -ldl";
     for (int i = 0; i < linkerArgs.length; i += 1) linkerFlags ~= " " ~ linkerArgs[i];
+    string compiler = "clang -Wno-unused-command-line-argument";
+    if (backend.instanceOf(CBackend)) compiler = "gcc";
     string cmd = compiler ~ flags ~ fileArgs ~ " src/runtime.c -o " ~ output ~ linkerFlags;
     print("$ " ~ cmd);
     cxruntime_system(cmd);

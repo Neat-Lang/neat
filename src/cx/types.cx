@@ -324,6 +324,74 @@ class FunctionPointer : Type
     }
 }
 
+class ASTNestedFunctionPointer : ASTType
+{
+    ASTType ret;
+
+    ASTType[] args;
+
+    this(this.ret, this.args) { }
+
+    override Type compile(Context context)
+    {
+        Type ret = this.ret.compile(context);
+        Type[] args = new Type[](this.args.length);
+        for (int i = 0; i < this.args.length; i += 1) args[i] = this.args[i].compile(context);
+
+        return new NestedFunctionPointer(ret, args);
+    }
+}
+
+/**
+ * { void *base; void *data; Ret(Args...) funcptr; }
+ * base is held in reserve for when we reference count delegates
+ */
+class NestedFunctionPointer : Type
+{
+    Type ret;
+
+    Type[] args;
+
+    this(this.ret, this.args) { }
+
+    override BackendType emit(Platform platform)
+    {
+        auto args = new BackendType[](this.args.length + 1);
+        args[0] = platform.voidp();
+        for (int i = 0; i < this.args.length; i += 1) args[i + 1] = this.args[i].emit(platform);
+        auto fp = new BackendFunctionPointerType(this.ret.emit(platform), args);
+        return new BackendStructType(new BackendType[](0) ~ platform.voidp() ~ platform.voidp() ~ fp);
+    }
+
+    override bool same(Type other)
+    {
+        NestedFunctionPointer otherPtr = other.instanceOf(NestedFunctionPointer);
+        if (!otherPtr) return false;
+        if (!this.ret.same(otherPtr.ret)) return false;
+        if (this.args.length != otherPtr.args.length) return false;
+        for (int i = 0; i < this.args.length; i += 1)
+            if (!this.args[i].same(otherPtr.args[i])) return false;
+        return true;
+    }
+
+    override string repr() {
+        string ret = this.ret.repr() ~ " delegate(";
+        for (int i = 0; i < this.args.length; i += 1) {
+            if (i) ret ~= ", ";
+            ret ~= this.args[i].repr();
+        }
+        return ret ~ ")";
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("dgptr");
+        ret.hash(hash);
+        hash.addl(args.length);
+        for (int i = 0; i < args.length; i += 1)
+            args[i].hash(hash);
+    }
+}
+
 ASTType parseType(Parser parser, LexicalContext lexicalContext)
 {
     ASTType current = parseLeafType(parser, lexicalContext);
@@ -337,7 +405,7 @@ ASTType parseType(Parser parser, LexicalContext lexicalContext)
         }
         parser.begin();
         string identifier = parseIdentifier(parser);
-        if (identifier == "function")
+        if (identifier == "function" || identifier == "delegate")
         {
             parser.expect("(");
             ASTType[] args;
@@ -356,7 +424,10 @@ ASTType parseType(Parser parser, LexicalContext lexicalContext)
                 args ~= argType;
             }
             parser.commit();
-            current = new ASTFunctionPointer(current, args);
+            if (identifier == "function")
+                current = new ASTFunctionPointer(current, args);
+            else
+                current = new ASTNestedFunctionPointer(current, args);
             continue;
         }
         parser.revert();

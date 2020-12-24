@@ -406,6 +406,90 @@ class StructConstructor : Expression
     }
 }
 
+class DelegateExpr : Expression
+{
+    Expression funcPtr;
+
+    Expression thisPtr;
+
+    this(this.funcPtr, this.thisPtr) { }
+
+    override Type type()
+    {
+        FunctionPointer type = this.funcPtr.type().instanceOf(FunctionPointer);
+
+        // drop thisptr - implicit!
+        assert(type.args.length >= 1);
+        // TODO this smells.
+        return new NestedFunctionPointer(type.ret, type.args[1 .. type.args.length]);
+    }
+
+    override int emit(Generator output)
+    {
+        int thisReg = this.thisPtr.emit(output);
+        int funcReg = this.funcPtr.emit(output);
+        auto voidp = output.platform.voidp();
+        auto thisType = this.type().emit(output.platform);
+        int ret = output.fun.alloca(thisType);
+        int targetDataReg = output.fun.fieldOffset(thisType, ret, 1);
+        int targetFuncReg = output.fun.fieldOffset(thisType, ret, 2);
+        output.fun.store(voidp, targetDataReg, thisReg);
+        output.fun.store(this.funcPtr.type().emit(output.platform), targetFuncReg, funcReg);
+        return output.fun.load(thisType, ret);
+    }
+
+    override void hash(Hash hash) { hash.adds("DelegateExpr"); this.funcPtr.hash(hash); this.thisPtr.hash(hash); }
+}
+
+class DelegateDataPtr : Expression
+{
+    Expression dg;
+
+    this(this.dg) { }
+
+    override Type type()
+    {
+        return new Pointer(new Void);
+    }
+
+    override int emit(Generator output)
+    {
+        int reg = this.dg.emit(output);
+
+        return output.fun.field(this.dg.type().emit(output.platform), reg, 1);
+    }
+
+    override void hash(Hash hash) { hash.adds("DelegateDataPtr"); this.dg.hash(hash); }
+}
+
+class DelegateFuncPtr : Expression
+{
+    Expression dg;
+
+    this(this.dg) { }
+
+    override Type type()
+    {
+        auto nestfp = this.dg.type().instanceOf(NestedFunctionPointer);
+        assert(!!nestfp);
+        auto argTypes = new Type[](nestfp.args.length + 1);
+        argTypes[0] = new Pointer(new Void);
+        for (int i = 0; i < nestfp.args.length; i += 1)
+            argTypes[i + 1] = nestfp.args[i];
+
+        return new FunctionPointer(nestfp.ret, argTypes);
+    }
+
+    override int emit(Generator output)
+    {
+        int reg = this.dg.emit(output);
+
+        return output.fun.field(this.dg.type().emit(output.platform), reg, 2);
+    }
+
+    override void hash(Hash hash) { hash.adds("DelegateFuncPtr"); this.dg.hash(hash); }
+}
+
 Expression call(Symbol target, Expression[] args, Loc loc)
 {
     if (target.instanceOf(FunctionDeclaration))
@@ -424,6 +508,16 @@ Expression call(Symbol target, Expression[] args, Loc loc)
     if (expr && expr.type().instanceOf(FunctionPointer))
     {
         return new FuncPtrCall(expr, args, loc);
+    }
+    if (expr && expr.type().instanceOf(NestedFunctionPointer))
+    {
+        // TODO cache delegate
+        auto funcPtr = new DelegateFuncPtr(expr);
+        auto thisPtr = new DelegateDataPtr(expr);
+        Expression[] combinedArgs;
+        combinedArgs ~= thisPtr;
+        for (int i = 0; i < args.length; i += 1) combinedArgs ~= args[i];
+        return new FuncPtrCall(funcPtr, combinedArgs, loc);
     }
     Struct struct_ = target.instanceOf(Struct);
     if (struct_)
@@ -875,6 +969,9 @@ class ASTReference : ASTSymbol
                 Function fun = target.instanceOf(Function);
 
                 if (fun) return new FunctionReference(fun);
+
+                auto nestfn = target.instanceOf(ClassMethodPtr);
+                if (nestfn) return new DelegateExpr(nestfn.funcPtr, nestfn.thisPtr);
             }
         }
         Symbol baseExpression = this.base.compile(context);

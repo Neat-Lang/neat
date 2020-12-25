@@ -106,8 +106,9 @@ class ParserHelperImpl : ParserHelper
 
         // throwaway compilation (TODO cache?)
         Module module_ = compileModule(astModule, this, config, compiler, platform, true);
-        Module[] allModules = module_.allModules();
-        BackendModule[] backendModules;
+        Module[] allModules;
+        Module[] remainingModules = module_.newModules(allModules);
+        allModules = remainingModules;
 
         string baseCmd;
         if (backend.instanceOf(LLVMBackend)) baseCmd = "clang -Wno-unused-command-line-argument -fpic";
@@ -116,9 +117,13 @@ class ParserHelperImpl : ParserHelper
         if (x86_32) baseCmd ~= " -m32";
 
         string objFiles;
-        for (int i = 0; i < allModules.length; i += 1) {
-            string objFile = emitModule(compiler, backend, platform, allModules[i], false, x86_32);
-            objFiles ~= " " ~ objFile;
+        while (remainingModules.length > 0) {
+            for (int i = 0; i < remainingModules.length; i += 1) {
+                string objFile = emitModule(compiler, backend, platform, remainingModules[i], false, x86_32);
+                objFiles ~= " " ~ objFile;
+            }
+            remainingModules = module_.newModules(allModules);
+            allModules ~= remainingModules;
         }
 
         auto fun = module_.lookup(function_, null).instanceOf(Function);
@@ -288,6 +293,67 @@ class CompilerImpl : CompilerBase
         return parseStatementProxy(parser, lexicalContext);
     }
 
+    override ASTSymbol astBinaryOp(string op, ASTSymbol left, ASTSymbol right, Loc loc)
+    {
+        return new ASTBinaryOp(op, left, right, loc);
+    }
+
+    override ASTSymbol astIndex(ASTSymbol base, ASTSymbol index, Loc loc)
+    {
+        return new ASTIndexAccess(base, index, loc);
+    }
+
+    override ASTSymbol astMember(ASTSymbol base, string member, Loc loc)
+    {
+        return new ASTMember(base, member, loc);
+    }
+
+    override ASTSymbol astIntLiteral(int value, Loc loc)
+    {
+        return new ASTIntLiteral(value);
+    }
+
+    override ASTSymbol astIdentifier(string name, Loc loc)
+    {
+        return new ASTIdentifier(name, loc);
+    }
+
+    override ASTSymbol astCall(ASTSymbol target, ASTSymbol[] args, Loc loc)
+    {
+        return new ASTCall(target, args, loc);
+    }
+
+    override ASTStatement astExpressionStmt(ASTSymbol expr, Loc loc)
+    {
+        return new ASTExprStatement(expr);
+    }
+
+    override ASTStatement astScope(ASTStatement[] statements, Loc loc)
+    {
+        return new ASTScopeStatement(statements);
+    }
+
+    override ASTStatement astForLoop(
+        ASTStatement init, ASTSymbol test, ASTStatement step, ASTStatement body_, Loc loc)
+    {
+        return new ASTForLoop(init, test, step, body_);
+    }
+
+    override ASTStatement astAssign(ASTSymbol target, ASTSymbol source, Loc loc)
+    {
+        return new ASTAssignStatement(target, source, loc);
+    }
+
+    override ASTStatement astDeclareVar(string name, ASTSymbol initial, Loc loc)
+    {
+        return new ASTVarDeclStatement(name, true, null, initial, loc);
+    }
+
+    override ASTStatement astReturn(ASTSymbol value, Loc loc)
+    {
+        return new ASTReturnStatement(value, loc);
+    }
+
     // expressions and statements
     override Expression implicitConvertTo(Expression from, Type to)
     {
@@ -388,6 +454,26 @@ class CompilerImpl : CompilerBase
     {
         return new StatementExpression(statement, expression);
     }
+
+    override FunctionDeclaration createRuntimeFunction(
+        Context context, string name, Type ret, Argument[] args, ASTStatement body_)
+    {
+        Loc loc; // bleh
+        string path;
+        // TODO in Function
+        string mangledName = name;
+        for (int i = 0; i < args.length; i += 1) {
+            mangledName ~= "_" ~ args[i].type.mangle();
+        }
+        auto fun = new Function(loc, mangledName, ret, args, body_, context.macroState);
+        auto rtMod = new Module(name, new Package("rt_" ~ mangledName, path), context.macroState, null);
+        fun.parent = rtMod;
+        string types;
+        rtMod.add("__" ~ name, fun);
+        auto usingMod = findModule(context.namespace);
+        usingMod.addImport(rtMod);
+        return fun;
+    }
 }
 
 void main(string[] args)
@@ -482,12 +568,18 @@ void main(string[] args)
     if (optimize) baseFlags ~= " -Ofast";
     if (x86_32) baseFlags ~= " -m32";
 
-    auto modules = toplevel.allModules();
+    Module[] allModules;
+    Module[] remainingModules = toplevel.newModules(allModules);
+    allModules = remainingModules;
 
     string fileArgs;
-    for (int i = 0; i < modules.length; i += 1) {
-        string objFile = emitModule(compilerImpl, backend, platform, modules[i], optimize, x86_32);
-        fileArgs ~= " " ~ objFile;
+    while (remainingModules.length > 0) {
+        for (int i = 0; i < remainingModules.length; i += 1) {
+            string objFile = emitModule(compilerImpl, backend, platform, remainingModules[i], optimize, x86_32);
+            fileArgs ~= " " ~ objFile;
+        }
+        remainingModules = toplevel.newModules(allModules);
+        allModules ~= remainingModules;
     }
 
     if (dontLink) return;

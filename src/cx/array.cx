@@ -231,6 +231,7 @@ class ArrayEqual : Expression
 
     override int emit(Generator output)
     {
+        auto voidp = output.platform.voidp();
         Array leftArray = this.left.type().instanceOf(Array);
         Array rightArray = this.right.type().instanceOf(Array);
         assert(leftArray && rightArray);
@@ -240,8 +241,8 @@ class ArrayEqual : Expression
         int right = this.right.emit(output);
         int leftLen = getArrayLen(output, leftArray, left);
         int rightLen = getArrayLen(output, rightArray, right);
-        int leftPtr = getArrayPtr(output, leftArray, left);
-        int rightPtr = getArrayPtr(output, rightArray, right);
+        int leftPtr = output.fun.bitcast(getArrayPtr(output, leftArray, left), voidp);
+        int rightPtr = output.fun.bitcast(getArrayPtr(output, rightArray, right), voidp);
         int leftSize = output.fun.wordLiteral(
             output.platform,
             leftArray.elementType.emit(output.platform).size(output.platform));
@@ -274,7 +275,7 @@ class ArrayResize : Expression
     {
         // TODO simplify this?
         auto size_t = output.platform.nativeWordType;
-        BackendType voidp = (new Pointer(new Void)).emit(output.platform);
+        auto voidp = output.platform.voidp();
         int arrayReg = this.array.emit(output);
         Array arrayType = this.array.type().instanceOf(Array);
         this.loc.assert2s(!!arrayType, "ArrayResize called on non-array!");
@@ -317,70 +318,96 @@ class ArrayResize : Expression
     override void hash(Hash hash) { hash.adds("ArrayResize"); array.hash(hash); lengthChange.hash(hash); }
 }
 
-// TODO move this all into a runtime function
+class ASTArrayResize : ASTSymbol
+{
+    ASTSymbol array;
+
+    ASTSymbol lengthChange;
+
+    Loc loc;
+
+    this(this.array, this.lengthChange, this.loc) { }
+
+    override Expression compile(Context context) {
+        auto arrayExpr = beExpression2(array.compile(context), loc);
+        auto lengthChangeExpr = beExpression2(lengthChange.compile(context), loc);
+        return new ArrayResize(arrayExpr, lengthChangeExpr, loc);
+    }
+}
+
+ASTSymbol parseArrayResize(Parser parser, LexicalContext lexicalContext, ASTSymbol current)
+{
+    parser.begin();
+    auto loc = parser.loc();
+    if (!parser.accept(".") || !parser.accept("lengthen"))
+    {
+        parser.revert();
+        return null;
+    }
+    parser.expect("(");
+    ASTSymbol lengthChange = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+    if (!lengthChange) parser.fail("Length expression expected");
+    parser.expect(")");
+    parser.commit();
+    return new ASTArrayResize(current, lengthChange, loc);
+}
+
 Expression arrayCat(Context context, Expression left, Expression right, Loc loc) {
-    Type size_t = nativeWordType(context.platform);
     auto compiler = context.compiler;
+
     Array leftArray = left.type().instanceOf(Array);
-    loc.assert2s(!!leftArray, "left expression is not an array");
+    assert(!!leftArray);
+    Argument[] args = new Argument[](0)
+        ~ Argument(false, "left", leftArray) ~ Argument(false, "right", right.type());
 
-    auto tempLeft = compiler.temporaryPair(left);
-    auto tempRight = compiler.temporaryPair(right);
-
-    Expression leftLength = new ArrayLength(tempLeft.reference, size_t);
-    Expression rightLength;
-
-    bool singleElement;
+    ASTStatement body_;
+    auto leftArg = compiler.astIdentifier("left", loc);
+    auto rightArg = compiler.astIdentifier("right", loc);
     if (leftArray.elementType.same(right.type())) {
-        singleElement = true;
-        rightLength = compiler.intLiteral(1);
+        /**
+         * TODO
+         * body_ = compiler.$stmt {
+         *   auto result = left.resize(left.length + 1);
+         *   result[left.length] = right;
+         *   return result;
+         * };
+         */
+        auto declare = compiler.astDeclareVar("result",
+            new ASTArrayResize(leftArg, compiler.astIntLiteral(1, loc), loc), loc);
+        auto resultVar = compiler.astIdentifier("result", loc);
+        auto assign = compiler.astAssign(
+            compiler.astIndex(resultVar, compiler.astMember(leftArg, "length", loc), loc),
+            rightArg, loc);
+        auto ret = compiler.astReturn(resultVar, loc);
+        body_ = compiler.astScope(new ASTStatement[](0) ~ declare ~ assign ~ ret, loc);
     } else {
-        Array rightArray = right.type().instanceOf(Array);
-        loc.assert2s(
-            rightArray && rightArray.same(leftArray),
-            "right array is incompatible with left"
-        );
-        rightLength = new ArrayLength(tempRight.reference, size_t);
+        /**
+         * TODO
+         * body_ = compiler.$stmt {
+         *   auto result = left.resize(right.length);
+         *   for (int i = 0; i < right.length; i += 1)
+         *     result[left.length + i] = right[i];
+         *   return result;
+         * };
+         */
+        auto declare = compiler.astDeclareVar("result",
+            new ASTArrayResize(leftArg, compiler.astMember(rightArg, "length", loc), loc), loc);
+        auto result = compiler.astIdentifier("result", loc);
+        auto init = compiler.astDeclareVar("i", compiler.astIntLiteral(0, loc), loc);
+        auto i = compiler.astIdentifier("i", loc);
+        auto test = compiler.astBinaryOp("<", i, compiler.astMember(rightArg, "length", loc), loc);
+        auto step = compiler.astAssign(
+            i, compiler.astBinaryOp("+", i, compiler.astIntLiteral(1, loc), loc), loc);
+        auto loopLeft = compiler.astIndex(result,
+            compiler.astBinaryOp("+", compiler.astMember(leftArg, "length", loc), i, loc), loc);
+        auto loopRight = compiler.astIndex(rightArg, i, loc);
+        auto loopBody = compiler.astAssign(loopLeft, loopRight, loc);
+        auto loop = compiler.astForLoop(init, test, step, loopBody, loc);
+        auto ret = compiler.astReturn(result, loc);
+
+        body_ = compiler.astScope(new ASTStatement[](0) ~ declare ~ loop ~ ret, loc);
     }
+    auto fn = compiler.createRuntimeFunction(context, "arrayappend", leftArray, args, body_);
 
-    auto newArray = new ArrayResize(tempLeft.reference, rightLength, loc);
-    auto tempArray = compiler.temporaryPair(newArray);
-
-    Statement initializers = compiler.sequenceStatement(
-        new Statement[](0) ~ tempLeft.initialize ~ tempRight.initialize ~ tempArray.initialize);
-
-    if (singleElement) {
-        auto lastElement = compiler.dereference(
-            compiler.pointerOffset(new ArrayPointer(leftArray.elementType, tempArray.reference), leftLength));
-        if (!lastElement.type().same(right.type())) {
-            print("1 A " ~ lastElement.type().repr() ~ " B " ~ right.type().repr());
-            assert(false);
-        }
-
-        auto moveStmt = compiler.move(lastElement, tempRight.reference);
-        auto statement = compiler.sequenceStatement(new Statement[](0) ~ initializers ~ moveStmt);
-        return compiler.statementExpression(statement, tempArray.reference);
-    } else {
-        auto sourceBase = new ArrayPointer(right.type().instanceOf(Array).elementType, tempRight.reference);
-        auto targetBase = compiler.pointerOffset(
-            new ArrayPointer(leftArray.elementType, tempArray.reference), leftLength);
-        auto indexPair = compiler.temporaryPair(compiler.intLiteral(0));
-        auto index = indexPair.reference;
-
-        initializers = compiler.sequenceStatement(new Statement[](0) ~ initializers ~ indexPair.initialize);
-
-        auto sourceElement = compiler.dereference(compiler.pointerOffset(sourceBase, index));
-        auto targetElement = compiler.dereference(compiler.pointerOffset(targetBase, index));
-        if (!targetElement.type().same(sourceElement.type())) {
-            print("2 A " ~ targetElement.type().repr() ~ " B " ~ sourceElement.type().repr());
-            assert(false);
-        }
-        auto assignStep = compiler.move(targetElement, sourceElement);
-        auto increment = compiler.assignStatement(index,
-            compiler.binaryOp2("+", context, index, compiler.intLiteral(1), loc));
-        auto loopStmt = compiler.loopStatement(
-            context, initializers, compiler.binaryOp2(
-                "<", context, index, rightLength, loc), assignStep, increment);
-        return compiler.statementExpression(loopStmt, tempArray.reference);
-    }
+    return compiler.call(fn, new Expression[](0) ~ left ~ right, loc);
 }

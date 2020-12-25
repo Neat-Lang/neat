@@ -32,7 +32,24 @@ string removeSlashes(string s) {
     return result;
 }
 
-string emitModule(CompilerBase compiler, Backend backend, Platform platform, Module module_, bool opt, bool m32)
+string replace(string str, string match, string replace) {
+    string result;
+    size_t i = 0;
+    while (i <= str.length - match.length) {
+        if (str[i .. i + match.length] == match) {
+            result ~= replace;
+            i += match.length;
+        } else {
+            result ~= str[i];
+            i += 1;
+        }
+    }
+    result ~= str[i .. str.length];
+    return result;
+}
+
+string emitModule(CompilerBase compiler, Backend backend, Platform platform, Module module_,
+    bool opt, bool m32, bool caching)
 {
     auto backendModule = backend.createModule(platform);
     auto backendModuleLLVM = backendModule.instanceOf(LLVMBackendModule);
@@ -41,8 +58,8 @@ string emitModule(CompilerBase compiler, Backend backend, Platform platform, Mod
 
     string baseCmd;
     if (backendModuleLLVM) {
-        baseCmd = "llc --filetype=obj --relocation-model=pic";
-        if (opt) baseCmd ~= " -O3";
+        if (opt) baseCmd = "sh .obj/llvmBuildOpt.sh %src %obj";
+        else baseCmd = "sh .obj/llvmBuild.sh %src %obj";
         assert(!m32);
     } else {
         baseCmd = "gcc -fpic";
@@ -59,7 +76,7 @@ string emitModule(CompilerBase compiler, Backend backend, Platform platform, Mod
 
     string objFile = ".obj/" ~ hash.text() ~ ".o";
 
-    if (cxruntime_file_exists(objFile))
+    if (caching && cxruntime_file_exists(objFile))
         return objFile;
 
     auto generator = new Generator(platform, backendModule);
@@ -71,7 +88,7 @@ string emitModule(CompilerBase compiler, Backend backend, Platform platform, Mod
         auto llText = backendModuleLLVM.output.text();
         cxruntime_file_write(srcFile, llText);
         backendModuleLLVM.output.free();
-        cmd = baseCmd ~ " " ~ srcFile ~ " -o=" ~ objFile;
+        cmd = replace(replace(baseCmd, "%src", srcFile), "%obj", objFile);
     } else {
         assert(!!backendModuleC);
         string srcFile = ".obj/" ~ removeSlashes(module_.mangle()) ~ ".c";
@@ -93,7 +110,9 @@ class ParserHelperImpl : ParserHelper
 
     bool x86_32;
 
-    this(this.compiler, this.backend, this.x86_32) { }
+    bool caching;
+
+    this(this.compiler, this.backend, this.x86_32, this.caching) { }
 
     // TODO why do we need 'config'?
     override void proxyCall(ASTModule astModule, string function_, MacroState macroState, ModuleParserConfig config)
@@ -119,7 +138,7 @@ class ParserHelperImpl : ParserHelper
         string objFiles;
         while (remainingModules.length > 0) {
             for (int i = 0; i < remainingModules.length; i += 1) {
-                string objFile = emitModule(compiler, backend, platform, remainingModules[i], false, x86_32);
+                string objFile = emitModule(compiler, backend, platform, remainingModules[i], false, x86_32, caching);
                 objFiles ~= " " ~ objFile;
             }
             remainingModules = module_.newModules(allModules);
@@ -485,6 +504,7 @@ void main(string[] args)
     ASTPackage[] astPackages;
     bool dontLink;
     bool optimize;
+    bool caching = true;
     bool x86_32; bool macro_x86_32;
     CompilerBase compilerImpl = new CompilerImpl();
     // auto backend = new ProxyBackend();
@@ -516,6 +536,8 @@ void main(string[] args)
                 optimize = true;
             } else if (arg == "-c") {
                 dontLink = true;
+            } else if (arg == "-x") {
+                caching = false;
             } else if (arg == "-backend=c") {
                 backend = new CBackend;
             } else if (arg == "-macro-backend=c") {
@@ -540,6 +562,7 @@ void main(string[] args)
     if (!output.length) output = removeExtension(args[0]);
 
     cxruntime_system("mkdir -p .obj");
+    createBuilderScripts();
 
     auto builtins = new ASTModule("", new Package("builtins", ""), new MacroState, null);
     BackendType nativeWordType;
@@ -560,7 +583,7 @@ void main(string[] args)
     auto modParseConfig = new ModuleParserConfig(packages, defaultImports, astCache, cache);
     auto helper = new ParserHelperImpl(
         compilerImpl, macroBackend,
-        macro_x86_32);
+        macro_x86_32, caching);
     auto astToplevel = getModule(compilerImpl, args[0], null, false, helper, modParseConfig, Loc(null, ""));
     auto toplevel = compileModule(astToplevel, helper, modParseConfig, compilerImpl, platform, true);
 
@@ -575,7 +598,8 @@ void main(string[] args)
     string fileArgs;
     while (remainingModules.length > 0) {
         for (int i = 0; i < remainingModules.length; i += 1) {
-            string objFile = emitModule(compilerImpl, backend, platform, remainingModules[i], optimize, x86_32);
+            string objFile = emitModule(compilerImpl, backend, platform, remainingModules[i],
+                optimize, x86_32, caching);
             fileArgs ~= " " ~ objFile;
         }
         remainingModules = toplevel.newModules(allModules);
@@ -594,4 +618,47 @@ void main(string[] args)
     string cmd = compiler ~ flags ~ fileArgs ~ " src/runtime.c -o " ~ output ~ linkerFlags;
     print("$ " ~ cmd);
     cxruntime_system(cmd);
+}
+
+void createBuilderScripts() {
+    cxruntime_file_write(".obj/llvmBuild.sh", "#!/usr/bin/env sh
+set -e
+llc $1 --filetype=obj --relocation-model=pic -o=$2
+");
+    // -Oz
+    // disable -memcpyopt due to https://bugs.llvm.org/show_bug.cgi?id=48599
+    cxruntime_file_write(".obj/llvmBuildOpt.sh", "#!/usr/bin/env sh
+set -e
+opt $1 -o=$1.opt.bc -targetlibinfo -tti -tbaa -scoped-noalias -assumption-cache-tracker -profile-summary-info \\
+    -forceattrs -inferattrs -ipsccp -called-value-propagation -globalopt -domtree -mem2reg -deadargelim -domtree \\
+    -basic-aa -aa -loops -lazy-branch-prob -lazy-block-freq -opt-remark-emitter -instcombine -simplifycfg -basiccg \\
+    -globals-aa -prune-eh -inline -openmpopt -functionattrs -domtree -sroa -basic-aa -aa -memoryssa \\
+    -early-cse-memssa -speculative-execution -aa -lazy-value-info -jump-threading -correlated-propagation \\
+    -simplifycfg -domtree -basic-aa -aa -loops -lazy-branch-prob -lazy-block-freq -opt-remark-emitter -instcombine \\
+    -opt-remark-emitter -tailcallelim -simplifycfg -reassociate -domtree -loops -loop-simplify -lcssa-verification \\
+    -lcssa -basic-aa -aa -scalar-evolution -loop-rotate -memoryssa -licm -loop-unswitch -simplifycfg -domtree \\
+    -basic-aa -aa -loops -lazy-branch-prob -lazy-block-freq -opt-remark-emitter -instcombine -loop-simplify \\
+    -lcssa-verification -lcssa -scalar-evolution -indvars -loop-idiom -loop-deletion -loop-unroll -mldst-motion \\
+    -phi-values -aa -memdep -lazy-branch-prob -lazy-block-freq -opt-remark-emitter -gvn -phi-values -basic-aa -aa \\
+    -memdep -sccp -demanded-bits -bdce -aa -lazy-branch-prob -lazy-block-freq -opt-remark-emitter -instcombine \\
+    -lazy-value-info -jump-threading -correlated-propagation -basic-aa -aa -phi-values -memdep -dse -aa -memoryssa \\
+    -loops -loop-simplify -lcssa-verification -lcssa -scalar-evolution -licm -postdomtree -adce -simplifycfg \\
+    -domtree -basic-aa -aa -loops -lazy-branch-prob -lazy-block-freq -opt-remark-emitter -instcombine -barrier \\
+    -elim-avail-extern -basiccg -rpo-functionattrs -globalopt -globaldce -basiccg -globals-aa -domtree -float2int \\
+    -lower-constant-intrinsics -domtree -loops -loop-simplify -lcssa-verification -lcssa -basic-aa -aa \\
+    -scalar-evolution -loop-rotate -loop-accesses -lazy-branch-prob -lazy-block-freq -opt-remark-emitter \\
+    -loop-distribute -postdomtree -branch-prob -block-freq -scalar-evolution -basic-aa -aa -loop-accesses \\
+    -demanded-bits -lazy-branch-prob -lazy-block-freq -opt-remark-emitter -inject-tli-mappings -loop-vectorize \\
+    -loop-simplify -scalar-evolution -aa -loop-accesses -lazy-branch-prob -lazy-block-freq -loop-load-elim \\
+    -basic-aa -aa -lazy-branch-prob -lazy-block-freq -opt-remark-emitter -instcombine -simplifycfg -domtree \\
+    -vector-combine -basic-aa -aa -loops -lazy-branch-prob -lazy-block-freq -opt-remark-emitter -instcombine \\
+    -loop-simplify -lcssa-verification -lcssa -scalar-evolution -loop-unroll -lazy-branch-prob -lazy-block-freq \\
+    -opt-remark-emitter -instcombine -memoryssa -loop-simplify -lcssa-verification -lcssa -scalar-evolution -licm \\
+    -lazy-branch-prob -lazy-block-freq -opt-remark-emitter -transform-warning -alignment-from-assumptions \\
+    -strip-dead-prototypes -globaldce -constmerge -cg-profile -domtree -loops -postdomtree -branch-prob -block-freq \\
+    -loop-simplify -lcssa-verification -lcssa -basic-aa -aa -scalar-evolution -block-freq -loop-sink \\
+    -lazy-branch-prob -lazy-block-freq -opt-remark-emitter -instsimplify -div-rem-pairs -simplifycfg -verify
+llc --filetype=obj --relocation-model=pic $1.opt.bc -o=$2
+");
+
 }

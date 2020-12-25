@@ -1,5 +1,7 @@
 module cx.array;
 
+macro import cx.macros.either;
+
 import backend.base;
 import cx.base;
 import cx.hash;
@@ -120,7 +122,7 @@ class ArrayAllocation : Expression
 {
     Type elementType;
 
-    Expression length;
+    Either(Expression, size_t) length;
 
     this(this.elementType, this.length) { }
 
@@ -131,23 +133,25 @@ class ArrayAllocation : Expression
 
     override int emit(Generator output)
     {
-        auto size_t = output.platform.nativeWordType;
+        auto backendSizeT = output.platform.nativeWordType;
         auto voidp = output.platform.voidp();
         auto backendElementType = this.elementType.emit(output.platform);
         int elementSizeReg = output.fun.wordLiteral(output.platform, backendElementType.size(output.platform));
-        int twoWordSizeReg = output.fun.wordLiteral(output.platform, size_t.size(output.platform) * 2);
+        int twoWordSizeReg = output.fun.wordLiteral(output.platform, backendSizeT.size(output.platform) * 2);
         int oneReg = output.fun.wordLiteral(output.platform, 1);
         int twoReg = output.fun.wordLiteral(output.platform, 2);
-        int arrayLength = this.length.emit(output);
-        int arrayBytes = output.fun.binop("*", size_t, arrayLength, elementSizeReg);
-        int totalArrayBytes = output.fun.binop("+", size_t, arrayBytes, twoWordSizeReg);
+        int arrayLength = this.length.case(
+            Expression ex: ex.emit(output),
+            size_t sz: output.fun.wordLiteral(output.platform, sz));
+        int arrayBytes = output.fun.binop("*", backendSizeT, arrayLength, elementSizeReg);
+        int totalArrayBytes = output.fun.binop("+", backendSizeT, arrayBytes, twoWordSizeReg);
         int arrayBase = output.fun.call(voidp, "cxruntime_alloc", new int[](0) ~ totalArrayBytes);
         // ptr = base + 2
-        int arrayPtr = output.fun.bitcast(output.fun.ptrOffset(size_t, arrayBase, twoReg), voidp);
+        int arrayPtr = output.fun.bitcast(output.fun.ptrOffset(backendSizeT, arrayBase, twoReg), voidp);
         // base[0] = 1 (refs)
         // base[1] = allocated length (in elements)
-        output.fun.store(size_t, output.fun.bitcast(arrayBase, new BackendPointerType(size_t)), oneReg);
-        output.fun.store(size_t, output.fun.ptrOffset(size_t, arrayBase, oneReg), arrayLength);
+        output.fun.store(backendSizeT, output.fun.bitcast(arrayBase, new BackendPointerType(backendSizeT)), oneReg);
+        output.fun.store(backendSizeT, output.fun.ptrOffset(backendSizeT, arrayBase, oneReg), arrayLength);
 
         arrayPtr = output.fun.bitcast(arrayPtr, new BackendPointerType(backendElementType));
         return makeArray(output, this.elementType, arrayLength, arrayPtr, arrayBase);
@@ -155,7 +159,10 @@ class ArrayAllocation : Expression
 
     override void hash(Hash hash) {
         hash.adds("ArrayAllocation");
-        this.length.hash(hash);
+        this.length.case {
+            Expression ex: ex.hash(hash);
+            size_t sz: hash.addl(sz);
+        }
     }
 }
 
@@ -396,4 +403,103 @@ Expression arrayCat(Context context, Expression left, Expression right, Loc loc)
     auto fn = compiler.createRuntimeFunction(context, "arrayappend", leftArray, args, body_);
 
     return compiler.call(fn, new Expression[](0) ~ left ~ right, loc);
+}
+
+ASTSymbol parseArrayLiteral(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin();
+    auto loc = parser.loc();
+    if (!parser.accept("[")) {
+        parser.revert();
+        return null;
+    }
+    ASTArrayLiteralElement[] values;
+    while (!parser.accept("]")) {
+        auto loc = parser.loc();
+        ASTSymbol value = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+        values ~= ASTArrayLiteralElement(value, loc);
+        parser.accept(",");
+    }
+    parser.commit();
+    return new ASTArrayLiteral(values);
+}
+
+struct ASTArrayLiteralElement
+{
+    ASTSymbol value;
+
+    Loc loc;
+}
+
+class ASTArrayLiteral : ASTSymbol
+{
+    ASTArrayLiteralElement[] elements;
+
+    this(this.elements) { }
+
+    override Expression compile(Context context) {
+        Expression[] values;
+        for (int i = 0; i < this.elements.length; i += 1) {
+            values ~= beExpression2(this.elements[i].value.compile(context), this.elements[i].loc);
+        }
+        Expression mergedReference;
+        for (int i = 0; i < this.elements.length; i += 1) {
+            if (!mergedReference) mergedReference = values[i];
+            else {
+                // TODO centralize somewhere
+                auto value = values[i];
+                auto left = context.compiler.implicitConvertTo(value, mergedReference.type());
+                auto right = context.compiler.implicitConvertTo(mergedReference, value.type());
+                if (!left && !right)
+                    this.elements[i].loc.assert2s(false, "incompatible expression type");
+                else if (left && right && !left.type().same(right.type()))
+                    this.elements[i].loc.assert2s(false, "ambiguous expression type");
+                if (left) mergedReference = left;
+                else if (right) mergedReference = right;
+            }
+        }
+        auto mergeType = mergedReference.type();
+        for (int i = 0; i < this.elements.length; i += 1) {
+            values[i] = context.compiler.implicitConvertTo(values[i], mergeType);
+            assert(!!values[i]);
+        }
+        return new ArrayLiteral(new Array(mergeType), values, context.compiler);
+    }
+}
+
+class ArrayLiteral : Expression
+{
+    ArrayAllocation allocationHelper;
+
+    Array type_;
+
+    Expression[] values;
+
+    this(this.type_, this.values, CompilerBase compiler) {
+        allocationHelper = new ArrayAllocation(type_.elementType, this.values.length);
+    }
+
+    override Type type() {
+        return this.type_;
+    }
+
+    override int emit(Generator output) {
+        auto voidp = output.platform.voidp();
+        auto backendElementType = this.type_.elementType.emit(output.platform);
+        int arrayReg = allocationHelper.emit(output);
+        int arrayPtr = getArrayPtr(output, type_, arrayReg);
+        for (int i = 0; i < this.values.length; i += 1) {
+            int elementPtrReg = output.fun.ptrOffset(backendElementType, arrayPtr, output.fun.intLiteral(i));
+            int valueReg = this.values[i].emit(output);
+            output.fun.store(backendElementType, elementPtrReg, valueReg);
+        }
+        return arrayReg;
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("ArrayLiteral");
+        hash.addl(values.length);
+        for (int i = 0; i < this.values.length; i += 1)
+            values[i].hash(hash);
+    }
 }

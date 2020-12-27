@@ -55,12 +55,10 @@ class Function : FunctionDeclaration
         if (generator.mod.declared(mangle)) return;
 
         Type voidp = new Pointer(new Void);
-        int extra = 0;
-        if (this.thisType) extra = 1;
-        auto argTypes = new BackendType[](this.args.length + extra);
-        if (this.thisType) argTypes[0] = voidp.emit(generator.platform);
-        for (int i = 0; i < this.args.length; i += 1)
-            argTypes[extra + i] = this.args[i].type.emit(generator.platform);
+
+        auto argTypes = [arg.type.emit(generator.platform) for arg in this.args];
+        if (this.thisType)
+            argTypes = [voidp.emit(generator.platform)] ~ argTypes;
 
         generator.mod.declare(
             mangle,
@@ -173,12 +171,11 @@ class CompiledFunction : FinishedSymbol
 
         assert(!generator.fun);
         Type voidp = new Pointer(new Void);
-        int extra = 0;
-        if (this.fun.thisType) extra = 1;
-        auto argTypes = new BackendType[](this.fun.numArgs());
-        if (this.fun.thisType) argTypes[0] = voidp.emit(generator.platform);
-        for (int i = 0; i < this.fun.args.length; i += 1)
-            argTypes[extra + i] = this.fun.args[i].type.emit(generator.platform);
+
+        auto argTypes = [arg.type.emit(generator.platform) for arg in this.fun.args];
+        if (this.fun.thisType)
+            argTypes = [voidp.emit(generator.platform)] ~ argTypes;
+
         generator.fun = generator.mod.define(
             this.fun.mangle(),
             this.fun.ret.emit(generator.platform),
@@ -501,11 +498,7 @@ class DelegateFuncPtr : Expression
     {
         auto nestfp = this.dg.type().instanceOf(NestedFunctionPointer);
         assert(!!nestfp);
-        auto argTypes = new Type[](nestfp.args.length + 1);
-        argTypes[0] = new Pointer(new Void);
-        for (int i = 0; i < nestfp.args.length; i += 1)
-            argTypes[i + 1] = nestfp.args[i];
-
+        auto argTypes = [(new Pointer(new Void)).instanceOf(Type)] ~ nestfp.args;
         return new FunctionPointer(nestfp.ret, argTypes);
     }
 
@@ -773,18 +766,10 @@ Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool
         {
             loc.assert2s(false, "TODO struct member of value");
         }
-        int memberOffset = -1;
-        for (int i = 0; i < structType.members.length; i += 1)
-        {
-            if (structType.members[i].name == member) { memberOffset = i; break; }
-        }
+        size_t memberOffset = [first i for i, a in structType.members where a.name == member else -1];
         if (memberOffset != -1)
             return new StructMember(baseExpr.instanceOf(Reference), memberOffset);
-        int methodOffset = -1;
-        for (int i = 0; i < structType.methods.length; i += 1)
-        {
-            if (structType.methods[i].name == member) { methodOffset = i; break; }
-        }
+        size_t methodOffset = [first i for i, a in structType.methods where a.name == member else -1];
         if (methodOffset != -1)
         {
             // TODO dereference-into-symbol so we can '&' it again
@@ -798,11 +783,8 @@ Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool
     if (classType)
     {
         ClassMethod[] vtable = classType.vtable();
-        int methodOffset = -1;
-        for (int i = 0; i < vtable.length; i += 1) {
-            if (vtable[i].name == member) { methodOffset = i; break; }
-        }
         Expression asStructPtr = new PointerCast(new Pointer(classType.dataStruct()), baseExpr);
+        size_t methodOffset = [first i for i, a in vtable where a.name == member else -1];
         if (methodOffset != -1)
         {
             Reference classInfo = new Dereference(new PointerCast(
@@ -813,9 +795,7 @@ Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool
         }
 
         ClassMember[] members = classType.allMembers();
-        int memberOffset = -1;
-        for (int i = 0; i < members.length; i += 1)
-            if (members[i].name == member) { memberOffset = i; break; }
+        size_t memberOffset = [first i for i, a in members where a.name == member else -1];
         if (memberOffset != -1)
             return new StructMember(new Dereference(asStructPtr), memberOffset);
         if (allowUndefined) return null;
@@ -995,12 +975,8 @@ class FunctionReference : Expression
 
     override Type type()
     {
-        int extra = 0;
-        if (this.fun.thisType) extra = 1;
-        auto argTypes = new Type[](this.fun.numArgs());
-        if (this.fun.thisType) argTypes[0] = new Pointer(new Void);
-        for (int i = 0; i < this.fun.args.length; i += 1)
-            argTypes[extra + i] = this.fun.args[i].type;
+        auto argTypes = [arg.type for arg in this.fun.args];
+        if (this.fun.thisType) argTypes = [(new Pointer(new Void)).instanceOf(Type)] ~ argTypes;
 
         return new FunctionPointer(this.fun.ret, argTypes);
     }
@@ -2534,6 +2510,7 @@ class Module : Namespace
     this(this.name, this.pak, this.macroState, this.parentModule)
     {
         assert(!!pak);
+        // this.mangledName = [(a == '.') ? '_' : a for a in name];
         for (int i = 0; i < this.name.length; i += 1) {
             if (name[i .. i + 1] == ".") this.mangledName ~= "_";
             else this.mangledName ~= name[i .. i + 1];
@@ -2573,28 +2550,12 @@ class Module : Namespace
         if (this.parentModule)
             result = this.parentModule.newModules(existing);
         void add(Module mod) {
-            bool found;
-            for (int i = 0; i < existing.length; i += 1) {
-                if (existing[i].mangledName == mod.mangledName) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                for (int i = 0; i < result.length; i += 1) {
-                    if (result[i].mangledName == mod.mangledName) {
-                        found = true;
-                        break;
-                    }
-                }
-            }
+            bool found = [any a.mangledName == mod.mangledName for a in existing]
+                || [any a.mangledName == mod.mangledName for a in result];
             if (!found) result ~= mod;
         }
         add(this);
-        for (int i = 0; i < imports.length; i += 1) {
-            auto subModules = imports[i].newModules(existing);
-            [add(subModule) for subModule in subModules];
-        }
+        [[add(subModule) for subModule in import_.newModules(existing)] for import_ in imports];
         return result;
     }
 
@@ -2638,12 +2599,7 @@ class Module : Namespace
     Symbol lookupPublic(string name)
     {
         // not counting imports (non-transitive)
-        for (int i = 0; i < this.entries.length; i += 1)
-        {
-            if (this.entries[i].name == name)
-                return this.entries[i].value;
-        }
-        return null;
+        return [first entry.value for entry in this.entries where entry.name == name else null];
     }
 
     override Symbol lookup(string name, Expression frame)
@@ -2841,9 +2797,7 @@ class ClassMethod : Function
 
     Type funcPtrType()
     {
-        auto argTypes = new Type[](this.args.length + 1);
-        argTypes[0] = this.thisType;
-        for (int i = 0; i < this.args.length; i += 1) argTypes[i + 1] = this.args[i].type;
+        auto argTypes = [this.thisType] ~ [arg.type for arg in this.args];
         return new FunctionPointer(this.ret, argTypes);
     }
 }
@@ -2961,11 +2915,7 @@ class Class : Type
     {
         if (!this.superClass)
         {
-            auto members = new ClassMember[](this.members.length + 1);
-            members[0] = new ClassMember("__classinfo", new Pointer(new Void));
-            for (int i = 0; i < this.members.length; i += 1)
-                members[i + 1] = this.members[i];
-            return members;
+            return [new ClassMember("__classinfo", new Pointer(new Void))] ~ this.members;
         }
         return this.superClass.allMembers() ~ this.members;
     }
@@ -3021,12 +2971,8 @@ class Class : Type
             ClassMethod method = this.methods[i];
 
             // TODO match types
-            int index = -1;
-            for (int i = 0; i < combinedMethods.length; i += 1)
-            {
-                if (combinedMethods[i].name == method.name) index = i;
-            }
             bool isCtor = method.name == "__ctor"; // workaround: no final yet, no proper masking yet
+            size_t index = [first i for i, a in combinedMethods where a.name == method.name else -1];
             if (index != -1)
             {
                 if (method.loc.lineNumbers)
@@ -3217,9 +3163,7 @@ class ASTClassDecl : ASTType
                     ASTThisAssignment arg:
                     {
                         ClassMember[] members = target.allMembers();
-                        int member = -1;
-                        for (int i = 0; i < members.length; i += 1)
-                            if (members[i].name == arg.name) { member = i; break; }
+                        size_t member = [first i for i, a in members where a.name == arg.name else -1];
                         // TODO specific loc
                         method.loc.assert2s2(member != -1, "no such member: ", arg.name);
                         methodArgs[k] = Argument(true, arg.name, members[member].type);
@@ -3363,9 +3307,7 @@ class ASTModuleCache
     ASTModuleCacheEntry[] modules;
     this() { }
     ASTModule find(string path) {
-        for (int i = 0; i < this.modules.length; i += 1)
-            if (this.modules[i].path == path) return this.modules[i].mod;
-        return null;
+        return [first a.mod for a in this.modules where a.path == path else null];
     }
     void add(string path, ASTModule mod) {
         this.modules ~= new ASTModuleCacheEntry(path, mod);
@@ -3389,9 +3331,7 @@ class ModuleCache
     }
     Module find(ASTModule mod, Platform platform) {
         string key = this.key(mod, platform);
-        for (int i = 0; i < this.modules.length; i += 1)
-            if (this.modules[i].key == key) return this.modules[i].mod;
-        return null;
+        return [first a.mod for a in this.modules where a.key == key else null];
     }
     void add(ASTModule astModule, Platform platform, Module module_) {
         this.modules ~= new ModuleCacheEntry(this.key(astModule, platform), module_);
@@ -3625,10 +3565,9 @@ ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
 
 Package selectPackage(Package[] packages, string name, Loc loc)
 {
-    for (int i = 0; i < packages.length; i += 1) {
-        if (packages[i].name == name) return packages[i];
-    }
-    loc.assert2s(false, "Undefined package: '" ~ name ~ "'");
+    auto result = [first a for a in packages where a.name == name else null];
+    loc.assert2s(!!result, "Undefined package: '" ~ name ~ "'");
+    return result;
 }
 
 class ASTTypeAlias

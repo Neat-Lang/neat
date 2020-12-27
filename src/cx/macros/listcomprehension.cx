@@ -15,13 +15,23 @@ class ASTListComprehension : ASTSymbol
 
     ASTSymbol expr;
 
+    ASTSymbol default_;
+
+    string iname; // iteration variable
+
     string varname;
 
     ASTSymbol source;
 
+    ASTSymbol where;
+
     Loc loc;
 
-    this(this.iterationMode, this.expr, this.varname, this.source, this.loc) { }
+    this(this.iterationMode, this.expr, this.default_,
+         this.iname, this.varname, this.source, this.where, this.loc)
+    {
+        if (!iname.length) iname = "__i";
+    }
 
     override Symbol compile(Context context) {
         auto compiler = context.compiler;
@@ -29,45 +39,81 @@ class ASTListComprehension : ASTSymbol
         auto sourceType = beExpression2(source.compile(context), loc).type();
         loc.assert2s(!!sourceType.instanceOf(Array), "expected array for source of list comprehension");
 
-        auto astType = compiler.$type typeof(({ auto $varname = $source[0]; $expr; }));
+        auto i = compiler.astIdentifier(iname, loc.reloc);
+        auto astType = compiler.$type typeof(({ auto $varname = $source[0]; size_t $iname = 0; $expr; }));
         auto type = astType.compile(context);
 
         if (type.instanceOf(Void)) {
+            assert(!default_);
+            if (where) {
+                return (compiler.$expr ({
+                    auto __source = $source;
+                    for (size_t $iname = 0; $i < __source.length; $i += 1) {
+                        auto $varname = __source[$i];
+                        if ($where) $expr;
+                    }
+                    0;
+                })).compile(context);
+            }
             return (compiler.$expr ({
                 auto __source = $source;
-                for (auto __i = 0; __i < __source.length; __i += 1) {
-                    auto $varname = __source[__i];
+                for (size_t $iname = 0; $i < __source.length; $i += 1) {
+                    auto $varname = __source[$i];
                     $expr;
                 }
                 0;
             })).compile(context);
         } else if (iterationMode == "any") {
+            assert(!default_);
+            auto test = expr;
+            if (where) test = compiler.$expr $where && $test;
             return (compiler.$expr ({
                 auto __source = $source;
-                auto __result = false;
-                for (auto __i = 0; __i < __source.length; __i += 1) {
-                    auto $varname = __source[__i];
-                    if ($expr) { __result = true; break; }
+                bool __result = false;
+                for (size_t $iname = 0; $i < __source.length; $i += 1) {
+                    auto $varname = __source[$i];
+                    if ($test) { __result = true; break; }
                 }
                 __result;
             })).compile(context);
         } else if (iterationMode == "all") {
+            assert(!default_);
+            auto test = compiler.$expr !$expr;
+            if (where) test = compiler.$expr $where && $test;
             return (compiler.$expr ({
                 auto __source = $source;
-                auto __result = true;
-                for (auto __i = 0; __i < __source.length; __i += 1) {
-                    auto $varname = __source[__i];
-                    if (!$expr) { __result = false; break; }
+                bool __result = true;
+                for (size_t $iname = 0; $i < __source.length; $i += 1) {
+                    auto $varname = __source[$i];
+                    if ($test) { __result = false; break; }
                 }
+                __result;
+            })).compile(context);
+        } else if (iterationMode == "first") {
+            assert(!!default_);
+            auto test = compiler.$expr true;
+            if (where) test = where;
+            return (compiler.$expr ({
+                auto __source = $source;
+                auto __found = false;
+                $astType __result;
+                for (size_t $iname = 0; $i < __source.length; $i += 1) {
+                    auto $varname = __source[$i];
+                    __result = $expr;
+                    if ($test) { __found = true; break; }
+                }
+                // TODO for (...) { } finally { }
+                if (!__found) __result = $default_;
                 __result;
             })).compile(context);
         } else {
             assert(iterationMode == "");
+            if (where) loc.fail("TODO: [a for ... where test]");
             return (compiler.$expr ({
                 auto __source = $source;
                 auto __result = new $astType[](__source.length);
-                for (auto __i = 0; __i < __source.length; __i += 1) {
-                    auto $varname = __source[__i];
+                for (auto $iname = 0; $i < __source.length; $i += 1) {
+                    auto $varname = __source[$i];
                     __result[__i] = $expr;
                 }
                 __result;
@@ -98,27 +144,52 @@ class ListComprehension : Macro
             parser.revert();
             return null;
         }
+        ASTSymbol default_;
         string iterationMode;
         if (acceptIdentifier(parser, "any")) iterationMode = "any";
         else if (acceptIdentifier(parser, "all")) iterationMode = "all";
+        else if (acceptIdentifier(parser, "first")) iterationMode = "first";
         auto expr = compiler.parseExpression(parser, lexicalContext);
-        if (!expr || !parser.accept("for")) {
+        if (!expr) {
             parser.revert();
             return null;
         }
-        auto varname = parseIdentifier(parser);
+        if (!acceptIdentifier(parser, "for")) {
+            parser.revert();
+            return null;
+        }
+        string iname;
+        string varname = parseIdentifier(parser);
         if (!varname.length) {
             parser.fail("variable name expected");
+        }
+        if (parser.accept(",")) {
+            iname = varname;
+            varname = parseIdentifier(parser);
+            if (!varname.length) {
+                parser.fail("variable name expected");
+            }
         }
         parser.expect("in");
         auto source = compiler.parseExpression(parser, lexicalContext);
         if (!source) {
             parser.fail("source expression expected");
         }
-        // TODO where
+        ASTSymbol where;
+        if (acceptIdentifier(parser, "where")) {
+            where = compiler.parseExpression(parser, lexicalContext);
+            if (!where) {
+                parser.fail("where expression expected");
+            }
+        }
+        if (iterationMode == "first") {
+            if (!acceptIdentifier(parser, "else"))
+                parser.fail("'else' expected");
+            default_ = compiler.parseExpression(parser, lexicalContext);
+        }
         parser.expect("]");
         parser.commit();
-        return new ASTListComprehension(iterationMode, expr, varname, source, loc);
+        return new ASTListComprehension(iterationMode, expr, default_, iname, varname, source, where, loc);
     }
 }
 

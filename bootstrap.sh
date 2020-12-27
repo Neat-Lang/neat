@@ -143,5 +143,7 @@ at_revision '30e945916bb72a29f9265b3a91528d6fefa0f0be' 'rebuild cx' 'build/cx'
 at_revision 'e27b76b1eb6b212615f4ae98e41efeabdf6302ef' 'rebuild cx' 'build/cx'
 # quasiquoting
 at_revision 'd660d71eee0e04c6b64c894e9a851fbf3ed385ea' 'rebuild cx' 'build/cx'
+# more quasiquoting
+at_revision '04205ac9766be0ca4e31a128241163799615179e' 'rebuild cx' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

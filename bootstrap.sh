@@ -141,5 +141,7 @@ at_revision '0b77cb1931349283007dd015d8545b8660df881b' 'rebuild cx' 'build/cx'
 at_revision '30e945916bb72a29f9265b3a91528d6fefa0f0be' 'rebuild cx' 'build/cx'
 # CompilerBase.parseType
 at_revision 'e27b76b1eb6b212615f4ae98e41efeabdf6302ef' 'rebuild cx' 'build/cx'
+# quasiquoting
+at_revision 'd660d71eee0e04c6b64c894e9a851fbf3ed385ea' 'rebuild cx' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

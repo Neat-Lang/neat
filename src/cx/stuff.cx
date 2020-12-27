@@ -790,6 +790,10 @@ Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool
             Reference classInfo = new Dereference(new PointerCast(
                 new Pointer(classType.classInfoStruct()), new StructMember(new Dereference(asStructPtr), 0)));
             // TODO dereference-into-symbol so we can '&' it again
+            if (classType.final_) {
+                auto funcPtr = new FunctionReference(vtable[methodOffset]);
+                return new ClassMethodPtr(funcPtr, baseExpr);
+            }
             auto funcPtr = new StructMember(classInfo, methodOffset);
             return new ClassMethodPtr(funcPtr, baseExpr);
         }
@@ -2826,6 +2830,8 @@ class Class : Type
 {
     string name;
 
+    bool final_; // methods may not be overridden
+
     bool abstract_; // may contain abstract methods
 
     Class superClass;
@@ -2848,8 +2854,11 @@ class Class : Type
 
     this(this.decl, this.superClass, this.context)
     {
+        if (superClass && superClass.final_)
+            decl.loc.fail("cannot subclass a final class");
         assert(!!decl);
         this.name = decl.name;
+        this.final_ = decl.final_;
         this.abstract_ = decl.abstract_;
         this.mangledName = context.namespace.mangle() ~ "_class_" ~ this.name;
     }
@@ -3116,6 +3125,8 @@ class ASTClassDecl : ASTType
 
     string superClass;
 
+    bool final_;
+
     bool abstract_;
 
     ASTClassDeclMember[] members;
@@ -3126,7 +3137,8 @@ class ASTClassDecl : ASTType
 
     Loc loc;
 
-    this(this.name, this.superClass, this.abstract_, this.members, this.methods, this.macroState, this.loc) { }
+    this(this.name, this.superClass, this.final_, this.abstract_,
+         this.members, this.methods, this.macroState, this.loc) { }
 
     override Class compile(Context context)
     {
@@ -3221,11 +3233,21 @@ Either(ASTArgument, ASTThisAssignment)[] parseArglist(Parser parser, LexicalCont
 ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
 {
     bool classAbstract = false;
+    bool classFinal = false;
     parser.begin();
     parser.strip();
     auto loc = parser.loc();
-    if (acceptIdentifier(parser, "abstract"))
-        classAbstract = true;
+    while (true) {
+        if (acceptIdentifier(parser, "abstract")) {
+            classAbstract = true;
+            continue;
+        }
+        if (acceptIdentifier(parser, "final")) {
+            classFinal = true;
+            continue;
+        }
+        break;
+    }
     if (!acceptIdentifier(parser, "class"))
     {
         parser.revert();
@@ -3292,7 +3314,9 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
             members ~= ASTClassDeclMember(memberName, retType);
         }
     }
-    return new ASTClassDecl(name, superClass, classAbstract, members, methods, lexicalContext.macroState, loc);
+    return new ASTClassDecl(
+        name, superClass, classFinal, classAbstract,
+        members, methods, lexicalContext.macroState, loc);
 }
 
 class ASTModuleCacheEntry

@@ -147,5 +147,7 @@ at_revision 'd660d71eee0e04c6b64c894e9a851fbf3ed385ea' 'rebuild cx' 'build/cx'
 at_revision '04205ac9766be0ca4e31a128241163799615179e' 'rebuild cx' 'build/cx'
 # [any], [all]
 at_revision 'a2509315bc753abfb3170ecd31351564c92cde66' 'rebuild cx' 'build/cx'
+# class final
+at_revision 'cdda324772cbe2d252f2c50d291d53f2ccb48be7' 'rebuild cx' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

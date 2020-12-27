@@ -306,7 +306,7 @@ ASTType parseType(Parser parser, LexicalContext lexicalContext)
         {
             parser.commit();
 
-            current = new ASTArray(current);
+            current = new ASTArray(current, parser.loc());
             continue;
         }
         parser.revert();
@@ -1176,7 +1176,14 @@ class ASTNewExpression : ASTSymbol
         this.loc.assert2s2(false, "don't know how to allocate ", type.repr());
     }
 
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTNewExpression'"); assert(false); }
+    override ASTSymbol quote(Quoter quoter) {
+        auto quotedArgs = new ASTSymbol[](this.args.length);
+        for (int i = 0; i < this.args.length; i += 1)
+            quotedArgs[i] = this.args[i].quote(quoter);
+        return quoter.compilerCall("astNewExpression", [
+            this.type.quote(quoter),
+            quoter.compiler.astArrayLiteral(quotedArgs, loc.reloc)], loc.reloc);
+    }
 }
 
 ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
@@ -1247,6 +1254,10 @@ class ASTIdentifier : ASTSymbol
 
     override ASTSymbol quote(Quoter quoter) {
         assert(!moduleLevel);
+        // $foo is quoted as 'foo'
+        if (name[0 .. 1] == "$") {
+            return quoter.compiler.astIdentifier(name[1 .. name.length], loc.reloc);
+        }
         return quoter.compilerCall("astIdentifier", [
             quoter.compiler.astStringLiteral(this.name, loc.reloc)
         ], loc.reloc);
@@ -1399,6 +1410,8 @@ ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
     {
         return parseStringLiteral(parser, "\"");
     }
+    auto statementExpr = parseStatementExpr(parser, lexicalContext);
+    if (statementExpr) return statementExpr;
     if (parser.accept("("))
     {
         ASTSymbol result = parseExpression(parser, lexicalContext);
@@ -2126,6 +2139,13 @@ class ASTVarDeclStatement : ASTStatement
             print("cannot quote 'ASTVarDeclStatement' with type");
             assert(false);
         }
+        // auto $foo = 5;
+        // -> compiler.astDeclareVar(foo, compiler.astIntLiteral(5))
+        if (this.name[0 .. 1] == "$") {
+            return quoter.compilerCall("astDeclareVar", [
+                quoter.compiler.astIdentifier(this.name[1 .. this.name.length], this.loc.reloc),
+                this.initial.quote(quoter)], this.loc.reloc);
+        }
         return quoter.compilerCall("astDeclareVar", [
             quoter.compiler.astStringLiteral(this.name, this.loc.reloc),
             this.initial.quote(quoter)], this.loc.reloc);
@@ -2140,7 +2160,7 @@ ASTVarDeclStatement parseVarInitialization(Parser parser, LexicalContext lexical
     if (infer && parser.accept("="))
     {
         initial = parseExpression(parser, lexicalContext);
-        assert(!!initial);
+        if (!initial) parser.fail("variable initializer expected");
     }
     else
     {
@@ -2153,11 +2173,11 @@ ASTVarDeclStatement parseVarInitialization(Parser parser, LexicalContext lexical
         if (infer) {
             parser.expect("=");
             initial = parseExpression(parser, lexicalContext);
-            assert(!!initial);
+            if (!initial) parser.fail("variable initializer expected");
         }
         else if (parser.accept("=")) {
             initial = parseExpression(parser, lexicalContext);
-            assert(!!initial);
+            if (!initial) parser.fail("variable initializer expected");
         }
     }
     parser.commit();
@@ -2307,6 +2327,22 @@ ASTExprStatement parseExprStatement(Parser parser, LexicalContext lexicalContext
     parser.expect(";");
     parser.commit();
     return new ASTExprStatement(value);
+}
+
+// ({ ...; ...; })
+// value of last expression is value of statement expression
+ASTStatementExpression parseStatementExpr(Parser parser, LexicalContext lexicalContext)
+{
+    auto loc = parser.loc();
+    if (!parser.accept("({")) return null;
+    ASTStatement[] statements;
+    while (!parser.accept("})")) {
+        statements ~= parseStatement(parser, lexicalContext);
+    }
+    if (statements.length == 0) parser.fail("expected at least one statement");
+    auto exprStmt = statements[statements.length - 1].instanceOf(ASTExprStatement);
+    if (!exprStmt) parser.fail("last statement in statement expression must be an expression");
+    return new ASTStatementExpression(statements[0 .. statements.length - 1], exprStmt.value, loc.reloc);
 }
 
 class ASTForLoop : ASTStatement
@@ -3216,6 +3252,8 @@ class ASTClassDecl : ASTType
         }
         target.genVtable();
     }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTClassDecl'!"); assert(false); }
 }
 
 Either(ASTArgument, ASTThisAssignment)[] parseArglist(Parser parser, LexicalContext lexicalContext)
@@ -3537,6 +3575,8 @@ class ASTStructDecl : ASTType
         }
         return struct_;
     }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTStructDecl'!"); assert(false); }
 }
 
 ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)

@@ -456,12 +456,8 @@ class DelegateExpr : Expression
         int funcReg = this.funcPtr.emit(output);
         auto voidp = output.platform.voidp();
         auto thisType = this.type().emit(output.platform);
-        int ret = output.fun.alloca(thisType);
-        int targetDataReg = output.fun.fieldOffset(thisType, ret, 1);
-        int targetFuncReg = output.fun.fieldOffset(thisType, ret, 2);
-        output.fun.store(voidp, targetDataReg, thisReg);
-        output.fun.store(this.funcPtr.type().emit(output.platform), targetFuncReg, funcReg);
-        return output.fun.load(thisType, ret);
+        int nullReg = output.fun.bitcast(output.fun.wordLiteral(output.platform, 0), voidp);
+        return output.fun.structLiteral(thisType, [nullReg, thisReg, funcReg]);
     }
 
     override void hash(Hash hash) { hash.adds("DelegateExpr"); this.funcPtr.hash(hash); this.thisPtr.hash(hash); }
@@ -2242,7 +2238,8 @@ class ASTNestedFunctionDeclStatement : ASTStatement
 
         auto namespace = new NestedFunctionDeclaration(context.namespace, fun_);
 
-        module_.add("", fun_);
+        module_.update("__" ~ ptrId(this), fun_);
+
         return StatementCompileResult(
             new NoopStatement,
             context.withNamespace(namespace));
@@ -2529,6 +2526,20 @@ class Module : Namespace
     void add(string name, Symbol symbol)
     {
         this.entries ~= new ModuleEntry(name, symbol);
+    }
+
+    /**
+     * Sometimes we add a symbol twice, because the same module
+     * can get compiled twice. Then we use update() to avoid
+     * double-emitting the same function.
+     * The better solution would be to not rely on Module for
+     * determining which functions to recursively emit.
+     */
+    void update(string name, Symbol symbol)
+    {
+        auto pos = [first i for i, a in entries where a.name == name else -1];
+        if (pos == -1) add(name, symbol);
+        else entries[pos].value = symbol;
     }
 
     void addImport(Module module_)

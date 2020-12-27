@@ -214,3 +214,6 @@ struct String fnv_hex_value(void *state)
     snprintf(ptr, sizeof(FNVState) + 1, "%.*llX", (int) sizeof(FNVState), *(long long int*) state);
     return (struct String) { .length = sizeof(FNVState), .ptr = ptr };
 }
+
+// for debug breaks
+void debug() { }

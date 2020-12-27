@@ -1,0 +1,73 @@
+// TODO: $var escaping
+module cx.macros.quasiquoting;
+
+import cx.base;
+import cx.parser_base;
+
+class QuasiQuoterImpl : Quoter
+{
+    ASTSymbol compilerExpr;
+
+    this(this.compiler, this.compilerExpr) { }
+
+    override ASTSymbol compilerCall(string name, ASTSymbol[] parameters, ReLoc reloc) {
+        return compiler.astCall(compiler.astMember(compilerExpr, name, reloc), parameters ~ quoteReloc(reloc), reloc);
+    }
+
+    override ASTSymbol quoteReloc(ReLoc reloc) {
+        ReLoc nowhere;
+        int ioffset;
+        for (int _ = 0; ioffset < reloc.offset; ioffset += 1) { } // I really hope the optimizer recognizes this.
+        return compiler.astCall(
+            compiler.astIdentifier("ReLoc", nowhere), [
+                compiler.astStringLiteral(reloc.filename, nowhere),
+                compiler.astIntLiteral(ioffset, nowhere),
+            ], nowhere);
+    }
+}
+
+class QuasiQuoting : Macro
+{
+    this() { }
+    override void apply(MacroArgs args) {
+        auto args = args.instanceOf(ParsePropertyArgs);
+        if (args) {
+            args.result = this.parse(args.parser, args.lexicalContext, args.left);
+        }
+    }
+
+    ASTSymbol parse(Parser parser, LexicalContext lexicalContext, ASTSymbol compilerExpr)
+    {
+        auto compiler = lexicalContext.compiler;
+
+        auto quoter = new QuasiQuoterImpl(compiler, compilerExpr);
+        {
+            parser.begin();
+            if (parser.accept(".") && parser.accept("$stmt")) {
+                parser.commit();
+                auto stmt = compiler.parseStatement(parser, lexicalContext);
+                parser.assert_(!!stmt, "no statement found");
+                return stmt.quote(quoter);
+            }
+            parser.revert();
+        }
+        {
+            parser.begin();
+            if (parser.accept(".") && parser.accept("$expr")) {
+                parser.commit();
+                auto expr = compiler.parseExpression(parser, lexicalContext);
+                parser.assert_(!!expr, "no statement found");
+                return expr.quote(quoter);
+            }
+            parser.revert();
+        }
+        return null;
+    }
+}
+
+void addQuasiQuotingMacro(MacroState macroState)
+{
+    macroState.addMacro(new QuasiQuoting);
+}
+
+macro(addQuasiQuotingMacro);

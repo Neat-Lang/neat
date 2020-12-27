@@ -16,10 +16,6 @@ import cx.struct_;
 import cx.types;
 import helpers;
 
-extern(C) bool cxruntime_file_exists(string file);
-extern(C) string cxruntime_file_read(string file);
-extern(C) void cxruntime_file_write(string file, string content);
-
 struct ASTArgument
 {
     string name;
@@ -639,6 +635,16 @@ class ASTCall : ASTSymbol
         }
         return new WrapExpression(null, call(target, args, this.loc), post);
     }
+
+    override ASTSymbol quote(Quoter quoter) {
+        auto args = new ASTSymbol[](this.args.length);
+        for (int i = 0; i < this.args.length; i += 1)
+            args[i] = this.args[i].quote(quoter);
+        return quoter.compilerCall("astCall", [
+            this.target.quote(quoter),
+            quoter.compiler.astArrayLiteral(args, this.loc.reloc)
+        ], this.loc.reloc);
+    }
 }
 
 ASTSymbol[] parseSymbolList(Parser parser, LexicalContext lexicalContext)
@@ -694,6 +700,10 @@ class ASTIndexAccess : ASTSymbol
         assert(index.type().same(wordType));
         return new Dereference(new PointerOffset(base, index));
     }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compilerCall("astIndex", [base.quote(quoter), index.quote(quoter)], loc.reloc);
+    }
 }
 
 class ASTArraySlice : ASTSymbol
@@ -718,6 +728,8 @@ class ASTArraySlice : ASTSymbol
             expectImplicitConvertTo(beExpression(this.upper.compile(context)), wordType, this.loc),
             this.loc);
     }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTArraySlice'"); assert(false); }
 }
 
 ASTSymbol parseIndex(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
@@ -833,6 +845,12 @@ class ASTMember : ASTMemberBase
     {
         return accessMember(context.platform, this.base.compile(context), this.member, this.loc, false);
     }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compilerCall("astMember", [
+            this.base.quote(quoter),
+            quoter.compiler.astStringLiteral(this.member, loc.reloc)], loc.reloc);
+    }
 }
 
 ASTMember parseMember(Parser parser, ASTSymbol base)
@@ -869,6 +887,8 @@ class ASTInstanceOf : ASTSymbol
         Expression name = new StringLiteral(target.name);
         return new PointerCast(target, call(instanceOf, [name], this.loc));
     }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTInstanceOf'"); assert(false); }
 }
 
 ASTSymbol parseInstanceOf(Parser parser, LexicalContext lexicalContext, ASTSymbol left)
@@ -942,6 +962,8 @@ class ASTDereference : ASTSymbol
     {
         return new Dereference(beExpression(this.base.compile(context)));
     }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTDereference'"); assert(false); }
 }
 
 class Dereference : Reference
@@ -1034,6 +1056,8 @@ class ASTReference : ASTSymbol
 
         return new ReferenceExpression(baseExpression.instanceOf(Reference));
     }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTReference'"); assert(false); }
 }
 
 class SizeOf : Expression
@@ -1151,6 +1175,8 @@ class ASTNewExpression : ASTSymbol
         }
         this.loc.assert2s2(false, "don't know how to allocate ", type.repr());
     }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTNewExpression'"); assert(false); }
 }
 
 ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
@@ -1218,17 +1244,32 @@ class ASTIdentifier : ASTSymbol
         this.loc.assert2s2(!!symbol, this.name, " not found");
         return symbol;
     }
+
+    override ASTSymbol quote(Quoter quoter) {
+        assert(!moduleLevel);
+        return quoter.compilerCall("astIdentifier", [
+            quoter.compiler.astStringLiteral(this.name, loc.reloc)
+        ], loc.reloc);
+    }
 }
 
 class ASTIntLiteral : ASTSymbol
 {
     int value;
 
-    this(this.value) { }
+    Loc loc;
+
+    this(this.value, this.loc) { }
 
     override Symbol compile(Context context)
     {
         return new IntLiteral(this.value);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compilerCall("astIntLiteral", [
+            quoter.compiler.astIntLiteral(this.value, loc.reloc)
+        ], loc.reloc);
     }
 }
 
@@ -1242,6 +1283,8 @@ class ASTFloatLiteral : ASTSymbol
     {
         return new FloatLiteral(this.value);
     }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTFloatLiteral'"); assert(false); }
 }
 
 class ASTStringLiteral : ASTSymbol
@@ -1254,6 +1297,8 @@ class ASTStringLiteral : ASTSymbol
     {
         return new StringLiteral(this.text);
     }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTStringLiteral'"); assert(false); }
 }
 
 string replaceEscapes(string text)
@@ -1324,20 +1369,21 @@ ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
         lexicalContext.macroState.applyMacro(args);
         if (args.symbol) return args.symbol;
     }
+    auto loc = parser.loc();
     parser.begin();
     if (parser.accept(".")) {
         // .name is module level
         string name = parseIdentifier(parser);
         if (name.length) {
             parser.commit();
-            return new ASTIdentifier(name, true, parser.loc());
+            return new ASTIdentifier(name, true, loc);
         }
     }
     parser.revert();
     string name = parseIdentifier(parser);
     if (name.length)
     {
-        return new ASTIdentifier(name, false, parser.loc());
+        return new ASTIdentifier(name, false, loc);
     }
     float f;
     if (parseFloat(parser, &f))
@@ -1347,7 +1393,7 @@ ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
     int i;
     if (parseNumber(parser, &i))
     {
-        return new ASTIntLiteral(i);
+        return new ASTIntLiteral(i, loc);
     }
     if (parser.accept("\""))
     {
@@ -1496,6 +1542,8 @@ class ASTNegation : ASTSymbol
 
         return new BinaryOp("==", isTrue, new IntLiteral(0), this.loc);
     }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTNegation'"); assert(false); }
 }
 
 ASTSymbol parseComparison(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
@@ -1598,12 +1646,18 @@ class ASTReturnStatement : ASTStatement
 
         return StatementCompileResult(sequence(escapeValueStmt, returnStmt), context);
     }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compilerCall("astReturn", [value.quote(quoter)], loc.reloc);
+    }
 }
 
 class ASTVoidExpression : ASTSymbol
 {
     this() { }
     override Expression compile(Context context) { return new VoidExpression; }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTVoidExpression'"); assert(false); }
 }
 
 class VoidExpression : Expression
@@ -1850,6 +1904,8 @@ class ASTIfStatement : ASTStatement
             new IfStatement(truthy(beExpression(test), this.loc), then, else_),
             context);
     }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTIfStatement'"); assert(false); }
 }
 
 ASTIfStatement parseIf(Parser parser, LexicalContext lexicalContext)
@@ -1898,7 +1954,9 @@ class ASTScopeStatement : ASTStatement
 {
     ASTStatement[] statements;
 
-    this(this.statements) { }
+    Loc loc;
+
+    this(this.statements, this.loc) { }
 
     override StatementCompileResult compile(Context context)
     {
@@ -1915,6 +1973,13 @@ class ASTScopeStatement : ASTStatement
             unwindScope(subContext.namespace, context.namespace, new SequenceStatement(statements)),
             context); // scope ends here
     }
+
+    override ASTSymbol quote(Quoter quoter) {
+        auto statements = new ASTSymbol[](statements.length);
+        for (int i = 0; i < this.statements.length; i += 1) statements[i] = this.statements[i].quote(quoter);
+        return quoter.compilerCall(
+            "astScope", [quoter.compiler.astArrayLiteral(statements, this.loc.reloc)], this.loc.reloc);
+    }
 }
 
 // just a bunch of statements after each other
@@ -1923,7 +1988,9 @@ class ASTSequenceStatement : ASTStatement
 {
     ASTStatement[] statements;
 
-    this(this.statements) { }
+    Loc loc;
+
+    this(this.statements, this.loc) { }
 
     override StatementCompileResult compile(Context context)
     {
@@ -1939,10 +2006,18 @@ class ASTSequenceStatement : ASTStatement
         // not a scope!
         return StatementCompileResult(new SequenceStatement(statements), subContext);
     }
+
+    override ASTSymbol quote(Quoter quoter) {
+        auto statements = new ASTSymbol[](statements.length);
+        for (int i = 0; i < this.statements.length; i += 1) statements[i] = this.statements[i].quote(quoter);
+        return quoter.compilerCall(
+            "astSequence", [quoter.compiler.astArrayLiteral(statements, this.loc.reloc)], this.loc.reloc);
+    }
 }
 
 ASTScopeStatement parseScope(Parser parser, LexicalContext lexicalContext)
 {
+    auto loc = parser.loc();
     if (!parser.accept("{"))
     {
         return null;
@@ -1954,7 +2029,7 @@ ASTScopeStatement parseScope(Parser parser, LexicalContext lexicalContext)
 
         statements ~= stmt;
     }
-    return new ASTScopeStatement(statements);
+    return new ASTScopeStatement(statements, loc);
 }
 
 ASTAssignStatement parseAssignment(Parser parser, LexicalContext lexicalContext)
@@ -2045,6 +2120,16 @@ class ASTVarDeclStatement : ASTStatement
                 context.withNamespace(decl));
         }
     }
+
+    override ASTSymbol quote(Quoter quoter) {
+        if (!this.infer) {
+            print("cannot quote 'ASTVarDeclStatement' with type");
+            assert(false);
+        }
+        return quoter.compilerCall("astDeclareVar", [
+            quoter.compiler.astStringLiteral(this.name, this.loc.reloc),
+            this.initial.quote(quoter)], this.loc.reloc);
+    }
 }
 
 ASTVarDeclStatement parseVarInitialization(Parser parser, LexicalContext lexicalContext, bool infer, ASTType type)
@@ -2109,6 +2194,7 @@ ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
     parser.begin();
     bool infer = false;
     ASTType type;
+    auto loc = parser.loc();
     if (acceptIdentifier(parser, "auto")) {
         infer = true;
     } else {
@@ -2132,7 +2218,7 @@ ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
         if (parser.accept(";")) break;
     }
     parser.commit();
-    return new ASTSequenceStatement(decls);
+    return new ASTSequenceStatement(decls, loc);
 }
 
 class ASTNestedFunctionDeclStatement : ASTStatement
@@ -2158,6 +2244,8 @@ class ASTNestedFunctionDeclStatement : ASTStatement
             new NoopStatement,
             context.withNamespace(namespace));
     }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTNestedFunctionDeclStatement'"); assert(false); }
 }
 
 ASTNestedFunctionDeclStatement parseNestedFunctionDecl(Parser parser, LexicalContext lexicalContext)
@@ -2189,6 +2277,8 @@ class ASTWhile : ASTStatement
             new Loop(label, null, condExpr, bodyStmt, null),
             context);
     }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTWhileStatement'"); assert(false); }
 }
 
 ASTWhile parseWhile(Parser parser, LexicalContext lexicalContext)
@@ -2229,7 +2319,9 @@ class ASTForLoop : ASTStatement
 
     ASTStatement body_;
 
-    this(this.declareLoopVar, this.condition, this.step, this.body_) { }
+    Loc loc;
+
+    this(this.declareLoopVar, this.condition, this.step, this.body_, this.loc) { }
 
     override StatementCompileResult compile(Context context)
     {
@@ -2247,10 +2339,19 @@ class ASTForLoop : ASTStatement
             new Loop(label, declPair.statement, condition, bodyPair.statement, stepPair.statement),
             context);
     }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compilerCall("astForLoop", [
+            declareLoopVar.quote(quoter),
+            condition.quote(quoter),
+            step.quote(quoter),
+            body_.quote(quoter)], loc.reloc);
+    }
 }
 
 ASTForLoop parseFor(Parser parser, LexicalContext lexicalContext)
 {
+    auto loc = parser.loc();
     if (!acceptIdentifier(parser, "for"))
     {
         return null;
@@ -2266,7 +2367,7 @@ ASTForLoop parseFor(Parser parser, LexicalContext lexicalContext)
     parser.expect(")");
     ASTStatement body_ = parseStatement(parser, lexicalContext);
 
-    return new ASTForLoop(varDecl, condition, step, body_);
+    return new ASTForLoop(varDecl, condition, step, body_, loc);
 }
 
 ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)

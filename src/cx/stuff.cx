@@ -2,6 +2,7 @@
 module cx.stuff;
 
 macro import cx.macros.either;
+macro import cx.macros.listcomprehension;
 
 import backend.base;
 import cx.array;
@@ -150,9 +151,7 @@ class DefineClass : FinishedSymbol
     override void hash(Hash hash)
     {
         // only the actual vtable symbol
-        for (int i = 0; i < class_.vtable_.length; i += 1) {
-            hash.adds(class_.vtable_[i].mangle());
-        }
+        [hash.adds(method.mangle()) for method in class_.vtable_];
     }
 }
 
@@ -188,11 +187,7 @@ class CompiledFunction : FinishedSymbol
 
         generator.frameReg = generator.fun.alloca(this.stackframe.structType().emit(generator.platform));
 
-        for (int i = 0; i < this.argAssignments.length; i += 1)
-        {
-            this.argAssignments[i].emit(generator);
-        }
-
+        [assignment.emit(generator) for assignment in this.argAssignments];
         this.compiledStatement.emit(generator);
 
         generator.fun.ret(generator.fun.voidLiteral());
@@ -208,10 +203,7 @@ class CompiledFunction : FinishedSymbol
         if (fun.thisType) fun.thisType.hash(hash);
         else hash.adds("null");
         hash.addl(fun.args.length);
-        for (int i = 0; i < fun.args.length; i += 1) {
-            hash.adds(fun.args[i].name);
-            fun.args[i].type.hash(hash);
-        }
+        [({ hash.adds(arg.name); arg.type.hash(hash); }) for arg in fun.args];
         this.compiledStatement.hash(hash);
     }
 }
@@ -236,13 +228,8 @@ class ASTFunction
 
     FunctionDeclaration compile(Context context)
     {
-        auto arguments = new Argument[](this.args.length);
-        for (int i = 0; i < this.args.length; i += 1)
-        {
-            ASTArgument arg = this.args[i];
-            Type type = arg.type.compile(context);
-            arguments[i] = Argument(false, arg.name, type);
-        }
+        auto arguments = [
+            Argument(false, arg.name, arg.type.compile(context)) for arg in this.args];
 
         if (this.isDeclaration)
         {
@@ -394,8 +381,7 @@ class FuncPtrCall : Expression
         hash.adds("FuncPtrCall");
         funcPtr.hash(hash);
         hash.addl(args.length);
-        for (int i = 0; i < args.length; i += 1)
-            args[i].hash(hash);
+        [arg.hash(hash) for arg in args];
     }
 }
 
@@ -445,8 +431,7 @@ class StructConstructor : Expression
         hash.adds("StructConstructor");
         struct_.hash(hash);
         hash.addl(args.length);
-        for (int i = 0; i < args.length; i += 1)
-            args[i].hash(hash);
+        [arg.hash(hash) for arg in args];
     }
 }
 
@@ -545,7 +530,7 @@ Expression call(Symbol target, Expression[] args, Loc loc)
     {
         Expression[] combinedArgs;
         combinedArgs ~= method.thisPtr;
-        for (int i = 0; i < args.length; i += 1) combinedArgs ~= args[i];
+        combinedArgs ~= args;
         return new FuncPtrCall(method.funcPtr, combinedArgs, loc);
     }
     Expression expr = target.instanceOf(Expression);
@@ -560,7 +545,7 @@ Expression call(Symbol target, Expression[] args, Loc loc)
         auto thisPtr = new DelegateDataPtr(expr);
         Expression[] combinedArgs;
         combinedArgs ~= thisPtr;
-        for (int i = 0; i < args.length; i += 1) combinedArgs ~= args[i];
+        combinedArgs ~= args;
         return new FuncPtrCall(funcPtr, combinedArgs, loc);
     }
     Struct struct_ = target.instanceOf(Struct);
@@ -637,9 +622,7 @@ class ASTCall : ASTSymbol
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        auto args = new ASTSymbol[](this.args.length);
-        for (int i = 0; i < this.args.length; i += 1)
-            args[i] = this.args[i].quote(quoter);
+        auto args = [arg.quote(quoter) for arg in this.args];
         return quoter.compilerCall("astCall", [
             this.target.quote(quoter),
             quoter.compiler.astArrayLiteral(args, this.loc.reloc)
@@ -690,11 +673,15 @@ class ASTIndexAccess : ASTSymbol
         Expression index = beExpression(this.index.compile(context));
 
         index = expectImplicitConvertTo(index, wordType, this.loc);
-        Array array_ = base.type().instanceOf(Array);
-        if (array_)
-        {
+        auto type = base.type();
+        Array array_ = type.instanceOf(Array);
+        if (array_) {
             // TODO bounds check
             base = new ArrayPointer(array_.elementType, base);
+        } else {
+            if (!type.instanceOf(Pointer)) {
+                this.loc.fail("index access requires pointer or array");
+            }
         }
 
         assert(index.type().same(wordType));
@@ -1135,8 +1122,7 @@ class CallCtorExpression : Expression
         hash.adds("CallCtorExpression");
         classptr.hash(hash);
         hash.addl(args.length);
-        for (int i = 0; i < args.length; i += 1)
-            args[i].hash(hash);
+        [arg.hash(hash) for arg in args];
     }
 }
 
@@ -1158,9 +1144,7 @@ class ASTNewExpression : ASTSymbol
         if (classType) {
             Expression classptr = new NewClassExpression(classType);
 
-            auto argExpressions = new Expression[](this.args.length);
-            for (int i = 0; i < this.args.length; i += 1)
-                argExpressions[i] = beExpression2(this.args[i].compile(context), this.loc);
+            auto argExpressions = [beExpression2(arg.compile(context), this.loc) for arg in this.args];
             this.loc.assert2s2(!!classType, "expected new <class>, not %s", type.repr());
             return new CallCtorExpression(classptr, argExpressions, this.loc);
         }
@@ -1177,9 +1161,7 @@ class ASTNewExpression : ASTSymbol
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        auto quotedArgs = new ASTSymbol[](this.args.length);
-        for (int i = 0; i < this.args.length; i += 1)
-            quotedArgs[i] = this.args[i].quote(quoter);
+        auto quotedArgs = [arg.quote(quoter) for arg in this.args];
         return quoter.compilerCall("astNewExpression", [
             this.type.quote(quoter),
             quoter.compiler.astArrayLiteral(quotedArgs, loc.reloc)], loc.reloc);
@@ -2002,8 +1984,7 @@ class ASTScopeStatement : ASTStatement
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        auto statements = new ASTSymbol[](statements.length);
-        for (int i = 0; i < this.statements.length; i += 1) statements[i] = this.statements[i].quote(quoter);
+        auto statements = [statement.quote(quoter) for statement in this.statements];
         return quoter.compilerCall(
             "astScope", [quoter.compiler.astArrayLiteral(statements, this.loc.reloc)], this.loc.reloc);
     }
@@ -2035,8 +2016,7 @@ class ASTSequenceStatement : ASTStatement
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        auto statements = new ASTSymbol[](statements.length);
-        for (int i = 0; i < this.statements.length; i += 1) statements[i] = this.statements[i].quote(quoter);
+        auto statements = [arg.quote(quoter) for arg in this.statements];
         return quoter.compilerCall(
             "astSequence", [quoter.compiler.astArrayLiteral(statements, this.loc.reloc)], this.loc.reloc);
     }
@@ -2604,9 +2584,7 @@ class Module : Namespace
         add(this);
         for (int i = 0; i < imports.length; i += 1) {
             auto subModules = imports[i].newModules(existing);
-            for (int k = 0; k < subModules.length; k += 1) {
-                add(subModules[k]);
-            }
+            [add(subModule) for subModule in subModules];
         }
         return result;
     }
@@ -2626,15 +2604,13 @@ class Module : Namespace
             if (class_) {
                 symbols ~= new DefineClass(class_);
                 // class_.define(generator);
-                for (int k = 0; k < class_.methods.length; k += 1) {
-                    symbols ~= class_.methods[k].compile(compiler, platform);
-                }
+                symbols ~= [method.compile(compiler, platform) for method in class_.methods];
             }
             Struct struct_ = entry.value.instanceOf(Struct);
             if (struct_) {
-                for (int i = 0; i < struct_.methods.length; i += 1) {
-                    symbols ~= struct_.methods[i].instanceOf(StructMethod).compile(compiler, platform);
-                }
+                symbols ~= [
+                    method.instanceOf(StructMethod).compile(compiler, platform)
+                    for method in struct_.methods];
             }
         }
         return symbols;
@@ -2647,8 +2623,7 @@ class Module : Namespace
 
         assert(!generator.fun);
 
-        for (int i = 0; i < symbols.length; i += 1)
-            symbols[i].emit(generator);
+        [symbol.emit(generator) for symbol in symbols];
     }
 
     Symbol lookupPublic(string name)
@@ -2708,9 +2683,7 @@ class ASTExtern
 
     FunctionDeclaration compile(Context context)
     {
-        auto args = new Argument[](this.args.length);
-        for (int i = 0; i < this.args.length; i += 1)
-            args[i] = Argument(false, this.args[i].name, this.args[i].type.compile(context));
+        auto args = [Argument(false, arg.name, arg.type.compile(context)) for arg in this.args];
 
         return new FunctionDeclaration(this.name, this.ret.compile(context), args);
     }
@@ -2985,19 +2958,16 @@ class Class : Type
                 members[i + 1] = this.members[i];
             return members;
         }
-        ClassMember[] members = this.superClass.allMembers();
-        for (int i = 0; i < this.members.length; i += 1)
-            members ~= this.members[i];
-        return members;
+        return this.superClass.allMembers() ~ this.members;
     }
 
     Struct dataStruct()
     {
         ClassMember[] allMembers = this.allMembers();
 
-        auto structMembers = new StructMemberDeclaration[](allMembers.length);
-        for (int i = 0; i < allMembers.length; i += 1)
-            structMembers[i] = new StructMemberDeclaration(allMembers[i].name, allMembers[i].type);
+        auto structMembers = [
+            new StructMemberDeclaration(member.name, member.type)
+            for member in allMembers];
 
         return new Struct("", structMembers, this.decl.loc);
     }
@@ -3011,9 +2981,9 @@ class Class : Type
             return classInfoStructCache;
         }
 
-        auto vtableMembers = new StructMemberDeclaration[](vtable_.length);
-        for (int i = 0; i < vtable_.length; i += 1)
-            vtableMembers[i] = new StructMemberDeclaration(vtable_[i].name, vtable_[i].funcPtrType());
+        auto vtableMembers = [
+            new StructMemberDeclaration(method.name, method.funcPtrType())
+            for method in vtable_];
 
         classInfoStructCache = new Struct("", vtableMembers, this.decl.loc);
         return classInfoStructCache;
@@ -3021,10 +2991,7 @@ class Class : Type
 
     ClassMethod[] vtable()
     {
-        auto copy = new ClassMethod[](this.vtable_.length);
-        for (int i = 0; i < this.vtable_.length; i += 1)
-            copy[i] = this.vtable_[i];
-        return copy;
+        return [a for a in this.vtable_];
     }
 
     void genVtable()
@@ -3090,12 +3057,10 @@ class Class : Type
 
     void define(Generator generator)
     {
-        auto methods = new string[](vtable_.length);
-        for (int i = 0; i < vtable_.length; i += 1)
-        {
-            vtable_[i].declare(generator);
-            methods[i] = vtable_[i].mangle();
-        }
+        auto methods = [
+            ({ method.declare(generator); method.mangle(); })
+            for method in vtable_];
+
         generator.mod.defineSymbolList(vtableSymbol, methods);
     }
 
@@ -3226,9 +3191,9 @@ class ASTClassDecl : ASTType
         auto classScope = new ClassScope(context.namespace, target);
         Context classContext = context.withNamespace(classScope);
 
-        target.members = new ClassMember[](this.members.length);
-        for (int i = 0; i < this.members.length; i += 1)
-            target.members[i] = new ClassMember(this.members[i].name, this.members[i].type.compile(classContext));
+        target.members = [
+            new ClassMember(member.name, member.type.compile(classContext))
+            for member in this.members];
 
         target.methods = new ClassMethod[](this.methods.length);
         for (int i = 0; i < this.methods.length; i += 1)
@@ -3555,10 +3520,9 @@ class ASTStructDecl : ASTType
 
     override Struct compile(Context context)
     {
-        auto members = new StructMemberDeclaration[](this.members.length);
-
-        for (int i = 0; i < this.members.length; i += 1)
-            members[i] = new StructMemberDeclaration(this.members[i].name, this.members[i].type.compile(context));
+        auto members = [
+            new StructMemberDeclaration(member.name, member.type.compile(context))
+            for member in this.members];
 
         auto struct_ = new Struct(this.name, members, this.loc);
         auto structScope = new StructScope(context.namespace, struct_); // make S visibile in struct S {}

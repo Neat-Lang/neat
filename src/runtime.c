@@ -77,7 +77,7 @@ struct String cxruntime_ptr_id(void* ptr) {
     snprintf(res, len + 1, "%p", ptr);
     return (struct String) { len, res };
 }
-
+int cxruntime_toInt(float f) { return (int) f; }
 
 int cxruntime_linenr(struct String haystack, struct String needle, int* linep, int* columnp) {
     if (needle.ptr < haystack.ptr && needle.ptr >= haystack.ptr + haystack.length)

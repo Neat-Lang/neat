@@ -215,5 +215,77 @@ struct String fnv_hex_value(void *state)
     return (struct String) { .length = sizeof(FNVState), .ptr = ptr };
 }
 
+//
+// polynomial hash
+//
+
+#define PRIME 1099511628211
+
+typedef struct {
+    long long add, mult;
+} PolyHashState;
+
+PolyHashState *poly_init()
+{
+    // hopefully copied from fnv
+    PolyHashState *result = malloc(sizeof(PolyHashState));
+    *result = (PolyHashState) {
+        .add = 14695981039346656037UL, // offset basis
+        .mult = 1,
+    };
+    return result;
+}
+
+void poly_apply_hash(PolyHashState *left, PolyHashState *right)
+{
+    left->add = left->add * right->mult + right->add;
+    left->mult *= right->mult;
+}
+
+PolyHashState poly_hash_string(struct String s)
+{
+    // in a polynomial hash, we apply a string by computing h * p^(s.length) + ((s[0]*p + s[1])*p + s[2])*p...
+    // iow, h * p^(s.length) + s[0] * p^(s.length - 1) + s[1] * p^(s.length - 2) + ...
+    // p^(s.length) can be efficiently determined by counting along
+    PolyHashState result = (PolyHashState) { .add = 0, .mult = 1 };
+    // INVERSE index cause we're counting up factors
+    for (size_t i = 0; i < s.length; i++) {
+        result.add += s.ptr[s.length - 1 - i] * result.mult;
+        result.mult *= PRIME;
+    }
+    return result;
+}
+
+void poly_add_string(PolyHashState *state, struct String s)
+{
+    PolyHashState right = poly_hash_string(s);
+    poly_apply_hash(state, &right);
+}
+
+PolyHashState poly_hash_long(long long int value)
+{
+    PolyHashState result = (PolyHashState) { .add = 0, .mult = 1 };
+    for (size_t i = 0; i < sizeof(long long int); i++) {
+        result.add += ((value >> (8 * i)) & 0xff) * result.mult;
+        result.mult *= PRIME;
+    }
+    return result;
+}
+
+void poly_add_long(void *state, long long int value)
+{
+    PolyHashState right = poly_hash_long(value);
+    poly_apply_hash(state, &right);
+}
+
+#undef PRIME
+
+struct String poly_hex_value(PolyHashState *state)
+{
+    char *ptr = malloc(sizeof(state->add) + 1);
+    snprintf(ptr, sizeof(state->add) + 1, "%.*llX", (int) sizeof(state->add), state->add);
+    return (struct String) { .length = sizeof(state->add), .ptr = ptr };
+}
+
 // for debug breaks
 void debug() { }

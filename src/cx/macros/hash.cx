@@ -1,0 +1,59 @@
+module cx.macros.hash;
+
+macro import cx.macros.quasiquoting;
+
+import package(compiler).cx.base;
+import package(compiler).cx.parser_base;
+import package(compiler).helpers;
+import cx.hash;
+
+/**
+ * This is almost certainly too clever by half.
+ */
+class StringHashMacro : Macro
+{
+    this() { }
+
+    override void apply(MacroArgs args) {
+        auto callMacroArgs = args.instanceOf(CallMacroArgs);
+        if (!callMacroArgs) return;
+        auto context = callMacroArgs.context;
+        // auto isHashMethod = callMacroArgs.target.compile(context).same(
+        //   (compiler.$expr (new Hash).adds).compile(context));
+        auto classMethodPtr = callMacroArgs.target.compile(context).instanceOf(ClassMethodPtr);
+        if (!classMethodPtr) return;
+        auto type = classMethodPtr.thisPtr.type();
+        // TODO look up Hash with fqn path
+        auto isHash = type.same((context.compiler.$type Hash).compile(context));
+        if (!isHash) return;
+        auto method = classMethodPtr.funcPtr.instanceOf(FunctionReferenceBase);
+        if (!method) return;
+        auto fun = method.getFunction();
+        if (fun.name != "adds") return;
+        // it's a Hash.adds() call.
+        auto callArgs = callMacroArgs.args;
+        assert(callArgs.length == 1);
+        auto str = callArgs[0].compile(context).instanceOf(StringLiteralBase);
+        if (!str) return; // variable call
+        auto astMember = callMacroArgs.target.instanceOf(ASTMemberBase);
+        if (!astMember) return;
+        callMacroArgs.transformed
+            = optimizeStringCall(astMember.base, str.text, context, callMacroArgs.loc);
+    }
+
+    Expression optimizeStringCall(ASTSymbol base, string str, Context context, Loc loc) {
+        auto state = poly_hash_string(str);
+        auto add = context.compiler.astLongLiteral(state.add, loc.reloc);
+        auto mult = context.compiler.astLongLiteral(state.mult, loc.reloc);
+
+        return (context.compiler.$expr $base.apply($add, $mult)).compile(context).instanceOf(Expression);
+    }
+}
+
+void addStringHashMacro(MacroState macroState)
+{
+    macroState.addMacro(new StringHashMacro);
+}
+
+macro(addStringHashMacro);
+

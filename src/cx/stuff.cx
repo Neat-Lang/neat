@@ -506,25 +506,50 @@ class DelegateFuncPtr : Expression
 
 Expression call(Symbol target, Expression[] args, Loc loc)
 {
-    if (target.instanceOf(FunctionDeclaration))
+    auto fundecl = target.instanceOf(FunctionDeclaration);
+    if (fundecl)
     {
-        return new Call(target.instanceOf(FunctionDeclaration), args, loc);
+        args = [expectImplicitConvertTo(arg, fundecl.args[i].type, loc) for i, arg in args];
+        return new Call(fundecl, args, loc);
     }
     ClassMethodPtr method = target.instanceOf(ClassMethodPtr);
     if (method)
     {
+        auto base = method.funcPtr.type().instanceOf(FunctionReferenceBase);
+        if (base) {
+            auto fundecl = base.getFunction();
+            assert(args.length == fundecl.args.length);
+            args = [expectImplicitConvertTo(arg, fundecl.args[i].type, loc) for i, arg in args];
+        } else {
+            auto funcptr = method.funcPtr.type().instanceOf(FunctionPointer);
+            if (funcptr) {
+                // this ptr
+                assert(args.length == funcptr.args.length - 1);
+                args = [expectImplicitConvertTo(arg, funcptr.args[i+1], loc) for i, arg in args];
+            } else {
+                loc.fail("function reference or funcptr expected? but is '" ~ method.funcPtr.type().repr() ~ "'");
+            }
+        }
         Expression[] combinedArgs;
         combinedArgs ~= method.thisPtr;
         combinedArgs ~= args;
         return new FuncPtrCall(method.funcPtr, combinedArgs, loc);
     }
     Expression expr = target.instanceOf(Expression);
-    if (expr && expr.type().instanceOf(FunctionPointer))
+    // TODO
+    // auto funcptr = expr?.type().instanceOf(FunctionPointer);
+    FunctionPointer funcptr;
+    if (expr) funcptr = expr.type().instanceOf(FunctionPointer);
+    if (expr && funcptr)
     {
+        args = [expectImplicitConvertTo(arg, funcptr.args[i], loc) for i, arg in args];
         return new FuncPtrCall(expr, args, loc);
     }
-    if (expr && expr.type().instanceOf(NestedFunctionPointer))
+    NestedFunctionPointer nestedfuncptr;
+    if (expr) nestedfuncptr = expr.type().instanceOf(NestedFunctionPointer);
+    if (expr && nestedfuncptr)
     {
+        args = [expectImplicitConvertTo(arg, nestedfuncptr.args[i], loc) for i, arg in args];
         // TODO cache delegate
         auto funcPtr = new DelegateFuncPtr(expr);
         auto thisPtr = new DelegateDataPtr(expr);

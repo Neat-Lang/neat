@@ -271,7 +271,11 @@ class ASTSizeT : ASTType
 
 class CompilerImpl : CompilerBase
 {
-    this() { this.linenr = new LineNumberRegistry; }
+    ASTModule[] defaultImports;
+
+    this(this.defaultImports) { this.linenr = new LineNumberRegistry; }
+
+    Module delegate(ASTModule) compile;
 
     // parser
     override ASTSymbol parseExpression(Parser parser, LexicalContext lexicalContext)
@@ -309,6 +313,16 @@ class CompilerImpl : CompilerBase
         return new ASTMember(base, member, Loc(linenr, reloc));
     }
 
+    override ASTSymbol astReference(ASTSymbol value, ReLoc reloc)
+    {
+        return new ASTReference(value, Loc(linenr, reloc));
+    }
+
+    override ASTSymbol astDereference(ASTSymbol value, ReLoc reloc)
+    {
+        return new ASTDereference(value, Loc(linenr, reloc));
+    }
+
     override ASTSymbol astIntLiteral(int value, ReLoc reloc)
     {
         return new ASTIntLiteral(value, Loc(linenr, reloc));
@@ -328,6 +342,11 @@ class CompilerImpl : CompilerBase
     {
         auto elements = [ASTArrayLiteralElement(value, Loc(linenr, reloc)) for value in values];
         return new ASTArrayLiteral(elements);
+    }
+
+    override ASTSymbol astVoidLiteral(ReLoc reloc)
+    {
+        return new ASTVoidExpression(Loc(linenr, reloc));
     }
 
     override ASTSymbol astIdentifier(string name, ReLoc reloc)
@@ -353,6 +372,11 @@ class CompilerImpl : CompilerBase
     override ASTSymbol astCast(ASTType target, ASTSymbol value, ReLoc reloc)
     {
         return new ASTCastExpr(target, value, Loc(linenr, reloc));
+    }
+
+    override ASTSymbol astDestroy(ASTSymbol target, ReLoc reloc)
+    {
+        return new ASTDestroy(target, Loc(linenr, reloc));
     }
 
     override ASTStatement astExpressionStmt(ASTSymbol expr, ReLoc reloc)
@@ -414,6 +438,11 @@ class CompilerImpl : CompilerBase
     override ASTType astTypeOf(ASTSymbol value, ReLoc reloc)
     {
         return new ASTTypeof(value, Loc(linenr, reloc));
+    }
+
+    override ASTType astPointer(ASTType target, ReLoc reloc)
+    {
+        return new ASTPointer(target, Loc(linenr, reloc));
     }
 
     // expressions and statements
@@ -507,14 +536,20 @@ class CompilerImpl : CompilerBase
         return new VariableDeclaration(parent, name, type);
     }
 
-    override Statement move(Reference target, Expression source)
+    override Statement move(Context context, Reference target, Expression source)
     {
-        return .move(target, source);
+        return .move(context, target, source);
     }
 
     override Expression statementExpression(Statement statement, Expression expression)
     {
         return new StatementExpression(statement, expression);
+    }
+
+    void addDefaultImports(Module module_)
+    {
+        auto defaultMods = [compile(mod) for mod in this.defaultImports];
+        [module_.addImport(mod) for mod in defaultMods];
     }
 
     override FunctionDeclaration createRuntimeFunction(
@@ -532,6 +567,7 @@ class CompilerImpl : CompilerBase
         fun.parent = rtMod;
         string types;
         rtMod.add("__" ~ name, fun);
+        addDefaultImports(rtMod);
         auto usingMod = findModule(context.namespace);
         usingMod.addImport(rtMod);
         return fun;
@@ -549,7 +585,6 @@ void main(string[] args)
     bool optimize;
     bool caching = true;
     bool x86_32; bool macro_x86_32;
-    CompilerBase compilerImpl = new CompilerImpl();
     // auto backend = new ProxyBackend();
     Backend backend = new LLVMBackend();
     Backend macroBackend = backend;
@@ -621,14 +656,20 @@ void main(string[] args)
     builtins.addExprAlias("null", new FixedExpressionAlias(new NullExpr(new Pointer(new Void))));
 
     auto defaultImports = new ASTModule[](0) ~ builtins;
+    auto compilerImpl = new CompilerImpl(defaultImports);
     auto astCache = new ASTModuleCache;
     auto cache = new ModuleCache;
     auto modParseConfig = new ModuleParserConfig(packages, defaultImports, astCache, cache);
     auto helper = new ParserHelperImpl(
         compilerImpl, macroBackend,
         macro_x86_32, caching);
+
+    Module compile(ASTModule astMod) {
+        return compileModule(astMod, helper, modParseConfig, compilerImpl, platform, true);
+    }
+    compilerImpl.compile = &compile;
     auto astToplevel = getModule(compilerImpl, args[0], null, false, helper, modParseConfig, Loc(null, ReLoc("", 0)));
-    auto toplevel = compileModule(astToplevel, helper, modParseConfig, compilerImpl, platform, true);
+    auto toplevel = compile(astToplevel);
 
     string baseFlags;
     if (optimize) baseFlags ~= " -Ofast";

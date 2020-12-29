@@ -196,7 +196,7 @@ class ASTExprStatement : ASTStatement
     override StatementCompileResult compile(Context context)
     {
         auto expr = beExpression2(this.value.compile(context), this.loc);
-        return StatementCompileResult(discard(expr), context);
+        return StatementCompileResult(discard(context, expr), context);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -205,7 +205,7 @@ class ASTExprStatement : ASTStatement
 }
 
 // see bool temporary in Expression
-Statement move(Reference target, Expression source)
+Statement move(Context context, Reference target, Expression source)
 {
     auto type = target.type();
     // create referenceable copy for destructor call
@@ -213,7 +213,8 @@ Statement move(Reference target, Expression source)
     Statement do_(Expression source) {
         auto copyInto = type.copyInto(target, source);
         if (!copyInto) copyInto = new AssignStatement(target, source);
-        if (source.temporary()) copyInto = sequence(copyInto, type.endLifetime(source.instanceOf(Reference)));
+        if (source.temporary())
+            copyInto = sequence(copyInto, type.endLifetime(context, source.instanceOf(Reference)));
         return copyInto;
     }
     if (source.temporary() && !source.type().same(new Void)) {
@@ -226,7 +227,7 @@ class ExprStatement : Statement
 {
     Expression value;
 
-    this(this.value) { }
+    this(this.value) { assert(!!value); }
 
     override void emit(Generator output)
     {
@@ -236,14 +237,22 @@ class ExprStatement : Statement
     override void hash(Hash hash) { hash.adds("ExprStatement"); value.hash(hash); }
 }
 
-Statement discard(Expression expr)
+Statement destroy(Context context, Expression expr)
 {
     auto type = expr.type();
+    auto reference = expr.instanceOf(Reference);
+    if (reference) return type.endLifetime(context, reference);
     // TODO hasElaborateDestructor?
+    Reference temp = new Temporary(new NullExpr(type));
+    // call destructor on result
+    return sequence(new AssignStatement(temp, expr), type.endLifetime(context, temp));
+}
+
+Statement discard(Context context, Expression expr)
+{
+    auto type = expr.type();
     if (expr.temporary() && !type.same(new Void)) {
-        Reference temp = new Temporary(new NullExpr(type));
-        // call destructor on result
-        return sequence(new AssignStatement(temp, expr), type.endLifetime(temp));
+        return destroy(context, expr);
     } else {
         return new ExprStatement(expr);
     }

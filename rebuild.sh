@@ -8,8 +8,8 @@ then
 else
     set -euxo pipefail
 fi
-FLAGS="-O"
-# FLAGS=""
+# FLAGS="-O"
+FLAGS=""
 # new compiler, reset cache
 if [ ! -d build/src ]
 then

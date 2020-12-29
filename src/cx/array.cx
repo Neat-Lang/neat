@@ -448,6 +448,64 @@ ASTSymbol parseArrayLiteral(Parser parser, LexicalContext lexicalContext)
     return new ASTArrayLiteral(values);
 }
 
+// marker: type that converts to any array type.
+// type of [].
+class EmptyArrayType : Type
+{
+    this() { }
+
+    override BackendType emit(Platform platform) {
+        assert(false);
+    }
+
+    override bool same(Type other) {
+        return !!other.instanceOf(EmptyArrayType);
+    }
+
+    override Expression implicitConvertTo(Expression source, Type target)
+    {
+        if (target.instanceOf(Array)) {
+            return new EmptyArrayLiteral(target);
+        }
+        return null;
+    }
+
+    override string repr() { return "typeof([])"; }
+
+    override void hash(Hash hash) { hash.adds("EmptyArrayType"); }
+}
+
+class EmptyArrayLiteral : Expression
+{
+    Type type_; // may be null
+
+    this(this.type_) { }
+
+    override Type type() {
+        if (type_) return type_;
+        return new EmptyArrayType;
+    }
+
+    override int emit(Generator generator) {
+        assert(!!this.type_);
+        auto elementType = this.type_.instanceOf(Array).elementType;
+        auto voidp = generator.platform.voidp();
+        auto elementp = new BackendPointerType(elementType.emit(generator.platform));
+
+        int len = generator.fun.wordLiteral(generator.platform, 0);
+        int ptr = generator.fun.bitcast(generator.fun.intLiteral(0), elementp);
+        int base = generator.fun.bitcast(generator.fun.intLiteral(0), voidp);
+
+        return makeArray(generator, elementType, len, ptr, base);
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("EmptyArrayLiteral");
+        assert(!!this.type_);
+        this.type_.hash(hash);
+    }
+}
+
 struct ASTArrayLiteralElement
 {
     ASTSymbol value;
@@ -462,6 +520,8 @@ class ASTArrayLiteral : ASTSymbol
     this(this.elements) { }
 
     override Expression compile(Context context) {
+        if (!elements.length)
+            return new EmptyArrayLiteral(null);
         Expression[] values;
         for (int i = 0; i < this.elements.length; i += 1) {
             values ~= beExpression2(this.elements[i].value.compile(context), this.elements[i].loc);

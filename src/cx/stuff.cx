@@ -91,6 +91,9 @@ class Function : FunctionDeclaration
                 thisDecl.accessLocal(),
                 new PointerCast(this.thisType, new ArgExpr(0, voidp)));
         }
+
+        auto context = Context(compiler, platform, scope_, null, this.macroState, (new int[](1)).ptr);
+
         for (int i = 0; i < this.args.length; i += 1) {
             Argument arg = this.args[i];
             auto argExpr = new ArgExpr(extra + i, arg.type);
@@ -102,7 +105,9 @@ class Function : FunctionDeclaration
                     .instanceOf(Reference);
                 this.loc.assert2s2(!!target, "not a reference: ", arg.name);
 
-                argAssignments[extra + i] = new AssignStatement(target, argExpr);
+                auto stmt = arg.type.copyInto(context, target, argExpr);
+                if (!stmt) stmt = new AssignStatement(target, argExpr);
+                argAssignments[extra + i] = stmt;
             } else {
                 auto argDecl = new VariableDeclaration(scope_, arg.name, arg.type);
 
@@ -113,15 +118,15 @@ class Function : FunctionDeclaration
         }
 
         scope_ = new FunctionScopeStart(scope_);
+        context = context.withNamespace(scope_);
 
         auto compiledStatement = this.compiledStatement;
-
         if (!compiledStatement)
         {
-            auto context = Context(compiler, platform, scope_, null, this.macroState, (new int[](1)).ptr);
             auto pair = this.statement.compile(context);
 
-            compiledStatement = unwindScope(pair.context.namespace, scope_, pair.statement);
+            compiledStatement = unwindScope(
+                pair.context, scope_, pair.statement);
         }
 
         return new CompiledFunction(this, compiledStatement, stackframe, argAssignments);
@@ -257,9 +262,10 @@ ASTType parseType(Parser parser, LexicalContext lexicalContext)
     if (!current) return null;
     while (true)
     {
+        auto loc = parser.loc();
         if (parser.accept("*"))
         {
-            current = new ASTPointer(current);
+            current = new ASTPointer(current, loc);
             continue;
         }
         parser.begin();
@@ -341,6 +347,8 @@ class ArgExpr : Expression
         return this.type_;
     }
 
+    override bool temporary() { return false; }
+
     override void hash(Hash hash) { hash.adds("ArgExpr"); hash.addl(index); }
 }
 
@@ -378,6 +386,8 @@ class FuncPtrCall : Expression
         return output.fun.callFuncPtr(
             type.emit(output.platform), this.funcPtr.emit(output), regs);
     }
+
+    override bool temporary() { return true; }
 
     override void hash(Hash hash) {
         hash.adds("FuncPtrCall");
@@ -420,6 +430,8 @@ class StructConstructor : Expression
         return output.fun.structLiteral(struct_, regs);
     }
 
+    override bool temporary() { return true; }
+
     override void hash(Hash hash) {
         hash.adds("StructConstructor");
         struct_.hash(hash);
@@ -456,6 +468,8 @@ class DelegateExpr : Expression
         return output.fun.structLiteral(thisType, [nullReg, thisReg, funcReg]);
     }
 
+    override bool temporary() { return false; }
+
     override void hash(Hash hash) { hash.adds("DelegateExpr"); this.funcPtr.hash(hash); this.thisPtr.hash(hash); }
 }
 
@@ -476,6 +490,8 @@ class DelegateDataPtr : Expression
 
         return output.fun.field(this.dg.type().emit(output.platform), reg, 1);
     }
+
+    override bool temporary() { return false; }
 
     override void hash(Hash hash) { hash.adds("DelegateDataPtr"); this.dg.hash(hash); }
 }
@@ -500,6 +516,8 @@ class DelegateFuncPtr : Expression
 
         return output.fun.field(this.dg.type().emit(output.platform), reg, 2);
     }
+
+    override bool temporary() { return false; }
 
     override void hash(Hash hash) { hash.adds("DelegateFuncPtr"); this.dg.hash(hash); }
 }
@@ -584,6 +602,8 @@ class WrapExpression : Expression
         return result;
     }
 
+    override bool temporary() { return value.temporary(); }
+
     override void hash(Hash hash) {
         hash.adds("WrapExpression");
         if (pre) pre.hash(hash);
@@ -612,13 +632,14 @@ class ASTCall : ASTSymbol
 
         auto target = this.target.compile(context);
         auto args = new Expression[](this.args.length);
+        // TODO does all of this belong in call()?
         Statement post;
         for (int i = 0; i < this.args.length; i += 1) {
             auto arg = beExpression2(this.args[i].compile(context), this.loc);
             // we must free arg after the call, so make a copy
             if (arg.temporary()) {
                 auto temp = new Temporary(arg);
-                auto destructor = arg.type().endLifetime(temp);
+                auto destructor = arg.type().endLifetime(context, temp);
                 if (destructor) {
                     post = sequence(post, destructor);
                     arg = temp;
@@ -626,7 +647,8 @@ class ASTCall : ASTSymbol
             }
             args[i] = arg;
         }
-        return new WrapExpression(null, call(target, args, this.loc), post);
+        auto result = new WrapExpression(null, call(target, args, this.loc), post);
+        return result;
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -942,14 +964,19 @@ class ASTDereference : ASTSymbol
 {
     ASTSymbol base;
 
-    this(this.base) { }
+    Loc loc;
+
+    this(this.base, this.loc) { }
 
     override Symbol compile(Context context)
     {
         return new Dereference(beExpression(this.base.compile(context)));
     }
 
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTDereference'"); assert(false); }
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compilerCall(
+            "astDereference", [this.base.quote(quoter)], loc.reloc);
+    }
 }
 
 class Dereference : Reference
@@ -1009,6 +1036,8 @@ class FunctionReference : FunctionReferenceBase
         return output.fun.getFuncPtr(this.fun.mangle());
     }
 
+    override bool temporary() { return false; }
+
     override void hash(Hash hash) { hash.adds("FunctionReference"); hash.adds(fun.mangle()); }
 }
 
@@ -1016,7 +1045,9 @@ class ASTReference : ASTSymbol
 {
     ASTSymbol base;
 
-    this(this.base) { }
+    Loc loc;
+
+    this(this.base, this.loc) { }
 
     override Expression compile(Context context)
     {
@@ -1034,14 +1065,17 @@ class ASTReference : ASTSymbol
                 if (nestfn) return new DelegateExpr(nestfn.funcPtr, nestfn.thisPtr);
             }
         }
-        Symbol baseExpression = this.base.compile(context);
+        Expression baseExpression = beExpression2(this.base.compile(context), this.loc);
 
         assert(!!baseExpression.instanceOf(Reference));
 
         return new ReferenceExpression(baseExpression.instanceOf(Reference));
     }
 
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTReference'"); assert(false); }
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compilerCall(
+            "astReference", [this.base.quote(quoter)], loc.reloc);
+    }
 }
 
 class SizeOf : Expression
@@ -1058,6 +1092,8 @@ class SizeOf : Expression
 
         return output.fun.intLiteral(size);
     }
+
+    override bool temporary() { return false; }
 
     override void hash(Hash hash) { hash.adds("SizeOf"); type_.hash(hash); }
 }
@@ -1089,6 +1125,8 @@ class NewClassExpression : Expression
         return classPtr;
     }
 
+    override bool temporary() { return true; }
+
     override void hash(Hash hash) { hash.adds("NewClassExpression"); classType.hash(hash); }
 }
 
@@ -1114,6 +1152,8 @@ class CallCtorExpression : Expression
             .emit(output);
         return classptrTemp.emit(output);
     }
+
+    override bool temporary() { return classptr.temporary(); }
 
     override void hash(Hash hash) {
         hash.adds("CallCtorExpression");
@@ -1173,14 +1213,14 @@ ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
         ASTSymbol next = parseExpressionLeaf(parser, lexicalContext);
 
         assert(!!next);
-        return new ASTDereference(next);
+        return new ASTDereference(next, loc);
     }
     if (parser.accept("&"))
     {
         ASTSymbol next = parseExpressionLeaf(parser, lexicalContext);
 
         assert(!!next);
-        return new ASTReference(next);
+        return new ASTReference(next, loc);
     }
     if (acceptIdentifier(parser, "new"))
     {
@@ -1391,6 +1431,10 @@ ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
         auto args = new ParseExpressionBaseArgs(parser, lexicalContext);
         lexicalContext.macroState.applyMacro(args);
         if (args.symbol) return args.symbol;
+    }
+    {
+        ASTSymbol destroy_ = parseDestroy(parser, lexicalContext);
+        if (destroy_) return destroy_;
     }
     auto loc = parser.loc();
     parser.begin();
@@ -1661,15 +1705,16 @@ class ASTReturnStatement : ASTStatement
 
         Statement returnStmt;
         Statement escapeValueStmt;
-        if (expr.temporary()) {
+        if (expr.temporary() || expr.type().same(new Void)) {
             returnStmt = new ReturnStatement(expr);
         } else { // scoped value, take a copy
             Reference temp = new Temporary(new NullExpr(ret));
-            escapeValueStmt = ret.copyInto(temp, expr);
+            escapeValueStmt = ret.copyInto(context, temp, expr);
             if (!escapeValueStmt) escapeValueStmt = new AssignStatement(temp, expr);
             returnStmt = new ReturnStatement(temp);
         }
-        escapeValueStmt = unwindScope(context.namespace, findFunctionScopeStart(context.namespace), escapeValueStmt);
+        escapeValueStmt = unwindScope(
+            context, findFunctionScopeStart(context.namespace), escapeValueStmt);
 
         return StatementCompileResult(sequence(escapeValueStmt, returnStmt), context);
     }
@@ -1679,12 +1724,19 @@ class ASTReturnStatement : ASTStatement
     }
 }
 
+// the return expression of "return;"
 class ASTVoidExpression : ASTSymbol
 {
-    this() { }
+    Loc loc;
+
+    this(this.loc) { }
+
     override Expression compile(Context context) { return new VoidExpression; }
 
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTVoidExpression'"); assert(false); }
+    override ASTSymbol quote(Quoter quoter) {
+        ASTSymbol[] args;
+        return quoter.compilerCall("astVoidLiteral", args, loc.reloc);
+    }
 }
 
 class VoidExpression : Expression
@@ -1695,6 +1747,7 @@ class VoidExpression : Expression
     {
         return generator.fun.voidLiteral();
     }
+    override bool temporary() { return false; }
     override void hash(Hash hash) { hash.adds("VoidExpression"); }
 }
 
@@ -1710,7 +1763,7 @@ ASTReturnStatement parseReturn(Parser parser, LexicalContext lexicalContext)
     ASTSymbol expr;
     if (parser.accept(";")) // return;
     {
-        expr = new ASTVoidExpression;
+        expr = new ASTVoidExpression(parser.loc());
     }
     else
     {
@@ -1834,6 +1887,23 @@ FunctionScopeStart findFunctionScopeStart(Namespace namespace)
     }
 }
 
+// helper for binding values for stuff like compiler.$stmt
+class ExpressionAlias : Namespace
+{
+    string name;
+
+    Expression value;
+
+    this(this.parent, this.name, this.value) { }
+
+    override Symbol lookup(string name, Expression frame)
+    {
+        if (this.name == name) return value;
+        if (this.parent) return this.parent.lookup(name, frame);
+        return null;
+    }
+}
+
 class VariableDeclaration : VariableDeclarationBase
 {
     LatentVariable variable;
@@ -1887,16 +1957,17 @@ class NestedFunctionDeclaration : Namespace
     }
 }
 
-Statement unwindScope(Namespace current, Namespace target, Statement body_)
+Statement unwindScope(Context context, Namespace target, Statement body_)
 {
     Statement result = body_;
+    auto current = context.namespace;
     while (current !is target) {
         auto varDecl = current.instanceOf(VariableDeclaration);
         if (varDecl)
         {
             auto var = varDecl.accessLocal();
             auto type = var.type();
-            auto destroy = type.endLifetime(var);
+            auto destroy = type.endLifetime(context, var);
             result = sequence(result, destroy);
         }
         current = current.parent;
@@ -1920,11 +1991,11 @@ class ASTIfStatement : ASTStatement
     {
         Symbol test = this.test.compile(context);
         auto thenPair = this.then.compile(context);
-        Statement then = unwindScope(thenPair.context.namespace, context.namespace, thenPair.statement);
+        Statement then = unwindScope(thenPair.context, context.namespace, thenPair.statement);
         Statement else_;
         if (this.else_) {
             auto elsePair = this.else_.compile(context);
-            else_ = unwindScope(elsePair.context.namespace, context.namespace, elsePair.statement);
+            else_ = unwindScope(elsePair.context, context.namespace, elsePair.statement);
         }
 
         return StatementCompileResult(
@@ -2009,7 +2080,7 @@ class ASTScopeStatement : ASTStatement
             statements[i] = pair.statement;
         }
         return StatementCompileResult(
-            unwindScope(subContext.namespace, context.namespace, new SequenceStatement(statements)),
+            unwindScope(subContext, context.namespace, new SequenceStatement(statements)),
             context); // scope ends here
     }
 
@@ -2090,6 +2161,9 @@ ASTAssignStatement parseAssignment(Parser parser, LexicalContext lexicalContext)
         return null;
     }
     ASTSymbol expr = parseExpression(parser, lexicalContext);
+    if (!expr) {
+        parser.fail("expression expected");
+    }
     parser.commit();
     if (operator.length) {
         // TODO separate AST construct - avoid double compiling lhs?
@@ -2145,7 +2219,7 @@ class ASTVarDeclStatement : ASTStatement
             auto decl = new VariableDeclaration(context.namespace, this.name, type);
 
             return StatementCompileResult(
-                move(decl.accessLocal(), initial),
+                move(context, decl.accessLocal(), initial),
                 context.withNamespace(decl));
         }
         else
@@ -2325,7 +2399,7 @@ class ASTWhile : ASTStatement
         auto loopContext = context.withDeclScope(new LoopScopeImpl(label, context.scope_));
         auto condExpr = truthy(beExpression(this.cond.compile(loopContext)), this.loc);
         auto bodyPair = this.body_.compile(loopContext);
-        auto bodyStmt = unwindScope(bodyPair.context.namespace, context.namespace, bodyPair.statement);
+        auto bodyStmt = unwindScope(bodyPair.context, context.namespace, bodyPair.statement);
 
         return StatementCompileResult(
             new Loop(label, null, condExpr, bodyStmt, null),
@@ -2439,6 +2513,40 @@ ASTForLoop parseFor(Parser parser, LexicalContext lexicalContext)
     ASTStatement body_ = parseStatement(parser, lexicalContext);
 
     return new ASTForLoop(varDecl, condition, step, body_, loc);
+}
+
+class ASTDestroy : ASTSymbol
+{
+    ASTSymbol target;
+
+    Loc loc;
+
+    this(this.target, this.loc) { }
+
+    override Expression compile(Context context) {
+        auto expr = beExpression2(this.target.compile(context), loc);
+        auto stmt = destroy(context, expr);
+        if (!stmt) return new VoidExpression;
+        return new StatementExpression(stmt, new VoidExpression);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compilerCall("astDestroy", [target.quote(quoter)], loc.reloc);
+    }
+}
+
+// manually end lifetime of a value
+ASTSymbol parseDestroy(Parser parser, LexicalContext lexicalContext)
+{
+    auto loc = parser.loc();
+    if (!acceptIdentifier(parser, "__destroy"))
+        return null;
+    parser.expect("(");
+    ASTSymbol target = parseExpression(parser, lexicalContext);
+    if (!target) parser.fail("expression expected");
+    parser.expect(")");
+
+    return new ASTDestroy(target, loc);
 }
 
 ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)

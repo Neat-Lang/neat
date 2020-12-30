@@ -58,6 +58,22 @@ class Array : Type
 
     override void hash(Hash hash) { hash.adds("array"); this.elementType.hash(hash); }
 
+    override Statement copyInto(Context context, Reference target, Expression source)
+    {
+        auto compiler = context.compiler;
+
+        Statement assign(Expression source) {
+            context = context.withNamespace(context.compiler.exprAlias(context.namespace, "source", source));
+            // count up reference
+            auto stmt = compiler.$stmt if (source.base) *cast(size_t*) source.base += 1;;
+            auto result = stmt.compile(context);
+            return compiler.sequenceStatement([
+                result.statement,
+                compiler.assignStatement(target, source)]);
+        }
+        return compiler.stmtWithTemporary(source, &assign);
+    }
+
     override Statement endLifetime(Context context, Reference expr)
     {
         return null;
@@ -108,6 +124,8 @@ class ArrayLength : Expression
         return getArrayLen(output, this.arrayValue.type(), arrayReg);
     }
 
+    override bool temporary() { return false; }
+
     override void hash(Hash hash) { hash.adds("ArrayLength"); this.arrayValue.hash(hash); }
 }
 
@@ -136,6 +154,8 @@ class ArrayPointer : Expression
         return getArrayPtr(output, this.arrayValue.type(), arrayReg);
     }
 
+    override bool temporary() { return false; }
+
     override void hash(Hash hash) { hash.adds("ArrayPointer"); this.arrayValue.hash(hash); }
 }
 
@@ -161,6 +181,8 @@ class ArrayBase : Expression
 
         return getArrayBase(output, this.arrayValue.type(), arrayReg);
     }
+
+    override bool temporary() { return false; }
 
     override void hash(Hash hash) { hash.adds("ArrayBase"); this.arrayValue.hash(hash); }
 }
@@ -219,6 +241,8 @@ class ArrayAllocation : Expression
             size_t sz: hash.addl(sz);
         }
     }
+
+    override bool temporary() { return true; }
 }
 
 class ArraySlice : Expression
@@ -259,6 +283,8 @@ class ArraySlice : Expression
         return makeArray(output, arrayType.elementType, newLen, newPtr, base);
     }
 
+    override bool temporary() { return array.temporary(); }
+
     override void hash(Hash hash) {
         hash.adds("ArraySlice");
         array.hash(hash);
@@ -296,6 +322,8 @@ class ArrayEqual : Expression
             leftArray.elementType.emit(output.platform).size(output.platform));
         return output.fun.call(new BackendIntType, "_arraycmp", [leftPtr, rightPtr, leftLen, rightLen, leftSize]);
     }
+
+    override bool temporary() { return false; }
 
     override void hash(Hash hash) { hash.adds("ArrayEqual"); left.hash(hash); right.hash(hash); }
 }
@@ -362,6 +390,8 @@ class ArrayResize : Expression
         return makeArray(output, arrayType.elementType, newArrayLen, newArrayPtr, newArrayBase);
     }
 
+    override bool temporary() { return true; }
+
     override void hash(Hash hash) { hash.adds("ArrayResize"); array.hash(hash); lengthChange.hash(hash); }
 }
 
@@ -420,7 +450,7 @@ Expression releaseArray(Context context, Expression value) {
         *cast(size_t*) value.base -= 1;
         if (*cast(size_t*) value.base != 0) return;
         for (int i = 0; i < value.length; i += 1) {
-            // __destroy(value[i]);
+            __destroy(value[i]);
         }
         free(value.base);
     };
@@ -528,6 +558,8 @@ class EmptyArrayLiteral : Expression
         return makeArray(generator, elementType, len, ptr, base);
     }
 
+    override bool temporary() { return false; }
+
     override void hash(Hash hash) {
         hash.adds("EmptyArrayLiteral");
         assert(!!this.type_);
@@ -611,6 +643,8 @@ class ArrayLiteral : Expression
         }
         return arrayReg;
     }
+
+    override bool temporary() { return true; }
 
     override void hash(Hash hash) {
         hash.adds("ArrayLiteral");

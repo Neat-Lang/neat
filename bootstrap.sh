@@ -157,5 +157,7 @@ at_revision '1bbc5c6f255095386994021458282196e96dc64e' 'rebuild cx' 'build/cx'
 at_revision 'f479cd617e9250b5347fa0d4222ef054898a76c2' 'rebuild cx' 'build/cx'
 # refactoring stuff
 at_revision '51003a75ae2b39a4d071032c6ce345305a74adda' 'rebuild cx' 'build/cx'
+# bootstrap fix commit
+at_revision '3f612a29adefd3e0edb59a32c309bd7394050f0f' 'rebuild cx' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

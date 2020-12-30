@@ -138,18 +138,24 @@ at_revision '7ebcc2737910d81b96ed91696b52894472221d85' 'rebuild cx' 'build/cx'
 # array literals
 at_revision '0b77cb1931349283007dd015d8545b8660df881b' 'rebuild cx' 'build/cx'
 # .name
-at_revision '30e945916bb72a29f9265b3a91528d6fefa0f0be' 'rebuild cx' 'build/cx'
+at_revision 'dd6230de98348ec7612f2d30fa2802628bc46bbf' 'rebuild cx' 'build/cx'
 # CompilerBase.parseType
 at_revision 'e27b76b1eb6b212615f4ae98e41efeabdf6302ef' 'rebuild cx' 'build/cx'
-# quasiquoting
-at_revision 'd660d71eee0e04c6b64c894e9a851fbf3ed385ea' 'rebuild cx' 'build/cx'
+# quasiquoting prep bootstrap fix
+at_revision '5b5bca178ad3e1bc9c8937430ce838164c94082d' 'rebuild cx' 'build/cx'
 # more quasiquoting
 at_revision '04205ac9766be0ca4e31a128241163799615179e' 'rebuild cx' 'build/cx'
 # [any], [all]
 at_revision 'a2509315bc753abfb3170ecd31351564c92cde66' 'rebuild cx' 'build/cx'
+# add quoting of typed var decl statements
+at_revision '4430f4a47c5fe21e461d9c68cb7ed345330b10f9' 'rebuild cx' 'build/cx'
 # class final
 at_revision 'cdda324772cbe2d252f2c50d291d53f2ccb48be7' 'rebuild cx' 'build/cx'
 # hash opt prep
 at_revision '1bbc5c6f255095386994021458282196e96dc64e' 'rebuild cx' 'build/cx'
+# cast()
+at_revision 'f479cd617e9250b5347fa0d4222ef054898a76c2' 'rebuild cx' 'build/cx'
+# refactoring stuff
+at_revision 'b03d3440a6df8d35e9841a2f58b11f194c6f445d' 'rebuild cx' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

@@ -18,6 +18,11 @@ import cx.types;
 import helpers;
 
 extern(C) int getpid();
+extern(C) void cxruntime_file_write(string file, string content);
+extern(C) void cxruntime_system(string command);
+extern(C) void cxruntime_dlcall(string soname, string name, void* arg);
+extern(C) bool cxruntime_waitpid(int pid);
+extern(C) int cxruntime_execbg(string command, string[] arguments);
 
 string removeExtension(string s) {
     string shortened = s;
@@ -51,7 +56,13 @@ string replace(string str, string match, string replace) {
     return result;
 }
 
-string emitModule(CompilerBase compiler, Backend backend, Platform platform, Module module_,
+struct BackgroundCompilation
+{
+    string objFile;
+    int pid;
+}
+
+BackgroundCompilation emitModule(CompilerBase compiler, Backend backend, Platform platform, Module module_,
     bool opt, bool m32, bool caching)
 {
     auto backendModule = backend.createModule(platform);
@@ -59,19 +70,37 @@ string emitModule(CompilerBase compiler, Backend backend, Platform platform, Mod
     auto backendModuleC = backendModule.instanceOf(CBackendModule);
     auto hash = new Hash;
 
-    string baseCmd;
-    if (backendModuleLLVM) {
-        if (opt) baseCmd = "sh .obj/llvmBuildOpt.sh %src %obj";
-        else baseCmd = "sh .obj/llvmBuild.sh %src %obj";
-        assert(!m32);
-    } else {
-        baseCmd = "gcc -fpic";
-        if (opt) baseCmd ~= " -O3";
-        if (m32) baseCmd ~= " -m32";
+    string join(string[] values, string joiner) {
+        string ret;
+        for (int i = 0; i < values.length; i += 1) {
+            if (i) ret ~= joiner;
+            ret ~= values[i];
+        }
+        return ret;
+    }
+    int build(string src, string obj) {
+        string exec;
+        string[] args;
+        if (backendModuleLLVM) {
+            if (opt) { exec = "sh"; args = [".obj/llvmBuildOpt.sh", src, obj]; }
+            else { exec = "sh"; args = [".obj/llvmBuild.sh", src, obj]; }
+            assert(!m32);
+        } else {
+            if (opt) { exec = "gcc"; args = ["-fpic", "-O3", src, "-o", obj]; }
+            else { exec = "gcc"; args = ["-fpic", src, "-o", obj]; }
+            if (m32) args ~= "-m32";
+        }
+        string cmd = exec ~ " " ~ join(args, " ");
+        int pid = cxruntime_execbg(exec, args);
+        print("$ " ~ cmd ~ " [&" ~ itoa(pid) ~ "]");
+        return pid;
     }
 
-    hash.adds(baseCmd);
     // TODO add compiler checksum (generation number?)
+    if (backendModuleLLVM) hash.adds("LLVM");
+    else hash.adds("gcc");
+    if (m32) hash.adds("m32");
+    if (opt) hash.adds("opt");
 
     auto symbols = module_.compile(compiler, platform);
 
@@ -80,12 +109,13 @@ string emitModule(CompilerBase compiler, Backend backend, Platform platform, Mod
     string objFile = ".obj/" ~ hash.text() ~ ".o";
 
     if (caching && cxruntime_file_exists(objFile))
-        return objFile;
+        return BackgroundCompilation(objFile, 0);
 
     auto generator = new Generator(platform, backendModule);
     module_.emit(generator, symbols);
     backendModule.done();
-    string cmd;
+
+    int pid;
     if (backendModuleLLVM) {
         string srcFile = ".obj/" ~ removeSlashes(module_.mangle()) ~ ".ll";
         {
@@ -93,7 +123,7 @@ string emitModule(CompilerBase compiler, Backend backend, Platform platform, Mod
             cxruntime_file_write(srcFile, llText);
         }
         backendModuleLLVM.output.free();
-        cmd = replace(replace(baseCmd, "%src", srcFile), "%obj", objFile);
+        pid = build(srcFile, objFile);
     } else {
         assert(!!backendModuleC);
         string srcFile = ".obj/" ~ removeSlashes(module_.mangle()) ~ ".c";
@@ -102,11 +132,9 @@ string emitModule(CompilerBase compiler, Backend backend, Platform platform, Mod
             cxruntime_file_write(srcFile, csrc);
         }
         backendModuleC.output.free();
-        cmd = baseCmd ~ " " ~ srcFile ~ " -c -o " ~ objFile;
+        pid = build(srcFile, objFile);
     }
-    print("$ " ~ cmd);
-    cxruntime_system(cmd);
-    return objFile;
+    return BackgroundCompilation(objFile, pid);
 }
 
 class ParserHelperImpl : ParserHelper
@@ -144,14 +172,21 @@ class ParserHelperImpl : ParserHelper
 
         auto libHash = new Hash;
         string objFiles;
+        int[] pids;
         while (remainingModules.length > 0) {
             for (int i = 0; i < remainingModules.length; i += 1) {
-                string objFile = emitModule(compiler, backend, platform, remainingModules[i], false, x86_32, caching);
-                objFiles ~= " " ~ objFile;
-                libHash.adds(objFile);
+                auto compilation = emitModule(compiler, backend, platform, remainingModules[i], false, x86_32, caching);
+                objFiles ~= " " ~ compilation.objFile;
+                if (compilation.pid != 0) pids ~= compilation.pid;
+                libHash.adds(compilation.objFile);
             }
             remainingModules = module_.newModules(allModules);
             allModules ~= remainingModules;
+        }
+
+        for (int i = 0; i < pids.length; i += 1) {
+            if (!cxruntime_waitpid(pids[i]))
+                assert(false);
         }
 
         auto fun = module_.lookup(function_, null).instanceOf(Function);
@@ -690,14 +725,21 @@ void main(string[] args)
     allModules = remainingModules;
 
     string fileArgs;
+    int[] pids;
     while (remainingModules.length > 0) {
         for (int i = 0; i < remainingModules.length; i += 1) {
-            string objFile = emitModule(compilerImpl, backend, platform, remainingModules[i],
+            auto compilation = emitModule(compilerImpl, backend, platform, remainingModules[i],
                 optimize, x86_32, caching);
-            fileArgs ~= " " ~ objFile;
+            fileArgs ~= " " ~ compilation.objFile;
+            if (compilation.pid != 0) pids ~= compilation.pid;
         }
         remainingModules = toplevel.newModules(allModules);
         allModules ~= remainingModules;
+    }
+
+    for (int i = 0; i < pids.length; i += 1) {
+        if (!cxruntime_waitpid(pids[i]))
+            assert(false);
     }
 
     if (dontLink) return;

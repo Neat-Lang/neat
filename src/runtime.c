@@ -1,8 +1,10 @@
 #include <dlfcn.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 struct String
@@ -143,6 +145,26 @@ void cxruntime_system(struct String command) {
     if (ret != 0) fprintf(stderr, "command failed with %i\n", ret);
     assert(ret == 0);
     free(cmd);
+}
+
+int cxruntime_execbg(struct String command, struct StringArray arguments) {
+    int ret = fork();
+    if (ret != 0) return ret;
+    char *cmd = toStringz(command);
+    char **args = malloc(sizeof(char*) * (arguments.length + 2));
+    args[0] = cmd;
+    for (int i = 0; i < arguments.length; i++) {
+        args[1 + i] = toStringz(arguments.ptr[i]);
+    }
+    args[1 + arguments.length] = NULL;
+    return execvp(cmd, args);
+}
+
+bool cxruntime_waitpid(int pid) {
+    int wstatus;
+    int ret = waitpid(pid, &wstatus, 0);
+    if (ret == -1) fprintf(stderr, "waitpid() failed: %s\n", strerror(errno));
+    return WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0;
 }
 
 void cxruntime_dlcall(struct String dlfile, struct String fun, void* arg) {

@@ -37,7 +37,7 @@ struct Globals
     Global[] array() {
         return this.globals[0 .. this.used];
     }
-    void free() { .free(globals.base); }
+    void free() { .free(globals.base); globals = []; }
 }
 
 extern(C) void cxruntime_file_write(string file, string content);
@@ -508,14 +508,16 @@ class LLVMBackendFunction : BackendFunction {
         return reg;
     }
     override int bitcast(int from, BackendType to) {
-        auto regDefines = this.regDefines.array();
         BackendType fromType;
-        for (int i = 0; i < regDefines.length; i += 1) {
-            RegDefine def = regDefines[i];
-            if (def.reg == from) {
-                if (def.type.same(to)) return from;
-                fromType = def.type;
-                break;
+        {
+            auto regDefines = this.regDefines.array();
+            for (int i = 0; i < regDefines.length; i += 1) {
+                RegDefine def = regDefines[i];
+                if (def.reg == from) {
+                    if (def.type.same(to)) return from;
+                    fromType = def.type;
+                    break;
+                }
             }
         }
         string castType = "bitcast";
@@ -578,11 +580,14 @@ class LLVMBackendFunction : BackendFunction {
         string coerceReg(int i) {
             return "%reg" ~ itoa(reg) ~ ".coerce" ~ itoa(i);
         }
+        bool anyByMemory = passByMemory(ret, this.mod.platform)
+            || [any passByMemory(arg, this.mod.platform) for arg in type.args];
+        int stackSaveReg;
+        if (anyByMemory) stackSaveReg = this.saveStack();
         for (int i = 0; i < args.length; i += 1) {
             if (passByMemory(type.args[i], this.mod.platform)) {
                 string coerceReg = coerceReg(i);
                 string typeFmt = llvmFmt(type.args[i], this.mod.platform);
-                // TODO wrap allocas in a stack push/pop?
                 this.print(coerceReg ~ " = alloca " ~ typeFmt);
                 this.print("store " ~ this.treg(args[i]) ~ ", " ~ typeFmt ~ "* " ~ coerceReg);
             }
@@ -618,6 +623,7 @@ class LLVMBackendFunction : BackendFunction {
             this.print(
                 "%reg" ~ itoa(reg)
                 ~ " = load " ~ retFmt ~ ", " ~ retFmt ~ "* %reg" ~ itoa(reg) ~ ".ret");
+        if (anyByMemory) this.restoreStack(stackSaveReg);
         return reg;
     }
     override int getFuncPtr(string name) {
@@ -634,6 +640,10 @@ class LLVMBackendFunction : BackendFunction {
         string coerceReg(int i) {
             return "%reg" ~ itoa(reg) ~ ".coerce" ~ itoa(i);
         }
+        bool anyByMemory = passByMemory(ret, this.mod.platform)
+            || [any passByMemory(arg, this.mod.platform) for arg in backendFpType.args];
+        int stackSaveReg;
+        if (anyByMemory) stackSaveReg = this.saveStack();
         for (int i = 0; i < args.length; i += 1) {
             if (passByMemory(backendFpType.args[i], this.mod.platform)) {
                 string coerceReg = coerceReg(i);
@@ -680,6 +690,7 @@ class LLVMBackendFunction : BackendFunction {
             this.print(
                 "%reg" ~ itoa(reg)
                 ~ " = load " ~ retFmt ~ ", " ~ retFmt ~ "* %reg" ~ itoa(reg) ~ ".ret");
+        if (anyByMemory) this.restoreStack(stackSaveReg);
         return reg;
     }
     override int load(BackendType backendType, int source) {
@@ -817,8 +828,10 @@ class LLVMBackendFunction : BackendFunction {
                     "%arg" ~ itoa(i)
                     ~ " = load " ~ argFmt ~ ", " ~ argFmt ~ "* %arg" ~ itoa(i) ~ ".coerce");
         }
-        auto funtext = this.output.text();
-        this.mod.output.print(funtext);
+        {
+            auto funtext = this.output.text();
+            this.mod.output.print(funtext);
+        }
         this.output.free();
         this.mod.output.print("}");
 
@@ -871,6 +884,7 @@ class LineWriter
     }
     void free() {
         .free(this.buffer.base);
+        this.buffer = [];
     }
     string text() {
         return this.buffer[0 .. this.used];

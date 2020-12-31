@@ -556,6 +556,99 @@ class ReferenceExpression : Expression
     override void hash(Hash hash) { hash.adds("ReferenceExpression"); base.hash(hash); }
 }
 
+/**
+ * Must be initialized once with a InitializeTemporaryStatement.
+ */
+class PairedTemporary : Reference
+{
+    Type type_;
+
+    int reg;
+
+    this(this.type_)
+    {
+        this.reg = -1;
+    }
+
+    override Type type() { return this.type_; }
+
+    override int emitLocation(Generator output)
+    {
+        assert(reg != -1);
+
+        return reg;
+    }
+
+    override int emit(Generator output)
+    {
+        auto type = this.type().emit(output.platform);
+
+        return output.fun.load(type, emitLocation(output));
+    }
+
+    // part of internal glue logic, don't concern yourself with lifetime cleanup on this
+    override bool temporary() { return false; } // ironically
+
+    // temp value change identified in InitializeTemporaryStatement
+    // TODO use label?
+    override void hash(Hash hash) {
+        hash.adds("temporary");
+        type_.hash(hash);
+    }
+}
+
+class UninitializeTemporaryStatement : Statement
+{
+    PairedTemporary target;
+
+    this(this.target) { }
+
+    override void emit(Generator output)
+    {
+        // does double-emit ever happen?
+        assert(target.reg == -1);
+
+        auto type = target.type_.emit(output.platform);
+
+        target.reg = output.fun.alloca(type);
+    }
+
+    // TODO id here?
+    override void hash(Hash hash) {
+        hash.adds("UninitializeTemporaryStatement");
+    }
+}
+
+// assignment that defines a register
+class InitializeTemporaryStatement : Statement
+{
+    PairedTemporary target;
+
+    Expression value;
+
+    this(this.target, this.value) { }
+
+    override void emit(Generator output)
+    {
+        // does double-emit ever happen?
+        // yes! - macros!
+        // TODO figure out a Generator based way (named regs?) to avoid double emit.
+        // assert(target.reg == -1);
+
+        auto type = target.type_.emit(output.platform);
+
+        target.reg = output.fun.alloca(type);
+        int value = value.emit(output);
+        output.fun.store(type, target.reg, value);
+    }
+
+    // TODO id here?
+    override void hash(Hash hash) {
+        hash.adds("InitializeTemporaryStatement");
+        value.hash(hash);
+    }
+}
+
 class UninitializedTemporary : Reference
 {
     Type type_;
@@ -654,11 +747,6 @@ class CleanupStackStmt : Statement
         hash.adds("cleanupStack");
         child.hash(hash);
     }
-}
-
-Statement stmtWithTemporary(Expression value, Statement delegate(Expression) callback) {
-    auto temporary = new Temporary(value);
-    return new CleanupStackStmt(callback(temporary));
 }
 
 class NullExpr : Expression

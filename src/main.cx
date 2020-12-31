@@ -88,15 +88,19 @@ string emitModule(CompilerBase compiler, Backend backend, Platform platform, Mod
     string cmd;
     if (backendModuleLLVM) {
         string srcFile = ".obj/" ~ removeSlashes(module_.mangle()) ~ ".ll";
-        auto llText = backendModuleLLVM.output.text();
-        cxruntime_file_write(srcFile, llText);
+        {
+            auto llText = backendModuleLLVM.output.text();
+            cxruntime_file_write(srcFile, llText);
+        }
         backendModuleLLVM.output.free();
         cmd = replace(replace(baseCmd, "%src", srcFile), "%obj", objFile);
     } else {
         assert(!!backendModuleC);
         string srcFile = ".obj/" ~ removeSlashes(module_.mangle()) ~ ".c";
-        auto csrc = backendModuleC.output.text();
-        cxruntime_file_write(srcFile, csrc);
+        {
+            auto csrc = backendModuleC.output.text();
+            cxruntime_file_write(srcFile, csrc);
+        }
         backendModuleC.output.free();
         cmd = baseCmd ~ " " ~ srcFile ~ " -c -o " ~ objFile;
     }
@@ -483,18 +487,6 @@ class CompilerImpl : CompilerBase
         return .truthy(value, loc);
     }
 
-    override Reference temporary(Expression value)
-    {
-        return new Temporary(value);
-    }
-
-    override TemporaryResult temporaryPair(Expression value)
-    {
-        auto temp = new UninitializedTemporary(value.type());
-
-        return TemporaryResult(assignStatement(temp, value), temp);
-    }
-
     override Reference dereference(Expression value)
     {
         return new Dereference(value);
@@ -548,7 +540,9 @@ class CompilerImpl : CompilerBase
 
     override Statement stmtWithTemporary(Expression value, Statement delegate(Expression) callback)
     {
-        return .stmtWithTemporary(value, callback);
+        auto temp = new PairedTemporary(value.type());
+        auto start = new InitializeTemporaryStatement(temp, value);
+        return new CleanupStackStmt(new SequenceStatement([start, callback(temp)]));
     }
 
     override Expression statementExpression(Statement statement, Expression expression)
@@ -578,6 +572,8 @@ class CompilerImpl : CompilerBase
             "free", new Void, [Argument(false, "", new Pointer(new Void))]));
         rtMod.add("print", new FunctionDeclaration(
             "print", new Void, [Argument(false, "", new Array(new Character))]));
+        rtMod.add("ltoa", new FunctionDeclaration(
+            "cxruntime_ltoa", new Array(new Character), [Argument(false, "", new Long)]));
         fun.parent = rtMod;
         string types;
         rtMod.add("__" ~ name, fun);
@@ -711,7 +707,7 @@ void main(string[] args)
     string flags = baseFlags ~ " -rdynamic";
     string linkerFlags = " -ldl";
     for (int i = 0; i < linkerArgs.length; i += 1) linkerFlags ~= " " ~ linkerArgs[i];
-    string compiler = "clang -Wno-unused-command-line-argument";
+    string compiler = "clang -Wno-unused-command-line-argument -fpic";
     if (backend.instanceOf(CBackend)) compiler = "gcc";
     string cmd = compiler ~ flags ~ fileArgs ~ " src/runtime.c -o " ~ output ~ linkerFlags;
     print("$ " ~ cmd);

@@ -535,7 +535,7 @@ Expression call(Symbol target, Expression[] args, Loc loc)
         auto base = method.funcPtr.type().instanceOf(FunctionReferenceBase);
         if (base) {
             auto fundecl = base.getFunction();
-            assert(args.length == fundecl.args.length);
+            if (args.length == fundecl.args.length) loc.fail("wrong number of args: " ~ ltoa(args.length));
             args = [expectImplicitConvertTo(arg, fundecl.args[i].type, loc) for i, arg in args];
         } else {
             auto funcptr = method.funcPtr.type().instanceOf(FunctionPointer);
@@ -634,22 +634,24 @@ class ASTCall : ASTSymbol
         auto target = this.target.compile(context);
         auto args = new Expression[](this.args.length);
         // TODO does all of this belong in call()?
-        Statement post;
+        Statement pre, post;
         for (int i = 0; i < this.args.length; i += 1) {
             auto arg = beExpression2(this.args[i].compile(context), this.loc);
             // we must free arg after the call, so make a copy
             if (arg.temporary()) {
-                auto temp = new Temporary(arg);
+                auto temp = new PairedTemporary(arg.type());
+                // no copyInto() because we're taking ownership.
+                auto set = new InitializeTemporaryStatement(temp, arg);
                 auto destructor = arg.type().endLifetime(context, temp);
                 if (destructor) {
+                    pre = sequence(pre, set);
                     post = sequence(post, destructor);
                     arg = temp;
                 }
             }
             args[i] = arg;
         }
-        auto result = new WrapExpression(null, call(target, args, this.loc), post);
-        return result;
+        return new WrapExpression(pre, call(target, args, this.loc), post);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -1711,18 +1713,28 @@ class ASTReturnStatement : ASTStatement
         expr = expectImplicitConvertTo(expr, ret, this.loc);
 
         Statement returnStmt;
-        Statement escapeValueStmt;
+        // temporary = we can steal its reference
         if (expr.temporary() || expr.type().same(new Void)) {
             returnStmt = new ReturnStatement(expr);
+            returnStmt = unwindScope(context, findFunctionScopeStart(context.namespace), returnStmt);
         } else { // scoped value, take a copy
-            Reference temp = new Temporary(new NullExpr(ret));
-            escapeValueStmt = ret.copyInto(context, temp, expr);
+            /**
+             * - alloca
+             * - copyInto the value
+             * - unwind stack
+             * - ret the alloca
+             */
+            auto temp = new PairedTemporary(ret);
+            auto init = new UninitializeTemporaryStatement(temp);
+            auto escapeValueStmt = ret.copyInto(context, temp, expr);
             if (!escapeValueStmt) escapeValueStmt = new AssignStatement(temp, expr);
-            returnStmt = new ReturnStatement(temp);
+            returnStmt = sequence(init, escapeValueStmt);
+            returnStmt = unwindScope(context, findFunctionScopeStart(context.namespace), returnStmt);
+            returnStmt = sequence(returnStmt, new ReturnStatement(temp));
+            // no need for stack cleanup after a return.
         }
-        escapeValueStmt = unwindScope(context, findFunctionScopeStart(context.namespace), escapeValueStmt);
 
-        return StatementCompileResult(sequence(escapeValueStmt, returnStmt), context);
+        return StatementCompileResult(returnStmt, context);
     }
 
     override ASTSymbol quote(Quoter quoter) {

@@ -284,6 +284,12 @@ struct RegDefines
     void free() { .free(regDefines.base); }
 }
 
+struct StaticAlloca
+{
+    Either(int, string) reg;
+    BackendType type;
+}
+
 class LLVMBackendFunction : BackendFunction {
     string name;
     LLVMBackendModule mod;
@@ -294,6 +300,7 @@ class LLVMBackendFunction : BackendFunction {
     RegDefines regDefines;
     int regId;
     int blockId;
+    StaticAlloca[] staticAllocas;
 
     this(LLVMBackendModule mod, string name, BackendType ret, BackendType[] args)
     {
@@ -576,15 +583,11 @@ class LLVMBackendFunction : BackendFunction {
         string coerceReg(int i) {
             return "%reg" ~ itoa(reg) ~ ".coerce" ~ itoa(i);
         }
-        bool anyByMemory = passByMemory(ret, this.mod.platform)
-            || [any passByMemory(arg, this.mod.platform) for arg in type.args];
-        int stackSaveReg;
-        if (anyByMemory) stackSaveReg = this.saveStack();
         for (int i = 0; i < args.length; i += 1) {
             if (passByMemory(type.args[i], this.mod.platform)) {
                 string coerceReg = coerceReg(i);
                 string typeFmt = llvmFmt(type.args[i], this.mod.platform);
-                this.print(coerceReg ~ " = alloca " ~ typeFmt);
+                staticAllocas ~= StaticAlloca(coerceReg, type.args[i]);
                 this.print("store " ~ this.treg(args[i]) ~ ", " ~ typeFmt ~ "* " ~ coerceReg);
             }
         }
@@ -619,7 +622,6 @@ class LLVMBackendFunction : BackendFunction {
             this.print(
                 "%reg" ~ itoa(reg)
                 ~ " = load " ~ retFmt ~ ", " ~ retFmt ~ "* %reg" ~ itoa(reg) ~ ".ret");
-        if (anyByMemory) this.restoreStack(stackSaveReg);
         return reg;
     }
     override int getFuncPtr(string name) {
@@ -636,15 +638,11 @@ class LLVMBackendFunction : BackendFunction {
         string coerceReg(int i) {
             return "%reg" ~ itoa(reg) ~ ".coerce" ~ itoa(i);
         }
-        bool anyByMemory = passByMemory(ret, this.mod.platform)
-            || [any passByMemory(arg, this.mod.platform) for arg in backendFpType.args];
-        int stackSaveReg;
-        if (anyByMemory) stackSaveReg = this.saveStack();
         for (int i = 0; i < args.length; i += 1) {
             if (passByMemory(backendFpType.args[i], this.mod.platform)) {
                 string coerceReg = coerceReg(i);
                 string typeFmt = llvmFmt(backendFpType.args[i], this.mod.platform);
-                this.print(coerceReg ~ " = alloca " ~ typeFmt);
+                staticAllocas ~= StaticAlloca(coerceReg, backendFpType.args[i]);
                 this.print("store " ~ this.treg(args[i]) ~ ", " ~ typeFmt ~ "* " ~ coerceReg);
             }
         }
@@ -686,7 +684,6 @@ class LLVMBackendFunction : BackendFunction {
             this.print(
                 "%reg" ~ itoa(reg)
                 ~ " = load " ~ retFmt ~ ", " ~ retFmt ~ "* %reg" ~ itoa(reg) ~ ".ret");
-        if (anyByMemory) this.restoreStack(stackSaveReg);
         return reg;
     }
     override int load(BackendType backendType, int source) {
@@ -704,6 +701,15 @@ class LLVMBackendFunction : BackendFunction {
         this.print("%reg" ~ itoa(reg) ~ " = alloca " ~ typefmt);
         this.print("store " ~ typefmt ~ " zeroinitializer, " ~ typefmt ~ "* %reg" ~ itoa(reg));
         this.defReg2(reg, new BackendPointerType(backendType), Reg(reg));
+        return reg;
+    }
+    override int staticAlloca(BackendType backendType) {
+        int reg = this.nextReg();
+        this.staticAllocas ~= StaticAlloca(reg, backendType);
+        this.defReg2(reg, new BackendPointerType(backendType), Reg(reg));
+        string typefmt = llvmFmt(backendType, this.mod.platform);
+        // TODO zeroLiteral
+        this.print("store " ~ typefmt ~ " zeroinitializer, " ~ typefmt ~ "* %reg" ~ itoa(reg));
         return reg;
     }
     override int field(BackendType backendType, int source, size_t index) {
@@ -823,6 +829,12 @@ class LLVMBackendFunction : BackendFunction {
                 this.mod.output.print(
                     "%arg" ~ itoa(i)
                     ~ " = load " ~ argFmt ~ ", " ~ argFmt ~ "* %arg" ~ itoa(i) ~ ".coerce");
+        }
+        for (int i = 0; i < this.staticAllocas.length; i += 1) {
+            auto reg = this.staticAllocas[i].reg;
+            auto type = this.staticAllocas[i].type;
+            string typefmt = llvmFmt(type, this.mod.platform);
+            this.mod.output.print(reg.case(string s: s, int i: "%reg" ~ itoa(i)) ~ " = alloca " ~ typefmt);
         }
         {
             auto funtext = this.output.text();

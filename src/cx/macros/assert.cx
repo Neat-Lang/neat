@@ -1,8 +1,13 @@
 module cx.macros.assert;
 
+macro import cx.macros.quasiquoting;
+
 import package(compiler).cx.array;
 import package(compiler).cx.base;
+import package(compiler).cx.expr;
 import package(compiler).cx.parser_base;
+import package(compiler).cx.statements;
+import package(compiler).cx.stuff;
 import package(compiler).cx.types;
 import package(compiler).helpers;
 
@@ -20,14 +25,121 @@ class ASTAssertion : ASTStatement
         this.loc = loc;
     }
 
+    Expression identTest(Context context, ASTIdentifier ident) {
+        context = context.withNamespace(context.compiler.exprAlias(
+                context.namespace, "identName", context.compiler.stringLiteral(repr(ident))));
+        return (
+            context.compiler.$expr "because " ~ identName ~ " = "/* ~ itoa($ident)*/
+        ).compile(context).instanceOf(Expression);
+    }
+
+    Expression binopTest(Context context, ASTBinaryOp binop) {
+        void set(string name, Symbol value) {
+            context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, name, value));
+        }
+        string leftStr = repr(binop.left), rightStr = repr(binop.right);
+        set("leftStr", context.compiler.stringLiteral(leftStr));
+        set("rightStr", context.compiler.stringLiteral(rightStr));
+        Loc nowhere;
+        auto
+            left = binop.left.compile(context).instanceOf(Expression),
+            right = binop.right.compile(context).instanceOf(Expression);
+        set("left", left);
+        set("right", right);
+
+        if (binop.op == "&&") {
+            auto leftRecurse = dispatch(context, binop.left);
+            auto rightRecurse = dispatch(context, binop.right);
+            if (!leftRecurse || !rightRecurse) return null;
+            set("leftRecurse", leftRecurse);
+            set("rightRecurse", rightRecurse);
+
+            return (context.compiler.$expr ({
+                string ret;
+                if (!left) ret = leftStr ~ " failed, because " ~ leftRecurse;
+                else ret = rightStr ~ " failed, because " ~ rightRecurse;
+                ret;
+            })).compile(context).instanceOf(Expression);
+        }
+        if (binop.op == "||") {
+            auto leftRecurse = dispatch(context, binop.left);
+            auto rightRecurse = dispatch(context, binop.right);
+            if (!leftRecurse || !rightRecurse) return null;
+            set("leftRecurse", leftRecurse);
+            set("rightRecurse", rightRecurse);
+
+            return (context.compiler.$expr ({
+                string ret;
+                if (left) ret = rightStr ~ " failed, because " ~ rightRecurse;
+                else if (right) ret = leftStr ~ " failed, because " ~ leftRecurse;
+                else ret = leftStr ~ " failed (because " ~ leftRecurse ~ ") and "
+                    ~ rightStr ~ " failed (because " ~ rightRecurse ~ ")";
+                ret;
+            })).compile(context).instanceOf(Expression);
+        }
+        if (left.type().instanceOf(Integer) && right.type().instanceOf(Integer)) {
+            if (right.instanceOf(IntLiteral)) {
+                return (
+                    context.compiler.$expr leftStr ~ " = " ~ itoa(left)
+                ).compile(context).instanceOf(Expression);
+            }
+            return (
+                context.compiler.$expr
+                    "because " ~ leftStr ~ " = " ~ itoa(left)
+                    ~ " and " ~ rightStr ~ " = " ~ itoa(right)
+            ).compile(context).instanceOf(Expression);
+        }
+        return null;
+    }
+
+    Expression dispatch(Context context, ASTSymbol sym) {
+        auto ident = sym.instanceOf(ASTIdentifier);
+        if (ident)
+        {
+            return identTest(context, ident);
+        }
+        auto binop = sym.instanceOf(ASTBinaryOp);
+        if (binop)
+        {
+            return binopTest(context, binop);
+        }
+        return null;
+    }
+
     override StatementCompileResult compile(Context context)
     {
-        auto printArgTypes = [Argument(false, "str", new Array(new Character))];
-        auto printFun = new FunctionDeclaration("print", new Void, printArgTypes);
+        auto printFun = new FunctionDeclaration(
+            "print", new Void, [Argument(false, "str", new Array(new Character))]);
+        auto assertFun = new FunctionDeclaration(
+            "assert", new Void, [Argument(false, "test", new Integer)]);
+        auto itoaFun = new FunctionDeclaration(
+            "cxruntime_itoa", new Array(new Character), [Argument(false, "value", new Integer)]);
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "print", printFun));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "assert", assertFun));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "itoa", itoaFun));
+        string failedMsg = loc.location() ~ ": assertion failed: " ~ exprText ~ ", because ";
+        auto ifFailed = dispatch(context, test);
+        if (ifFailed) {
+            context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "ifFailed", ifFailed));
+            context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "failedMsg", context.compiler.stringLiteral(failedMsg)));
+            auto assertTest = context.compiler.$stmt {
+                if (!$test) {
+                    print(failedMsg ~ ifFailed);
+                    assert(false);
+                }
+            };
+            auto assertTestStmt = assertTest.compile(context);
+            return StatementCompileResult(assertTestStmt.statement, context);
+        }
 
-        auto assertArgTypes = [Argument(false, "test", new Integer)];
-        auto assertFun = new FunctionDeclaration("assert", new Void, assertArgTypes);
-
+        // fallback: old impl
+        // TODO quasiquote this
         auto test = this.test.compile(context);
         auto expr = beExpression2(test, this.loc);
         auto texpr = context.compiler.truthy(expr, this.loc);
@@ -54,6 +166,23 @@ class ASTAssertion : ASTStatement
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTAssertion'!"); assert(false); }
+}
+
+string repr(ASTSymbol expr) {
+    assert(!!expr);
+    auto ident = expr.instanceOf(ASTIdentifier);
+    if (ident) {
+        return ident.name;
+    }
+    auto binop = expr.instanceOf(ASTBinaryOp);
+    if (binop) {
+        return "(" ~ repr(binop.left) ~ " " ~ binop.op ~ " " ~ repr(binop.right) ~ ")";
+    }
+    auto intl = expr.instanceOf(ASTIntLiteral);
+    if (intl) {
+        return itoa(intl.value);
+    }
+    return "TODO";
 }
 
 class ParseAssert : Macro

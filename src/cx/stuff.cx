@@ -392,49 +392,6 @@ class FuncPtrCall : Expression
     }
 }
 
-class StructConstructor : Expression
-{
-    Struct struct_;
-
-    Expression[] args;
-
-    Loc loc;
-
-    this(this.struct_, this.args, this.loc) { }
-
-    override Type type()
-    {
-        return this.struct_;
-    }
-
-    // TODO emitInto to avoid alloca duplication with Temporary
-    override int emit(Generator output)
-    {
-        this.loc.assert2s(this.args.length == this.struct_.members.length, "invalid number of args for struct constructor");
-
-        auto struct_ = this.struct_.emit(output.platform);
-        int[] regs = new int[](this.args.length);
-
-        for (int i = 0; i < this.args.length; i += 1) {
-            auto arg = this.args[i];
-
-            arg = expectImplicitConvertTo(arg, this.struct_.members[i].type, this.loc);
-
-            regs[i] = arg.emit(output);
-        }
-        return output.fun.structLiteral(struct_, regs);
-    }
-
-    override bool temporary() { return true; }
-
-    override void hash(Hash hash) {
-        hash.adds("StructConstructor");
-        struct_.hash(hash);
-        hash.addl(args.length);
-        [arg.hash(hash) for arg in args];
-    }
-}
-
 class DelegateExpr : Expression
 {
     Expression funcPtr;
@@ -517,7 +474,7 @@ class DelegateFuncPtr : Expression
     override void hash(Hash hash) { hash.adds("DelegateFuncPtr"); this.dg.hash(hash); }
 }
 
-Expression call(Symbol target, Expression[] args, Loc loc)
+Expression call(Context context, Symbol target, Expression[] args, Loc loc)
 {
     auto fundecl = target.instanceOf(FunctionDeclaration);
     if (fundecl)
@@ -576,7 +533,21 @@ Expression call(Symbol target, Expression[] args, Loc loc)
     Struct struct_ = target.instanceOf(Struct);
     if (struct_)
     {
-        return new StructConstructor(struct_, args, loc);
+        loc.assert2s(args.length == struct_.members.length, "invalid number of args for struct constructor");
+
+        auto target = new PairedTemporary(struct_, true);
+        Statement initialize = new UninitializeTemporaryStatement(target);
+        for (int i = 0; i < args.length; i += 1) {
+            auto arg = args[i];
+            arg = expectImplicitConvertTo(arg, struct_.members[i].type, loc);
+
+            auto field = new StructMember(target, i);
+            auto stmt = arg.type().copyInto(context, field, arg);
+            if (!stmt) stmt = new AssignStatement(field, arg);
+
+            initialize = sequence(initialize, stmt);
+        }
+        return new StatementExpression(initialize, target);
     }
     loc.assert2s(false, "unknown call target");
 }
@@ -635,7 +606,7 @@ class ASTCall : ASTSymbol
             auto arg = beExpression2(this.args[i].compile(context), this.loc);
             // we must free arg after the call, so make a copy
             if (arg.temporary()) {
-                auto temp = new PairedTemporary(arg.type());
+                auto temp = new PairedTemporary(arg.type(), false);
                 // no copyInto() because we're taking ownership.
                 auto set = new InitializeTemporaryStatement(temp, arg);
                 auto destructor = arg.type().endLifetime(context, temp);
@@ -647,7 +618,7 @@ class ASTCall : ASTSymbol
             }
             args[i] = arg;
         }
-        return new WrapExpression(pre, call(target, args, this.loc), post);
+        return new WrapExpression(pre, call(context, target, args, this.loc), post);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -892,7 +863,7 @@ class ASTInstanceOf : ASTSymbol
         assert(!!target);
         Symbol instanceOf = accessMember(context.platform, base, "__instanceof", this.loc, false);
         Expression name = new StringLiteral(target.name);
-        return new PointerCast(target, call(instanceOf, [name], this.loc));
+        return new PointerCast(target, call(context, instanceOf, [name], this.loc));
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTInstanceOf'"); assert(false); }
@@ -1129,39 +1100,6 @@ class NewClassExpression : Expression
     override void hash(Hash hash) { hash.adds("NewClassExpression"); classType.hash(hash); }
 }
 
-class CallCtorExpression : Expression
-{
-    Expression classptr;
-
-    Expression[] args;
-
-    Loc loc;
-
-    this(this.classptr, this.args, this.loc) { }
-
-    override Type type()
-    {
-        return this.classptr.type();
-    }
-
-    override int emit(Generator output)
-    {
-        auto classptrTemp = new Temporary(classptr);
-        call(accessMember(output.platform, classptrTemp, "__ctor", this.loc, false), this.args, this.loc)
-            .emit(output);
-        return classptrTemp.emit(output);
-    }
-
-    override bool temporary() { return classptr.temporary(); }
-
-    override void hash(Hash hash) {
-        hash.adds("CallCtorExpression");
-        classptr.hash(hash);
-        hash.addl(args.length);
-        [arg.hash(hash) for arg in args];
-    }
-}
-
 class ASTNewExpression : ASTSymbol
 {
     ASTType type;
@@ -1182,7 +1120,15 @@ class ASTNewExpression : ASTSymbol
 
             auto argExpressions = [beExpression2(arg.compile(context), this.loc) for arg in this.args];
             this.loc.assert2s2(!!classType, "expected new <class>, not %s", type.repr());
-            return new CallCtorExpression(classptr, argExpressions, this.loc);
+
+            auto loc = this.loc; // TODO fix
+            Expression do_(Expression classptr) {
+                auto ctor = accessMember(context.platform, classptr, "__ctor", loc, false);
+                auto ctorCall = context.compiler.exprStatement(call(context, ctor, argExpressions, loc));
+
+                return context.compiler.statementExpression(ctorCall, classptr);
+            }
+            return context.compiler.exprWithTemporary(classptr, &do_);
         }
         Array arrayType = type.instanceOf(Array);
         if (arrayType) {
@@ -1720,7 +1666,7 @@ class ASTReturnStatement : ASTStatement
              * - unwind stack
              * - ret the alloca
              */
-            auto temp = new PairedTemporary(ret);
+            auto temp = new PairedTemporary(ret, false);
             auto init = new UninitializeTemporaryStatement(temp);
             auto escapeValueStmt = ret.copyInto(context, temp, expr);
             if (!escapeValueStmt) escapeValueStmt = new AssignStatement(temp, expr);

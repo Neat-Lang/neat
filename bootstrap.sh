@@ -161,5 +161,7 @@ at_revision '51003a75ae2b39a4d071032c6ce345305a74adda' 'rebuild cx' 'build/cx'
 at_revision '3f612a29adefd3e0edb59a32c309bd7394050f0f' 'rebuild cx' 'build/cx'
 # intermediate commit: turn on array reference count incrementing
 at_revision '8cd67cffc34930a84c5415169544b74845cfbb60' 'rebuild cx' 'build/cx'
+# staticAlloca
+at_revision '3cac13f97107ef000ae1f998e4f01b175b04edd3' 'rebuild cx' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

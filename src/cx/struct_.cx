@@ -89,42 +89,141 @@ class Struct : Type
         return null;
     }
 
+    Expression callAutoDtor(Context context, Reference ref_)
+    {
+        auto compiler = context.compiler;
+        Loc nowhere;
+
+        Argument[] args = [Argument(false, "ptr", new Pointer(ref_.type()))];
+        ASTSymbol ptr = compiler.astIdentifier("ptr", nowhere.reloc);
+
+        ASTStatement[] calls;
+        for (int i = 0; i < members.length; i += 1) {
+            auto entry = members[i];
+            auto member = new StructMemberReference(ref_, i);
+            auto destroy = entry.type.endLifetime(context, member);
+            if (destroy) {
+                // calls ~= compiler.$stmt __destroy ptr.$name;;
+                calls ~= compiler.astExpressionStmt(
+                    compiler.astDestroy(
+                        compiler.astMember(ptr, entry.name, nowhere.reloc), nowhere.reloc), nowhere.reloc);
+            }
+        }
+        if (!calls.length) return null;
+        ASTStatement body_ = compiler.astSequence(calls, nowhere.reloc);
+        auto fn = compiler.createRuntimeFunction(context, "structrelease", new Void, args, body_);
+
+        return compiler.call(fn, [compiler.reference(ref_)], loc);
+    }
+
+    Expression callAutoCopyCtor(Context context, Reference target, Expression source)
+    {
+        auto compiler = context.compiler;
+        Loc nowhere;
+
+        Argument[] args = [
+            Argument(false, "target", new Pointer(target.type())),
+            Argument(false, "source", source.type())];
+        ASTSymbol targetArg = compiler.astIdentifier("target", nowhere.reloc);
+        ASTSymbol sourceArg = compiler.astIdentifier("source", nowhere.reloc);
+
+        ASTStatement[] calls;
+        bool anySpecialAssignments;
+        for (int i = 0; i < members.length; i += 1) {
+            auto entry = members[i];
+            auto targetField = new StructMemberReference(target, i);
+            auto sourceField = new StructMember(source, i);
+            auto copyInto = entry.type.copyInto(context, targetField, sourceField);
+            if (copyInto) anySpecialAssignments = true;
+            // calls ~= compiler.$stmt target.$name = source.$name;;
+            calls ~= compiler.astAssign(
+                compiler.astMember(targetArg, entry.name, nowhere.reloc),
+                compiler.astMember(sourceArg, entry.name, nowhere.reloc), nowhere.reloc);
+        }
+        if (!anySpecialAssignments) return null;
+        ASTStatement body_ = compiler.astSequence(calls, nowhere.reloc);
+        auto fn = compiler.createRuntimeFunction(context, "structcopy", new Void, args, body_);
+
+        return compiler.call(fn, [compiler.reference(target), source], loc);
+    }
+
     override Statement copyInto(Context context, Reference target, Expression source)
     {
         FunctionDeclaration copyCtor = getCopyCtor();
-        if (!copyCtor) return null;
-        Expression targetPtr = new ReferenceExpression(target);
-        auto call = new Call(copyCtor, [targetPtr, source], this.loc);
-        return new ExprStatement(call);
+        if (copyCtor) {
+            Expression targetPtr = new ReferenceExpression(target);
+            auto call = new Call(copyCtor, [targetPtr, source], this.loc);
+            return new ExprStatement(call);
+        }
+        auto autoCopyCtor = callAutoCopyCtor(context, target, source);
+        if (autoCopyCtor) {
+            return new ExprStatement(autoCopyCtor);
+        }
+        return null;
     }
 
     override Statement endLifetime(Context context, Reference ref_)
     {
         FunctionDeclaration destructor = getDtor();
-        if (!destructor) return null;
         Expression ptr = new ReferenceExpression(ref_);
-        auto call = new Call(destructor, [ptr], this.loc);
-        return new ExprStatement(call);
+        Statement callDtor, callAutoDtor_;
+        auto autoDtor = callAutoDtor(context, ref_);
+        if (destructor) callDtor = new ExprStatement(new Call(destructor, [ptr], this.loc));
+        if (autoDtor) callAutoDtor_ = new ExprStatement(autoDtor);
+        return sequence(callDtor, callAutoDtor_);
     }
 }
 
-class StructMember : Reference
+class StructMember : Expression
 {
-    Reference base;
+    Expression base;
 
     size_t index;
 
+    Struct structType;
+
     this(this.base, this.index)
     {
-        Struct structType = this.base.type().instanceOf(Struct);
+        this.structType = this.base.type().instanceOf(Struct);
         assert(!!structType);
     }
 
     override Type type()
     {
-        Type type = this.base.type();
-        Struct structType = type.instanceOf(Struct);
+        return structType.members[this.index].type;
+    }
+
+    override int emit(Generator output)
+    {
+        return output.fun.field(structType.emit(output.platform), base.emit(output), cast(int) index);
+    }
+
+    override bool temporary() { return base.temporary(); }
+
+    override void hash(Hash hash)
+    {
+        hash.adds("StructMember");
+        base.hash(hash);
+        hash.addl(index);
+    }
+}
+
+class StructMemberReference : Reference
+{
+    Reference base;
+
+    size_t index;
+
+    Struct structType;
+
+    this(this.base, this.index)
+    {
+        this.structType = this.base.type().instanceOf(Struct);
         assert(!!structType);
+    }
+
+    override Type type()
+    {
         return structType.members[this.index].type;
     }
 
@@ -146,7 +245,7 @@ class StructMember : Reference
 
     override void hash(Hash hash)
     {
-        hash.adds("StructMember");
+        hash.adds("StructMemberReference");
         base.hash(hash);
         hash.addl(index);
     }

@@ -27,8 +27,9 @@ struct Globals
             auto copy = new Global[](globals.length * 2);
             for (int i = 0; i < globals.length; i += 1)
                 copy[i] = globals[i];
-            .free(globals.base);
+            auto baseptr = globals.base;
             globals = copy;
+            .free(baseptr);
         }
         globals[used] = global;
         used += 1;
@@ -44,14 +45,14 @@ extern(C) void cxruntime_system(string command);
 extern(C) void cxruntime_dlcall(string soname, string name, void* arg);
 
 class CBackendModule : BackendModule {
-    LineWriter2 output;
+    LineWriter output;
     Platform platform;
 
     int literalId;
     Globals globals;
 
     this(Platform platform) {
-        this.output = new LineWriter2;
+        this.output = new LineWriter;
         this.platform = platform;
         this.output.print("#include <stdlib.h>");
         this.output.print("#include <string.h>");
@@ -208,7 +209,7 @@ class CBackendFunction : BackendFunction {
     BackendType ret_;
     BackendType[] args;
 
-    LineWriter2 output;
+    LineWriter output;
     int regId;
     int blockId;
 
@@ -218,7 +219,7 @@ class CBackendFunction : BackendFunction {
         this.mod = mod;
         this.ret_ = ret;
         this.args = args;
-        this.output = new LineWriter2;
+        this.output = new LineWriter;
         this.regId = 1;
     }
     void print(string msg) {
@@ -230,11 +231,6 @@ class CBackendFunction : BackendFunction {
         int result = this.regId;
         this.regId = this.regId + 1;
         return result;
-    }
-    string nextBlockLabel() {
-        string res = "Label" ~ itoa(this.blockId);
-        this.blockId = this.blockId + 1;
-        return res;
     }
     override string getLabel() {
         return "Label" ~ itoa(this.blockId);
@@ -331,7 +327,10 @@ class CBackendFunction : BackendFunction {
         this.output.appendsi(" reg", reg);
         this.output.append(" = (");
         typeFmtInto(mod, to, output);
-        this.output.appendsis(") reg", from, ";");
+        if (to.instanceOf(BackendPointerType))
+            this.output.appendsis(") (size_t) reg", from, ";");
+        else
+            this.output.appendsis(") reg", from, ";");
         this.output.endl();
         return reg;
     }
@@ -346,11 +345,13 @@ class CBackendFunction : BackendFunction {
         // TODO revisit when we have unsigned types
         this.print(typeFmt(mod, to) ~ " reg" ~ itoa(reg)
             ~ " = (" ~ typeFmt(mod, to) ~ ") reg" ~ itoa(value) ~ ";");
+        return reg;
     }
     override int trunc(int value, BackendType to) {
         int reg = this.nextReg();
         this.print(typeFmt(mod, to) ~ " reg" ~ itoa(reg)
             ~ " = (" ~ typeFmt(mod, to) ~ ") reg" ~ itoa(value) ~ ";");
+        return reg;
     }
     override int intToFloat(int value) {
         int reg = this.nextReg();
@@ -408,8 +409,8 @@ class CBackendFunction : BackendFunction {
         string typefmt = typeFmt(mod, backendType);
         string init = "0";
         if (backendType.instanceOf(BackendStructType)) init = "{0}";
-        this.print(typefmt ~ " reg" ~ itoa(reg) ~ ".frame = (" ~ typefmt ~ ") " ~ init ~ ";");
-        this.print(typefmt ~ " *reg" ~ itoa(reg) ~ " = &reg" ~ itoa(reg) ~ ".frame;");
+        this.print(typefmt ~ " reg" ~ itoa(reg) ~ "_frame = (" ~ typefmt ~ ") " ~ init ~ ";");
+        this.print(typefmt ~ " *reg" ~ itoa(reg) ~ " = &reg" ~ itoa(reg) ~ "_frame;");
         return reg;
     }
     override int field(BackendType backendType, int source, size_t index) {
@@ -447,15 +448,14 @@ class CBackendFunction : BackendFunction {
         } else {
             this.print("return reg" ~ itoa(reg) ~ ";");
         }
-        this.print(this.nextBlockLabel() ~ ":;");
     }
     override void branch(string label) {
         this.print("goto " ~ label ~ ";");
-        this.print(this.nextBlockLabel() ~ ":;");
+        this.blockId = this.blockId + 1;
     }
     override void testBranch(int reg, string thenLabel, string elseLabel) {
         this.print("if (reg" ~ itoa(reg) ~ ") goto " ~ thenLabel ~ "; else goto " ~ elseLabel ~ ";");
-        this.print(this.nextBlockLabel() ~ ":;");
+        this.blockId = this.blockId + 1;
     }
     override void done() {
         string argstr = "(";
@@ -469,13 +469,15 @@ class CBackendFunction : BackendFunction {
         this.mod.output.print(retstr ~ " " ~ this.name ~ argstr ~ "{");
         auto funtext = this.output.text();
         this.mod.output.print(funtext);
-        .free(funtext.base);
+        auto baseptr = funtext.base;
+        funtext = [];
+        .free(baseptr);
         this.output.free();
         this.mod.output.print("}");
     }
 }
 
-class LineAppender2
+class LineAppender
 {
     string buffer;
     size_t used;
@@ -496,8 +498,9 @@ class LineAppender2
             size_t newBufLen = this.buffer.length * 2;
             auto newBuf = new string(newBufLen);
             for (int i = 0; i < this.used; i += 1) newBuf[i] = this.buffer[i];
-            free();
+            auto baseptr = this.buffer.base;
             this.buffer = newBuf;
+            .free(baseptr);
         }
     }
     void free() {
@@ -511,13 +514,13 @@ class LineAppender2
     }
 }
 
-class LineWriter2
+class LineWriter
 {
     string[] lines;
     int length;
-    LineAppender2 line;
+    LineAppender line;
     this() {
-        this.line = new LineAppender2;
+        this.line = new LineAppender;
     }
     void free() {
         for (int i = 0; i < this.lines.length; i += 1) {
@@ -579,8 +582,9 @@ class LineWriter2
             if (newLen == 0) newLen = 1;
             auto newLines = new string[](newLen);
             for (int i = 0; i < this.length; i += 1) newLines[i] = this.lines[i];
-            .free(this.lines.base);
+            auto baseptr = this.lines.base;
             this.lines = newLines;
+            .free(baseptr);
         }
         this.lines[this.length] = line;
         this.length = this.length + 1;
@@ -603,7 +607,7 @@ class LineWriter2
     }
 }
 
-void typeFmtInto(CBackendModule mod, BackendType type, LineWriter2 output)
+void typeFmtInto(CBackendModule mod, BackendType type, LineWriter output)
 {
     output.append(typeFmt(mod, type));
 }

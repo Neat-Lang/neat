@@ -26,10 +26,36 @@ class ASTAssignStatement : ASTStatement
         this.loc.assert2s(!!targetref, "target of assignment must be a reference");
         value = expectImplicitConvertTo(value, targetref.type(), this.loc);
 
-        auto stmt = value.type().copyInto(context, targetref, value);
-        if (!stmt) stmt = new AssignStatement(targetref, value);
+        /**
+         * Order is important here.
+         *
+         * 1. temporize the RHS.
+         * 2. temporize the address of LHS.
+         * 3. destroy the LHS.
+         * 4. overwrite the LHS with the temporized RHS.
+         *
+         * Why this order? Evaluating the RHS might change the LHS address
+         * (consider: *f() = *g() - in that case, g() is more likely to
+         * invalidate f() than the other way around).
+         * Also, the RHS may just *be* the LHS, as in "s = s;"
+         * Hence we need to temporize the RHS.
+         * The address of LHS is temporized so that the destructor call
+         * doesn't lead to a double evaluation.
+         */
 
-        return StatementCompileResult(stmt, context);
+        Statement do1(Expression tmpRhs) {
+            Statement do2(Expression tmpLhsPtr) {
+                auto tmpLhs = context.compiler.dereference(tmpLhsPtr);
+                auto cleanup = tmpLhs.type().endLifetime(context, tmpLhs);
+                auto reassign = context.compiler.move(context, tmpLhs, tmpRhs);
+                return sequence(cleanup, reassign);
+            }
+
+            auto lhsPtr = context.compiler.reference(targetref);
+            return context.compiler.stmtWithTemporary(lhsPtr, &do2);
+        }
+        return StatementCompileResult(
+            context.compiler.stmtWithTemporary(value, &do1), context);
     }
 
     override ASTSymbol quote(Quoter quoter) {

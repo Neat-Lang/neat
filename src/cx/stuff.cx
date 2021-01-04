@@ -4,6 +4,7 @@ module cx.stuff;
 macro import cx.macros.either;
 macro import cx.macros.hash;
 macro import cx.macros.listcomprehension;
+macro import cx.macros.quasiquoting;
 
 import backend.base;
 import cx.array;
@@ -33,13 +34,10 @@ class Function : FunctionDeclaration
 
     MacroState macroState;
 
-    Statement compiledStatement;
-
     Namespace parent;
 
     this(this.loc, this.name, this.ret, this.args, this.statement, this.macroState)
     {
-        this.compiledStatement = null;
         this.thisType = null;
         this.parent = null;
     }
@@ -120,13 +118,8 @@ class Function : FunctionDeclaration
         scope_ = new FunctionScopeStart(scope_);
         context = context.withNamespace(scope_);
 
-        auto compiledStatement = this.compiledStatement;
-        if (!compiledStatement)
-        {
-            auto pair = this.statement.compile(context);
-
-            compiledStatement = unwindScope(pair.context, scope_, pair.statement);
-        }
+        auto pair = this.statement.compile(context);
+        auto compiledStatement = unwindScope(pair.context, scope_, pair.statement);
 
         return new CompiledFunction(this, compiledStatement, stackframe, argAssignments);
     }
@@ -2923,7 +2916,7 @@ class ClassMethod : Function
     bool abstract_;
 
     this(this.loc, Class classType, this.override_, this.abstract_, this.name, this.ret, this.args,
-         this.statement, this.compiledStatement, this.macroState)
+         this.statement, this.macroState)
     {
         // TODO super()
         auto classNamespace = new ClassNamespace(classType.context.namespace, classType);
@@ -3115,7 +3108,7 @@ class Class : Type
         return [a for a in this.vtable_];
     }
 
-    void genVtable()
+    void genVtable(Context context)
     {
         if (this.vtableSymbol.length > 0) return;
 
@@ -3123,11 +3116,11 @@ class Class : Type
 
         ClassMethod[] combinedMethods;
         if (this.superClass) {
-            this.superClass.genVtable();
+            this.superClass.genVtable(context);
             combinedMethods = this.superClass.vtable();
         }
 
-        this.genInstanceofMethod();
+        this.genInstanceofMethod(context);
 
         for (int i = 0; i < this.methods.length; i += 1) {
             ClassMethod method = this.methods[i];
@@ -3181,35 +3174,30 @@ class Class : Type
         generator.mod.defineSymbolList(vtableSymbol, methods);
     }
 
-    void genInstanceofMethod()
+    void genInstanceofMethod(Context context)
     {
         Type voidp = new Pointer(new Void);
         Array stringType = new Array(new Character);
 
-        Statement[] castStmts;
-        ArgExpr thisptr = new ArgExpr(0, voidp);
-        ArgExpr target = new ArgExpr(1, stringType);
-        auto nullptr = new NullExpr(voidp);
+        ASTStatement[] castStmts;
+        Loc nowhere;
         Class current = this;
         while (current)
         {
-            auto test = new ArrayEqual(target, new StringLiteral(current.name));
-            Statement cmp = new IfStatement(test, new ReturnStatement(thisptr), null);
-
-            castStmts ~= cmp;
+            auto name = context.compiler.astStringLiteral(current.name, nowhere.reloc);
+            castStmts ~= context.compiler.$stmt if (target == $name) return cast(void*) this;;
             current = current.superClass;
         }
-        Statement ret = new ReturnStatement(nullptr);
-        castStmts ~= ret;
+        castStmts ~= context.compiler.$stmt return null;;
 
-        auto stmt = new SequenceStatement(castStmts);
+        auto stmt = context.compiler.astSequence(castStmts, nowhere.reloc);
 
         bool override_ = false;
         if (this.superClass) override_ = true;
 
         this.methods ~= new ClassMethod(
             Loc(null, ReLoc("", 0)), this, override_, false /* abstract */, "__instanceof",
-            voidp, [Argument(false, "target", stringType)], null, stmt, null);
+            voidp, [Argument(false, "target", stringType)], stmt, null);
     }
 
     override bool same(Type other) {
@@ -3346,9 +3334,9 @@ class ASTClassDecl : ASTType
                 method.name,
                 method.ret.compile(classContext),
                 methodArgs,
-                method.body_, null, this.macroState);
+                method.body_, this.macroState);
         }
-        target.genVtable();
+        target.genVtable(context);
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTClassDecl'!"); assert(false); }
@@ -3599,7 +3587,7 @@ class StructMethod : Function
     string mangledName;
 
     this(this.loc, Struct structType, Context context, this.name, this.ret, this.args, this.statement,
-         this.compiledStatement, this.macroState)
+         this.macroState)
     {
         // TODO super()
         auto structNamespace = new StructNamespace(context.namespace, structType);
@@ -3680,7 +3668,7 @@ class ASTStructDecl : ASTType
                 method.name,
                 method.ret.compile(structContext),
                 methodArgs,
-                method.body_, null, this.macroState);
+                method.body_, this.macroState);
         }
         return struct_;
     }

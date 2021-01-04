@@ -101,7 +101,7 @@ class Function : FunctionDeclaration
             if (arg.isThisAssignment) {
                 assert(!!this.thisType);
 
-                auto target = accessMember(null, thisDecl.accessLocal(), arg.name, this.loc, false)
+                auto target = accessMember(platform, thisDecl.accessLocal(), arg.name, this.loc, false)
                     .instanceOf(Reference);
                 this.loc.assert2s2(!!target, "not a reference: ", arg.name);
 
@@ -791,7 +791,8 @@ Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool
     if (classType)
     {
         ClassMethod[] vtable = classType.vtable();
-        Expression asStructPtr = new PointerCast(new Pointer(classType.dataStruct()), baseExpr);
+        Expression asStructPtr = new PointerCast(
+            new Pointer(classType.dataStruct(platform)), baseExpr);
         size_t methodOffset = [first i for i, a in vtable where a.name == member else -1];
         if (methodOffset != -1)
         {
@@ -807,7 +808,7 @@ Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool
             return new ClassMethodPtr(funcPtr, baseExpr);
         }
 
-        ClassMember[] members = classType.allMembers();
+        ClassMember[] members = classType.allMembers(platform);
         size_t memberOffset = [first i for i, a in members where a.name == member else -1];
         if (memberOffset != -1)
             return new StructMemberReference(new Dereference(asStructPtr), memberOffset);
@@ -1028,7 +1029,7 @@ class ASTReference : ASTSymbol
         ASTIdentifier ident = this.base.instanceOf(ASTIdentifier);
         if (ident) {
             auto frame = new ReferenceExpression(new StackFrame(new Void));
-            Symbol target = context.namespace.lookup(ident.name, frame);
+            Symbol target = context.namespace.lookup(ident.name, context, frame);
             if (target) {
                 Function fun = target.instanceOf(Function);
 
@@ -1086,7 +1087,7 @@ class NewClassExpression : Expression
     {
         // oh boy!
         this.classType.declare(output);
-        Struct classDataStruct = this.classType.dataStruct();
+        Struct classDataStruct = this.classType.dataStruct(output.platform);
         BackendType voidp = (new Pointer(new Void)).emit(output.platform);
         int classInfoPtr = output.fun.symbolList(this.classType.vtableSymbol);
         int classDataSize = classDataStruct.emit(output.platform).size(output.platform);
@@ -1223,10 +1224,10 @@ class ASTIdentifier : ASTSymbol
         Symbol symbol;
         if (this.moduleLevel) {
             auto module_ = findModule(context.namespace);
-            symbol = module_.lookup(this.name, null);
+            symbol = module_.lookup(this.name, context, null);
         } else {
             auto frame = new ReferenceExpression(new StackFrame(new Void));
-            symbol = context.namespace.lookup(this.name, frame);
+            symbol = context.namespace.lookup(this.name, context, frame);
         }
         this.loc.assert2s2(!!symbol, this.name, " not found");
         return symbol;
@@ -1806,7 +1807,7 @@ class FunctionScope : Namespace
 
     override string mangle() { return this.mangle_; }
 
-    override Symbol lookup(string name, Expression frame)
+    override Symbol lookup(string name, Context context, Expression frame)
     {
         assert(!!this.parent);
 
@@ -1820,7 +1821,7 @@ class FunctionScope : Namespace
             nextFrame = new Dereference(framePtr);
         }
 
-        return this.parent.lookup(name, nextFrame);
+        return this.parent.lookup(name, context, nextFrame);
     }
 }
 
@@ -1837,7 +1838,9 @@ class FunctionScopeStart : Namespace
 {
     this(this.parent) { }
 
-    override Symbol lookup(string name, Expression frame) { return parent.lookup(name, frame); }
+    override Symbol lookup(string name, Context context, Expression frame) {
+        return parent.lookup(name, context, frame);
+    }
 }
 
 FunctionScopeStart findFunctionScopeStart(Namespace namespace)
@@ -1859,10 +1862,10 @@ class ExpressionAlias : Namespace
 
     this(this.parent, this.name, this.value) { }
 
-    override Symbol lookup(string name, Expression frame)
+    override Symbol lookup(string name, Context context, Expression frame)
     {
         if (this.name == name) return value;
-        if (this.parent) return this.parent.lookup(name, frame);
+        if (this.parent) return this.parent.lookup(name, context, frame);
         return null;
     }
 }
@@ -1889,13 +1892,13 @@ class VariableDeclaration : VariableDeclarationBase
         return new StructMemberReference(new Dereference(frame), variable.offset);
     }
 
-    override Symbol lookup(string name, Expression frame)
+    override Symbol lookup(string name, Context context, Expression frame)
     {
         if (this.variable.name == name)
         {
             return access(frame);
         }
-        if (this.parent) return this.parent.lookup(name, frame);
+        if (this.parent) return this.parent.lookup(name, context, frame);
         return null;
     }
 }
@@ -1907,7 +1910,7 @@ class NestedFunctionDeclaration : Namespace
     // TODO collision check
     this(this.parent, this.nestedFunction) { }
 
-    override Symbol lookup(string name, Expression frame)
+    override Symbol lookup(string name, Context context, Expression frame)
     {
         if (this.nestedFunction.name == name)
         {
@@ -1915,7 +1918,7 @@ class NestedFunctionDeclaration : Namespace
 
             return new ClassMethodPtr(new FunctionReference(this.nestedFunction), framePtr);
         }
-        if (this.parent) return this.parent.lookup(name, frame);
+        if (this.parent) return this.parent.lookup(name, context, frame);
         return null;
     }
 }
@@ -2742,7 +2745,7 @@ class Module : Namespace
         return [first entry.value for entry in this.entries where entry.name == name else null];
     }
 
-    override Symbol lookup(string name, Expression frame)
+    override Symbol lookup(string name, Context context, Expression frame)
     {
         assert(!frame);
 
@@ -2755,7 +2758,7 @@ class Module : Namespace
             if (entry) return entry;
         }
         if (this.parent)
-            return this.parent.lookup(name, frame);
+            return this.parent.lookup(name, context, frame);
         return null;
     }
 }
@@ -2948,20 +2951,27 @@ class ClassNamespace : Namespace
 
     this(this.parent, this.class_) { }
 
-    override Symbol lookup(string name, Expression thisPtr)
+    override Symbol lookup(string name, Context context, Expression thisPtr)
     {
         thisPtr = new PointerCast(this.class_, thisPtr);
 
-        auto result = accessMember(null, thisPtr, name, Loc(null, ReLoc("", 0)), true);
+        auto result = accessMember(context.platform, thisPtr, name, Loc(null, ReLoc("", 0)), true);
 
         if (result) return result;
 
         // TODO "outer"?
         if (!this.parent) return null;
-        return this.parent.lookup(name, null);
+        return this.parent.lookup(name, context, null);
     }
 }
 
+/**
+ * Class layout:
+ * - super class data OR
+ *   - vtable ptr
+ *   - reference count
+ * - class data
+ */
 class Class : Type
 {
     string name;
@@ -3060,18 +3070,24 @@ class Class : Type
         return platform.voidp();
     }
 
-    ClassMember[] allMembers()
+    ClassMember[] allMembers(Platform platform)
     {
         if (!this.superClass)
         {
+            if (platform.newClasses) {
+                return [
+                    new ClassMember("__classinfo", new Pointer(new Void)),
+                    new ClassMember("__refs", nativeWordType(platform)),
+                ] ~ this.members;
+            }
             return [new ClassMember("__classinfo", new Pointer(new Void))] ~ this.members;
         }
-        return this.superClass.allMembers() ~ this.members;
+        return this.superClass.allMembers(platform) ~ this.members;
     }
 
-    Struct dataStruct()
+    Struct dataStruct(Platform platform)
     {
-        ClassMember[] allMembers = this.allMembers();
+        ClassMember[] allMembers = this.allMembers(platform);
 
         auto structMembers = [
             new StructMemberDeclaration(member.name, member.type)
@@ -3220,13 +3236,13 @@ class ClassScope : Namespace
 
     this(this.parent, this.class_) { }
 
-    override Symbol lookup(string name, Expression frame)
+    override Symbol lookup(string name, Context context, Expression frame)
     {
         if (name == this.class_.name)
         {
             return this.class_;
         }
-        return this.parent.lookup(name, frame);
+        return this.parent.lookup(name, context, frame);
     }
 }
 
@@ -3285,7 +3301,7 @@ class ASTClassDecl : ASTType
         Class superClass = null;
         if (this.superClass.length)
         {
-            Symbol superClassObj = context.namespace.lookup(this.superClass, null);
+            Symbol superClassObj = context.namespace.lookup(this.superClass, context, null);
             this.loc.assert2s(!!superClassObj, "super class not found: " ~ this.superClass);
             superClass = superClassObj.instanceOf(Class);
             assert(!!superClass);
@@ -3314,7 +3330,7 @@ class ASTClassDecl : ASTType
                 arg.case {
                     ASTThisAssignment arg:
                     {
-                        ClassMember[] members = target.allMembers();
+                        ClassMember[] members = target.allMembers(context.platform);
                         size_t member = [first i for i, a in members where a.name == arg.name else -1];
                         // TODO specific loc
                         method.loc.assert2s2(member != -1, "no such member: ", arg.name);
@@ -3565,7 +3581,7 @@ class StructNamespace : Namespace
 
     this(this.parent, this.struct_) { }
 
-    override Symbol lookup(string name, Expression thisPtr)
+    override Symbol lookup(string name, Context context, Expression thisPtr)
     {
         thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr);
 
@@ -3575,7 +3591,7 @@ class StructNamespace : Namespace
 
         // TODO "outer"?
         if (!this.parent) return null;
-        return this.parent.lookup(name, null);
+        return this.parent.lookup(name, context, null);
     }
 }
 
@@ -3611,13 +3627,13 @@ class StructScope : Namespace
 
     this(this.parent, this.struct_) { }
 
-    override Symbol lookup(string name, Expression frame)
+    override Symbol lookup(string name, Context context, Expression frame)
     {
         if (name == this.struct_.name)
         {
             return this.struct_;
         }
-        return this.parent.lookup(name, frame);
+        return this.parent.lookup(name, context, frame);
     }
 }
 

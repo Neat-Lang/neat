@@ -163,5 +163,8 @@ at_revision '3f612a29adefd3e0edb59a32c309bd7394050f0f' 'rebuild cx' 'build/cx'
 at_revision '8cd67cffc34930a84c5415169544b74845cfbb60' 'rebuild cx' 'build/cx'
 # staticAlloca
 at_revision '3cac13f97107ef000ae1f998e4f01b175b04edd3' 'rebuild cx' 'build/cx'
+# classes with reference count
+at_revision '158d1231313d2db1c68ffa2c530e328205a074da' 'rebuild cx' 'build/cx'
+at_revision '158d1231313d2db1c68ffa2c530e328205a074da' 'transition new-classes' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

@@ -3121,6 +3121,9 @@ class Class : Type
         }
 
         this.genInstanceofMethod(context);
+        if (context.platform.genReleaseMethod) {
+            this.genReleaseMethod(context);
+        }
 
         for (int i = 0; i < this.methods.length; i += 1) {
             ClassMethod method = this.methods[i];
@@ -3176,9 +3179,6 @@ class Class : Type
 
     void genInstanceofMethod(Context context)
     {
-        Type voidp = new Pointer(new Void);
-        Array stringType = new Array(new Character);
-
         ASTStatement[] castStmts;
         Loc nowhere;
         Class current = this;
@@ -3189,15 +3189,40 @@ class Class : Type
             current = current.superClass;
         }
         castStmts ~= context.compiler.$stmt return null;;
-
         auto stmt = context.compiler.astSequence(castStmts, nowhere.reloc);
+
+        Type voidp = new Pointer(new Void);
+        Array stringType = new Array(new Character);
+        bool override_ = false;
+        if (this.superClass) override_ = true;
+        this.methods ~= new ClassMethod(
+            nowhere, this, override_, false /* abstract */, "__instanceof",
+            voidp, [Argument(false, "target", stringType)], stmt, null);
+    }
+
+    void genReleaseMethod(Context context)
+    {
+        ASTStatement[] statements;
+        Loc nowhere;
+        auto members = this.allMembers(context.platform);
+        assert(members.length >= 2);
+        members = members[2 .. members.length]; // drop __classinfo and __refs
+        statements ~= context.compiler.$stmt {
+            (cast(size_t*) this)[1] -= 1;
+            if ((cast(size_t*) this)[1] != 0) return;
+        };
+        for (int i = 0; i < members.length; i += 1) {
+            auto name = context.compiler.astIdentifier(members[i].name, nowhere.reloc);
+            statements ~= context.compiler.$stmt __destroy($name);;
+        }
+        statements ~= context.compiler.$stmt { /*free(this);*/ };
+        auto stmt = context.compiler.astSequence(statements, nowhere.reloc);
 
         bool override_ = false;
         if (this.superClass) override_ = true;
-
         this.methods ~= new ClassMethod(
-            Loc(null, ReLoc("", 0)), this, override_, false /* abstract */, "__instanceof",
-            voidp, [Argument(false, "target", stringType)], stmt, null);
+            nowhere, this, override_, false /* abstract */, "__release",
+            new Void, [], stmt, null);
     }
 
     override bool same(Type other) {

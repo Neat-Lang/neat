@@ -170,5 +170,6 @@ at_revision '58e2e874c16641455fbf78db05a7222168e6659c' 'detransition new-classes
 # classes with __release method
 at_revision 'e791bb8c1b9047cd25c2b75a4c05730a2a27e2ff' 'rebuild cx' 'build/cx'
 at_revision 'e791bb8c1b9047cd25c2b75a4c05730a2a27e2ff' 'transition gen-release-method' 'build/cx'
+at_revision 'b7c2e88728079cfb67ddab7f8b57227736e1c84b' 'detransition gen-release-method' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

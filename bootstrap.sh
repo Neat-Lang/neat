@@ -166,5 +166,6 @@ at_revision '3cac13f97107ef000ae1f998e4f01b175b04edd3' 'rebuild cx' 'build/cx'
 # classes with reference count
 at_revision '158d1231313d2db1c68ffa2c530e328205a074da' 'rebuild cx' 'build/cx'
 at_revision '158d1231313d2db1c68ffa2c530e328205a074da' 'transition new-classes' 'build/cx'
+at_revision '58e2e874c16641455fbf78db05a7222168e6659c' 'detransition new-classes' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

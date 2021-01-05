@@ -327,116 +327,6 @@ class ArrayEqual : Expression
     override void hash(Hash hash) { hash.adds("ArrayEqual"); left.hash(hash); right.hash(hash); }
 }
 
-/**
- * Note: does not call constructors/destructors!
- */
-class ArrayResize : Expression
-{
-    Expression array;
-
-    // positive offset
-    Expression lengthChange;
-
-    Loc loc;
-
-    this(this.array, this.lengthChange, this.loc) { }
-
-    override Type type() {
-        return this.array.type();
-    }
-
-    override int emit(Generator output)
-    {
-        // TODO simplify this?
-        auto size_t = output.platform.nativeWordType;
-        auto voidp = output.platform.voidp();
-        int arrayReg = this.array.emit(output);
-        Array arrayType = this.array.type().instanceOf(Array);
-        this.loc.assert2s(!!arrayType, "ArrayResize called on non-array!");
-        int arrayLen = getArrayLen(output, arrayType, arrayReg);
-        int arrayPtr = getArrayPtr(output, arrayType, arrayReg);
-        int lengthChangeReg = this.lengthChange.emit(output);
-        auto elementType = arrayType.elementType.emit(output.platform);
-        int elementSizeReg = output.fun.wordLiteral(output.platform, elementType.size(output.platform));
-        int twoWordSizeReg = output.fun.wordLiteral(output.platform, size_t.size(output.platform) * 2);
-
-        int oneReg = output.fun.wordLiteral(output.platform, 1);
-        int twoReg = output.fun.wordLiteral(output.platform, 2);
-        // newArrayLen = array.length + lengthChange
-        int newArrayLen = output.fun.binop("+", size_t, arrayLen, lengthChangeReg);
-        int oldSize = output.fun.binop("*", size_t, arrayLen, elementSizeReg);
-        int newSize = output.fun.binop("*", size_t, newArrayLen, elementSizeReg);
-
-        // reserve space for references, capacity
-        int totalSize = output.fun.binop("+", size_t, newSize, twoWordSizeReg);
-
-        int newArrayBase = output.fun.call(voidp, "cxruntime_alloc", [totalSize]);
-        // ptr = base + 2
-        int newArrayPtr = output.fun.bitcast(output.fun.ptrOffset(size_t, newArrayBase, twoReg), voidp);
-
-        // base[0] = 1 (refs)
-        // base[1] = allocated length (in elements)
-        output.fun.store(size_t, output.fun.bitcast(newArrayBase, new BackendPointerType(size_t)), oneReg);
-        output.fun.store(size_t, output.fun.ptrOffset(size_t, newArrayBase, oneReg), newSize);
-
-        arrayPtr = output.fun.bitcast(arrayPtr, voidp);
-
-        // TODO copy ctors
-        output.fun.call(voidp, "memcpy", [newArrayPtr, arrayPtr, oldSize]);
-
-        newArrayPtr = output.fun.bitcast(newArrayPtr, new BackendPointerType(elementType));
-
-        return makeArray(output, arrayType.elementType, newArrayLen, newArrayPtr, newArrayBase);
-    }
-
-    override bool temporary() { return true; }
-
-    override void hash(Hash hash) { hash.adds("ArrayResize"); array.hash(hash); lengthChange.hash(hash); }
-}
-
-class ASTArrayResize : ASTSymbol
-{
-    ASTSymbol array;
-
-    ASTSymbol lengthChange;
-
-    ReLoc reloc;
-
-    this(this.array, this.lengthChange, this.reloc) { }
-
-    override Expression compile(Context context) {
-        auto loc = Loc(context.compiler.linenr, reloc);
-        auto arrayExpr = beExpression2(array.compile(context), loc);
-        auto lengthChangeExpr = beExpression2(lengthChange.compile(context), loc);
-        return new ArrayResize(arrayExpr, lengthChangeExpr, loc);
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compiler.astNewExpression(
-            quoter.compiler.astNamedType("ASTArrayResize", reloc), [
-                array.quote(quoter),
-                lengthChange.quote(quoter),
-                quoter.quoteReloc(reloc)], reloc);
-    }
-}
-
-ASTSymbol parseArrayResize(Parser parser, LexicalContext lexicalContext, ASTSymbol current)
-{
-    parser.begin();
-    auto loc = parser.loc();
-    if (!parser.accept(".") || !parser.accept("lengthen"))
-    {
-        parser.revert();
-        return null;
-    }
-    parser.expect("(");
-    ASTSymbol lengthChange = lexicalContext.compiler.parseExpression(parser, lexicalContext);
-    if (!lengthChange) parser.fail("Length expression expected");
-    parser.expect(")");
-    parser.commit();
-    return new ASTArrayResize(current, lengthChange, loc.reloc);
-}
-
 Expression releaseArray(Context context, Expression value) {
     auto compiler = context.compiler;
 
@@ -470,14 +360,18 @@ Expression arrayCat(Context context, Expression left, Expression right, Loc loc)
     ASTStatement body_;
     if (leftArray.elementType.same(right.type())) {
         body_ = compiler.$stmt {
-          auto result = left.lengthen(1);
+          auto result = new typeof(left)(left.length + 1);
+          for (size_t i = 0; i < left.length; i += 1)
+              result[i] = left[i];
           result[left.length] = right;
           return result;
         };
     } else if (leftArray.same(right.type())) {
         body_ = compiler.$stmt {
-          auto result = left.lengthen(right.length);
-          for (auto i = 0; i < right.length; i += 1)
+          auto result = new typeof(left)(left.length + right.length);
+          for (size_t i = 0; i < left.length; i += 1)
+              result[i] = left[i];
+          for (size_t i = 0; i < right.length; i += 1)
             result[left.length + i] = right[i];
           return result;
         };
@@ -486,7 +380,7 @@ Expression arrayCat(Context context, Expression left, Expression right, Loc loc)
     }
     auto fn = compiler.createRuntimeFunction(context, "arrayappend", leftArray, args, body_);
 
-    return compiler.call(fn, [left, right], loc);
+    return compiler.callWithLifetime(context, fn, [left, right], loc);
 }
 
 ASTSymbol parseArrayLiteral(Parser parser, LexicalContext lexicalContext)

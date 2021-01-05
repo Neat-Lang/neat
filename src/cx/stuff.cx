@@ -576,6 +576,27 @@ class WrapExpression : Expression
     }
 }
 
+Expression callWithLifetime(Context context, Symbol target, Expression[] args, Loc loc) {
+    Statement pre, post;
+    for (int i = 0; i < args.length; i += 1) {
+        auto arg = args[i];
+        // we must free arg after the call, so make a copy
+        if (arg.temporary()) {
+            auto temp = new PairedTemporary(arg.type(), false);
+            // no copyInto() because we're taking ownership.
+            auto set = new InitializeTemporaryStatement(temp, arg);
+            auto destructor = arg.type().endLifetime(context, temp);
+            if (destructor) {
+                pre = sequence(pre, set);
+                post = sequence(post, destructor);
+                arg = temp;
+            }
+        }
+        args[i] = arg;
+    }
+    return new WrapExpression(pre, call(context, target, args, loc), post);
+}
+
 class ASTCall : ASTSymbol
 {
     ASTSymbol target;
@@ -593,26 +614,9 @@ class ASTCall : ASTSymbol
         if (callMacroArgs.transformed) return callMacroArgs.transformed;
 
         auto target = this.target.compile(context);
-        auto args = new Expression[](this.args.length);
-        // TODO does all of this belong in call()?
-        Statement pre, post;
-        for (int i = 0; i < this.args.length; i += 1) {
-            auto arg = beExpression2(this.args[i].compile(context), this.loc);
-            // we must free arg after the call, so make a copy
-            if (arg.temporary()) {
-                auto temp = new PairedTemporary(arg.type(), false);
-                // no copyInto() because we're taking ownership.
-                auto set = new InitializeTemporaryStatement(temp, arg);
-                auto destructor = arg.type().endLifetime(context, temp);
-                if (destructor) {
-                    pre = sequence(pre, set);
-                    post = sequence(post, destructor);
-                    arg = temp;
-                }
-            }
-            args[i] = arg;
-        }
-        return new WrapExpression(pre, call(context, target, args, this.loc), post);
+        auto args = [beExpression2(arg.compile(context), this.loc) for arg in this.args];
+
+        return callWithLifetime(context, target, args, this.loc);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -1084,11 +1088,16 @@ class NewClassExpression : Expression
         Struct classDataStruct = this.classType.dataStruct(output.platform);
         BackendType voidp = (new Pointer(new Void)).emit(output.platform);
         int classInfoPtr = output.fun.symbolList(this.classType.vtableSymbol);
-        int classDataSize = classDataStruct.emit(output.platform).size(output.platform);
+        auto backendClassData = classDataStruct.emit(output.platform);
+        int classDataSize = backendClassData.size(output.platform);
         int classPtr = output.fun.call(
             voidp, "cxruntime_alloc", [output.fun.wordLiteral(output.platform, classDataSize)]);
-        int classInfoTarget = output.fun.fieldOffset(classDataStruct.emit(output.platform), classPtr, 0);
+        auto sizeT = output.platform.nativeWordType;
+        int classInfoTarget = output.fun.fieldOffset(backendClassData, classPtr, 0);
         output.fun.store(voidp, classInfoTarget, classInfoPtr);
+        int refCount = output.fun.fieldOffset(backendClassData, classPtr, 1);
+        int one = output.fun.wordLiteral(output.platform, 1);
+        output.fun.store(sizeT, refCount, one);
 
         return classPtr;
     }
@@ -1122,7 +1131,8 @@ class ASTNewExpression : ASTSymbol
             auto loc = this.loc; // TODO fix
             Expression do_(Expression classptr) {
                 auto ctor = accessMember(context.platform, classptr, "__ctor", loc, false);
-                auto ctorCall = context.compiler.exprStatement(call(context, ctor, argExpressions, loc));
+                auto ctorCall = context.compiler.exprStatement(
+                    callWithLifetime(context, ctor, argExpressions, loc));
 
                 return context.compiler.statementExpression(ctorCall, classptr);
             }
@@ -3206,10 +3216,6 @@ class Class : Type
         auto members = this.allMembers(context.platform);
         assert(members.length >= 2);
         members = members[2 .. members.length]; // drop __classinfo and __refs
-        statements ~= context.compiler.$stmt {
-            (cast(size_t*) this)[1] -= 1;
-            if ((cast(size_t*) this)[1] != 0) return;
-        };
         for (int i = 0; i < members.length; i += 1) {
             auto name = context.compiler.astIdentifier(members[i].name, nowhere.reloc);
             statements ~= context.compiler.$stmt __destroy($name);;
@@ -3220,8 +3226,8 @@ class Class : Type
         bool override_ = false;
         if (this.superClass) override_ = true;
         this.methods ~= new ClassMethod(
-            nowhere, this, override_, false /* abstract */, "__release",
-            new Void, [], stmt, null);
+            nowhere, this, override_, false /* abstract */, "__destroy",
+            new Void, [], stmt, new MacroState);
     }
 
     override bool same(Type other) {
@@ -3236,6 +3242,43 @@ class Class : Type
         hash.apply(mangledHash.add, mangledHash.mult);
         // does there to be more here? I think not; Class is not being emitted as a distinct symbol
         // the vtable is hashed from the class decl
+    }
+
+    override Statement copyInto(Context context, Reference target, Expression source)
+    {
+        Statement do_(Expression source) {
+            auto sizeT = nativeWordType(context.platform);
+            context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, "this", source));
+            context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, "size_t", sizeT));
+
+            auto incref = context.compiler.$stmt
+                if (!!this) (cast(size_t*) this)[1] += 1;;
+            auto assign = context.compiler.assignStatement(target, source);
+            return sequence(incref.compile(context).statement, assign);
+        }
+        return context.compiler.stmtWithTemporary(source, &do_);
+    }
+
+    override Statement endLifetime(Context context, Reference reference)
+    {
+        Statement do_(Expression this_) {
+            auto sizeT = nativeWordType(context.platform);
+            context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, "this", this_));
+            context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, "size_t", sizeT));
+
+            auto stmt = context.compiler.$stmt
+                if (!!this) {
+                    (cast(size_t*) this)[1] -= 1;
+                    if ((cast(size_t*) this)[1] == 0)
+                        this.__destroy();
+                };
+            return stmt.compile(context).statement;
+        }
+        return context.compiler.stmtWithTemporary(reference, &do_);
     }
 }
 

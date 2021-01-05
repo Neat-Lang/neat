@@ -12,7 +12,7 @@ class ASTEitherDecl : ASTType
 {
     ASTType[] partTypes;
 
-    this(ASTType[] partTypes) { this.partTypes = partTypes; }
+    this(this.partTypes) { }
 
     override Type compile(Context context)
     {
@@ -33,16 +33,9 @@ class EitherExpr : Expression
 
     int offset;
 
-    this(Either either, Expression value, int offset) {
-        this.either = either;
-        this.offset = offset;
-        this.value = value;
-    }
+    this(this.either, this.value, this.offset) { }
 
-    override Type type()
-    {
-        return either;
-    }
+    override Type type() { return either; }
 
     override int emit(Generator generator)
     {
@@ -61,8 +54,8 @@ class EitherExpr : Expression
         return generator.fun.load(eitherType, reg);
     }
 
-    // TODO propagate refcounting through Either
-    override bool temporary() { return false; }
+    // consume value's lifetime
+    override bool temporary() { return value.temporary(); }
 
     override void hash(Hash hash) { hash.adds("EitherExpr"); value.hash(hash); hash.addl(offset); }
 }
@@ -71,7 +64,7 @@ class EitherType : Expression
 {
     Expression value;
 
-    this(Expression value) { this.value = value; }
+    this(this.value) { }
 
     override Type type()
     {
@@ -90,13 +83,75 @@ class EitherType : Expression
     override void hash(Hash hash) { hash.adds("EitherType"); value.hash(hash); }
 }
 
+class EitherTypeReference : Reference
+{
+    Reference base;
+
+    this(this.base) { }
+
+    override Type type() { return new Integer; }
+
+    override int emitLocation(Generator output)
+    {
+        auto eitherType = this.base.type().emit(output.platform);
+        int baseptr = this.base.emitLocation(output);
+        return output.fun.fieldOffset(eitherType, baseptr, 0);
+    }
+
+    override int emit(Generator output)
+    {
+        return output.fun.load(this.type().emit(output.platform), this.emitLocation(output));
+    }
+
+    override bool temporary() { return false; }
+
+    override void hash(Hash hash) { hash.adds("EitherTypeReference"); base.hash(hash); }
+}
+
+class EitherReference : Reference
+{
+    Reference base;
+
+    int offset;
+
+    this(this.base, this.offset) { }
+
+    override Type type()
+    {
+        return this.base.type().instanceOf(Either).types[this.offset];
+    }
+
+    override int emitLocation(Generator output)
+    {
+        BackendType eitherType = this.base.type().emit(output.platform);
+        int eitherPtr = this.base.emitLocation(output);
+        int eitherUnionPtr = output.fun.fieldOffset(eitherType, eitherPtr, 1);
+        BackendType backendValueType = this.type().emit(output.platform);
+        int valuePtr = output.fun.bitcast(eitherUnionPtr, new BackendPointerType(backendValueType));
+
+        return valuePtr;
+    }
+
+    override int emit(Generator output)
+    {
+        return output.fun.load(
+            this.type().emit(output.platform),
+            emitLocation(output));
+    }
+
+    // EitherReference should not participate in memory management
+    override bool temporary() { return false; }
+
+    override void hash(Hash hash) { hash.adds("EitherReference"); base.hash(hash); hash.addl(offset); }
+}
+
 class EitherMember : Expression
 {
     Expression value;
 
     int offset;
 
-    this(Expression value, int offset) { this.value = value; this.offset = offset; }
+    this(this.value, this.offset) { }
 
     override Type type()
     {
@@ -118,7 +173,7 @@ class EitherMember : Expression
         return generator.fun.load(backendValueType, valuePtr);
     }
 
-    // TODO propagate refcounting through Either
+    // EitherMember should not participate in memory management
     override bool temporary() { return false; }
 
     override void hash(Hash hash) { hash.adds("EitherMember"); value.hash(hash); hash.addl(offset); }
@@ -128,7 +183,7 @@ class Either : Type
 {
     Type[] types;
 
-    this(Type[] types) { this.types = types; }
+    this(this.types) { }
 
     override BackendType emit(Platform platform) {
         int size = 0;
@@ -192,6 +247,65 @@ class Either : Type
         for (int i = 0; i < types.length; i += 1)
             types[i].hash(hash);
     }
+
+    /**
+     * Called to create a copy of an expression in a target.
+     */
+    override Statement copyInto(Context context, Reference target, Expression source)
+    {
+        Statement do_(Expression source) {
+            auto sourceType = new EitherType(source);
+            auto targetType = new EitherTypeReference(target);
+            auto typeAssignment = context.compiler.assignStatement(targetType, sourceType);
+
+            Loc nowhere;
+            Statement ifTree;
+            for (int i = 0; i < types.length; i += 1) {
+                auto type = types[i];
+                auto targetMember = new EitherReference(target, i);
+                auto sourceMember = new EitherMember(source, i);
+
+                Statement copy = type.copyInto(context, targetMember, sourceMember);
+                if (!copy) copy = context.compiler.assignStatement(targetMember, sourceMember);
+                Expression test = context.compiler.binaryOp(
+                    "==", context, sourceType, context.compiler.intLiteral(i + 1), nowhere);
+                ifTree = context.compiler.ifStatement(test, copy, ifTree);
+            }
+            if (!ifTree) return null; // no copyInto for any member
+            return context.compiler.sequenceStatement([typeAssignment, ifTree]);
+        }
+        // TODO tmpize `target`
+        return context.compiler.stmtWithTemporary(source, &do_);
+    }
+
+    /**
+     * Called when a scoped expression goes out of scope.
+     */
+    override Statement endLifetime(Context context, Reference reference)
+    {
+        Statement do_(Expression refPtr) {
+            auto reference = context.compiler.dereference(refPtr);
+            auto valueType = new EitherType(reference);
+
+            Loc nowhere;
+            Statement ifTree;
+            for (int i = 0; i < types.length; i += 1) {
+                auto type = types[i];
+                auto member = new EitherReference(reference, i);
+
+                Statement destroy = type.endLifetime(context, member);
+                if (!destroy) continue;
+                Expression test = context.compiler.binaryOp(
+                    "==", context, valueType, context.compiler.intLiteral(i + 1), nowhere);
+                ifTree = context.compiler.ifStatement(test, destroy, ifTree);
+            }
+
+            return ifTree;
+        }
+        return context.compiler.stmtWithTemporary(
+            context.compiler.reference(reference),
+            &do_);
+    }
 }
 
 ASTType parseEither(Parser parser, LexicalContext lexicalContext)
@@ -241,7 +355,7 @@ class ASTEitherCaseExpr : ASTSymbol
 
     ASTEitherCaseExprCase[] cases;
 
-    this(Loc loc, ASTSymbol base, ASTEitherCaseExprCase[] cases) { this.loc = loc; this.base = base; this.cases = cases; }
+    this(this.loc, this.base, this.cases) { }
 
     override Symbol compile(Context context) {
         auto baseExpr = beExpression2(base.compile(context), loc);
@@ -366,7 +480,7 @@ class ASTEitherCaseStmt : ASTStatement
 
     ASTEitherCaseStmtCase[] cases;
 
-    this(Loc loc, ASTSymbol base, ASTEitherCaseStmtCase[] cases) { this.loc = loc; this.base = base; this.cases = cases; }
+    this(this.loc, this.base, this.cases) { }
 
     override StatementCompileResult compile(Context context) {
         auto baseExpr = beExpression2(base.compile(context), loc);

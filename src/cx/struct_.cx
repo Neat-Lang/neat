@@ -89,12 +89,12 @@ class Struct : Type
         return null;
     }
 
-    Expression callAutoDtor(Context context, Reference ref_)
+    Statement callAutoDtor(Context context, Reference ref_)
     {
         auto compiler = context.compiler;
         Loc nowhere;
 
-        Argument[] args = [Argument(false, "ptr", new Pointer(ref_.type()))];
+        // Argument[] args = [Argument(false, "ptr", new Pointer(ref_.type()))];
         ASTSymbol ptr = compiler.astIdentifier("ptr", nowhere.reloc);
 
         ASTStatement[] calls;
@@ -111,19 +111,24 @@ class Struct : Type
         }
         if (!calls.length) return null;
         ASTStatement body_ = compiler.astSequence(calls, nowhere.reloc);
-        auto fn = compiler.createRuntimeFunction(context, "structrelease", new Void, args, body_);
-
-        return compiler.call(fn, [compiler.reference(ref_)], loc);
+        // auto fn = compiler.createRuntimeFunction(context, "structrelease", new Void, args, body_);
+        // return compiler.call(fn, [compiler.reference(ref_)], loc);
+        Statement do_(Expression refptr) {
+            context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, "ptr", refptr));
+            return body_.compile(context).statement;
+        }
+        return context.compiler.stmtWithTemporary(compiler.reference(ref_), &do_);
     }
 
-    Expression callAutoCopyCtor(Context context, Reference target, Expression source)
+    Statement callAutoCopyCtor(Context context, Reference target, Expression source)
     {
         auto compiler = context.compiler;
         Loc nowhere;
 
-        Argument[] args = [
+        /*Argument[] args = [
             Argument(false, "target", new Pointer(target.type())),
-            Argument(false, "source", source.type())];
+            Argument(false, "source", source.type())];*/
         ASTSymbol targetArg = compiler.astIdentifier("target", nowhere.reloc);
         ASTSymbol sourceArg = compiler.astIdentifier("source", nowhere.reloc);
 
@@ -142,9 +147,19 @@ class Struct : Type
         }
         if (!anySpecialAssignments) return null;
         ASTStatement body_ = compiler.astSequence(calls, nowhere.reloc);
-        auto fn = compiler.createRuntimeFunction(context, "structcopy", new Void, args, body_);
-
-        return compiler.call(fn, [compiler.reference(target), source], loc);
+        // auto fn = compiler.createRuntimeFunction(context, "structcopy", new Void, args, body_);
+        // return compiler.call(fn, [compiler.reference(target), source], loc);
+        Statement do1(Expression targetptr) {
+            Statement do2(Expression source) {
+                context = context.withNamespace(
+                    context.compiler.exprAlias(context.namespace, "target", compiler.dereference(targetptr)));
+                context = context.withNamespace(
+                    context.compiler.exprAlias(context.namespace, "source", source));
+                return body_.compile(context).statement;
+            }
+            return context.compiler.stmtWithTemporary(source, &do2);
+        }
+        return context.compiler.stmtWithTemporary(compiler.reference(target), &do1);
     }
 
     override Statement copyInto(Context context, Reference target, Expression source)
@@ -157,7 +172,7 @@ class Struct : Type
         }
         auto autoCopyCtor = callAutoCopyCtor(context, target, source);
         if (autoCopyCtor) {
-            return new ExprStatement(autoCopyCtor);
+            return autoCopyCtor;
         }
         return null;
     }
@@ -166,10 +181,8 @@ class Struct : Type
     {
         FunctionDeclaration destructor = getDtor();
         Expression ptr = new ReferenceExpression(ref_);
-        Statement callDtor, callAutoDtor_;
-        auto autoDtor = callAutoDtor(context, ref_);
+        Statement callDtor, callAutoDtor_ = callAutoDtor(context, ref_);
         if (destructor) callDtor = new ExprStatement(new Call(destructor, [ptr], this.loc));
-        if (autoDtor) callAutoDtor_ = new ExprStatement(autoDtor);
         return sequence(callDtor, callAutoDtor_);
     }
 }

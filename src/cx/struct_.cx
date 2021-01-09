@@ -114,48 +114,33 @@ class Struct : Type
         // auto fn = compiler.createRuntimeFunction(context, "structrelease", new Void, args, body_);
         // return compiler.call(fn, [compiler.reference(ref_)], loc);
         Statement do_(Expression refptr) {
-            context = context.withNamespace(
+            auto context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "ptr", refptr));
+
             return body_.compile(context).statement;
         }
         return context.compiler.stmtWithTemporary(compiler.reference(ref_), &do_);
     }
 
-    Statement callAutoCopyCtor(Context context, Reference target, Expression source)
+    Statement copyRecursive(Context context, Reference target, Expression source)
     {
         auto compiler = context.compiler;
-        Loc nowhere;
 
-        /*Argument[] args = [
-            Argument(false, "target", new Pointer(target.type())),
-            Argument(false, "source", source.type())];*/
-        ASTSymbol targetArg = compiler.astIdentifier("target", nowhere.reloc);
-        ASTSymbol sourceArg = compiler.astIdentifier("source", nowhere.reloc);
-
-        ASTStatement[] calls;
-        bool anySpecialAssignments;
-        for (int i = 0; i < members.length; i += 1) {
-            auto entry = members[i];
-            auto targetField = new StructMemberReference(target, i);
-            auto sourceField = new StructMember(source, i);
-            auto copyInto = entry.type.copyInto(context, targetField, sourceField);
-            if (copyInto) anySpecialAssignments = true;
-            // calls ~= compiler.$stmt target.$name = source.$name;;
-            calls ~= compiler.astAssign(
-                compiler.astMember(targetArg, entry.name, nowhere.reloc),
-                compiler.astMember(sourceArg, entry.name, nowhere.reloc), nowhere.reloc);
-        }
-        if (!anySpecialAssignments) return null;
-        ASTStatement body_ = compiler.astSequence(calls, nowhere.reloc);
-        // auto fn = compiler.createRuntimeFunction(context, "structcopy", new Void, args, body_);
-        // return compiler.call(fn, [compiler.reference(target), source], loc);
         Statement do1(Expression targetptr) {
+            auto target = compiler.dereference(targetptr);
             Statement do2(Expression source) {
-                context = context.withNamespace(
-                    context.compiler.exprAlias(context.namespace, "target", compiler.dereference(targetptr)));
-                context = context.withNamespace(
-                    context.compiler.exprAlias(context.namespace, "source", source));
-                return body_.compile(context).statement;
+                Statement[] assigns;
+                bool anySpecialAssignments;
+                for (int i = 0; i < members.length; i += 1) {
+                    auto targetField = new StructMemberReference(target, i);
+                    auto sourceField = new StructMember(source, i);
+                    auto copyInto = members[i].type.copyInto(context, targetField, sourceField);
+                    if (copyInto) anySpecialAssignments = true;
+                    if (!copyInto) copyInto = compiler.assignStatement(targetField, sourceField);
+                    assigns ~= copyInto;
+                }
+                if (!anySpecialAssignments) return null;
+                return compiler.sequenceStatement(assigns);
             }
             return context.compiler.stmtWithTemporary(source, &do2);
         }
@@ -170,10 +155,9 @@ class Struct : Type
             auto call = new Call(copyCtor, [targetPtr, source], this.loc);
             return new ExprStatement(call);
         }
-        auto autoCopyCtor = callAutoCopyCtor(context, target, source);
-        if (autoCopyCtor) {
-            return autoCopyCtor;
-        }
+        auto copyStmt = copyRecursive(context, target, source);
+        if (copyStmt)
+            return copyStmt;
         return null;
     }
 
@@ -211,7 +195,7 @@ class StructMember : Expression
         return output.fun.field(structType.emit(output.platform), base.emit(output), cast(int) index);
     }
 
-    override bool temporary() { return base.temporary(); }
+    override ExprInfo info() { return base.info(); }
 
     override void hash(Hash hash)
     {
@@ -254,7 +238,7 @@ class StructMemberReference : Reference
         return output.fun.fieldOffset(this.base.type().emit(output.platform), reg, this.index);
     }
 
-    override bool temporary() { return base.temporary(); }
+    override ExprInfo info() { return base.info(); }
 
     override void hash(Hash hash)
     {

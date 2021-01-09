@@ -160,7 +160,6 @@ BackgroundCompilation emitModule(CompilerBase compiler, Backend backend, Platfor
             auto llText = backendModuleLLVM.output.text();
             cxruntime_file_write(srcFile, llText);
         }
-        backendModuleLLVM.output.free();
         pid = build(srcFile, objFile);
     } else {
         assert(!!backendModuleC);
@@ -169,7 +168,6 @@ BackgroundCompilation emitModule(CompilerBase compiler, Backend backend, Platfor
             auto csrc = backendModuleC.output.text();
             cxruntime_file_write(srcFile, csrc);
         }
-        backendModuleC.output.free();
         pid = build(srcFile, objFile);
     }
     return BackgroundCompilation(objFile, pid);
@@ -227,7 +225,7 @@ class ParserHelperImpl : ParserHelper
                 assert(false);
         }
 
-        auto simpleContext = Context(compiler, platform, null, null, null, null);
+        auto simpleContext = Context(compiler, platform, null, null, null);
         auto fun = module_.lookup(function_, simpleContext, null).instanceOf(Function);
         string name = fun.mangle();
         string soname;
@@ -347,11 +345,20 @@ class ASTSizeT : ASTType
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTSizeT'!"); assert(false); }
 }
 
+struct CachedRuntimeFunction
+{
+    FunctionDeclaration fun;
+
+    Module rtMod;
+}
+
 class CompilerImpl : CompilerBase
 {
     ASTModule[] defaultImports;
 
     this(this.defaultImports) { this.linenr = new LineNumberRegistry; }
+
+    CachedRuntimeFunction[] cachedRuntimeFunctions;
 
     Module delegate(ASTModule) compile;
 
@@ -452,6 +459,11 @@ class CompilerImpl : CompilerBase
         return new ASTDestroy(target, Loc(linenr, reloc));
     }
 
+    override ASTSymbol astStatementExpression(ASTStatement[] statements, ASTSymbol expr, ReLoc reloc)
+    {
+        return new ASTStatementExpression(statements, expr, reloc);
+    }
+
     override ASTSymbol astCast(ASTType target, ASTSymbol value, ReLoc reloc)
     {
         return new ASTCastExpr(target, value, Loc(linenr, reloc));
@@ -538,6 +550,11 @@ class CompilerImpl : CompilerBase
         return new Call(fun, args, loc);
     }
 
+    override Expression callWithLifetime(Context context, Symbol target, Expression[] args, Loc loc)
+    {
+        return .callWithLifetime(context, target, args, loc);
+    }
+
     override Expression binaryOp(string op, Context context, Expression left, Expression right, Loc loc)
     {
         if (op == "~")
@@ -602,6 +619,11 @@ class CompilerImpl : CompilerBase
         return new ExprStatement(test);
     }
 
+    override Statement unwindScope(Context context, Namespace target, Statement next)
+    {
+        return .unwindScope(context, target, next);
+    }
+
     override Namespace exprAlias(Namespace parent, string name, Symbol value)
     {
         return new ExpressionAlias(parent, name, value);
@@ -609,7 +631,7 @@ class CompilerImpl : CompilerBase
 
     override VariableDeclarationBase variableDeclaration(Namespace parent, string name, Type type)
     {
-        return new VariableDeclaration(parent, name, type);
+        return new VariableDeclaration(parent, name, type, true);
     }
 
     override Statement move(Context context, Reference target, Expression source)
@@ -619,7 +641,7 @@ class CompilerImpl : CompilerBase
 
     override Statement stmtWithTemporary(Expression value, Statement delegate(Expression) callback)
     {
-        auto temp = new PairedTemporary(value.type(), value.temporary());
+        auto temp = new PairedTemporary(value.type(), value.info().gifted);
         auto start = new InitializeTemporaryStatement(temp, value);
         auto stmt = callback(temp);
         if (!stmt) return null;
@@ -628,16 +650,16 @@ class CompilerImpl : CompilerBase
 
     override Expression exprWithTemporary(Expression value, Expression delegate(Expression) callback)
     {
-        auto temp = new PairedTemporary(value.type(), value.temporary());
+        auto temp = new PairedTemporary(value.type(), value.info().gifted);
         auto start = new InitializeTemporaryStatement(temp, value);
         auto expr = callback(temp);
         if (!expr) return null;
-        return new StatementExpression(start, expr);
+        return new StatementExpression(start, expr, false);
     }
 
     override Expression statementExpression(Statement statement, Expression expression)
     {
-        return new StatementExpression(statement, expression);
+        return new StatementExpression(statement, expression, false);
     }
 
     void addDefaultImports(Module module_)
@@ -656,6 +678,15 @@ class CompilerImpl : CompilerBase
         for (int i = 0; i < args.length; i += 1) {
             mangledName ~= "_" ~ args[i].type.mangle();
         }
+        for (int i = 0; i < cachedRuntimeFunctions.length; i += 1) {
+            auto cache = cachedRuntimeFunctions[i];
+            if (cache.fun.name == mangledName) {
+                auto usingMod = findModule(context.namespace);
+                usingMod.addImport(cache.rtMod);
+                return cache.fun;
+            }
+        }
+
         auto fun = new Function(loc, mangledName, ret, args, body_, context.macroState);
         auto rtMod = new Module(name, new Package("rt_" ~ mangledName, path), context.macroState, null);
         rtMod.add("free", new FunctionDeclaration(
@@ -664,18 +695,27 @@ class CompilerImpl : CompilerBase
             "print", new Void, [Argument(false, "", new Array(new Character))]));
         rtMod.add("ltoa", new FunctionDeclaration(
             "cxruntime_ltoa", new Array(new Character), [Argument(false, "", new Long)]));
+        rtMod.add("cxruntime_refcount_violation", new FunctionDeclaration(
+            "cxruntime_refcount_violation", new Void, [
+                Argument(false, "label", new Array(new Character)),
+                Argument(false, "ptr", new Pointer(new Void))]));
+
         fun.parent = rtMod;
         string types;
         rtMod.add("__" ~ name, fun);
         addDefaultImports(rtMod);
         auto usingMod = findModule(context.namespace);
         usingMod.addImport(rtMod);
+
+        cachedRuntimeFunctions ~= CachedRuntimeFunction(fun, rtMod);
+
         return fun;
     }
 }
 
 void main(string[] args)
 {
+    string[] args = args; // TODO mut string[] args
     print("# stage2");
     string output;
     string[] nextArgs;

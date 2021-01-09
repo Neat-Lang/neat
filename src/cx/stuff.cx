@@ -26,6 +26,8 @@ struct ASTArgument
     ASTType type;
 }
 
+extern(C) void* calloc(size_t nmemb, size_t size);
+
 class Function : FunctionDeclaration
 {
     Loc loc;
@@ -79,7 +81,8 @@ class Function : FunctionDeclaration
         VariableDeclaration thisDecl;
         if (this.thisType)
         {
-            thisDecl = new VariableDeclaration(scope_, "this", this.thisType);
+            bool owned = true; // is this right ... ?
+            thisDecl = new VariableDeclaration(scope_, "this", this.thisType, owned);
 
             Type voidp = new Pointer(new Void);
 
@@ -90,7 +93,7 @@ class Function : FunctionDeclaration
                 new PointerCast(this.thisType, new ArgExpr(0, voidp)));
         }
 
-        auto context = Context(compiler, platform, scope_, null, this.macroState, (new int[](1)).ptr);
+        auto context = Context(compiler, platform, scope_, this.macroState, cast(int*) calloc(1, 4));
 
         for (int i = 0; i < this.args.length; i += 1) {
             Argument arg = this.args[i];
@@ -99,7 +102,7 @@ class Function : FunctionDeclaration
             if (arg.isThisAssignment) {
                 assert(!!this.thisType);
 
-                auto target = accessMember(platform, thisDecl.accessLocal(), arg.name, this.loc, false)
+                auto target = accessMemberWithLifetime(context, thisDecl.accessLocal(), arg.name, this.loc, false)
                     .instanceOf(Reference);
                 this.loc.assert2s2(!!target, "not a reference: ", arg.name);
 
@@ -107,7 +110,7 @@ class Function : FunctionDeclaration
                 if (!stmt) stmt = new AssignStatement(target, argExpr);
                 argAssignments[extra + i] = stmt;
             } else {
-                auto argDecl = new VariableDeclaration(scope_, arg.name, arg.type);
+                auto argDecl = new VariableDeclaration(scope_, arg.name, arg.type, false);
 
                 argAssignments[extra + i] = new AssignStatement(argDecl.accessLocal(), argExpr);
 
@@ -336,7 +339,7 @@ class ArgExpr : Expression
         return this.type_;
     }
 
-    override bool temporary() { return false; }
+    override ExprInfo info() { return exprInfo(State_owned()); } // "borrowed" from the caller
 
     override void hash(Hash hash) { hash.adds("ArgExpr"); hash.addl(index); }
 }
@@ -376,7 +379,8 @@ class FuncPtrCall : Expression
             type.emit(output.platform), this.funcPtr.emit(output), regs);
     }
 
-    override bool temporary() { return true; }
+    // we take over the returned value
+    override ExprInfo info() { return exprInfo(State_gifted()); }
 
     override void hash(Hash hash) {
         hash.adds("FuncPtrCall");
@@ -414,7 +418,7 @@ class DelegateExpr : Expression
         return output.fun.structLiteral(thisType, [nullReg, thisReg, funcReg]);
     }
 
-    override bool temporary() { return false; }
+    override ExprInfo info() { return exprInfo(State_owned()); }
 
     override void hash(Hash hash) { hash.adds("DelegateExpr"); this.funcPtr.hash(hash); this.thisPtr.hash(hash); }
 }
@@ -437,7 +441,7 @@ class DelegateDataPtr : Expression
         return output.fun.field(this.dg.type().emit(output.platform), reg, 1);
     }
 
-    override bool temporary() { return false; }
+    override ExprInfo info() { return exprInfo(State_owned()); }
 
     override void hash(Hash hash) { hash.adds("DelegateDataPtr"); this.dg.hash(hash); }
 }
@@ -463,13 +467,14 @@ class DelegateFuncPtr : Expression
         return output.fun.field(this.dg.type().emit(output.platform), reg, 2);
     }
 
-    override bool temporary() { return false; }
+    override ExprInfo info() { return exprInfo(State_owned()); }
 
     override void hash(Hash hash) { hash.adds("DelegateFuncPtr"); this.dg.hash(hash); }
 }
 
 Expression call(Context context, Symbol target, Expression[] args, Loc loc)
 {
+    Expression[] args = args; // TODO mut Expression[] args,
     auto fundecl = target.instanceOf(FunctionDeclaration);
     if (fundecl)
     {
@@ -496,8 +501,9 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc)
                 loc.fail("function reference or funcptr expected? but is '" ~ method.funcPtr.type().repr() ~ "'");
             }
         }
+        auto voidp = new Pointer(new Void);
         Expression[] combinedArgs;
-        combinedArgs ~= method.thisPtr;
+        combinedArgs ~= new PointerCast(voidp, method.thisPtr);
         combinedArgs ~= args;
         return new FuncPtrCall(method.funcPtr, combinedArgs, loc);
     }
@@ -541,7 +547,7 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc)
 
             initialize = sequence(initialize, stmt);
         }
-        return new StatementExpression(initialize, temp);
+        return new StatementExpression(initialize, temp, false);
     }
     loc.assert2s(false, "unknown call target");
 }
@@ -564,7 +570,7 @@ class WrapExpression : Expression
         return result;
     }
 
-    override bool temporary() { return value.temporary(); }
+    override ExprInfo info() { return value.info(); }
 
     override void hash(Hash hash) {
         hash.adds("WrapExpression");
@@ -577,22 +583,38 @@ class WrapExpression : Expression
 }
 
 Expression callWithLifetime(Context context, Symbol target, Expression[] args, Loc loc) {
+    Symbol target = target; // TODO mut Symbol target
     Statement pre, post;
     for (int i = 0; i < args.length; i += 1) {
         auto arg = args[i];
         // we must free arg after the call, so make a copy
-        if (arg.temporary()) {
+        if (arg.info().gifted) {
             auto temp = new PairedTemporary(arg.type(), false);
             // no copyInto() because we're taking ownership.
             auto set = new InitializeTemporaryStatement(temp, arg);
             auto destructor = arg.type().endLifetime(context, temp);
             if (destructor) {
                 pre = sequence(pre, set);
-                post = sequence(post, destructor);
+                post = sequence(destructor, post);
                 arg = temp;
             }
         }
         args[i] = arg;
+    }
+    ClassMethodPtr method = target.instanceOf(ClassMethodPtr);
+    if (method && method.thisPtr.info().gifted) { // foo().bar()
+        auto thisPtrType = method.thisPtr.type();
+        // for endLifetime call
+        auto tempThisPtr = new PairedTemporary(thisPtrType, true);
+        Statement setThisPtr = new InitializeTemporaryStatement(tempThisPtr, method.thisPtr);
+        Statement cleanupThisPtr = thisPtrType.endLifetime(context, tempThisPtr);
+
+        if (cleanupThisPtr)
+        {
+            pre = sequence(pre, setThisPtr);
+            post = sequence(cleanupThisPtr, post);
+            target = new ClassMethodPtr(method.funcPtr, tempThisPtr);
+        }
     }
     return new WrapExpression(pre, call(context, target, args, loc), post);
 }
@@ -741,6 +763,62 @@ ASTSymbol parseIndex(Parser parser, LexicalContext lexicalContext, ASTSymbol bas
     return new ASTIndexAccess(base, index, parser.loc());
 }
 
+Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc loc, bool allowUndefined)
+{
+    if (!base.instanceOf(Expression))
+    {
+        loc.assert2s(false, "expected expression for member access");
+    }
+    Expression baseExpr = beExpression(base);
+    Type baseType = baseExpr.type();
+
+    if (baseType.instanceOf(Pointer)) {
+        // cannot trace lifetimes through pointers (TODO?)
+        return accessMember(context.platform, base, member, loc, allowUndefined);
+    }
+
+    // speculative lookup :-(
+    // TODO exprWithTemporary that handles symbol returns
+    auto ret = accessMember(context.platform, baseExpr, member, loc, allowUndefined);
+    if (!ret || !ret.instanceOf(Expression)) return ret;
+    /**
+     * - temporize lhs
+     * - copyInto member
+     * - destroy lhs
+     */
+    Expression do_(Expression baseExpr, bool destroyLhs) {
+        auto ret = accessMember(context.platform, baseExpr, member, loc, allowUndefined).instanceOf(Expression);
+
+        if (!destroyLhs && !ret.info().gifted) {
+            return ret;
+        }
+
+        auto tempRet = new PairedTemporary(ret.type(), true); // temporary since we copyInto
+        auto initTemp = new UninitializeTemporaryStatement(tempRet);
+        auto copyTemp = ret.type().copyInto(context, tempRet, ret);
+        if (!copyTemp) copyTemp = new AssignStatement(tempRet, ret);
+
+        Statement endLifetime;
+        // TODO the callback should take Reference, really
+        if (destroyLhs) endLifetime = baseType.endLifetime(context, baseExpr.instanceOf(Reference));
+
+        return new WrapExpression(sequence(initTemp, copyTemp), tempRet, endLifetime);
+    }
+    Expression doDestroyLhs(Expression baseExpr) {
+        return do_(baseExpr, true);
+    }
+    // SHIT
+    // we need a reference on the lhs for assignments
+    // that's fine if it's a struct, but for a class? always force nontemporary, because it's contained in the
+    // class lifetime?
+    // TODO handle member access of temporaries
+    // for instance with an ExprReturnType analogous to StatementReturnType, that gathers temp destructors
+
+    // if lhs is nontemp, just use StructReference
+    if (!baseExpr.info().gifted) return do_(baseExpr, false);
+    return context.compiler.exprWithTemporary(baseExpr, &doDestroyLhs);
+}
+
 Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool allowUndefined)
 {
     if (!base.instanceOf(Expression))
@@ -779,7 +857,7 @@ Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool
         {
             // TODO dereference-into-symbol so we can '&' it again
             auto funcPtr = new FunctionReference(structType.methods[methodOffset]);
-            assert(!!baseExpr.instanceOf(Reference));
+            loc.assert2s(!!baseExpr.instanceOf(Reference), "base of method call must be reference");
             return new ClassMethodPtr(funcPtr, new ReferenceExpression(baseExpr.instanceOf(Reference)));
         }
         if (allowUndefined) return null;
@@ -802,8 +880,14 @@ Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool
                 auto funcPtr = new FunctionReference(vtable[methodOffset]);
                 return new ClassMethodPtr(funcPtr, baseExpr);
             }
-            auto funcPtr = new StructMemberReference(classInfo, methodOffset);
-            return new ClassMethodPtr(funcPtr, baseExpr);
+            Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
+            auto funcPtr = funcPtrValue.type().instanceOf(FunctionPointer);
+
+            auto funcPtrWithVoidpThis = new FunctionPointer(funcPtr.ret, [arg for arg in funcPtr.args]);
+            funcPtrWithVoidpThis.args[0] = new Pointer(new Void);
+            funcPtrValue = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
+
+            return new ClassMethodPtr(funcPtrValue, baseExpr);
         }
 
         ClassMember[] members = classType.allMembers(platform);
@@ -822,7 +906,7 @@ class ASTMember : ASTMemberBase
 {
     override Symbol compile(Context context)
     {
-        return accessMember(context.platform, this.base.compile(context), this.member, this.loc, false);
+        return accessMemberWithLifetime(context, this.base.compile(context), this.member, this.loc, false);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -859,12 +943,16 @@ class ASTInstanceOf : ASTSymbol
     override Symbol compile(Context context)
     {
         Expression base = beExpression(this.base.compile(context));
-        assert(!!base.type().instanceOf(Class));
-        Class target = this.target.compile(context).instanceOf(Class);
-        assert(!!target);
-        Symbol instanceOf = accessMember(context.platform, base, "__instanceof", this.loc, false);
-        Expression name = new StringLiteral(target.name);
-        return new PointerCast(target, call(context, instanceOf, [name], this.loc));
+        auto type = base.type();
+        assert(!!type.instanceOf(Class));
+        Expression do_(Expression base) {
+            Class target = target.compile(context).instanceOf(Class);
+            assert(!!target);
+            Symbol instanceOf = accessMember(context.platform, base, "__instanceof", loc, false);
+            Expression name = new StringLiteral(target.name);
+            return new PointerCast(target, callWithLifetime(context, instanceOf, [name], loc));
+        }
+        return context.compiler.exprWithTemporary(base, &do_);
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTInstanceOf'"); assert(false); }
@@ -887,6 +975,7 @@ ASTSymbol parseInstanceOf(Parser parser, LexicalContext lexicalContext, ASTSymbo
 
 ASTSymbol parseProperties(Parser parser, LexicalContext lexicalContext, ASTSymbol current)
 {
+    ASTSymbol current = current; // TODO mut ASTSymbol current
     while (true)
     {
         ASTSymbol instanceOf = parseInstanceOf(parser, lexicalContext, current);
@@ -973,7 +1062,9 @@ class Dereference : Reference
         return this.base.emit(output);
     }
 
-    override bool temporary() { return base.temporary(); }
+    // avoid doing memory management until we figure out how to handle pointers.
+    // (or if we need to at all.)
+    override ExprInfo info() { return exprInfo(State_owned()); }
 
     override void hash(Hash hash) { hash.adds("Dereference"); base.hash(hash); }
 }
@@ -1002,7 +1093,7 @@ class FunctionReference : FunctionReferenceBase
         return output.fun.getFuncPtr(this.fun.mangle());
     }
 
-    override bool temporary() { return false; }
+    override ExprInfo info() { return exprInfo(State_owned()); }
 
     override void hash(Hash hash) { hash.adds("FunctionReference"); hash.adds(fun.mangle()); }
 }
@@ -1033,7 +1124,7 @@ class ASTReference : ASTSymbol
         }
         Expression baseExpression = beExpression2(this.base.compile(context), this.loc);
 
-        assert(!!baseExpression.instanceOf(Reference));
+        loc.assert2s(!!baseExpression.instanceOf(Reference), "&expr: expr not a reference");
 
         return new ReferenceExpression(baseExpression.instanceOf(Reference));
     }
@@ -1059,7 +1150,7 @@ class SizeOf : Expression
         return output.fun.intLiteral(size);
     }
 
-    override bool temporary() { return false; }
+    override ExprInfo info() { return exprInfo(State_owned()); }
 
     override void hash(Hash hash) { hash.adds("SizeOf"); type_.hash(hash); }
 }
@@ -1096,9 +1187,20 @@ class NewClassExpression : Expression
         return classPtr;
     }
 
-    override bool temporary() { return true; }
+    // the archetypal example
+    override ExprInfo info() { return exprInfo(State_gifted()); }
 
     override void hash(Hash hash) { hash.adds("NewClassExpression"); classType.hash(hash); }
+}
+
+class IgnoreLifetimeExpr : Expression
+{
+    Expression value;
+    this(this.value) { }
+    override Type type() { return value.type(); }
+    override int emit(Generator output) { return value.emit(output); }
+    override ExprInfo info() { return exprInfo(State_owned()); }
+    override void hash(Hash hash) { hash.adds("IgnoreLifetimeExpr"); value.hash(hash); }
 }
 
 class ASTNewExpression : ASTSymbol
@@ -1124,7 +1226,9 @@ class ASTNewExpression : ASTSymbol
 
             auto loc = this.loc; // TODO fix
             Expression do_(Expression classptr) {
-                auto ctor = accessMember(context.platform, classptr, "__ctor", loc, false);
+                // don't clean up classptr after constructor call, we're continuing its lifetime
+                auto ctor = accessMember(
+                    context.platform, new IgnoreLifetimeExpr(classptr), "__ctor", loc, false);
                 auto ctorCall = context.compiler.exprStatement(
                     callWithLifetime(context, ctor, argExpressions, loc));
 
@@ -1440,6 +1544,7 @@ ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
 
 ASTSymbol parseBitAnd(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
+    ASTSymbol left = left; // TODO mut ASTSymbol left
     while (true)
     {
         parser.begin();
@@ -1460,6 +1565,7 @@ ASTSymbol parseBitAnd(Parser parser, LexicalContext lexicalContext, ASTSymbol le
 
 ASTSymbol parseBitOr(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
+    ASTSymbol left = left; // TODO mut ASTSymbol left
     while (true)
     {
         parser.begin();
@@ -1480,6 +1586,7 @@ ASTSymbol parseBitOr(Parser parser, LexicalContext lexicalContext, ASTSymbol lef
 
 ASTSymbol parseAddSubCat(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
+    ASTSymbol left = left; // TODO mut ASTSymbol left
     while (true)
     {
         if (parser.accept("+"))
@@ -1506,6 +1613,7 @@ ASTSymbol parseAddSubCat(Parser parser, LexicalContext lexicalContext, ASTSymbol
 
 ASTSymbol parseMulDiv(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
+    ASTSymbol left = left; // TODO mut ASTSymbol left
     while (true)
     {
         if (parser.accept("*"))
@@ -1526,6 +1634,7 @@ ASTSymbol parseMulDiv(Parser parser, LexicalContext lexicalContext, ASTSymbol le
 
 ASTSymbol parseBoolAnd(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
+    ASTSymbol left = left; // TODO mut ASTSymbol left
     while (true)
     {
         if (parser.accept("&&"))
@@ -1539,6 +1648,7 @@ ASTSymbol parseBoolAnd(Parser parser, LexicalContext lexicalContext, ASTSymbol l
 
 ASTSymbol parseBoolOr(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
+    ASTSymbol left = left; // TODO mut ASTSymbol left
     while (true)
     {
         if (parser.accept("||"))
@@ -1656,27 +1766,23 @@ class ASTReturnStatement : ASTStatement
         Type ret = findFunctionScope(context.namespace).ret;
         expr = expectImplicitConvertTo(expr, ret, this.loc);
 
-        Statement returnStmt;
-        // temporary = we can steal its reference
-        if (expr.temporary() || expr.type().same(new Void)) {
-            returnStmt = new ReturnStatement(expr);
-            returnStmt = unwindScope(context, findFunctionScopeStart(context.namespace), returnStmt);
-        } else { // scoped value, take a copy
-            /**
-             * - alloca
-             * - copyInto the value
-             * - unwind stack
-             * - ret the alloca
-             */
-            auto temp = new PairedTemporary(ret, false);
-            auto init = new UninitializeTemporaryStatement(temp);
-            auto escapeValueStmt = ret.copyInto(context, temp, expr);
-            if (!escapeValueStmt) escapeValueStmt = new AssignStatement(temp, expr);
-            returnStmt = sequence(init, escapeValueStmt);
-            returnStmt = unwindScope(context, findFunctionScopeStart(context.namespace), returnStmt);
-            returnStmt = sequence(returnStmt, new ReturnStatement(temp));
-            // no need for stack cleanup after a return.
+        /**
+         * - alloca
+         *   - copyInto the value
+         *   - or assign the value (if it's a temporary and we can steal its reference)
+         * - unwind stack
+         * - ret the alloca
+         */
+        auto temp = new PairedTemporary(ret, false);
+        auto init = new UninitializeTemporaryStatement(temp);
+        Statement escapeValueStmt = ret.copyInto(context, temp, expr);
+        if (expr.info().gifted || !escapeValueStmt) {
+            escapeValueStmt = new AssignStatement(temp, expr);
         }
+        Statement returnStmt = sequence(init, escapeValueStmt);
+        returnStmt = unwindScope(context, findFunctionScopeStart(context.namespace), returnStmt);
+        returnStmt = sequence(returnStmt, new ReturnStatement(temp));
+        // no need for stack cleanup after a return.
 
         return StatementCompileResult(returnStmt, context);
     }
@@ -1709,7 +1815,7 @@ class VoidExpression : Expression
     {
         return generator.fun.voidLiteral();
     }
-    override bool temporary() { return false; }
+    override ExprInfo info() { return exprInfo(State_owned()); }
     override void hash(Hash hash) { hash.adds("VoidExpression"); }
 }
 
@@ -1757,7 +1863,7 @@ class StackFrame : Reference
         return generator.frameReg;
     }
 
-    override bool temporary() { return false; }
+    override ExprInfo info() { return exprInfo(State_owned()); }
 
     override void hash(Hash hash) { hash.adds("StackFrame"); targetType.hash(hash); }
 }
@@ -1771,7 +1877,9 @@ class LatentVariable
 
     int offset;
 
-    this(this.name, this.stackFrameType, this.offset) { }
+    bool owned;
+
+    this(this.name, this.stackFrameType, this.offset, this.owned) { }
 }
 
 class FunctionScope : Namespace
@@ -1788,14 +1896,14 @@ class FunctionScope : Namespace
 
     this(this.ret, this.extra, this.parent, this.mangle_, this.loc) { }
 
-    LatentVariable declare(string name, Type type)
+    LatentVariable declare(string name, Type type, bool owned)
     {
         this.variables ~= new StructMemberDeclaration(name, type);
         // having cast sure would be nice...
         int len;
         while (len < this.variables.length) len = len + 1;
 
-        return new LatentVariable(name, this.structType(), len - 1);
+        return new LatentVariable(name, this.structType(), len - 1, owned);
     }
 
     Struct structType()
@@ -1843,6 +1951,7 @@ class FunctionScopeStart : Namespace
 
 FunctionScopeStart findFunctionScopeStart(Namespace namespace)
 {
+    Namespace namespace = namespace; // TODO mut Namespace namespace
     while (true) {
         auto functionScopeStart = namespace.instanceOf(FunctionScopeStart);
         if (functionScopeStart) return functionScopeStart;
@@ -1868,13 +1977,26 @@ class ExpressionAlias : Namespace
     }
 }
 
+class BorrowedReference : Reference
+{
+    Reference base;
+
+    this(this.base) { }
+
+    override Type type() { return base.type(); }
+    override int emit(Generator output) { return base.emit(output); }
+    override int emitLocation(Generator output) { return base.emitLocation(output); }
+    override void hash(Hash hash) { hash.adds("BorrowedReference"); base.hash(hash); }
+    override ExprInfo info() { return exprInfo(State_borrowed()); }
+}
+
 class VariableDeclaration : VariableDeclarationBase
 {
     LatentVariable variable;
 
-    this(this.parent, string name, Type type)
+    this(this.parent, string name, Type type, bool owned)
     {
-        this.variable = findFunctionScope(this).declare(name, type);
+        this.variable = findFunctionScope(this).declare(name, type, owned);
     }
 
     override Reference accessLocal()
@@ -1886,8 +2008,11 @@ class VariableDeclaration : VariableDeclarationBase
     Reference access(Expression frame)
     {
         Type stackFrameType = variable.stackFrameType;
-        frame = new PointerCast(new Pointer(stackFrameType), frame);
-        return new StructMemberReference(new Dereference(frame), variable.offset);
+        auto frame = new PointerCast(new Pointer(stackFrameType), frame);
+        auto reference = new StructMemberReference(new Dereference(frame), variable.offset);
+        // an argument, for instance
+        if (!variable.owned) return new BorrowedReference(reference);
+        return reference;
     }
 
     override Symbol lookup(string name, Context context, Expression frame)
@@ -1927,8 +2052,7 @@ Statement unwindScope(Context context, Namespace target, Statement body_)
     auto current = context.namespace;
     while (current !is target) {
         auto varDecl = current.instanceOf(VariableDeclaration);
-        if (varDecl)
-        {
+        if (varDecl) {
             auto var = varDecl.accessLocal();
             auto type = var.type();
             auto destroy = type.endLifetime(context, var);
@@ -2180,7 +2304,7 @@ class ASTVarDeclStatement : ASTStatement
                 initial = expectImplicitConvertTo(initial, type, this.loc);
             }
 
-            auto decl = new VariableDeclaration(context.namespace, this.name, type);
+            auto decl = new VariableDeclaration(context.namespace, this.name, type, true);
 
             return StatementCompileResult(
                 move(context, decl.accessLocal(), initial),
@@ -2188,7 +2312,7 @@ class ASTVarDeclStatement : ASTStatement
         }
         else
         {
-            auto decl = new VariableDeclaration(context.namespace, this.name, type);
+            auto decl = new VariableDeclaration(context.namespace, this.name, type, true);
 
             return StatementCompileResult(
                 new AssignStatement(decl.accessLocal(), new NullExpr(type)),
@@ -2360,7 +2484,7 @@ class ASTWhile : ASTStatement
     override StatementCompileResult compile(Context context)
     {
         auto label = context.getLabel();
-        auto loopContext = context.withDeclScope(new LoopScopeImpl(label, context.scope_));
+        auto loopContext = context.withNamespace(new LabelLoopScope(label, context.namespace));
         auto condExpr = truthy(context, beExpression(this.cond.compile(loopContext)), this.loc);
         auto bodyPair = this.body_.compile(loopContext);
         auto bodyStmt = unwindScope(bodyPair.context, context.namespace, bodyPair.statement);
@@ -2402,6 +2526,63 @@ ASTExprStatement parseExprStatement(Parser parser, LexicalContext lexicalContext
     return new ASTExprStatement(value, loc);
 }
 
+class ASTStatementExpression : ASTSymbol
+{
+    ASTStatement[] statements;
+
+    ASTSymbol expr;
+
+    ReLoc reloc;
+
+    this(this.statements, this.expr, this.reloc) {
+        for (int i = 0; i < statements.length; i += 1)
+            assert(!!statements[i]);
+        assert(!!expr);
+    }
+
+    override Expression compile(Context context) {
+        auto context = context; // TODO mut Context context
+        auto loc = Loc(context.compiler.linenr, reloc);
+        auto baseNamespace = context.namespace;
+        auto statements = new Statement[](this.statements.length);
+        for (int i = 0; i < this.statements.length; i += 1) {
+            auto result = this.statements[i].compile(context);
+
+            statements[i] = result.statement;
+            context = result.context;
+        }
+        auto resultValue = beExpression2(this.expr.compile(context), loc);
+        auto resultType = resultValue.type();
+
+        // as ASTReturn
+        auto temp = new PairedTemporary(resultType, false);
+        auto init = new UninitializeTemporaryStatement(temp);
+
+        Statement escapeValueStmt = resultType.copyInto(context, temp, resultValue);
+        if (resultValue.info().gifted || !escapeValueStmt) {
+            escapeValueStmt = new AssignStatement(temp, resultValue);
+        }
+        escapeValueStmt = sequence(init, escapeValueStmt);
+
+        auto sequence = new SequenceStatement(statements ~ escapeValueStmt);
+        // unwind variables declared in the ({ })
+        auto stmtExpr = unwindScope(context, baseNamespace, sequence);
+
+        return new StatementExpression(stmtExpr, temp, true);
+    }
+
+    // TODO on CompilerBase?
+    override ASTSymbol quote(Quoter quoter) {
+        auto quotedStatements = new ASTSymbol[](this.statements.length);
+        for (int i = 0; i < this.statements.length; i += 1)
+            quotedStatements[i] = this.statements[i].quote(quoter);
+        return quoter.compilerCall("astStatementExpression", [
+            quoter.compiler.astArrayLiteral(quotedStatements, reloc),
+            this.expr.quote(quoter)
+        ], reloc);
+    }
+}
+
 // ({ ...; ...; })
 // value of last expression is value of statement expression
 ASTStatementExpression parseStatementExpr(Parser parser, LexicalContext lexicalContext)
@@ -2440,8 +2621,8 @@ class ASTForLoop : ASTStatement
         auto stepPair = this.step.compile(forScope);
 
         string label = context.getLabel();
-        DeclarationScope declScope = new LoopScopeImpl(label, context.scope_);
-        Context breakContScope = forScope.withDeclScope(declScope);
+        Namespace declScope = new LabelLoopScope(label, forScope.namespace);
+        Context breakContScope = forScope.withNamespace(declScope);
         auto bodyPair = this.body_.compile(breakContScope);
 
         return StatementCompileResult(
@@ -2491,7 +2672,7 @@ class ASTDestroy : ASTSymbol
         auto expr = beExpression2(this.target.compile(context), loc);
         auto stmt = destroy(context, expr);
         if (!stmt) return new VoidExpression;
-        return new StatementExpression(stmt, new VoidExpression);
+        return new StatementExpression(stmt, new VoidExpression, false);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -2951,9 +3132,8 @@ class ClassNamespace : Namespace
 
     override Symbol lookup(string name, Context context, Expression thisPtr)
     {
-        thisPtr = new PointerCast(this.class_, thisPtr);
-
-        auto result = accessMember(context.platform, thisPtr, name, Loc(null, ReLoc("", 0)), true);
+        auto thisPtr = new PointerCast(this.class_, thisPtr);
+        auto result = accessMemberWithLifetime(context, thisPtr, name, Loc(null, ReLoc("", 0)), true);
 
         if (result) return result;
 
@@ -3052,6 +3232,12 @@ class Class : Type
 
         if (to.same(voidp))
         {
+            if (from.info().gifted)
+            {
+                print("cannot convert temporary expression to void* - where would the reference go?");
+                // TODO return Either(Expression, Error)
+                assert(false);
+            }
             return new PointerCast(voidp, from);
         }
         return null;
@@ -3188,19 +3374,18 @@ class Class : Type
         while (current)
         {
             auto name = context.compiler.astStringLiteral(current.name, nowhere.reloc);
-            castStmts ~= context.compiler.$stmt if (target == $name) return cast(void*) this;;
+            castStmts ~= context.compiler.$stmt if (target == $name) return this;;
             current = current.superClass;
         }
         castStmts ~= context.compiler.$stmt return null;;
         auto stmt = context.compiler.astSequence(castStmts, nowhere.reloc);
 
-        Type voidp = new Pointer(new Void);
         Array stringType = new Array(new Character);
         bool override_ = false;
         if (this.superClass) override_ = true;
         this.methods ~= new ClassMethod(
             nowhere, this, override_, false /* abstract */, "__instanceof",
-            voidp, [Argument(false, "target", stringType)], stmt, new MacroState);
+            this, [Argument(false, "target", stringType)], stmt, new MacroState);
     }
 
     void genReleaseMethod(Context context)
@@ -3214,7 +3399,6 @@ class Class : Type
             auto name = context.compiler.astIdentifier(members[i].name, nowhere.reloc);
             statements ~= context.compiler.$stmt __destroy($name);;
         }
-        statements ~= context.compiler.$stmt { /*free(this);*/ };
         auto stmt = context.compiler.astSequence(statements, nowhere.reloc);
 
         bool override_ = false;
@@ -3240,15 +3424,45 @@ class Class : Type
 
     override Statement copyInto(Context context, Reference target, Expression source)
     {
+        string this_name = this.name; // FIXME
+        Context context = context; // TODO mut Context context
         Statement do_(Expression source) {
             auto sizeT = nativeWordType(context.platform);
+            auto printFun = new FunctionDeclaration(
+                "print", new Void, [Argument(false, "text", new Array(new Character))]);
+            auto printBtFun = new FunctionDeclaration(
+                "print_backtrace", new Void, []);
+            auto assertFun = new FunctionDeclaration(
+                "assert", new Void, [Argument(false, "test", new Integer)]);
+            auto refCountViolationFun = new FunctionDeclaration(
+                "cxruntime_refcount_violation", new Void, [
+                    Argument(false, "label", new Array(new Character)),
+                    Argument(false, "ptr", new Pointer(new Void))]);
+
             context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "this", source));
             context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "size_t", sizeT));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "print", printFun));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "print_backtrace", printBtFun));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "assert", assertFun));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "cxruntime_refcount_violation", refCountViolationFun));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "inc_name", new StringLiteral("inc " ~ this_name)));
 
             auto incref = context.compiler.$stmt
-                if (!!this) (cast(size_t*) this)[1] += 1;;
+            if (!!this) {
+                size_t *refs = &(cast(size_t*) this)[1];
+                if (*refs <= 0) {
+                    cxruntime_refcount_violation(inc_name, refs);
+                    // assert(false);
+                }
+                *refs += 1;
+            };
             auto assign = context.compiler.assignStatement(target, source);
             return sequence(incref.compile(context).statement, assign);
         }
@@ -3257,22 +3471,64 @@ class Class : Type
 
     override Statement endLifetime(Context context, Reference reference)
     {
-        Statement do_(Expression this_) {
-            auto sizeT = nativeWordType(context.platform);
-            context = context.withNamespace(
-                context.compiler.exprAlias(context.namespace, "this", this_));
-            context = context.withNamespace(
-                context.compiler.exprAlias(context.namespace, "size_t", sizeT));
+        Context context = context; // TODO mut Context context
+        // disable lifetime management
+        // (otherwise we get an infinite cycle when the compiler
+        // tries to clean up 'this' after the __destroy() call by
+        // ending its lifetime (ad infinitum).
+        auto tempThis = new PairedTemporary(reference.type(), false);
+        auto initTemp = new InitializeTemporaryStatement(tempThis, reference);
 
-            auto stmt = context.compiler.$stmt
-                if (!!this) {
-                    (cast(size_t*) this)[1] -= 1;
-                    if ((cast(size_t*) this)[1] == 0)
-                        this.__destroy();
-                };
-            return stmt.compile(context).statement;
-        }
-        return context.compiler.stmtWithTemporary(reference, &do_);
+        auto sizeT = nativeWordType(context.platform);
+        context = context.withNamespace(
+            context.compiler.exprAlias(context.namespace, "this", tempThis));
+        context = context.withNamespace(
+            context.compiler.exprAlias(context.namespace, "size_t", sizeT));
+
+        // TODO do in __destroy() once we have function imports
+        auto freeFun = new FunctionDeclaration(
+            "free", new Void, [Argument(false, "ptr", new Pointer(new Void))]);
+        auto printFun = new FunctionDeclaration(
+            "print", new Void, [Argument(false, "text", new Array(new Character))]);
+        auto printBtFun = new FunctionDeclaration(
+            "print_backtrace", new Void, []);
+        auto assertFun = new FunctionDeclaration(
+            "assert", new Void, [Argument(false, "test", new Integer)]);
+        auto refCountViolationFun = new FunctionDeclaration(
+            "cxruntime_refcount_violation", new Void, [
+                Argument(false, "label", new Array(new Character)),
+                Argument(false, "ptr", new Pointer(new Void))]);
+
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "free", freeFun));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "print", printFun));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "print_backtrace", printBtFun));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "assert", assertFun));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "cxruntime_refcount_violation", refCountViolationFun));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "name", new StringLiteral(this.name)));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "dec_name", new StringLiteral("dec " ~ this.name)));
+        auto stmt = context.compiler.$stmt
+            if (!!this) {
+                size_t* refs = &(cast(size_t*) this)[1];
+                if (*refs <= 0) {
+                    cxruntime_refcount_violation(dec_name, refs);
+                    // assert(false);
+                }
+                *refs -= 1;
+                if (*refs == 0) {
+                    this.__destroy();
+                    // print("<freeing " ~ name ~ ">");
+                    // print_backtrace();
+                    free(this);
+                }
+            };
+        return sequence(initTemp, stmt.compile(context).statement);
     }
 }
 
@@ -3629,9 +3885,8 @@ class StructNamespace : Namespace
 
     override Symbol lookup(string name, Context context, Expression thisPtr)
     {
-        thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr);
-
-        auto result = accessMember(null, thisPtr, name, Loc(null, ReLoc("", 0)), true);
+        auto thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr);
+        auto result = accessMemberWithLifetime(context, thisPtr, name, Loc(null, ReLoc("", 0)), true);
 
         if (result) return result;
 
@@ -3909,7 +4164,7 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
     }
 
     Module module_ = new Module(astModule.name, astModule.pak, astModule.macroState, parent);
-    Context context = Context(compiler, platform, module_, null, module_.macroState, (new int[](1)).ptr);
+    Context context = Context(compiler, platform, module_, module_.macroState, (new int[](1)).ptr);
     if (addDefaultModules)
     {
         // TODO add to ASTModule (addImport that handles updating the macro state
@@ -3956,6 +4211,7 @@ ASTModule getModule(CompilerBase compiler, string filename, Package pak, bool se
     ModuleParserConfig config, Loc loc)
 {
     auto macroState = new MacroState;
+    string filename = filename; // TODO mut string filename,
     string path = filename;
     if (search) {
         assert2s(!!pak, "search, but no package");

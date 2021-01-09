@@ -1,5 +1,6 @@
 #include <dlfcn.h>
 #include <errno.h>
+#include <execinfo.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,12 @@ struct StringArray
     struct String *ptr;
     void *base;
 };
+
+struct String string_alloc(size_t length) {
+    void *memory = malloc(sizeof(size_t) + length + 1);
+    *(size_t*) memory = 1; // references
+    return (struct String) { length, memory + sizeof(size_t), memory };
+}
 
 void print(struct String str) { printf("%.*s\n", (int) str.length, str.ptr); }
 void assert(int test) { if (!test) exit(1); }
@@ -50,34 +57,34 @@ float cxruntime_atof(struct String str) {
 }
 struct String cxruntime_itoa(int i) {
     int len = snprintf(NULL, 0, "%i", i);
-    char *res = malloc(len + 1);
-    snprintf(res, len + 1, "%i", i);
-    return (struct String) { len, res };
+    struct String res = string_alloc(len);
+    snprintf(res.ptr, len + 1, "%i", i);
+    return res;
 }
 struct String cxruntime_ltoa(long long l) {
     int len = snprintf(NULL, 0, "%lld", l);
-    char *res = malloc(len + 1);
-    snprintf(res, len + 1, "%lld", l);
-    return (struct String) { len, res };
+    struct String res = string_alloc(len);
+    snprintf(res.ptr, len + 1, "%lld", l);
+    return res;
 }
 struct String cxruntime_ftoa(float f) {
     int len = snprintf(NULL, 0, "%f", f);
-    char *res = malloc(len + 1);
-    snprintf(res, len + 1, "%f", f);
-    return (struct String) { len, res };
+    struct String res = string_alloc(len);
+    snprintf(res.ptr, len + 1, "%f", f);
+    return res;
 }
 struct String cxruntime_ftoa_hex(float f) {
     double d = f;
     int len = snprintf(NULL, 0, "%llx", *(long long int*) &d);
-    char *res = malloc(len + 1);
-    snprintf(res, len + 1, "%llx", *(long long int*) &d);
-    return (struct String) { len, res };
+    struct String res = string_alloc(len);
+    snprintf(res.ptr, len + 1, "%llx", *(long long int*) &d);
+    return res;
 }
 struct String cxruntime_ptr_id(void* ptr) {
     int len = snprintf(NULL, 0, "%p", ptr);
-    char *res = malloc(len + 1);
-    snprintf(res, len + 1, "%p", ptr);
-    return (struct String) { len, res };
+    struct String res = string_alloc(len);
+    snprintf(res.ptr, len + 1, "%p", ptr);
+    return res;
 }
 int cxruntime_toInt(float f) { return (int) f; }
 
@@ -311,3 +318,22 @@ struct String poly_hex_value(PolyHashState *state)
 
 // for debug breaks
 void debug() { }
+
+void print_backtrace()
+{
+    void *array[20];
+    int size = backtrace(array, 20);
+    char **strings = backtrace_symbols(array, size);
+    if (strings != NULL) {
+        printf("Backtrace:\n");
+        for (int i = 0; i < size; i++)
+        printf("  %i: %s\n", i, strings[i]);
+    }
+    free(strings);
+}
+
+void cxruntime_refcount_violation(struct String s, void *ptr)
+{
+    printf("<%.*s: refcount logic violated: %lld at %p\n", (int) s.length, s.ptr, *(long long int*) ptr, ptr);
+    print_backtrace();
+}

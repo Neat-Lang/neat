@@ -45,31 +45,23 @@ class LexicalContext
 }
 
 /**
- * Delineates a region of control flow in which scoped variables may be allocated and freed again.
- * Not currently used.
- */
-class DeclarationScope
-{
-    DeclarationScope parent;
-
-    Statement cleanup(Context context) { return null; }
-}
-
-/**
  * Delineates a region of control flow in which 'break;' and 'continue;' may be used.
  */
-abstract class LoopScope : DeclarationScope
+abstract class LoopScope : Namespace
 {
     abstract Statement breakFrom(Context context) { assert(false); }
     abstract Statement continueFrom(Context context) { assert(false); }
+    // purely a marker
+    override Symbol lookup(string name, Context context, Expression frame) {
+        return this.parent.lookup(name, context, frame);
+    }
 }
 
-LoopScope findLoopScope(DeclarationScope scope_)
+LoopScope findLoopScope(Namespace namespace)
 {
-    if (!scope_) return null;
-    auto loopScope = scope_.instanceOf(LoopScope);
+    auto loopScope = namespace.instanceOf(LoopScope);
     if (loopScope) return loopScope;
-    if (scope_.parent) return findLoopScope(scope_.parent);
+    if (namespace.parent) return findLoopScope(namespace.parent);
     return null;
 }
 
@@ -122,6 +114,7 @@ abstract class Type : Symbol
 
     /**
      * Called to create a copy of an expression in a target.
+     * Note that `target` is considered uninitialized and must not be destroyed!
      */
     Statement copyInto(Context context, Reference target, Expression source)
     {
@@ -207,15 +200,59 @@ class Generator
     }
 }
 
+// TODO enums
+/**
+ * Gifted: an expression with an unmanaged lifetime that we can take over
+ * Owned: an owning reference to a tracked lifetime.
+ * Borrowed: a reference to a tracked lifetime not at the address referenced.
+ *
+ * Examples:
+ * - Gifted: `new Class()`
+ * - Owned: `Class obj;`
+ * - Borrowed: `void foo(Class obj) { }`
+ *
+ * Because of "caller owns", Borrowed needs to be its own thing. What if we reassigned
+ * obj? We couldn't clean it up, and the caller would double clean the argument.
+ * So function arguments can be referenced, but not overwritten.
+ *
+ * NOTE: Called methods can overwrite fields. This is awkward.
+ * TODO: Prevent it.
+ */
+int State_gifted() { return 0; }
+int State_owned() { return 1; }
+int State_borrowed() { return 2; }
+
+struct ExprInfo
+{
+    bool gifted;
+    bool owned;
+    bool borrowed;
+}
+
+// extremely fake enum
+ExprInfo exprInfo(int state) {
+    if (state == 0) return ExprInfo(true, false, false);
+    if (state == 1) return ExprInfo(false, true, false);
+    if (state == 2) return ExprInfo(false, false, true);
+    assert(false);
+}
+
 abstract class Expression : Symbol
 {
     abstract Type type() { assert(false); }
     abstract int emit(Generator output) { assert(false); }
-    /**
-     * "Anything not in the stackframe."
-     * If we are given a temporary expression, we have responsibility for managing its lifetime.
-     */
-    abstract bool temporary() { assert(false); }
+
+    // Transition for macros. Yes those are circular.
+    bool temporary() {
+        return info().gifted;
+    }
+
+    ExprInfo info() {
+        if (temporary())
+            return exprInfo(State_gifted());
+        return exprInfo(State_owned());
+    }
+
     abstract void hash(Hash hash) { assert(false); }
 }
 
@@ -257,7 +294,7 @@ class PointerCast : Expression
         return output.fun.bitcast(reg, this.target.emit(output.platform));
     }
 
-    override bool temporary() { return value.temporary(); }
+    override ExprInfo info() { return value.info(); }
 
     override void hash(Hash hash) { hash.adds("ptrcast"); target.hash(hash); value.hash(hash); }
 }
@@ -455,6 +492,10 @@ abstract class CompilerBase
 
     abstract ASTSymbol astDestroy(ASTSymbol target, ReLoc reloc) { assert(false); }
 
+    abstract ASTSymbol astStatementExpression(ASTStatement[] statements, ASTSymbol expr, ReLoc reloc) {
+        assert(false);
+    }
+
     abstract ASTType astArray(ASTType elementType, ReLoc reloc) { assert(false); }
 
     abstract ASTType astNamedType(string name, ReLoc reloc) { assert(false); }
@@ -488,6 +529,10 @@ abstract class CompilerBase
 
     abstract Expression call(FunctionDeclaration fun, Expression[] args, Loc loc) { assert(false); }
 
+    abstract Expression callWithLifetime(Context context, Symbol target, Expression[] args, Loc loc) {
+        assert(false);
+    }
+
     abstract Expression pointerOffset(Expression pointer, Expression offset) { assert(false); }
 
     // evaluate first `statement`, then `expression`.
@@ -513,6 +558,8 @@ abstract class CompilerBase
     abstract Statement move(Context context, Reference target, Expression source) { assert(false); }
 
     abstract Statement stmtWithTemporary(Expression value, Statement delegate(Expression) callback) { assert(false); }
+
+    abstract Statement unwindScope(Context context, Namespace target, Statement next) { assert(false); }
 
     abstract Expression exprWithTemporary(Expression value, Expression delegate(Expression) callback) { assert(false); }
 
@@ -550,20 +597,13 @@ struct Context
 
     Namespace namespace;
 
-    DeclarationScope scope_;
-
     MacroState macroState;
 
     int* idCounter;
 
     Context withNamespace(Namespace namespace)
     {
-        return Context(this.compiler, this.platform, namespace, this.scope_, this.macroState, this.idCounter);
-    }
-
-    Context withDeclScope(DeclarationScope scope_)
-    {
-        return Context(this.compiler, this.platform, this.namespace, scope_, this.macroState, this.idCounter);
+        return Context(this.compiler, this.platform, namespace, this.macroState, this.idCounter);
     }
 
     string getLabel() { int i = *this.idCounter; *this.idCounter += 1; return "uniq" ~ itoa(i); }

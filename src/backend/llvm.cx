@@ -28,20 +28,13 @@ struct Globals
             auto copy = new Global[](globals.length * 2);
             for (int i = 0; i < globals.length; i += 1)
                 copy[i] = globals[i];
-            auto baseptr = globals.base;
             globals = copy;
-            .free(baseptr);
         }
         globals[used] = global;
         used += 1;
     }
     Global[] array() {
         return this.globals[0 .. this.used];
-    }
-    void free() {
-        auto baseptr = globals.base;
-        globals = [];
-        .free(baseptr);
     }
 }
 
@@ -195,10 +188,6 @@ class LLVMBackendModule : BackendModule {
             this.output.endl();
         }
     }
-
-    void free() {
-        this.output.free();
-    }
 }
 
 string llvmFmt(BackendType type, Platform platform) {
@@ -280,9 +269,7 @@ struct RegDefines
             auto copy = new RegDefine[](targetLength * 2);
             for (int i = 0; i < regDefines.length; i += 1)
                 copy[i] = regDefines[i];
-            auto baseptr = regDefines.base;
             regDefines = copy;
-            .free(baseptr);
         }
     }
     // TODO Maybe(RegDefine)
@@ -290,11 +277,6 @@ struct RegDefines
         if (reg >= regDefines.length || regDefines[reg].reg != reg)
             return 0;
         return regDefines[reg];
-    }
-    void free() {
-        auto baseptr = regDefines.base;
-        regDefines = [];
-        .free(baseptr);
     }
 }
 
@@ -704,6 +686,11 @@ class LLVMBackendFunction : BackendFunction {
     }
     override int load(BackendType backendType, int source) {
         int reg = this.nextReg();
+        if (backendType.instanceOf(BackendVoidType)) {
+            // fake reg
+            this.defReg2(reg, backendType, "VOID");
+            return reg;
+        }
         string typeFmt = llvmFmt(backendType, this.mod.platform);
         this.output.appendsi("  %reg", reg);
         this.output.append6s(" = load ", typeFmt, ", ", typeFmt, "* ", this.reg(source));
@@ -715,9 +702,11 @@ class LLVMBackendFunction : BackendFunction {
         int reg = this.nextReg();
         this.staticAllocas ~= StaticAlloca(reg, backendType);
         this.defReg2(reg, new BackendPointerType(backendType), Reg(reg));
-        string typefmt = llvmFmt(backendType, this.mod.platform);
-        // TODO zeroLiteral
-        this.print("store " ~ typefmt ~ " zeroinitializer, " ~ typefmt ~ "* %reg" ~ itoa(reg));
+        if (!backendType.instanceOf(BackendVoidType)) {
+            string typefmt = llvmFmt(backendType, this.mod.platform);
+            // TODO zeroLiteral
+            this.print("store " ~ typefmt ~ " zeroinitializer, " ~ typefmt ~ "* %reg" ~ itoa(reg));
+        }
         return reg;
     }
     override int field(BackendType backendType, int source, size_t index) {
@@ -767,6 +756,7 @@ class LLVMBackendFunction : BackendFunction {
         return reg2;
     }
     override void store(BackendType backendType, int target_reg, int value_reg) {
+        if (backendType.instanceOf(BackendVoidType)) return;
         this.output.appends("  store ");
         llvmFmtInto(backendType, this.output, this.mod.platform);
         this.output.appends(" ");
@@ -833,6 +823,7 @@ class LLVMBackendFunction : BackendFunction {
         for (int i = 0; i < this.staticAllocas.length; i += 1) {
             auto reg = this.staticAllocas[i].reg;
             auto type = this.staticAllocas[i].type;
+            if (type.instanceOf(BackendVoidType)) continue;
             string typefmt = llvmFmt(type, this.mod.platform);
             this.mod.output.print(reg.case(string s: s, int i: "%reg" ~ itoa(i)) ~ " = alloca " ~ typefmt);
         }
@@ -840,10 +831,7 @@ class LLVMBackendFunction : BackendFunction {
             auto funtext = this.output.text();
             this.mod.output.print(funtext);
         }
-        this.output.free();
         this.mod.output.print("}");
-
-        this.regDefines.free();
     }
 }
 
@@ -886,14 +874,8 @@ class LineWriter
             size_t newBufLen = this.buffer.length * 2;
             auto newBuf = new string(newBufLen);
             for (int i = 0; i < this.used; i += 1) newBuf[i] = this.buffer[i];
-            free();
             this.buffer = newBuf;
         }
-    }
-    void free() {
-        auto baseptr = this.buffer.base;
-        this.buffer = [];
-        .free(baseptr);
     }
     string text() {
         return this.buffer[0 .. this.used];

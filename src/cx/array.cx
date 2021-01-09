@@ -63,7 +63,7 @@ class Array : Type
         auto compiler = context.compiler;
 
         Statement assign(Expression source) {
-            context = context.withNamespace(context.compiler.exprAlias(context.namespace, "source", source));
+            auto context = context.withNamespace(context.compiler.exprAlias(context.namespace, "source", source));
             // count up reference
             auto stmt = compiler.$stmt if (source.base) *cast(size_t*) source.base += 1;;
             auto result = stmt.compile(context);
@@ -123,7 +123,7 @@ class ArrayLength : Expression
         return getArrayLen(output, this.arrayValue.type(), arrayReg);
     }
 
-    override bool temporary() { return false; }
+    override ExprInfo info() { return exprInfo(State_owned()); }
 
     override void hash(Hash hash) { hash.adds("ArrayLength"); this.arrayValue.hash(hash); }
 }
@@ -153,7 +153,7 @@ class ArrayPointer : Expression
         return getArrayPtr(output, this.arrayValue.type(), arrayReg);
     }
 
-    override bool temporary() { return false; }
+    override ExprInfo info() { return exprInfo(State_owned()); }
 
     override void hash(Hash hash) { hash.adds("ArrayPointer"); this.arrayValue.hash(hash); }
 }
@@ -181,7 +181,7 @@ class ArrayBase : Expression
         return getArrayBase(output, this.arrayValue.type(), arrayReg);
     }
 
-    override bool temporary() { return false; }
+    override ExprInfo info() { return exprInfo(State_owned()); }
 
     override void hash(Hash hash) { hash.adds("ArrayBase"); this.arrayValue.hash(hash); }
 }
@@ -241,7 +241,7 @@ class ArrayAllocation : Expression
         }
     }
 
-    override bool temporary() { return true; }
+    override ExprInfo info() { return exprInfo(State_gifted()); }
 }
 
 class ArraySlice : Expression
@@ -282,7 +282,7 @@ class ArraySlice : Expression
         return makeArray(output, arrayType.elementType, newLen, newPtr, base);
     }
 
-    override bool temporary() { return array.temporary(); }
+    override ExprInfo info() { return array.info(); }
 
     override void hash(Hash hash) {
         hash.adds("ArraySlice");
@@ -322,7 +322,7 @@ class ArrayEqual : Expression
         return output.fun.call(new BackendIntType, "_arraycmp", [leftPtr, rightPtr, leftLen, rightLen, leftSize]);
     }
 
-    override bool temporary() { return false; }
+    override ExprInfo info() { return exprInfo(State_owned()); }
 
     override void hash(Hash hash) { hash.adds("ArrayEqual"); left.hash(hash); right.hash(hash); }
 }
@@ -336,12 +336,17 @@ Expression releaseArray(Context context, Expression value) {
 
     ASTStatement body_ = compiler.$stmt {
         if (!value.base) return;
-        *cast(size_t*) value.base -= 1;
-        if (*cast(size_t*) value.base != 0) return;
+        size_t* refs = cast(size_t*) value.base;
+        if (*refs <= 0) {
+            cxruntime_refcount_violation("array release", refs);
+            // assert(false);
+        }
+        *refs -= 1;
+        if (*refs != 0) return;
         for (int i = 0; i < value.length; i += 1) {
             __destroy(value[i]);
         }
-        // free(value.base);
+        free(value.base);
     };
 
     auto fn = compiler.createRuntimeFunction(context, "arrayrelease", new Void, args, body_);
@@ -453,7 +458,7 @@ class EmptyArrayLiteral : Expression
         return makeArray(generator, elementType, len, ptr, base);
     }
 
-    override bool temporary() { return false; }
+    override ExprInfo info() { return exprInfo(State_owned()); }
 
     override void hash(Hash hash) {
         hash.adds("EmptyArrayLiteral");
@@ -504,47 +509,20 @@ class ASTArrayLiteral : ASTSymbol
             values[i] = context.compiler.implicitConvertTo(values[i], mergeType);
             assert(!!values[i]);
         }
-        return new ArrayLiteral(new Array(mergeType), values, context.compiler);
+        auto target = new ArrayAllocation(mergeType, values.length);
+        Expression do_(Expression target) {
+            Statement[] moves;
+            auto base = new ArrayPointer(mergeType, target);
+            for (int i = 0; i < values.length; i += 1) {
+                auto target = context.compiler.dereference(
+                    context.compiler.pointerOffset(base, context.compiler.intLiteral(i)));
+                moves ~= context.compiler.move(context, target, values[i]);
+            }
+            return context.compiler.statementExpression(
+                context.compiler.sequenceStatement(moves), target);
+        }
+        return context.compiler.exprWithTemporary(target, &do_);
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTArrayLiteral'"); assert(false); }
-}
-
-class ArrayLiteral : Expression
-{
-    ArrayAllocation allocationHelper;
-
-    Array type_;
-
-    Expression[] values;
-
-    this(this.type_, this.values, CompilerBase compiler) {
-        allocationHelper = new ArrayAllocation(type_.elementType, this.values.length);
-    }
-
-    override Type type() {
-        return this.type_;
-    }
-
-    override int emit(Generator output) {
-        auto voidp = output.platform.voidp();
-        auto backendElementType = this.type_.elementType.emit(output.platform);
-        int arrayReg = allocationHelper.emit(output);
-        int arrayPtr = getArrayPtr(output, type_, arrayReg);
-        for (int i = 0; i < this.values.length; i += 1) {
-            int elementPtrReg = output.fun.ptrOffset(backendElementType, arrayPtr, output.fun.intLiteral(i));
-            int valueReg = this.values[i].emit(output);
-            output.fun.store(backendElementType, elementPtrReg, valueReg);
-        }
-        return arrayReg;
-    }
-
-    override bool temporary() { return true; }
-
-    override void hash(Hash hash) {
-        hash.adds("ArrayLiteral");
-        hash.addl(values.length);
-        for (int i = 0; i < this.values.length; i += 1)
-            values[i].hash(hash);
-    }
 }

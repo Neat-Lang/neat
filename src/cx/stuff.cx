@@ -868,7 +868,7 @@ Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool
     {
         ClassMethod[] vtable = classType.vtable();
         Expression asStructPtr = new PointerCast(
-            new Pointer(classType.dataStruct(platform)), baseExpr);
+            new Pointer(classType.dataStruct), baseExpr);
         size_t methodOffset = [first i for i, a in vtable where a.name == member else -1];
         if (methodOffset != -1)
         {
@@ -1170,10 +1170,9 @@ class NewClassExpression : Expression
     {
         // oh boy!
         this.classType.declare(output);
-        Struct classDataStruct = this.classType.dataStruct(output.platform);
         BackendType voidp = (new Pointer(new Void)).emit(output.platform);
         int classInfoPtr = output.fun.symbolList(this.classType.vtableSymbol);
-        auto backendClassData = classDataStruct.emit(output.platform);
+        auto backendClassData = this.classType.dataStruct.emit(output.platform);
         int classDataSize = backendClassData.size(output.platform);
         int classPtr = output.fun.call(
             voidp, "cxruntime_alloc", [output.fun.wordLiteral(output.platform, classDataSize)]);
@@ -3004,11 +3003,11 @@ string moduleToFile(string module_)
     return modulePath ~ ".cx";
 }
 
-string findFileInPackage(string filename, Package pak, Loc loc, Package* foundPak)
+string findFileInPackage(string filename, Package pak, Loc loc, void delegate(Package) foundPak)
 {
     string fileInPackage = pak.path ~ "/" ~ filename;
     if (cxruntime_file_exists(fileInPackage)) {
-        *foundPak = pak;
+        foundPak(pak);
         return fileInPackage;
     }
     for (int i = 0; i < pak.deps.length; i += 1) {
@@ -3016,7 +3015,7 @@ string findFileInPackage(string filename, Package pak, Loc loc, Package* foundPa
         string fileInDep = dep.path ~ "/" ~ filename;
 
         if (cxruntime_file_exists(fileInDep)) {
-            *foundPak = dep;
+            foundPak(dep);
             return fileInDep;
         }
     }
@@ -3024,7 +3023,7 @@ string findFileInPackage(string filename, Package pak, Loc loc, Package* foundPa
 }
 
 // TODO rewrite this once we have a std.path
-string findResidualFilename(string filename, Package[] packages, Package* foundPackage)
+string findResidualFilename(string filename, Package[] packages, void delegate(Package) foundPackage)
 {
     // TODO split then check
     assert(cxruntime_file_exists(filename));
@@ -3032,14 +3031,14 @@ string findResidualFilename(string filename, Package[] packages, Package* foundP
         string path = packages[i].path;
         if (filename.length >= path.length
             && filename[0 .. path.length] == path) {
-            *foundPackage = packages[i];
+            foundPackage(packages[i]);
             return filename[path.length + 1 .. filename.length];
         }
     }
     // TODO handle "../" paths
     for (int i = 0; i < packages.length; i += 1) {
         if (packages[i].path == ".") {
-            *foundPackage = packages[i];
+            foundPackage(packages[i]);
             return filename;
         }
     }
@@ -3178,6 +3177,8 @@ class Class : Type
 
     PolyHashState mangledHash;
 
+    Struct dataStruct;
+
     this(this.decl, this.superClass, this.context)
     {
         if (superClass && superClass.final_)
@@ -3266,7 +3267,7 @@ class Class : Type
         return this.superClass.allMembers(platform) ~ this.members;
     }
 
-    Struct dataStruct(Platform platform)
+    void initDataStruct(Platform platform)
     {
         ClassMember[] allMembers = this.allMembers(platform);
 
@@ -3274,7 +3275,7 @@ class Class : Type
             new StructMemberDeclaration(member.name, member.type)
             for member in allMembers];
 
-        return new Struct("", structMembers, this.decl.loc, this.mangle());
+        this.dataStruct = new Struct("", structMembers, this.decl.loc, this.mangle());
     }
 
     Struct classInfoStructCache;
@@ -3621,6 +3622,7 @@ class ASTClassDecl : ASTType
             for member in this.members];
 
         target.methods = new ClassMethod[](this.methods.length);
+        target.initDataStruct(context.platform);
         for (int i = 0; i < this.methods.length; i += 1)
         {
             ASTClassDeclMethod method = this.methods[i];
@@ -4210,15 +4212,20 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
 ASTModule getModule(CompilerBase compiler, string filename, Package pak, bool search, ParserHelper helper,
     ModuleParserConfig config, Loc loc)
 {
+    auto pak = pak; // TODO mut Package pak
     auto macroState = new MacroState;
     string filename = filename; // TODO mut string filename,
     string path = filename;
     if (search) {
         assert2s(!!pak, "search, but no package");
-        path = findFileInPackage(filename, pak, loc, &pak);
+        // This is very janky and should not work, because it overwrites pak while findFileInPackage has it borrowed.
+        void result(Package resultPak) { pak = resultPak; }
+        path = findFileInPackage(filename, pak, loc, &result);
     } else {
         assert2s(!pak, "no search, but package");
-        filename = findResidualFilename(filename, config.packages, &pak);
+        // This is very janky and should not work, because it overwrites pak while findFileInPackage has it borrowed.
+        void result(Package resultPak) { pak = resultPak; }
+        filename = findResidualFilename(filename, config.packages, &result);
     }
     assert(!!pak);
     ASTModule mod = config.astCache.find(path);

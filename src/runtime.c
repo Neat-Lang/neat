@@ -200,6 +200,7 @@ int main(int argc, char **argv) {
         args.ptr[i] = (struct String) { strlen(argv[i + 1]), argv[i + 1] };
     }
     _main(args);
+    free(args.ptr);
     return 0;
 }
 

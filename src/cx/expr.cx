@@ -496,12 +496,13 @@ class ASTBinaryOp : ASTSymbol
     {
         Expression left = beExpression2(this.left.compile(context), this.loc);
         Expression right = beExpression2(this.right.compile(context), this.loc);
+        auto leftType = left.type(), rightType = right.type();
         if (this.op == "~")
         {
             loc.assert2s2(
-                !!left.type().instanceOf(Array),
-                "Left hand side of concatenation isn't array, but ", left.type().repr());
-            auto converted = implicitConvertTo(right, left.type().instanceOf(Array).elementType);
+                !!leftType.instanceOf(Array),
+                "Left hand side of concatenation isn't array, but ", leftType.repr());
+            auto converted = implicitConvertTo(right, leftType.instanceOf(Array).elementType);
             if (converted) {
                 return context.compiler.binaryOp2("~", context, left, converted, this.loc);
             }
@@ -512,8 +513,30 @@ class ASTBinaryOp : ASTSymbol
             return new BoolAnd(truthy(context, left, this.loc), truthy(context, right, this.loc));
         if (this.op == "||")
             return new BoolOr(truthy(context, left, this.loc), truthy(context, right, this.loc));
-        if (this.op == "==" && left.type().instanceOf(Array) && right.type().instanceOf(Array))
-            return new ArrayEqual(left, right);
+        if (this.op == "==" && leftType.instanceOf(Array) && rightType.instanceOf(Array))
+        {
+            Statement assignLeft, cleanupLeft;
+            Statement assignRight, cleanupRight;
+            if (left.info().gifted)
+            {
+                auto tempLeft = new PairedTemporary(leftType, false);
+                assignLeft = new InitializeTemporaryStatement(tempLeft, left);
+                cleanupLeft = leftType.endLifetime(context, tempLeft);
+                left = tempLeft;
+            }
+            if (right.info().gifted)
+            {
+                auto tempRight = new PairedTemporary(rightType, false);
+                assignRight = new InitializeTemporaryStatement(tempRight, right);
+                cleanupRight = leftType.endLifetime(context, tempRight);
+                right = tempRight;
+            }
+            auto equal = new ArrayEqual(left, right);
+            return context.compiler.wrap(
+                context.compiler.sequence(assignLeft, assignRight),
+                equal,
+                context.compiler.sequence(cleanupLeft, cleanupRight));
+        }
 
         return new BinaryOp(this.op, left, right, this.loc);
     }

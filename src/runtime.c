@@ -316,6 +316,16 @@ struct String poly_hex_value(PolyHashState *state)
     return (struct String) { .length = sizeof(state->add), .ptr = ptr };
 }
 
+long long int poly_hash_whole_string(struct String s)
+{
+    PolyHashState state = {
+        .add = 14695981039346656037UL, // offset basis
+        .mult = 1,
+    };
+    poly_add_string(&state, s);
+    return state.add;
+}
+
 // for debug breaks
 void debug() { }
 

@@ -23,6 +23,7 @@ extern(C) void cxruntime_system(string command);
 extern(C) void cxruntime_dlcall(string soname, string name, void* arg);
 extern(C) bool cxruntime_waitpid(int pid);
 extern(C) int cxruntime_execbg(string command, string[] arguments);
+extern(C) size_t poly_hash_whole_string(string s);
 
 string removeExtension(string s) {
     string shortened = s;
@@ -196,13 +197,10 @@ class ParserHelperImpl : ParserHelper
 
         // throwaway compilation (TODO cache?)
         Module module_ = compileModule(astModule, this, config, compiler, platform, true);
-        Module[] allModules;
-        void add(Module mod) {
-            if (![any a.mangledName == mod.mangledName for a in allModules])
-                allModules ~= mod;
-        }
+        auto allModules = new ModuleSet(0);
+        void add(Module mod) { allModules.add(mod); }
         module_.walkModules(&add);
-        Module[] remainingModules = allModules;
+        auto remainingModules = allModules.array();
 
         string baseCmd;
         if (backend.instanceOf(LLVMBackend)) baseCmd = "clang -Wno-unused-command-line-argument -fpic";
@@ -220,15 +218,16 @@ class ParserHelperImpl : ParserHelper
                 if (compilation.pid != 0) pids ~= compilation.pid;
                 libHash.adds(compilation.objFile);
             }
-            remainingModules = [];
+            auto remainingSet = new ModuleSet(0);
             // TODO add()
             void add2(Module mod) {
-                if (![any a.mangledName == mod.mangledName for a in allModules]
-                    && ![any a.mangledName == mod.mangledName for a in remainingModules])
-                    remainingModules ~= mod;
+                if (!allModules.has(mod)) {
+                    allModules.add(mod);
+                    remainingSet.add(mod);
+                }
             }
             module_.walkModules(&add2);
-            allModules ~= remainingModules;
+            remainingModules = remainingSet.array();
         }
 
         for (int i = 0; i < pids.length; i += 1) {
@@ -724,6 +723,77 @@ class CompilerImpl : CompilerBase
     }
 }
 
+// manual hashmap
+struct ModuleSetBucket
+{
+    bool set;
+    Module mod;
+}
+
+class ModuleSet
+{
+    ModuleSetBucket[] store;
+    int occupied;
+    this(int size) { this.store = new ModuleSetBucket[](size); this.occupied = 0; }
+    void add(Module mod)
+    {
+        if (occupied >= (store.length * 3) / 4)
+        {
+            resize(cast(int) (store.length * 2 + 10));
+        }
+        size_t hash = poly_hash_whole_string(mod.mangledName);
+        // TODO %
+        size_t index(size_t hash) {
+            // TODO proper unsigned types
+            if (hash < 0) hash = 0 - hash;
+            return hash - (hash / store.length) * store.length;
+        }
+        while (store[index(hash)].set) {
+            if (store[index(hash)].mod.mangledName == mod.mangledName)
+                return; // already stored
+            hash += 1;
+        }
+        store[index(hash)].set = true;
+        store[index(hash)].mod = mod;
+        occupied += 1;
+    }
+    bool has(Module mod)
+    {
+        size_t hash = poly_hash_whole_string(mod.mangledName);
+        // TODO %
+        size_t index(size_t hash) {
+            // TODO proper unsigned types
+            if (hash < 0) hash = 0 - hash;
+            return hash - (hash / store.length) * store.length;
+        }
+        while (store[index(hash)].set) {
+            if (store[index(hash)].mod.mangledName == mod.mangledName)
+                return true;
+            hash += 1;
+        }
+        return false;
+    }
+    Module[] array()
+    {
+        Module[] res = new Module[](occupied);
+        int k;
+        for (int i = 0; i < store.length; i += 1) {
+            if (store[i].set) {
+                res[k] = store[i].mod;
+                k += 1;
+            }
+        }
+        return res;
+    }
+    void resize(int newSize)
+    {
+        auto newSet = new ModuleSet(newSize);
+
+        [newSet.add(bucket.mod) for bucket in store where bucket.set];
+        this.store = newSet.store;
+    }
+}
+
 void main(string[] args)
 {
     string[] args = args; // TODO mut string[] args
@@ -776,7 +846,7 @@ void main(string[] args)
             } else if (arg == "-macro-m32") {
                 macro_x86_32 = true;
             } else {
-                remArgs = remArgs ~ arg;
+                remArgs ~= arg;
             }
         }
         args = remArgs;
@@ -826,13 +896,12 @@ void main(string[] args)
     if (optimize) baseFlags ~= " -Ofast";
     if (x86_32) baseFlags ~= " -m32";
 
-    Module[] allModules;
+    auto allModules = new ModuleSet(0);
     void add(Module mod) {
-        if (![any a.mangledName == mod.mangledName for a in allModules])
-            allModules ~= mod;
+        allModules.add(mod);
     }
     toplevel.walkModules(&add);
-    Module[] remainingModules = allModules;
+    auto remainingModules = allModules.array();
 
     string fileArgs;
     int[] pids;
@@ -843,15 +912,16 @@ void main(string[] args)
             fileArgs ~= " " ~ compilation.objFile;
             if (compilation.pid != 0) pids ~= compilation.pid;
         }
-        remainingModules = [];
+        auto remainingSet = new ModuleSet(0);
         // TODO add()
         void add2(Module mod) {
-            if (![any a.mangledName == mod.mangledName for a in allModules]
-                && ![any a.mangledName == mod.mangledName for a in remainingModules])
-                remainingModules ~= mod;
+            if (!allModules.has(mod)) {
+                allModules.add(mod);
+                remainingSet.add(mod);
+            }
         }
         toplevel.walkModules(&add2);
-        allModules ~= remainingModules;
+        remainingModules = remainingSet.array();
     }
 
     for (int i = 0; i < pids.length; i += 1) {

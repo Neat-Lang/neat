@@ -171,5 +171,17 @@ at_revision '58e2e874c16641455fbf78db05a7222168e6659c' 'detransition new-classes
 at_revision 'e791bb8c1b9047cd25c2b75a4c05730a2a27e2ff' 'rebuild cx' 'build/cx'
 at_revision 'e791bb8c1b9047cd25c2b75a4c05730a2a27e2ff' 'transition gen-release-method' 'build/cx'
 at_revision 'b7c2e88728079cfb67ddab7f8b57227736e1c84b' 'detransition gen-release-method' 'build/cx'
+# idk, something performance
+at_revision '104c043018a8ba912faf340c0dfd0abe893b59a7' 'rebuild cx' 'build/cx'
+# class lifetimes
+at_revision 'af1606e2c0dbc214f99ba6bb83c5899a192ab2b6' 'rebuild cx' 'build/cx'
+# either lifetimes
+at_revision 'b962a396dd58bf0068cec16452d242362cb8fbc4' 'rebuild cx' 'build/cx'
+# fix bootstrapping for array concat
+at_revision '435fb780bda8a134597f04d3f28989b30077e80a' 'rebuild cx' 'build/cx'
+# fix bootstrapping for refcounts (disable free)
+at_revision 'dfb9db03891d9718a0d93dafbfb9c5e6302e14ff' 'rebuild cx' 'build/cx'
+# actual refcounts
+at_revision '12c19f21cd81f978e8292861288546406b9e68fe' 'rebuild cx' 'build/cx'
 bash rebuild.sh
 echo "=== build/cx from master ==="

@@ -1,6 +1,22 @@
 #!/bin/sh
 set -eu
 
+rm -rf build
+mkdir build
+mkdir -p .bootcache
+
+function unpack_tagfile {
+    tagfile="build/archive"
+    if [ -f "$tagfile" ]
+    then
+        # unpack the previous archive
+        archive=$(cat "$tagfile")
+        rm "$tagfile"
+        echo "- restoring bootstrap archive $archive"
+        tar xf "$archive"
+    fi
+}
+
 # Since the language is self-hosting, we require a copy of the compiler in order to
 # produce another copy. To sidestep this circular requirement, we check out a sequence
 # of historic git revisions that did have a working bootstrap compiler, and use them to
@@ -10,6 +26,18 @@ function at_revision {
     rev=$1
     build=$2
     output=$3
+    archive=".bootcache/"$(echo "$1 $2" |sed -e 's/[^a-zA-Z0-9]/_/g')".tar.xz"
+    tagfile="build/archive"
+
+    if [ -f "$archive" ]
+    then
+        # prepare to use the cached version of the archive
+        echo "$archive" > "$tagfile"
+        return 0
+    fi
+
+    # archive doesn't exist - but maybe the tagfile does?
+    unpack_tagfile
 
     rm -rf build/$rev
     mkdir -p build/$rev
@@ -26,6 +54,11 @@ function at_revision {
         cp -R build/$rev/build/src build/
     fi
     rm -rf build/$rev
+
+    # now create the archive
+    echo "- saving bootstrap archive $archive"
+    tar cf "$archive" build
+
     echo "=== build/cx from $rev ==="
     echo
 }
@@ -183,5 +216,8 @@ at_revision '435fb780bda8a134597f04d3f28989b30077e80a' 'rebuild cx' 'build/cx'
 at_revision 'dfb9db03891d9718a0d93dafbfb9c5e6302e14ff' 'rebuild cx' 'build/cx'
 # actual refcounts
 at_revision '12c19f21cd81f978e8292861288546406b9e68fe' 'rebuild cx' 'build/cx'
+# unpack the last tagfile
+unpack_tagfile
+
 bash rebuild.sh
 echo "=== build/cx from master ==="

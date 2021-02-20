@@ -31,6 +31,11 @@ do
     SUMNEXT="$(objdump -S build/cx_test$K |grep -v file\ format |md5sum)"
     if [ "$SUM" == "$SUMNEXT" ]; then break; fi
     SUM="$SUMNEXT"
+    if [ "${K+x}" == "${STAGE+x}" ]
+    then
+        echo "Stage $STAGE reached, aborting"
+        exit 1
+    fi
     I=$K
 done
 mv build/cx_test$I build/cx

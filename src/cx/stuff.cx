@@ -786,26 +786,17 @@ Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc
      * - copyInto member
      * - destroy lhs
      */
-    Expression do_(Expression baseExpr, bool destroyLhs) {
+    Expression do_(Expression baseExpr) {
         auto ret = accessMember(context.platform, baseExpr, member, loc, allowUndefined).instanceOf(Expression);
-
-        if (!destroyLhs && !ret.info().gifted) {
-            return ret;
-        }
-
         auto tempRet = new PairedTemporary(ret.type(), true); // temporary since we copyInto
         auto initTemp = new UninitializeTemporaryStatement(tempRet);
         auto copyTemp = ret.type().copyInto(context, tempRet, ret);
         if (!copyTemp) copyTemp = new AssignStatement(tempRet, ret);
 
-        Statement endLifetime;
         // TODO the callback should take Reference, really
-        if (destroyLhs) endLifetime = baseType.endLifetime(context, baseExpr.instanceOf(Reference));
+        Statement endLifetime = baseType.endLifetime(context, baseExpr.instanceOf(Reference));
 
         return new WrapExpression(sequence(initTemp, copyTemp), tempRet, endLifetime);
-    }
-    Expression doDestroyLhs(Expression baseExpr) {
-        return do_(baseExpr, true);
     }
     // SHIT
     // we need a reference on the lhs for assignments
@@ -815,8 +806,11 @@ Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc
     // for instance with an ExprReturnType analogous to StatementReturnType, that gathers temp destructors
 
     // if lhs is nontemp, just use StructReference
-    if (!baseExpr.info().gifted) return do_(baseExpr, false);
-    return context.compiler.exprWithTemporary(baseExpr, &doDestroyLhs);
+    if (!baseExpr.info().gifted) {
+        return accessMember(context.platform, baseExpr, member, loc, allowUndefined)
+            .instanceOf(Expression);
+    }
+    return context.compiler.exprWithTemporary(baseExpr, &do_);
 }
 
 Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool allowUndefined)
@@ -3193,8 +3187,12 @@ class Class : Type
 
     override Expression truthy(Context context, Expression value, Loc loc)
     {
-        Type voidp = new Pointer(new Void);
-        return .truthy(context, new PointerCast(voidp, value), loc);
+        Expression do_(Expression value) {
+            Type voidp = new Pointer(new Void);
+
+            return .truthy(context, new PointerCast(voidp, value), loc);
+        }
+        return context.compiler.consume(context, value, &do_);
     }
 
     override Expression implicitConvertFrom(Expression from)
@@ -3436,7 +3434,7 @@ class Class : Type
                     Argument(false, "ptr", new Pointer(new Void))]);
 
             context = context.withNamespace(
-                context.compiler.exprAlias(context.namespace, "this", source));
+                context.compiler.exprAlias(context.namespace, "this", new IgnoreLifetimeExpr(source)));
             context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "size_t", sizeT));
             context = context.withNamespace(context.compiler.exprAlias(

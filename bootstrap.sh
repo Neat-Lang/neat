@@ -218,6 +218,8 @@ at_revision 'dfb9db03891d9718a0d93dafbfb9c5e6302e14ff' 'rebuild cx' 'build/cx'
 at_revision '12c19f21cd81f978e8292861288546406b9e68fe' 'rebuild cx' 'build/cx'
 # reenable some stuff I forgot
 at_revision '4c25468bd67660b2390fcdb2f2cda35b4e4a6954' 'rebuild cx' 'build/cx'
+# array[$]
+at_revision '5ac30c9c47a4d25a810f616249581d87adc99be1' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

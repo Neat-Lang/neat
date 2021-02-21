@@ -582,6 +582,50 @@ class WrapExpression : Expression
     }
 }
 
+/**
+ * This type is a bit risky.
+ * Because result is returned after post() is called,
+ * `WrapReference` can leak the location of a value that
+ * has no references. As such, it should only be used when
+ * `reference` doesn't yield an address managed by `pre`/`post`.
+ */
+class WrapReference : Reference
+{
+    Statement pre;
+    Reference reference;
+    Statement post;
+
+    this(this.pre, this.reference, this.post) { }
+
+    override Type type() { return reference.type(); }
+
+    override int emit(Generator output)
+    {
+        int reg = this.emitLocation(output);
+
+        return output.fun.load(this.type().emit(output.platform), reg);
+    }
+
+    override int emitLocation(Generator output)
+    {
+        if (pre) pre.emit(output);
+        int result = reference.emitLocation(output);
+        if (post) post.emit(output);
+        return result;
+    }
+
+    override ExprInfo info() { return reference.info(); }
+
+    override void hash(Hash hash) {
+        hash.adds("WrapReference");
+        if (pre) pre.hash(hash);
+        else hash.adds("null");
+        reference.hash(hash);
+        if (post) post.hash(hash);
+        else hash.adds("null");
+    }
+}
+
 Expression callWithLifetime(Context context, Symbol target, Expression[] args, Loc loc) {
     Symbol target = target; // TODO mut Symbol target
     Statement pre, post;
@@ -690,22 +734,38 @@ class ASTIndexAccess : ASTSymbol
     {
         Type wordType = nativeWordType(context.platform);
         Expression base = beExpression(this.base.compile(context));
-        Expression index = beExpression(this.index.compile(context));
 
-        index = expectImplicitConvertTo(index, wordType, this.loc);
-        auto type = base.type();
-        Array array_ = type.instanceOf(Array);
-        if (array_) {
-            // TODO bounds check
-            base = new ArrayPointer(array_.elementType, base);
-        } else {
-            if (!type.instanceOf(Pointer)) {
-                this.loc.fail("index access requires pointer or array");
+        // FIXME
+        auto index = this.index;
+        auto loc = this.loc;
+        Expression do_(Reference base)
+        {
+            auto type = base.type();
+            Expression indexExpr;
+            Expression ptrBase;
+
+            Array array_ = type.instanceOf(Array);
+            if (array_) {
+                auto context = context.withNamespace(
+                    context.compiler.exprAlias(context.namespace, "__array", base));
+
+                indexExpr = beExpression(index.compile(context));
+                // TODO bounds check
+                ptrBase = new ArrayPointer(array_.elementType, base);
+            } else {
+                if (!type.instanceOf(Pointer)) {
+                    loc.fail("index access requires pointer or array");
+                }
+                indexExpr = beExpression(index.compile(context));
+                ptrBase = base;
             }
-        }
 
-        assert(index.type().same(wordType));
-        return new Dereference(new PointerOffset(base, index));
+            indexExpr = expectImplicitConvertTo(indexExpr, wordType, loc);
+
+            assert(indexExpr.type().same(wordType));
+            return new Dereference(new PointerOffset(ptrBase, indexExpr));
+        }
+        return context.compiler.consumeTemporary(context, true, base, &do_);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -728,12 +788,26 @@ class ASTArraySlice : ASTSymbol
     override Symbol compile(Context context)
     {
         Type wordType = nativeWordType(context.platform);
+        auto array = beExpression(this.array.compile(context));
+        // FIXME
+        auto loc = loc;
+        auto lower = lower;
+        auto upper = upper;
 
-        return new ArraySlice(
-            beExpression(this.array.compile(context)),
-            expectImplicitConvertTo(beExpression(this.lower.compile(context)), wordType, this.loc),
-            expectImplicitConvertTo(beExpression(this.upper.compile(context)), wordType, this.loc),
-            this.loc);
+        Expression do_(Reference array)
+        {
+            auto context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, "__array", array));
+            auto lower = beExpression(lower.compile(context));
+            auto upper = beExpression(upper.compile(context));
+
+            return new ArraySlice(
+                array,
+                expectImplicitConvertTo(lower, wordType, loc),
+                expectImplicitConvertTo(upper, wordType, loc),
+                loc);
+        }
+        return context.compiler.consumeTemporary(context, false, array, &do_);
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTArraySlice'"); assert(false); }
@@ -1500,6 +1574,9 @@ ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
     string name = parseIdentifier(parser);
     if (name.length)
     {
+        if (name == "$") {
+            return new ASTArrayLength(loc.reloc);
+        }
         return new ASTIdentifier(name, false, loc);
     }
     float f;

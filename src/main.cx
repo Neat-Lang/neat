@@ -594,6 +594,15 @@ class CompilerImpl : CompilerBase
         return new WrapExpression(before, value, after);
     }
 
+    // wrap, allowing references
+    override Expression wrapRef(Statement before, Expression value, Statement after)
+    {
+        if (!before && !after) return value;
+        auto valueRef = value.instanceOf(Reference);
+        if (valueRef) return new WrapReference(before, valueRef, after);
+        return new WrapExpression(before, value, after);
+    }
+
     override Expression consume(Context context, Expression expr, Expression delegate(Expression) dg)
     {
         if (!expr.info().gifted)
@@ -606,7 +615,31 @@ class CompilerImpl : CompilerBase
         auto cleanup = type.endLifetime(context, temp);
         auto result = dg(temp);
         return wrap(assign, result, cleanup);
+    }
 
+    override Expression consumeTemporary(Context context, bool allowRefReturn, Expression expr, Expression delegate(Reference) dg)
+    {
+        auto type = expr.type();
+        // "owned" by the temporary()
+        auto temp = new PairedTemporary(type, false);
+        auto result = dg(temp);
+        if (!result) return null;
+
+        Statement assign = new InitializeTemporaryStatement(temp, expr);
+        Statement cleanup;
+        if (expr.info().gifted) {
+            cleanup = type.endLifetime(context, temp);
+        }
+        if (allowRefReturn)
+            return wrapRef(assign, result, cleanup);
+        return wrap(assign, result, cleanup);
+    }
+
+    override Symbol lookup(Context context, string name)
+    {
+        auto frame = new ReferenceExpression(new StackFrame(new Void));
+
+        return context.namespace.lookup(name, context, frame);
     }
 
     override Reference dereference(Expression value)

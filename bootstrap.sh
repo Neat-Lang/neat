@@ -10,10 +10,10 @@ function unpack_tagfile {
     if [ -f "$tagfile" ]
     then
         # unpack the previous archive
-        archive=$(cat "$tagfile")
+        unpack_archive=$(cat "$tagfile")
         rm "$tagfile"
-        echo "- restoring bootstrap archive $archive"
-        tar xf "$archive"
+        echo "- restoring bootstrap archive $unpack_archive"
+        tar xf "$unpack_archive"
     fi
 }
 

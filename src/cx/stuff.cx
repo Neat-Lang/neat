@@ -844,12 +844,12 @@ Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc
 
     if (baseType.instanceOf(Pointer)) {
         // cannot trace lifetimes through pointers (TODO?)
-        return accessMember(context.platform, base, member, loc, allowUndefined);
+        return accessMember(context, base, member, loc, allowUndefined);
     }
 
     // speculative lookup :-(
     // TODO exprWithTemporary that handles symbol returns
-    auto ret = accessMember(context.platform, baseExpr, member, loc, allowUndefined);
+    auto ret = accessMember(context, baseExpr, member, loc, allowUndefined);
     if (!ret || !ret.instanceOf(Expression)) return ret;
     /**
      * - temporize lhs
@@ -857,7 +857,7 @@ Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc
      * - destroy lhs
      */
     Expression do_(Expression baseExpr) {
-        auto ret = accessMember(context.platform, baseExpr, member, loc, allowUndefined).instanceOf(Expression);
+        auto ret = accessMember(context, baseExpr, member, loc, allowUndefined).instanceOf(Expression);
         auto tempRet = new PairedTemporary(ret.type(), true); // temporary since we copyInto
         auto initTemp = new UninitializeTemporaryStatement(tempRet);
         auto copyTemp = ret.type().copyInto(context, tempRet, ret);
@@ -877,13 +877,13 @@ Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc
 
     // if lhs is nontemp, just use StructReference
     if (!baseExpr.info().gifted) {
-        return accessMember(context.platform, baseExpr, member, loc, allowUndefined)
+        return accessMember(context, baseExpr, member, loc, allowUndefined)
             .instanceOf(Expression);
     }
     return context.compiler.exprWithTemporary(baseExpr, &do_);
 }
 
-Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool allowUndefined)
+Symbol accessMember(Context context, Symbol base, string member, Loc loc, bool allowUndefined)
 {
     if (!base.instanceOf(Expression))
     {
@@ -895,15 +895,10 @@ Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool
         baseExpr = new Dereference(baseExpr);
     }
 
-    Array arrayType = baseExpr.type().instanceOf(Array);
-    if (platform && arrayType)
+    auto field = baseExpr.type().accessMember(context, baseExpr, member);
+    if (field)
     {
-        if (member == "length")
-            return new ArrayLength(baseExpr, nativeWordType(platform));
-        if (member == "ptr")
-            return new ArrayPointer(arrayType.elementType, baseExpr);
-        if (member == "base")
-            return new ArrayBase(baseExpr);
+        return field;
     }
 
     Struct structType = baseExpr.type().instanceOf(Struct);
@@ -954,7 +949,7 @@ Symbol accessMember(Platform platform, Symbol base, string member, Loc loc, bool
             return new ClassMethodPtr(funcPtrValue, baseExpr);
         }
 
-        ClassMember[] members = classType.allMembers(platform);
+        ClassMember[] members = classType.allMembers(context.platform);
         size_t memberOffset = [first i for i, a in members where a.name == member else -1];
         if (memberOffset != -1)
             return new StructMemberReference(new Dereference(asStructPtr), memberOffset);
@@ -1012,7 +1007,7 @@ class ASTInstanceOf : ASTSymbol
         Expression do_(Expression base) {
             Class target = target.compile(context).instanceOf(Class);
             assert(!!target);
-            Symbol instanceOf = accessMember(context.platform, base, "__instanceof", loc, false);
+            Symbol instanceOf = accessMember(context, base, "__instanceof", loc, false);
             Expression name = new StringLiteral(target.name);
             return new PointerCast(target, callWithLifetime(context, instanceOf, [name], loc));
         }
@@ -1291,7 +1286,7 @@ class ASTNewExpression : ASTSymbol
             Expression do_(Expression classptr) {
                 // don't clean up classptr after constructor call, we're continuing its lifetime
                 auto ctor = accessMember(
-                    context.platform, new IgnoreLifetimeExpr(classptr), "__ctor", loc, false);
+                    context, new IgnoreLifetimeExpr(classptr), "__ctor", loc, false);
                 auto ctorCall = context.compiler.exprStatement(
                     callWithLifetime(context, ctor, argExpressions, loc));
 

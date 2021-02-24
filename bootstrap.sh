@@ -226,6 +226,10 @@ at_revision '1e5ee234e431a82c406d7dd1b654ad539c0c7141' 'rebuild cx' 'build/cx'
 at_revision '94efdb9b9a87bdab96ad154d7d7527b19832a189' 'rebuild cx' 'build/cx'
 # transition 2: add Context parameter to implicitConvertTo
 at_revision '2534fa70241b08338543e4711b727bcf148854f8' 'rebuild cx' 'build/cx'
+# at enums
+at_revision '507a440728862a3a771e83619bdfd23000ddab08' 'rebuild cx' 'build/cx'
+# make ownership an enum
+at_revision '1c3e540a528c0cfb51daa171dabdd3fdd6e8259b' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

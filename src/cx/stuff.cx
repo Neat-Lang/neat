@@ -9,6 +9,7 @@ macro import cx.macros.quasiquoting;
 import backend.base;
 import cx.array;
 import cx.base;
+import cx.enums;
 import cx.expr;
 import cx.hash;
 import cx.linenr;
@@ -375,10 +376,7 @@ class FuncPtrCall : Expression
         int[] regs = new int[](this.args.length);
         for (int i = 0; i < this.args.length; i += 1)
         {
-            auto arg = this.args[i];
-            arg = expectImplicitConvertTo(arg, type.args[i], this.loc);
-
-            regs[i] = arg.emit(output);
+            regs[i] = this.args[i].emit(output);
         }
         return output.fun.callFuncPtr(
             type.emit(output.platform), this.funcPtr.emit(output), regs);
@@ -483,7 +481,7 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc)
     auto fundecl = target.instanceOf(FunctionDeclaration);
     if (fundecl)
     {
-        args = [expectImplicitConvertTo(arg, fundecl.args[i].type, loc) for i, arg in args];
+        args = [expectImplicitConvertTo(context, arg, fundecl.args[i].type, loc) for i, arg in args];
         return new Call(fundecl, args, loc);
     }
     ClassMethodPtr method = target.instanceOf(ClassMethodPtr);
@@ -493,7 +491,7 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc)
         if (base) {
             auto fundecl = base.getFunction();
             if (args.length == fundecl.args.length) loc.fail("wrong number of args: " ~ ltoa(args.length));
-            args = [expectImplicitConvertTo(arg, fundecl.args[i].type, loc) for i, arg in args];
+            args = [expectImplicitConvertTo(context, arg, fundecl.args[i].type, loc) for i, arg in args];
         } else {
             auto funcptr = method.funcPtr.type().instanceOf(FunctionPointer);
             if (funcptr) {
@@ -501,7 +499,7 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc)
                 if (args.length != funcptr.args.length - 1)
                     loc.fail("wrong number of arguments: expected " ~ ltoa(funcptr.args.length - 1)
                         ~ " but got " ~ ltoa(args.length));
-                args = [expectImplicitConvertTo(arg, funcptr.args[i+1], loc) for i, arg in args];
+                args = [expectImplicitConvertTo(context, arg, funcptr.args[i+1], loc) for i, arg in args];
             } else {
                 loc.fail("function reference or funcptr expected? but is '" ~ method.funcPtr.type().repr() ~ "'");
             }
@@ -519,14 +517,14 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc)
     if (expr) funcptr = expr.type().instanceOf(FunctionPointer);
     if (expr && funcptr)
     {
-        args = [expectImplicitConvertTo(arg, funcptr.args[i], loc) for i, arg in args];
+        args = [expectImplicitConvertTo(context, arg, funcptr.args[i], loc) for i, arg in args];
         return new FuncPtrCall(expr, args, loc);
     }
     NestedFunctionPointer nestedfuncptr;
     if (expr) nestedfuncptr = expr.type().instanceOf(NestedFunctionPointer);
     if (expr && nestedfuncptr)
     {
-        args = [expectImplicitConvertTo(arg, nestedfuncptr.args[i], loc) for i, arg in args];
+        args = [expectImplicitConvertTo(context, arg, nestedfuncptr.args[i], loc) for i, arg in args];
         // TODO cache delegate
         auto funcPtr = new DelegateFuncPtr(expr);
         auto thisPtr = new DelegateDataPtr(expr);
@@ -544,7 +542,7 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc)
         Statement initialize = new UninitializeTemporaryStatement(temp);
         for (int i = 0; i < args.length; i += 1) {
             auto arg = args[i];
-            arg = expectImplicitConvertTo(arg, struct_.members[i].type, loc);
+            arg = expectImplicitConvertTo(context, arg, struct_.members[i].type, loc);
 
             auto field = new StructMemberReference(temp, i);
             auto stmt = arg.type().copyInto(context, field, arg);
@@ -762,7 +760,7 @@ class ASTIndexAccess : ASTSymbol
                 ptrBase = base;
             }
 
-            indexExpr = expectImplicitConvertTo(indexExpr, wordType, this.loc);
+            indexExpr = expectImplicitConvertTo(context, indexExpr, wordType, this.loc);
 
             assert(indexExpr.type().same(wordType));
             return new Dereference(new PointerOffset(ptrBase, indexExpr));
@@ -799,8 +797,8 @@ class ASTArraySlice : ASTSymbol
 
             return new ArraySlice(
                 array,
-                expectImplicitConvertTo(beExpression(this.lower.compile(context)), wordType, this.loc),
-                expectImplicitConvertTo(beExpression(this.upper.compile(context)), wordType, this.loc),
+                expectImplicitConvertTo(context, beExpression(this.lower.compile(context)), wordType, this.loc),
+                expectImplicitConvertTo(context, beExpression(this.upper.compile(context)), wordType, this.loc),
                 this.loc);
         }
         return context.compiler.consumeTemporary(context, false, array, &do_);
@@ -835,6 +833,10 @@ ASTSymbol parseIndex(Parser parser, LexicalContext lexicalContext, ASTSymbol bas
 
 Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc loc, bool allowUndefined)
 {
+    if (base.instanceOf(Type))
+    {
+        return accessMember(context, base, member, loc, allowUndefined);
+    }
     if (!base.instanceOf(Expression))
     {
         loc.assert2s(false, "expected expression for member access");
@@ -885,6 +887,10 @@ Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc
 
 Symbol accessMember(Context context, Symbol base, string member, Loc loc, bool allowUndefined)
 {
+    if (base.instanceOf(Type))
+    {
+        return base.instanceOf(Type).accessMember(context, null, member);
+    }
     if (!base.instanceOf(Expression))
     {
         loc.assert2s(false, "expected expression for member access");
@@ -1300,7 +1306,7 @@ class ASTNewExpression : ASTSymbol
 
             Type wordType = nativeWordType(context.platform);
             auto length = expectImplicitConvertTo(
-                beExpression2(this.args[0].compile(context), this.loc), wordType, this.loc);
+                context, beExpression2(this.args[0].compile(context), this.loc), wordType, this.loc);
             return new ArrayAllocation(arrayType.elementType, length);
         }
         this.loc.assert2s2(false, "don't know how to allocate ", type.repr());
@@ -1825,7 +1831,7 @@ class ASTReturnStatement : ASTStatement
     {
         Expression expr = beExpression(this.value.compile(context));
         Type ret = findFunctionScope(context.namespace).ret;
-        expr = expectImplicitConvertTo(expr, ret, this.loc);
+        expr = expectImplicitConvertTo(context, expr, ret, this.loc);
 
         /**
          * - alloca
@@ -2362,7 +2368,7 @@ class ASTVarDeclStatement : ASTStatement
                 type = initial.type();
             } else {
                 assert(!!type);
-                initial = expectImplicitConvertTo(initial, type, this.loc);
+                initial = expectImplicitConvertTo(context, initial, type, this.loc);
             }
 
             auto decl = new VariableDeclaration(context.namespace, this.name, type, true);
@@ -2847,7 +2853,7 @@ class ASTModule
     // because we hit a macro declaration
     ASTModule parent;
 
-    Either(ASTImport, ASTClassDecl, ASTStructDecl, ASTExtern, ASTFunction, ASTTypeAlias, ASTSymbolAlias)[] entries;
+    Either(ASTImport, ASTType, ASTExtern, ASTFunction, ASTTypeAlias, ASTSymbolAlias)[] entries;
 
     this(this.name, this.pak, this.macroState, this.parent) { }
 
@@ -3288,7 +3294,7 @@ class Class : Type
         return null;
     }
 
-    override Expression implicitConvertTo(Expression from, Type to)
+    override Expression implicitConvertTo(Context context, Expression from, Type to)
     {
         // (void*) class
         auto voidp = new Pointer(new Void);
@@ -4163,7 +4169,8 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
         }
         ASTClassDecl classDecl = parseClassDecl(parser, lexicalContext);
         if (classDecl) {
-            module_.entries ~= classDecl;
+            // TODO implconv check
+            module_.entries ~= classDecl.instanceOf(ASTType);
             continue;
         }
         ASTExtern extern_ = parseExtern(parser, lexicalContext);
@@ -4171,9 +4178,16 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             module_.entries ~= extern_;
             continue;
         }
-        auto strct = parseStructDecl(parser, lexicalContext);
+        ASTStructDecl strct = parseStructDecl(parser, lexicalContext);
         if (strct) {
-            module_.entries ~= strct;
+            // TODO implconv
+            module_.entries ~= strct.instanceOf(ASTType);
+            continue;
+        }
+        ASTEnumDecl enumDecl = parseEnumDecl(parser, lexicalContext);
+        if (enumDecl) {
+            // TODO implconv
+            module_.entries ~= enumDecl.instanceOf(ASTType);
             continue;
         }
         ASTModule submod = parseMacroContinuation(compiler, parser, helper, module_, config);
@@ -4252,10 +4266,22 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
 
                 module_.addImport(importedModule);
             }
-            ASTClassDecl classDecl:
-                module_.add(classDecl.name, classDecl.compile(context));
-            ASTStructDecl structDecl:
-                module_.add(structDecl.name, structDecl.compile(context));
+            ASTType typeDecl: {
+                // TODO ASTTypeDecl?
+                auto classDecl = typeDecl.instanceOf(ASTClassDecl);
+                if (classDecl) {
+                    module_.add(classDecl.name, classDecl.compile(context));
+                }
+                auto structDecl = typeDecl.instanceOf(ASTStructDecl);
+                if (structDecl) {
+                    module_.add(structDecl.name, structDecl.compile(context));
+                }
+                auto enumDecl = typeDecl.instanceOf(ASTEnumDecl);
+                if (enumDecl) {
+                    module_.add(enumDecl.name, enumDecl.compile(context));
+                }
+                assert(classDecl || structDecl || enumDecl);
+            }
             ASTExtern extern_:
                 module_.add(extern_.name, extern_.compile(context));
             ASTFunction function_:

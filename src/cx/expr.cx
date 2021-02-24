@@ -11,15 +11,15 @@ import cx.parser_base;
 import cx.types;
 import helpers;
 
-Expression expectImplicitConvertTo(Expression from, Type to, Loc loc)
+Expression expectImplicitConvertTo(Context context, Expression from, Type to, Loc loc)
 {
     loc.assert2s(!!to, "no implconv target type");
-    auto result = implicitConvertTo(from, to);
+    auto result = implicitConvertTo(context, from, to);
     if (result) return result;
     loc.assert2s4(false, "todo: cast(", to.repr(), ") ", from.type().repr());
 }
 
-Expression implicitConvertTo(Expression from, Type to)
+Expression implicitConvertTo(Context context, Expression from, Type to)
 {
     if (from.type().same(to)) return from;
     // void* casts to any pointer
@@ -62,7 +62,7 @@ Expression implicitConvertTo(Expression from, Type to)
     }
     Expression fromImplicit = to.implicitConvertFrom(from);
     if (fromImplicit) return fromImplicit;
-    Expression toImplicit = from.type().implicitConvertTo(from, to);
+    Expression toImplicit = from.type().implicitConvertTo(context, from, to);
     if (toImplicit) return toImplicit;
     return null;
 }
@@ -429,9 +429,7 @@ class Call : Expression
             fun.numArgs() == args.length,
             fun.name, " expected ", ltoa(fun.numArgs()), " args, not ", ltoa(args.length));
         int extra = !!fun.contextType;
-        // TODO why not contextType?
-        if (extra) args[0] = expectImplicitConvertTo(args[0], new Pointer(new Void), loc);
-        for (int i = 0; i < fun.args.length; i += 1) {
+        for (int i = extra; i < fun.args.length; i += 1) {
             assert(args[extra + i].type().same(fun.args[i].type));
         }
     }
@@ -497,12 +495,16 @@ class ASTBinaryOp : ASTSymbol
         Expression left = beExpression2(this.left.compile(context), this.loc);
         Expression right = beExpression2(this.right.compile(context), this.loc);
         auto leftType = left.type(), rightType = right.type();
+
+        auto opOverload = leftType.binaryOp(context, this.op, left, right, this.loc);
+        if (opOverload) return opOverload;
+
         if (this.op == "~")
         {
             loc.assert2s2(
                 !!leftType.instanceOf(Array),
                 "Left hand side of concatenation isn't array, but ", leftType.repr());
-            auto converted = implicitConvertTo(right, leftType.instanceOf(Array).elementType);
+            auto converted = implicitConvertTo(context, right, leftType.instanceOf(Array).elementType);
             if (converted) {
                 return context.compiler.binaryOp2("~", context, left, converted, this.loc);
             }

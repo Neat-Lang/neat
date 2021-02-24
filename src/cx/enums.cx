@@ -1,0 +1,106 @@
+module cx.enums;
+
+macro import cx.macros.listcomprehension;
+
+import backend.base;
+import cx.base;
+import cx.hash;
+import cx.parser_base;
+import cx.parser;
+import cx.types;
+import helpers;
+
+struct EnumEntry
+{
+    string name;
+    int value;
+}
+
+class Enum : Type
+{
+    string name;
+
+    EnumEntry[] entries;
+
+    // TODO like so, in Class{}
+    Hash precomputedHash;
+
+    this(this.name, this.entries) {
+        precomputedHash = new Hash();
+        precomputedHash.adds("hash");
+        precomputedHash.adds(name);
+        precomputedHash.addl(entries.length);
+        [precomputedHash.adds(e.name) for e in entries];
+        [precomputedHash.addl(e.value) for e in entries];
+    }
+
+    override BackendType emit(Platform platform) { return new BackendIntType; }
+    override bool same(Type other) {
+        auto otherEnum = other.instanceOf(Enum);
+
+        // TODO fqn
+        return otherEnum && otherEnum.name == name;
+    }
+    override string repr() { return name; }
+    override string mangle() { return "enum_" ~ name; }
+    override void hash(Hash hash) { hash.applyHash(precomputedHash); }
+    override Symbol accessMember(Context context, Expression base, string field)
+    {
+        if (base) return null;
+        Symbol asEnum(int value) {
+            return context.compiler.castTo(this,
+                context.compiler.intLiteral(value));
+        }
+        return [first asEnum(e.value) for e in entries where e.name == field else null];
+    }
+    override Expression binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
+    {
+        if (op == "==")
+        {
+            // TODO check type of rhs
+            auto left = context.compiler.castTo(new Integer, lhs);
+            auto right = context.compiler.castTo(new Integer, rhs);
+
+            return context.compiler.binaryOp("==", context, left, right, loc);
+        }
+        return null;
+    }
+}
+
+class ASTEnumDecl : ASTType
+{
+    string name;
+
+    EnumEntry[] entries;
+
+    this(this.name, this.entries) { }
+
+    override Type compile(Context context) {
+        return new Enum(name, entries);
+    }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTEnumDecl'!"); assert(false); }
+}
+
+ASTEnumDecl parseEnumDecl(Parser parser, LexicalContext lexicalContext)
+{
+    auto loc = parser.loc();
+    if (!acceptIdentifier(parser, "enum"))
+    {
+        return null;
+    }
+    string name = parseIdentifier(parser);
+    EnumEntry[] entries;
+    parser.expect("{");
+    while (!parser.accept("}"))
+    {
+        if (entries.length)
+            parser.expect(",");
+        // is there a better way to write 'there may be a trailing comma'?
+        if (parser.accept("}"))
+            break;
+        string entryName = parseIdentifier(parser);
+        entries ~= EnumEntry(entryName, cast(int) entries.length);
+    }
+    return new ASTEnumDecl(name, entries);
+}

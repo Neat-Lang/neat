@@ -222,6 +222,8 @@ at_revision '4c25468bd67660b2390fcdb2f2cda35b4e4a6954' 'rebuild cx' 'build/cx'
 at_revision '5ac30c9c47a4d25a810f616249581d87adc99be1' 'rebuild cx' 'build/cx'
 # fix 'this' access for nested functions
 at_revision '1e5ee234e431a82c406d7dd1b654ad539c0c7141' 'rebuild cx' 'build/cx'
+# transition: add Context parameter to implicitConvertTo
+at_revision '94efdb9b9a87bdab96ad154d7d7527b19832a189' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

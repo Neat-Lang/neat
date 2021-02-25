@@ -26,8 +26,9 @@ import helpers;
  * {
  *      size_t references;
  *      size_t capacity; // total length
+ *      size_t used; // length in use (used for realloc)
  * }
- * They are followed directly by the array data.
+ * They are then followed directly by the array data.
  */
 class Array : Type
 {
@@ -224,21 +225,24 @@ class ArrayAllocation : Expression
         auto voidp = output.platform.voidp();
         auto backendElementType = this.elementType.emit(output.platform);
         int elementSizeReg = output.fun.wordLiteral(output.platform, backendElementType.size(output.platform));
-        int twoWordSizeReg = output.fun.wordLiteral(output.platform, backendSizeT.size(output.platform) * 2);
+        int threeWordSizeReg = output.fun.wordLiteral(output.platform, backendSizeT.size(output.platform) * 3);
         int oneReg = output.fun.wordLiteral(output.platform, 1);
         int twoReg = output.fun.wordLiteral(output.platform, 2);
+        int threeReg = output.fun.wordLiteral(output.platform, 3);
         int arrayLength = this.length.case(
             Expression ex: ex.emit(output),
             size_t sz: output.fun.wordLiteral(output.platform, sz));
         int arrayBytes = output.fun.binop("*", backendSizeT, arrayLength, elementSizeReg);
-        int totalArrayBytes = output.fun.binop("+", backendSizeT, arrayBytes, twoWordSizeReg);
+        int totalArrayBytes = output.fun.binop("+", backendSizeT, arrayBytes, threeWordSizeReg);
         int arrayBase = output.fun.call(voidp, "cxruntime_alloc", [totalArrayBytes]);
         // ptr = base + 2
-        int arrayPtr = output.fun.bitcast(output.fun.ptrOffset(backendSizeT, arrayBase, twoReg), voidp);
-        // base[0] = 1 (refs)
+        int arrayPtr = output.fun.bitcast(output.fun.ptrOffset(backendSizeT, arrayBase, threeReg), voidp);
+        // base[0] = refs (1)
         // base[1] = allocated length (in elements)
+        // base[2] = used length (in elements, inited to allocated length)
         output.fun.store(backendSizeT, output.fun.bitcast(arrayBase, new BackendPointerType(backendSizeT)), oneReg);
         output.fun.store(backendSizeT, output.fun.ptrOffset(backendSizeT, arrayBase, oneReg), arrayLength);
+        output.fun.store(backendSizeT, output.fun.ptrOffset(backendSizeT, arrayBase, twoReg), arrayLength);
 
         arrayPtr = output.fun.bitcast(arrayPtr, new BackendPointerType(backendElementType));
         return makeArray(output, this.elementType, arrayLength, arrayPtr, arrayBase);

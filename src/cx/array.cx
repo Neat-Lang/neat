@@ -261,7 +261,7 @@ class ArrayAllocation : Expression
 
 class ArraySlice : Expression
 {
-    Expression array;
+    Expression base;
 
     Expression lower;
 
@@ -269,23 +269,38 @@ class ArraySlice : Expression
 
     Loc loc;
 
-    this(this.array, this.lower, this.upper, this.loc) { }
+    Array arrayType;
 
-    override Type type() { return this.array.type(); }
+    this(this.base, this.lower, this.upper, this.loc) {
+        auto baseType = this.base.type();
+        if (baseType.instanceOf(Array)) {
+            this.arrayType = baseType.instanceOf(Array);
+        } else if (baseType.instanceOf(Pointer)) {
+            this.arrayType = new Array(baseType.instanceOf(Pointer).target);
+        } else {
+            this.loc.assert2s(false, "slice of non-array/non-pointer");
+        }
+    }
+
+    override Type type() { return this.arrayType; }
 
     override int emit(Generator output)
     {
         BackendType voidp = output.platform.voidp();
 
-        Array arrayType = this.array.type().instanceOf(Array);
-        this.loc.assert2s(!!arrayType, "slice of non-array");
-        auto elementType = arrayType.elementType.emit(output.platform);
+        auto elementType = this.arrayType.elementType.emit(output.platform);
 
-        int arrayReg = this.array.emit(output);
+        int baseReg = this.base.emit(output);
         int lowerReg = this.lower.emit(output);
         int upperReg = this.upper.emit(output);
-        int base = getArrayBase(output, arrayType, arrayReg);
-        int ptr = getArrayPtr(output, arrayType, arrayReg);
+        int base, ptr;
+        if (this.base.type().instanceOf(Array)) {
+            base = getArrayBase(output, this.arrayType, baseReg);
+            ptr = getArrayPtr(output, this.arrayType, baseReg);
+        } else {
+            base = output.fun.bitcast(output.fun.wordLiteral(output.platform, 0), voidp);
+            ptr = baseReg;
+        }
         // ptr = ptr + lower
         int newPtr = output.fun.ptrOffset(elementType, ptr, lowerReg);
         // len = upper - lower
@@ -294,14 +309,14 @@ class ArraySlice : Expression
             upperReg, lowerReg);
 
         // TODO acquire ref
-        return makeArray(output, arrayType.elementType, newLen, newPtr, base);
+        return makeArray(output, this.arrayType.elementType, newLen, newPtr, base);
     }
 
-    override ExprInfo info() { return array.info(); }
+    override ExprInfo info() { return base.info(); }
 
     override void hash(Hash hash) {
         hash.adds("ArraySlice");
-        array.hash(hash);
+        base.hash(hash);
         lower.hash(hash);
         upper.hash(hash);
     }
@@ -380,20 +395,45 @@ Expression arrayCat(Context context, Expression left, Expression right, Loc loc)
     ASTStatement body_;
     if (leftArray.elementType.same(right.type())) {
         body_ = compiler.$stmt {
-          auto result = new typeof(left)(left.length + 1);
-          for (size_t i = 0; i < left.length; i += 1)
-              result[i] = left[i];
-          result[left.length] = right;
-          return result;
+            if (left.base) {
+                size_t prevCap = (cast(size_t*) left.base)[1];
+                size_t* prevUsed = &(cast(size_t*) left.base)[2];
+                auto prevFrontier = &(cast(typeof(left.ptr)) &(cast(size_t*) left.base)[3])[*prevUsed];
+                if (&left.ptr[left.length] is prevFrontier && *prevUsed < prevCap) {
+                    *prevUsed += 1;
+                    prevFrontier[0] = right;
+                    return left[0 .. $ + 1];
+                }
+            }
+            auto result = new typeof(left)(left.length * 2 + 1);
+            for (size_t i = 0; i < left.length; i += 1)
+                result[i] = left[i];
+            result[left.length] = right;
+            // used
+            (cast(size_t*) result.base)[2] = left.length + 1;
+            return result[0 .. left.length + 1];
         };
     } else if (leftArray.same(right.type())) {
         body_ = compiler.$stmt {
-          auto result = new typeof(left)(left.length + right.length);
-          for (size_t i = 0; i < left.length; i += 1)
-              result[i] = left[i];
-          for (size_t i = 0; i < right.length; i += 1)
-            result[left.length + i] = right[i];
-          return result;
+            auto newLength = left.length + right.length;
+            if (left.base) {
+                size_t prevCap = (cast(size_t*) left.base)[1];
+                size_t* prevUsed = &(cast(size_t*) left.base)[2];
+                auto prevFrontier = &(cast(typeof(left.ptr)) &(cast(size_t*) left.base)[3])[*prevUsed];
+                if (&left.ptr[left.length] is prevFrontier && *prevUsed + right.length <= prevCap) {
+                    *prevUsed += right.length;
+                    for (size_t i = 0; i < right.length; i += 1)
+                        prevFrontier[i] = right[i];
+                    return left[0 .. newLength];
+                }
+            }
+            auto result = new typeof(left)(left.length * 2 + right.length);
+            for (size_t i = 0; i < left.length; i += 1)
+                result[i] = left[i];
+            for (size_t i = 0; i < right.length; i += 1)
+                result[left.length + i] = right[i];
+            (cast(size_t*) result.base)[2] = newLength;
+            return result[0 .. newLength];
         };
     } else {
         loc.fail("incompatible types for concat: " ~ leftArray.repr() ~ " and " ~ right.type().repr());

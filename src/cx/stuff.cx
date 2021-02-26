@@ -27,8 +27,6 @@ struct ASTArgument
     ASTType type;
 }
 
-extern(C) void* calloc(size_t nmemb, size_t size);
-
 class Function : FunctionDeclaration
 {
     Loc loc;
@@ -99,7 +97,7 @@ class Function : FunctionDeclaration
                 new PointerCast(this.contextType, new ArgExpr(0, voidp)));
         }
 
-        auto context = Context(compiler, platform, scope_, this.macroState, cast(int*) calloc(1, 4));
+        auto context = makeContext(compiler, platform, scope_, this.macroState);
 
         for (int i = 0; i < this.args.length; i += 1) {
             Argument arg = this.args[i];
@@ -1397,8 +1395,8 @@ class ASTIdentifier : ASTSymbol
             auto module_ = findModule(context.namespace);
             symbol = module_.lookup(this.name, context, null);
         } else {
-            auto frame = new ReferenceExpression(new StackFrame(new Void));
-            symbol = context.namespace.lookup(this.name, context, frame);
+            auto stackframe = new ReferenceExpression(new StackFrame(new Void));
+            symbol = context.namespace.lookup(this.name, context, stackframe);
         }
         this.loc.assert2s2(!!symbol, this.name, " not found");
         return symbol;
@@ -3501,12 +3499,6 @@ class Class : Type
         Context context = context; // TODO mut Context context
         Statement do_(Expression source) {
             auto sizeT = nativeWordType(context.platform);
-            auto printFun = new FunctionDeclaration(
-                "print", new Void, [Argument(false, "text", new Array(new Character))]);
-            auto printBtFun = new FunctionDeclaration(
-                "print_backtrace", new Void, []);
-            auto assertFun = new FunctionDeclaration(
-                "assert", new Void, [Argument(false, "test", new Integer)]);
             auto refCountViolationFun = new FunctionDeclaration(
                 "cxruntime_refcount_violation", new Void, [
                     Argument(false, "label", new Array(new Character)),
@@ -3517,24 +3509,16 @@ class Class : Type
             context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "size_t", sizeT));
             context = context.withNamespace(context.compiler.exprAlias(
-                        context.namespace, "print", printFun));
-            context = context.withNamespace(context.compiler.exprAlias(
-                        context.namespace, "print_backtrace", printBtFun));
-            context = context.withNamespace(context.compiler.exprAlias(
-                        context.namespace, "assert", assertFun));
-            context = context.withNamespace(context.compiler.exprAlias(
                         context.namespace, "cxruntime_refcount_violation", refCountViolationFun));
             context = context.withNamespace(context.compiler.exprAlias(
                         context.namespace, "inc_name", new StringLiteral("inc " ~ this.name)));
 
             auto incref = context.compiler.$stmt
             if (!!this) {
-                size_t *refs = &(cast(size_t*) this)[1];
-                if (*refs <= 0) {
-                    cxruntime_refcount_violation(inc_name, refs);
-                    // assert(false);
+                if ((cast(size_t*) this)[1] <= 0) {
+                    cxruntime_refcount_violation(inc_name, &(cast(size_t*) this)[1]);
                 }
-                *refs += 1;
+                (cast(size_t*) this)[1] += 1;
             };
             auto assign = context.compiler.assignStatement(target, source);
             return sequence(incref.compile(context).statement, assign);
@@ -3561,12 +3545,6 @@ class Class : Type
         // TODO do in __destroy() once we have function imports
         auto freeFun = new FunctionDeclaration(
             "free", new Void, [Argument(false, "ptr", new Pointer(new Void))]);
-        auto printFun = new FunctionDeclaration(
-            "print", new Void, [Argument(false, "text", new Array(new Character))]);
-        auto printBtFun = new FunctionDeclaration(
-            "print_backtrace", new Void, []);
-        auto assertFun = new FunctionDeclaration(
-            "assert", new Void, [Argument(false, "test", new Integer)]);
         auto refCountViolationFun = new FunctionDeclaration(
             "cxruntime_refcount_violation", new Void, [
                 Argument(false, "label", new Array(new Character)),
@@ -3575,29 +3553,17 @@ class Class : Type
         context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "free", freeFun));
         context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "print", printFun));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "print_backtrace", printBtFun));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "assert", assertFun));
-        context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "cxruntime_refcount_violation", refCountViolationFun));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "name", new StringLiteral(this.name)));
         context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "dec_name", new StringLiteral("dec " ~ this.name)));
         auto stmt = context.compiler.$stmt
             if (!!this) {
-                size_t* refs = &(cast(size_t*) this)[1];
-                if (*refs <= 0) {
-                    cxruntime_refcount_violation(dec_name, refs);
-                    // assert(false);
+                if ((cast(size_t*) this)[1] <= 0) {
+                    cxruntime_refcount_violation(dec_name, &(cast(size_t*) this)[1]);
                 }
-                *refs -= 1;
-                if (*refs == 0) {
+                (cast(size_t*) this)[1] -= 1;
+                if ((cast(size_t*) this)[1] == 0) {
                     this.__destroy();
-                    // print("<freeing " ~ name ~ ">");
-                    // print_backtrace();
                     free(this);
                 }
             };
@@ -4247,7 +4213,7 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
     }
 
     Module module_ = new Module(astModule.name, astModule.pak, astModule.macroState, parent);
-    Context context = Context(compiler, platform, module_, module_.macroState, (new int[](1)).ptr);
+    Context context = makeContext(compiler, platform, module_, module_.macroState);
     if (addDefaultModules)
     {
         // TODO add to ASTModule (addImport that handles updating the macro state

@@ -34,16 +34,22 @@ class Array : Type
 {
     Type elementType;
 
+    BackendType backendType;
+
     this(this.elementType) { }
 
     override BackendType emit(Platform platform)
     {
-        BackendType[] types;
-        types = new BackendType[](3);
-        types[0] = platform.nativeWordType;
-        types[1] = new BackendPointerType(this.elementType.emit(platform));
-        types[2] = platform.voidp();
-        return new BackendStructType(types);
+        if (!this.backendType)
+        {
+            BackendType[] types;
+            types = new BackendType[](3);
+            types[0] = platform.nativeWordType;
+            types[1] = new BackendPointerType(this.elementType.emit(platform));
+            types[2] = platform.voidp();
+            this.backendType = new BackendStructType(types);
+        }
+        return this.backendType;
     }
 
     override bool same(Type other)
@@ -364,22 +370,25 @@ Expression releaseArray(Context context, Expression value) {
     assert(!!array);
     Argument[] args = [Argument(false, "value", array)];
 
-    ASTStatement body_ = compiler.$stmt {
-        if (!value.base) return;
-        size_t* refs = cast(size_t*) value.base;
-        if (*refs <= 0) {
-            cxruntime_refcount_violation("array release", refs);
-            // assert(false);
-        }
-        *refs -= 1;
-        if (*refs != 0) return;
-        for (int i = 0; i < value.length; i += 1) {
-            __destroy(value[i]);
-        }
-        free(value.base);
-    };
+    ASTStatement body_()
+    {
+        return compiler.$stmt {
+            if (!value.base) return;
+            size_t* refs = cast(size_t*) value.base;
+            if (*refs <= 0) {
+                cxruntime_refcount_violation("array release", refs);
+                // assert(false);
+            }
+            *refs -= 1;
+            if (*refs != 0) return;
+            for (int i = 0; i < value.length; i += 1) {
+                __destroy(value[i]);
+            }
+            free(value.base);
+        };
+    }
 
-    auto fn = compiler.createRuntimeFunction(context, "arrayrelease", new Void, args, body_);
+    auto fn = compiler.createRuntimeFunction(context, "arrayrelease", new Void, args, &body_);
 
     Loc nowhere;
     return compiler.call(fn, [value], nowhere);
@@ -392,53 +401,54 @@ Expression arrayCat(Context context, Expression left, Expression right, Loc loc)
     assert(!!leftArray);
     Argument[] args = [Argument(false, "left", leftArray), Argument(false, "right", right.type())];
 
-    ASTStatement body_;
-    if (leftArray.elementType.same(right.type())) {
-        body_ = compiler.$stmt {
-            if (left.base) {
-                size_t prevCap = (cast(size_t*) left.base)[1];
-                size_t* prevUsed = &(cast(size_t*) left.base)[2];
-                auto prevFrontier = &(cast(typeof(left.ptr)) &(cast(size_t*) left.base)[3])[*prevUsed];
-                if (&left.ptr[left.length] is prevFrontier && *prevUsed < prevCap) {
-                    *prevUsed += 1;
-                    prevFrontier[0] = right;
-                    return left[0 .. $ + 1];
+    ASTStatement body_() {
+        if (leftArray.elementType.same(right.type())) {
+            return compiler.$stmt {
+                if (left.base) {
+                    size_t prevCap = (cast(size_t*) left.base)[1];
+                    size_t* prevUsed = &(cast(size_t*) left.base)[2];
+                    auto prevFrontier = &(cast(typeof(left.ptr)) &(cast(size_t*) left.base)[3])[*prevUsed];
+                    if (&left.ptr[left.length] is prevFrontier && *prevUsed < prevCap) {
+                        *prevUsed += 1;
+                        prevFrontier[0] = right;
+                        return left[0 .. $ + 1];
+                    }
                 }
-            }
-            auto result = new typeof(left)(left.length * 2 + 1);
-            for (size_t i = 0; i < left.length; i += 1)
-                result[i] = left[i];
-            result[left.length] = right;
-            // used
-            (cast(size_t*) result.base)[2] = left.length + 1;
-            return result[0 .. left.length + 1];
-        };
-    } else if (leftArray.same(right.type())) {
-        body_ = compiler.$stmt {
-            auto newLength = left.length + right.length;
-            if (left.base) {
-                size_t prevCap = (cast(size_t*) left.base)[1];
-                size_t* prevUsed = &(cast(size_t*) left.base)[2];
-                auto prevFrontier = &(cast(typeof(left.ptr)) &(cast(size_t*) left.base)[3])[*prevUsed];
-                if (&left.ptr[left.length] is prevFrontier && *prevUsed + right.length <= prevCap) {
-                    *prevUsed += right.length;
-                    for (size_t i = 0; i < right.length; i += 1)
-                        prevFrontier[i] = right[i];
-                    return left[0 .. newLength];
+                auto result = new typeof(left)(left.length * 2 + 1);
+                for (size_t i = 0; i < left.length; i += 1)
+                    result[i] = left[i];
+                result[left.length] = right;
+                // used
+                (cast(size_t*) result.base)[2] = left.length + 1;
+                return result[0 .. left.length + 1];
+            };
+        } else if (leftArray.same(right.type())) {
+            return compiler.$stmt {
+                auto newLength = left.length + right.length;
+                if (left.base) {
+                    size_t prevCap = (cast(size_t*) left.base)[1];
+                    size_t* prevUsed = &(cast(size_t*) left.base)[2];
+                    auto prevFrontier = &(cast(typeof(left.ptr)) &(cast(size_t*) left.base)[3])[*prevUsed];
+                    if (&left.ptr[left.length] is prevFrontier && *prevUsed + right.length <= prevCap) {
+                        *prevUsed += right.length;
+                        for (size_t i = 0; i < right.length; i += 1)
+                            prevFrontier[i] = right[i];
+                        return left[0 .. newLength];
+                    }
                 }
-            }
-            auto result = new typeof(left)(left.length * 2 + right.length);
-            for (size_t i = 0; i < left.length; i += 1)
-                result[i] = left[i];
-            for (size_t i = 0; i < right.length; i += 1)
-                result[left.length + i] = right[i];
-            (cast(size_t*) result.base)[2] = newLength;
-            return result[0 .. newLength];
-        };
-    } else {
-        loc.fail("incompatible types for concat: " ~ leftArray.repr() ~ " and " ~ right.type().repr());
+                auto result = new typeof(left)(left.length * 2 + right.length);
+                for (size_t i = 0; i < left.length; i += 1)
+                    result[i] = left[i];
+                for (size_t i = 0; i < right.length; i += 1)
+                    result[left.length + i] = right[i];
+                (cast(size_t*) result.base)[2] = newLength;
+                return result[0 .. newLength];
+            };
+        } else {
+            loc.fail("incompatible types for concat: " ~ leftArray.repr() ~ " and " ~ right.type().repr());
+        }
     }
-    auto fn = compiler.createRuntimeFunction(context, "arrayappend", leftArray, args, body_);
+    auto fn = compiler.createRuntimeFunction(context, "arrayappend", leftArray, args, &body_);
 
     return compiler.callWithLifetime(context, fn, [left, right], loc);
 }

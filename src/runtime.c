@@ -348,3 +348,33 @@ void cxruntime_refcount_violation(struct String s, void *ptr)
     printf("<%.*s: refcount logic violated: %lld at %p\n", (int) s.length, s.ptr, *(long long int*) ptr, ptr);
     print_backtrace();
 }
+
+struct Cache
+{
+    size_t length;
+    void **entries;
+};
+
+__thread struct Cache cxruntime_cache = {0};
+
+bool cxruntime_cache_isset(int key)
+{
+    if (key >= cxruntime_cache.length)
+        return false;
+    return cxruntime_cache.entries[key] != NULL;
+}
+
+void *cxruntime_cache_get(int key)
+{
+    return cxruntime_cache.entries[key];
+}
+
+void cxruntime_cache_set(int key, void *ptr)
+{
+    assert(ptr != NULL);
+    if (key >= cxruntime_cache.length) {
+        cxruntime_cache.entries = realloc(cxruntime_cache.entries, sizeof(void*) * (key + 1));
+        cxruntime_cache.length = key + 1;
+    }
+    cxruntime_cache.entries[key] = ptr;
+}

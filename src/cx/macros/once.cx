@@ -1,0 +1,88 @@
+module cx.macros.once;
+
+macro import cx.macros.quasiquoting;
+
+import package(compiler).cx.base;
+import package(compiler).cx.hash;
+import package(compiler).cx.parser;
+import package(compiler).cx.parser_base;
+import package(compiler).cx.types;
+import package(compiler).helpers;
+
+class ASTOnceExpression : ASTSymbol
+{
+    OnceMacro macro_;
+
+    ASTSymbol target;
+
+    Loc loc;
+
+    this(this.macro_, this.target, this.loc) { }
+
+    override Symbol compile(Context context)
+    {
+        auto key = context.compiler.astIntLiteral(this.macro_.keyCounter, this.loc.reloc);
+        this.macro_.keyCounter += 1;
+
+        auto cacheIsSet = new FunctionDeclaration(
+            "cxruntime_cache_isset", new Integer, [
+                Argument(false, "key", new Integer)]);
+        auto cacheSet = new FunctionDeclaration(
+            "cxruntime_cache_set", new Void, [
+                Argument(false, "key", new Integer),
+                Argument(false, "ptr", new Pointer(new Void))]);
+        auto cacheGet = new FunctionDeclaration(
+            "cxruntime_cache_get", new Pointer(new Void), [
+                Argument(false, "key", new Integer)]);
+
+        auto context = context; // TODO mut
+
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "cxruntime_cache_isset", cacheIsSet));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "cxruntime_cache_set", cacheSet));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "cxruntime_cache_get", cacheGet));
+
+        return (context.compiler.$expr ({
+            if (!cxruntime_cache_isset($key))
+            {
+                cxruntime_cache_set($key, cast(void*) $target);
+            }
+            cast(typeof($target)) cxruntime_cache_get($key);
+        })).compile(context);
+    }
+}
+
+class OnceMacro : Macro
+{
+    int keyCounter;
+
+    this() { }
+
+    override void apply(MacroArgs args) {
+        auto args = args.instanceOf(ParseExpressionBaseArgs);
+        if (args) {
+            args.symbol = this.parse(args.parser, args.lexicalContext);
+        }
+    }
+
+    ASTSymbol parse(Parser parser, LexicalContext lexicalContext)
+    {
+        auto loc = parser.loc();
+        if (!acceptIdentifier(parser, "once"))
+        {
+            return null;
+        }
+        auto expression = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+        loc.assert2s(!!expression, "expression expected");
+        return new ASTOnceExpression(this, expression, loc);
+    }
+}
+
+void addOnceMacro(MacroState macroState)
+{
+    macroState.addMacro(new OnceMacro);
+}
+
+macro(addOnceMacro);

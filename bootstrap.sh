@@ -232,6 +232,8 @@ at_revision '507a440728862a3a771e83619bdfd23000ddab08' 'rebuild cx' 'build/cx'
 at_revision '1c3e540a528c0cfb51daa171dabdd3fdd6e8259b' 'rebuild cx' 'build/cx'
 # array slice quoting
 at_revision '8704d9e17eafc7a2b7aa36e7d6f46fe5cc59d88e' 'rebuild cx' 'build/cx'
+# once macro
+at_revision '2c349743d50818dd682279c1b8133f9729cd2c50' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

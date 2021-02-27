@@ -4,6 +4,7 @@ module cx.stuff;
 macro import cx.macros.either;
 macro import cx.macros.hash;
 macro import cx.macros.listcomprehension;
+macro import cx.macros.once;
 macro import cx.macros.quasiquoting;
 
 import backend.base;
@@ -56,7 +57,7 @@ class Function : FunctionDeclaration
         string mangle = this.mangle();
         if (generator.mod.declared(mangle)) return;
 
-        Type voidp = new Pointer(new Void);
+        Type voidp = once new Pointer(new Void);
 
         auto argTypes = [arg.type.emit(generator.platform) for arg in this.args];
         if (this.contextType)
@@ -88,7 +89,7 @@ class Function : FunctionDeclaration
             if (this.hasThisArg) framePtrName = "this";
             thisDecl = new VariableDeclaration(scope_, framePtrName, this.contextType, owned);
 
-            Type voidp = new Pointer(new Void);
+            Type voidp = once new Pointer(new Void);
 
             scope_ = thisDecl;
 
@@ -176,7 +177,7 @@ class CompiledFunction : FinishedSymbol
         // print("emit " ~ this.fun.mangle());
 
         assert(!generator.fun);
-        Type voidp = new Pointer(new Void);
+        Type voidp = once new Pointer(new Void);
 
         auto argTypes = [arg.type.emit(generator.platform) for arg in this.fun.args];
         if (this.fun.contextType)
@@ -432,7 +433,7 @@ class DelegateDataPtr : Expression
 
     override Type type()
     {
-        return new Pointer(new Void);
+        return once new Pointer(new Void);
     }
 
     override int emit(Generator output)
@@ -457,7 +458,7 @@ class DelegateFuncPtr : Expression
     {
         auto nestfp = this.dg.type().instanceOf(NestedFunctionPointer);
         assert(!!nestfp);
-        auto argTypes = [(new Pointer(new Void)).instanceOf(Type)] ~ nestfp.args;
+        auto argTypes = [once (new Pointer(new Void)).instanceOf(Type)] ~ nestfp.args;
         return new FunctionPointer(nestfp.ret, argTypes);
     }
 
@@ -502,7 +503,7 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc)
                 loc.fail("function reference or funcptr expected? but is '" ~ method.funcPtr.type().repr() ~ "'");
             }
         }
-        auto voidp = new Pointer(new Void);
+        auto voidp = once new Pointer(new Void);
         Expression[] combinedArgs;
         combinedArgs ~= new PointerCast(voidp, method.thisPtr);
         combinedArgs ~= args;
@@ -733,7 +734,6 @@ class ASTIndexAccess : ASTSymbol
 
     override Expression compile(Context context)
     {
-        Type wordType = nativeWordType(context.platform);
         Expression base = beExpression(this.base.compile(context));
 
         Expression do_(Reference base)
@@ -758,9 +758,9 @@ class ASTIndexAccess : ASTSymbol
                 ptrBase = base;
             }
 
-            indexExpr = expectImplicitConvertTo(context, indexExpr, wordType, this.loc);
+            indexExpr = expectImplicitConvertTo(context, indexExpr, context.nativeWordType, this.loc);
 
-            assert(indexExpr.type().same(wordType));
+            assert(indexExpr.type().same(context.nativeWordType));
             return new Dereference(new PointerOffset(ptrBase, indexExpr));
         }
         return context.compiler.consumeTemporary(context, true, base, &do_);
@@ -785,7 +785,7 @@ class ASTArraySlice : ASTSymbol
 
     override Symbol compile(Context context)
     {
-        Type wordType = nativeWordType(context.platform);
+        Type sizeT = context.nativeWordType;
         auto array = beExpression(this.array.compile(context));
 
         Expression do_(Reference array)
@@ -795,8 +795,8 @@ class ASTArraySlice : ASTSymbol
 
             return new ArraySlice(
                 array,
-                expectImplicitConvertTo(context, beExpression(this.lower.compile(context)), wordType, this.loc),
-                expectImplicitConvertTo(context, beExpression(this.upper.compile(context)), wordType, this.loc),
+                expectImplicitConvertTo(context, beExpression(this.lower.compile(context)), sizeT, this.loc),
+                expectImplicitConvertTo(context, beExpression(this.upper.compile(context)), sizeT, this.loc),
                 this.loc);
         }
         return context.compiler.consumeTemporary(context, false, array, &do_);
@@ -952,13 +952,13 @@ Symbol accessMember(Context context, Symbol base, string member, Loc loc, bool a
             auto funcPtr = funcPtrValue.type().instanceOf(FunctionPointer);
 
             auto funcPtrWithVoidpThis = new FunctionPointer(funcPtr.ret, [arg for arg in funcPtr.args]);
-            funcPtrWithVoidpThis.args[0] = new Pointer(new Void);
+            funcPtrWithVoidpThis.args[0] = once new Pointer(new Void);
             funcPtrValue = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
 
             return new ClassMethodPtr(funcPtrValue, baseExpr);
         }
 
-        ClassMember[] members = classType.allMembers(context.platform);
+        ClassMember[] members = classType.allMembers(context);
         size_t memberOffset = [first i for i, a in members where a.name == member else -1];
         if (memberOffset != -1)
             return new StructMemberReference(new Dereference(asStructPtr), memberOffset);
@@ -1145,7 +1145,7 @@ class FunctionReference : FunctionReferenceBase
 
     this(this.fun) {
         auto argTypes = [arg.type for arg in this.fun.args];
-        if (this.fun.contextType) argTypes = [(new Pointer(new Void)).instanceOf(Type)] ~ argTypes;
+        if (this.fun.contextType) argTypes = [once (new Pointer(new Void)).instanceOf(Type)] ~ argTypes;
 
         this.type_ = new FunctionPointer(this.fun.ret, argTypes);
     }
@@ -1179,7 +1179,7 @@ class ASTReference : ASTSymbol
         // &function
         ASTIdentifier ident = this.base.instanceOf(ASTIdentifier);
         if (ident) {
-            auto frame = new ReferenceExpression(new StackFrame(new Void));
+            auto frame = once new ReferenceExpression(new StackFrame(new Void));
             Symbol target = context.namespace.lookup(ident.name, context, frame);
             if (target) {
                 Function fun = target.instanceOf(Function);
@@ -1238,7 +1238,7 @@ class NewClassExpression : Expression
     {
         // oh boy!
         this.classType.declare(output);
-        BackendType voidp = (new Pointer(new Void)).emit(output.platform);
+        BackendType voidp = once (new Pointer(new Void)).emit(output.platform);
         int classInfoPtr = output.fun.symbolList(this.classType.vtableSymbol);
         auto backendClassData = this.classType.dataStruct.emit(output.platform);
         int classDataSize = backendClassData.size(output.platform);
@@ -1307,9 +1307,9 @@ class ASTNewExpression : ASTSymbol
         if (arrayType) {
             this.loc.assert2s(this.args.length == 1, "expected one argument to loc");
 
-            Type wordType = nativeWordType(context.platform);
+            Type sizeT = context.nativeWordType;
             auto length = expectImplicitConvertTo(
-                context, beExpression2(this.args[0].compile(context), this.loc), wordType, this.loc);
+                context, beExpression2(this.args[0].compile(context), this.loc), sizeT, this.loc);
             return new ArrayAllocation(arrayType.elementType, length);
         }
         this.loc.assert2s2(false, "don't know how to allocate ", type.repr());
@@ -1395,7 +1395,7 @@ class ASTIdentifier : ASTSymbol
             auto module_ = findModule(context.namespace);
             symbol = module_.lookup(this.name, context, null);
         } else {
-            auto stackframe = new ReferenceExpression(new StackFrame(new Void));
+            auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
             symbol = context.namespace.lookup(this.name, context, stackframe);
         }
         this.loc.assert2s2(!!symbol, this.name, " not found");
@@ -1869,7 +1869,7 @@ class ASTVoidExpression : ASTSymbol
 
     this(this.loc) { }
 
-    override Expression compile(Context context) { return new VoidExpression; }
+    override Expression compile(Context context) { return once new VoidExpression; }
 
     override ASTSymbol quote(Quoter quoter) {
         ASTSymbol[] args;
@@ -1880,7 +1880,7 @@ class ASTVoidExpression : ASTSymbol
 class VoidExpression : Expression
 {
     this() { }
-    override Type type() { return new Void; }
+    override Type type() { return once new Void; }
     override int emit(Generator generator)
     {
         return generator.fun.voidLiteral();
@@ -1992,7 +1992,7 @@ class FunctionScope : Namespace
         {
             // first field in stackframe must be parent
             // TODO better?
-            auto framePtr = new PointerCast(new Pointer(new Pointer(new Void)), frame);
+            auto framePtr = new PointerCast(once new Pointer(new Pointer(new Void)), frame);
 
             nextFrame = new Dereference(framePtr);
         }
@@ -2107,7 +2107,7 @@ class NestedFunctionDeclaration : Namespace
     {
         if (this.nestedFunction.name == name)
         {
-            auto framePtr = new PointerCast(new Pointer(new Void), frame);
+            auto framePtr = new PointerCast(once new Pointer(new Void), frame);
 
             return new ClassMethodPtr(new FunctionReference(this.nestedFunction), framePtr);
         }
@@ -2517,7 +2517,7 @@ class ASTNestedFunctionDeclStatement : ASTStatement
         auto module_ = findModule(context.namespace);
         auto fun_ = this.fun.compile(context).instanceOf(Function);
         auto structType = findFunctionScope(context.namespace).structType();
-        auto voidp = new Pointer(new Void);
+        auto voidp = once new Pointer(new Void);
 
         fun_.contextType = new Pointer(structType);
         fun_.parent = context.namespace;
@@ -2741,8 +2741,8 @@ class ASTDestroy : ASTSymbol
     override Expression compile(Context context) {
         auto expr = beExpression2(this.target.compile(context), loc);
         auto stmt = destroy(context, expr);
-        if (!stmt) return new VoidExpression;
-        return new StatementExpression(stmt, new VoidExpression, false);
+        if (!stmt) return once new VoidExpression;
+        return new StatementExpression(stmt, once new VoidExpression, false);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -3266,7 +3266,7 @@ class Class : Type
     override Expression truthy(Context context, Expression value, Loc loc)
     {
         Expression do_(Expression value) {
-            Type voidp = new Pointer(new Void);
+            Type voidp = once new Pointer(new Void);
 
             return .truthy(context, new PointerCast(voidp, value), loc);
         }
@@ -3300,7 +3300,7 @@ class Class : Type
     override Expression implicitConvertTo(Context context, Expression from, Type to)
     {
         // (void*) class
-        auto voidp = new Pointer(new Void);
+        auto voidp = once new Pointer(new Void);
 
         if (to.same(voidp))
         {
@@ -3326,21 +3326,21 @@ class Class : Type
         return platform.voidp();
     }
 
-    ClassMember[] allMembers(Platform platform)
+    ClassMember[] allMembers(Context context)
     {
         if (!this.superClass)
         {
             return [
-                new ClassMember("__classinfo", new Pointer(new Void)),
-                new ClassMember("__refs", nativeWordType(platform)),
+                once new ClassMember("__classinfo", new Pointer(new Void)),
+                new ClassMember("__refs", context.nativeWordType),
             ] ~ this.members;
         }
-        return this.superClass.allMembers(platform) ~ this.members;
+        return this.superClass.allMembers(context) ~ this.members;
     }
 
-    void initDataStruct(Platform platform)
+    void initDataStruct(Context context)
     {
-        ClassMember[] allMembers = this.allMembers(platform);
+        ClassMember[] allMembers = this.allMembers(context);
 
         auto structMembers = [
             new StructMemberDeclaration(member.name, member.type)
@@ -3464,7 +3464,7 @@ class Class : Type
     {
         ASTStatement[] statements;
         Loc nowhere;
-        auto members = this.allMembers(context.platform);
+        auto members = this.allMembers(context);
         assert(members.length >= 2);
         members = members[2 .. $]; // drop __classinfo and __refs
         for (int i = 0; i < members.length; i += 1) {
@@ -3477,7 +3477,7 @@ class Class : Type
         if (this.superClass) override_ = true;
         this.methods ~= new ClassMethod(
             nowhere, this, override_, false /* abstract */, "__destroy",
-            new Void, [], stmt, new MacroState);
+            once new Void, [], stmt, new MacroState);
     }
 
     override bool same(Type other) {
@@ -3498,8 +3498,8 @@ class Class : Type
     {
         Context context = context; // TODO mut Context context
         Statement do_(Expression source) {
-            auto sizeT = nativeWordType(context.platform);
-            auto refCountViolationFun = new FunctionDeclaration(
+            auto sizeT = context.nativeWordType;
+            auto refCountViolationFun = once new FunctionDeclaration(
                 "cxruntime_refcount_violation", new Void, [
                     Argument(false, "label", new Array(new Character)),
                     Argument(false, "ptr", new Pointer(new Void))]);
@@ -3536,16 +3536,16 @@ class Class : Type
         auto tempThis = new PairedTemporary(reference.type(), false);
         auto initTemp = new InitializeTemporaryStatement(tempThis, reference);
 
-        auto sizeT = nativeWordType(context.platform);
+        auto sizeT = context.nativeWordType;
         context = context.withNamespace(
             context.compiler.exprAlias(context.namespace, "this", tempThis));
         context = context.withNamespace(
             context.compiler.exprAlias(context.namespace, "size_t", sizeT));
 
         // TODO do in __destroy() once we have function imports
-        auto freeFun = new FunctionDeclaration(
+        auto freeFun = once new FunctionDeclaration(
             "free", new Void, [Argument(false, "ptr", new Pointer(new Void))]);
-        auto refCountViolationFun = new FunctionDeclaration(
+        auto refCountViolationFun = once new FunctionDeclaration(
             "cxruntime_refcount_violation", new Void, [
                 Argument(false, "label", new Array(new Character)),
                 Argument(false, "ptr", new Pointer(new Void))]);
@@ -3660,7 +3660,7 @@ class ASTClassDecl : ASTType
             for member in this.members];
 
         target.methods = new ClassMethod[](this.methods.length);
-        target.initDataStruct(context.platform);
+        target.initDataStruct(context);
         for (int i = 0; i < this.methods.length; i += 1)
         {
             ASTClassDeclMethod method = this.methods[i];
@@ -3672,7 +3672,7 @@ class ASTClassDecl : ASTType
                 arg.case {
                     ASTThisAssignment arg:
                     {
-                        ClassMember[] members = target.allMembers(context.platform);
+                        ClassMember[] members = target.allMembers(context);
                         size_t member = [first i for i, a in members where a.name == arg.name else -1];
                         // TODO specific loc
                         method.loc.assert2s2(member != -1, "no such member: ", arg.name);
@@ -3848,16 +3848,15 @@ class ModuleCache
 {
     ModuleCacheEntry[] modules;
     this() { }
-    string key(ASTModule mod, Platform platform) {
-        // TODO platform.key()
-        return nativeWordType(platform).repr() ~ "_" ~ mod.pak.name ~ "_" ~ mod.name;
+    string key(string base, ASTModule mod) {
+        return base ~ "_" ~ mod.pak.name ~ "_" ~ mod.name;
     }
-    Module find(ASTModule mod, Platform platform) {
-        string key = this.key(mod, platform);
+    Module find(string base, ASTModule mod) {
+        string key = this.key(base, mod);
         return [first a.mod for a in this.modules where a.key == key else null];
     }
-    void add(ASTModule astModule, Platform platform, Module module_) {
-        this.modules ~= new ModuleCacheEntry(this.key(astModule, platform), module_);
+    void add(string base, ASTModule astModule, Module module_) {
+        this.modules ~= new ModuleCacheEntry(this.key(base, astModule), module_);
     }
 }
 
@@ -4202,7 +4201,8 @@ Module compileImport(ASTModule module_, ASTImport import_, ParserHelper helper,
 Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfig config,
                      CompilerBase compiler, Platform platform, bool addDefaultModules)
 {
-    Module mod = config.cache.find(astModule, platform);
+    string baseKey = platform.nativeWordType.repr();
+    Module mod = config.cache.find(baseKey, astModule);
     if (mod) return mod;
 
     Module parent = null;
@@ -4213,7 +4213,7 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
     }
 
     Module module_ = new Module(astModule.name, astModule.pak, astModule.macroState, parent);
-    Context context = makeContext(compiler, platform, module_, module_.macroState);
+    auto context = makeContext(compiler, platform, module_, module_.macroState);
     if (addDefaultModules)
     {
         // TODO add to ASTModule (addImport that handles updating the macro state
@@ -4264,7 +4264,7 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
         }
     }
     module_.resolve();
-    config.cache.add(astModule, platform, module_);
+    config.cache.add(baseKey, astModule, module_);
     return module_;
 }
 

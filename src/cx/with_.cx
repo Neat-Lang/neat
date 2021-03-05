@@ -1,0 +1,80 @@
+module cx.with_;
+
+import cx.base;
+import cx.parser;
+import cx.parser_base;
+import helpers;
+
+class WithNamespace : DeclarationHolder
+{
+    // This can't work!
+    // When you do with() { void nested() { accessWithMember; } }, then the
+    // lookup will try to access a nonlocal register.
+    // We need to localize the reference in the stackframe,
+    // by declaring it as an anonymous variable.
+    Reference temporary;
+
+    Loc loc;
+
+    this(this.parent, this.temporary, this.loc) { }
+
+    override Reference accessDecl()
+    {
+        return temporary;
+    }
+
+    override Symbol lookup(string name, Context context, Expression frame)
+    {
+        auto member = context.compiler.accessMemberWithLifetime(context, temporary, name, loc, true);
+        if (member) return member;
+        if (this.parent) return this.parent.lookup(name, context, frame);
+        return null;
+    }
+}
+
+class ASTWithStatement : ASTStatement
+{
+    ASTSymbol expr;
+
+    ASTStatement stmt;
+
+    Loc loc;
+
+    this(this.expr, this.stmt, this.loc) { }
+
+    override StatementCompileResult compile(Context context)
+    {
+        Expression expr = beExpression2(this.expr.compile(context), this.loc);
+
+        Statement do_(Reference temp)
+        {
+            auto subContext = context.withNamespace(new WithNamespace(context.namespace, temp, this.loc));
+            auto subStmtPair = this.stmt.compile(subContext);
+            return subStmtPair.statement;
+        }
+        auto stmt = context.compiler.consumeTemporaryStmt(context, expr, &do_);
+
+        return StatementCompileResult(stmt, context);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        print("TODO: quote(ASTWithStatement)");
+        assert(false);
+    }
+}
+
+ASTStatement parseWithStatement(Parser parser, LexicalContext lexicalContext)
+{
+    auto loc = parser.loc();
+    if (!acceptIdentifier(parser, "with"))
+    {
+        return null;
+    }
+    parser.expect("(");
+    auto subExpr = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+    parser.assert_(!!subExpr, "with expression expected");
+    parser.expect(")");
+    auto body_ = lexicalContext.compiler.parseStatement(parser, lexicalContext);
+
+    return new ASTWithStatement(subExpr, body_, loc);
+}

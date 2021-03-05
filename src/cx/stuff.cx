@@ -888,16 +888,12 @@ Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc
     return context.compiler.exprWithTemporary(baseExpr, &do_);
 }
 
-Symbol accessMember(Context context, Symbol base, string member, Loc loc, bool allowUndefined)
-{
-    if (base.instanceOf(Type))
-    {
+Symbol accessMember(Context context, Symbol base, string member, Loc loc, bool allowUndefined) {
+    if (base.instanceOf(Type)) {
         return base.instanceOf(Type).accessMember(context, null, member);
     }
-    if (!base.instanceOf(Expression))
-    {
-        loc.assert2s(false, "expected expression for member access");
-    }
+
+    loc.assert2s(!!base.instanceOf(Expression), "expected expression for member access");
     Expression baseExpr = beExpression(base);
 
     while (baseExpr.type().instanceOf(Pointer)) {
@@ -905,69 +901,10 @@ Symbol accessMember(Context context, Symbol base, string member, Loc loc, bool a
     }
 
     auto field = baseExpr.type().accessMember(context, baseExpr, member);
-    if (field)
-    {
-        return field;
-    }
+    if (field) return field;
 
-    Struct structType = baseExpr.type().instanceOf(Struct);
-    if (structType)
-    {
-        size_t memberOffset = [first i for i, a in structType.members where a.name == member else -1];
-        if (memberOffset != -1) {
-            if (baseExpr.instanceOf(Reference)) {
-                return new StructMemberReference(baseExpr.instanceOf(Reference), memberOffset);
-            }
-            return new StructMember(baseExpr, memberOffset);
-        }
-        size_t methodOffset = [first i for i, a in structType.methods where a.name == member else -1];
-        if (methodOffset != -1)
-        {
-            // TODO dereference-into-symbol so we can '&' it again
-            auto funcPtr = new FunctionReference(structType.methods[methodOffset]);
-            loc.assert2s(!!baseExpr.instanceOf(Reference), "base of method call must be reference");
-            return new ClassMethodPtr(funcPtr, new ReferenceExpression(baseExpr.instanceOf(Reference)));
-        }
-        if (allowUndefined) return null;
-        loc.assert2s2(false, "no such member or method ", member);
-    }
-    Class classType = baseExpr.type().instanceOf(Class);
-    if (classType)
-    {
-        ClassMethod[] vtable = classType.vtable();
-        Expression asStructPtr = new PointerCast(
-            new Pointer(classType.dataStruct), baseExpr);
-        size_t methodOffset = [first i for i, a in vtable where a.name == member else -1];
-        if (methodOffset != -1)
-        {
-            Reference classInfo = new Dereference(new PointerCast(
-                new Pointer(classType.classInfoStruct()),
-                new StructMemberReference(new Dereference(asStructPtr), 0)));
-            // TODO dereference-into-symbol so we can '&' it again
-            if (classType.final_) {
-                auto funcPtr = new FunctionReference(vtable[methodOffset]);
-                return new ClassMethodPtr(funcPtr, baseExpr);
-            }
-            Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
-            auto funcPtr = funcPtrValue.type().instanceOf(FunctionPointer);
-
-            auto funcPtrWithVoidpThis = new FunctionPointer(funcPtr.ret, [arg for arg in funcPtr.args]);
-            funcPtrWithVoidpThis.args[0] = once new Pointer(new Void);
-            funcPtrValue = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
-
-            return new ClassMethodPtr(funcPtrValue, baseExpr);
-        }
-
-        ClassMember[] members = classType.allMembers(context);
-        size_t memberOffset = [first i for i, a in members where a.name == member else -1];
-        if (memberOffset != -1)
-            return new StructMemberReference(new Dereference(asStructPtr), memberOffset);
-        if (allowUndefined) return null;
-        loc.assert2s4(false, "no such member ", member, " in ", classType.name);
-    }
-    if (!allowUndefined)
-        loc.assert2s2(false, "expected struct/class type for member, not ", baseExpr.type().repr());
-    return null;
+    if (allowUndefined) return null;
+    loc.assert2s4(false, baseExpr.type().repr(), ": no such field '", member, "'");
 }
 
 class ASTMember : ASTMemberBase
@@ -3275,6 +3212,38 @@ class Class : Type
             return .truthy(context, new PointerCast(voidp, value), loc);
         }
         return context.compiler.consume(context, value, &do_);
+    }
+
+    override Symbol accessMember(Context context, Expression baseExpr, string member)
+    {
+        ClassMethod[] vtable = this.vtable();
+        Expression asStructPtr = new PointerCast(
+            new Pointer(this.dataStruct), baseExpr);
+        size_t methodOffset = [first i for i, a in vtable where a.name == member else -1];
+        if (methodOffset != -1)
+        {
+            Reference classInfo = new Dereference(new PointerCast(
+                new Pointer(this.classInfoStruct()),
+                new StructMemberReference(new Dereference(asStructPtr), 0)));
+            // TODO dereference-into-symbol so we can '&' it again
+            if (this.final_) {
+                auto funcPtr = new FunctionReference(vtable[methodOffset]);
+                return new ClassMethodPtr(funcPtr, baseExpr);
+            }
+            Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
+            auto funcPtr = funcPtrValue.type().instanceOf(FunctionPointer);
+
+            auto funcPtrWithVoidpThis = new FunctionPointer(funcPtr.ret, [arg for arg in funcPtr.args]);
+            funcPtrWithVoidpThis.args[0] = once new Pointer(new Void);
+            funcPtrValue = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
+
+            return new ClassMethodPtr(funcPtrValue, baseExpr);
+        }
+
+        ClassMember[] members = this.allMembers(context);
+        size_t memberOffset = [first i for i, a in members where a.name == member else -1];
+        if (memberOffset != -1)
+            return new StructMemberReference(new Dereference(asStructPtr), memberOffset);
     }
 
     override Expression implicitConvertFrom(Expression from)

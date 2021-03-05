@@ -29,7 +29,12 @@ struct String string_alloc(size_t length) {
 }
 
 void print(struct String str) { printf("%.*s\n", (int) str.length, str.ptr); }
-void assert(int test) { if (!test) exit(1); }
+void assert(int test) {
+    if (!test) {
+        fprintf(stderr, "Assertion failed! Aborting.\n");
+        exit(1);
+    }
+}
 int cxruntime_ptr_test(void* ptr) { return !!ptr; }
 int _arraycmp(void* a, void* b, size_t la, size_t lb, size_t sz) {
     if (la != lb) return 0;

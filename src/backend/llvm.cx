@@ -8,8 +8,8 @@ import helpers;
 
 class LLVMBackend : Backend {
     this() { }
-    override LLVMBackendModule createModule(Platform platform) {
-        return new LLVMBackendModule(platform);
+    override LLVMBackendModule createModule(Platform platform, BackendLocation loc) {
+        return new LLVMBackendModule(platform, loc);
     }
 }
 
@@ -52,6 +52,11 @@ bool passByMemory(BackendType type, Platform platform) {
     return false;
 }
 
+struct DebugInfo {
+    string key;
+    string value;
+}
+
 class LLVMBackendModule : BackendModule {
     Platform platform;
     LineWriter output;
@@ -63,12 +68,30 @@ class LLVMBackendModule : BackendModule {
     int literalId;
     Globals globals;
 
-    this(Platform platform) {
+    DebugInfo[] debugInfos;
+    string compileUnit;
+
+    this(Platform platform, BackendLocation loc) {
         this.platform = platform;
         this.output = new LineWriter;
         this.output.print("target triple = \"x86_64-unknown-linux-gnu\"");
         this.output.print("declare i8* @llvm.stacksave()");
         this.output.print("declare void @llvm.stackrestore(i8* %ptr)");
+
+        auto comps = split(loc.file, "/");
+        auto dir = join(comps[0 .. $ - 1], "/");
+        auto filename = comps[$ - 1];
+
+        string debugFileKey = debugInfo("!DIFile(filename: \"" ~ filename ~ "\", directory: \"" ~ dir ~ "\")");
+        this.compileUnit = distinctDebugInfo(
+            "!DICompileUnit(language: DW_LANG_C99, file: " ~ debugFileKey ~ ", emissionKind: FullDebug)");
+        this.output.print("!llvm.dbg.cu = !{" ~ compileUnit ~ "}");
+
+        string dwarfVersion = this.debugInfo("!{i32 2, !\"Dwarf Version\", i32 2}");
+        string dbgVersion = this.debugInfo("!{i32 2, !\"Debug Info Version\", i32 3}");
+        string picLevel = this.debugInfo("!{i32 1, !\"PIC Level\", i32 2}");
+        this.output.print("!llvm.module.flags = !{" ~ dwarfVersion ~ ", " ~ dbgVersion ~ ", " ~ picLevel ~ "}");
+
         defineIntrinsics(this, platform);
     }
 
@@ -96,11 +119,39 @@ class LLVMBackendModule : BackendModule {
         }
     }
 
-    override BackendFunction define(string name, BackendType ret, BackendType[] args)
+    string debugInfo_(bool distinct, string value) {
+        string insert() {
+            string key = "!" ~ ltoa(this.debugInfos.length);
+            if (distinct) this.debugInfos ~= DebugInfo(key, "distinct " ~ value);
+            else this.debugInfos ~= DebugInfo(key, value);
+            return key;
+        }
+        if (distinct) return insert();
+        return [first a.key for a in debugInfos where a.value == value else insert()];
+    }
+
+    string debugInfo(string value) { return debugInfo_(false, value); }
+    string distinctDebugInfo(string value) { return debugInfo_(true, value); }
+
+    override BackendFunction define(
+        string name, string decoration, BackendType ret, BackendType[] args, BackendLocation loc)
     {
         removePendingDecl(name);
         this.globals.add(Global(name, new BackendFunctionPointerType(ret, args)));
-        return new LLVMBackendFunction(this, name, ret, args);
+
+        string subProgram;
+        auto comps = split(loc.file, "/");
+        auto dir = join(comps[0 .. $ - 1], "/");
+        auto filename = comps[$ - 1];
+
+        auto debugFileKey = debugInfo("!DIFile(filename: \"" ~ filename ~ "\", directory: \"" ~ dir ~ "\")");
+        auto typeKey = debugInfo("!DISubroutineType(types: " ~ debugInfo("!{null}") ~ ")");
+        subProgram = distinctDebugInfo(
+            "!DISubprogram(name: \"" ~ decoration ~ /*"\", linkageName: \"" ~ name ~ */"\", " ~
+            "scope: " ~ debugFileKey ~ ", file: " ~ debugFileKey ~ ", line: " ~ ltoa(loc.line) ~ ", " ~
+            "type: " ~ typeKey ~ ", unit: " ~ this.compileUnit ~ ")");
+
+        return new LLVMBackendFunction(this, name, ret, args, subProgram);
     }
 
     override void declareSymbolList(string name, size_t length)
@@ -181,6 +232,11 @@ class LLVMBackendModule : BackendModule {
                 this.output.append3s("@", decl.name, " = external global ");
                 llvmFmtInto(decl.type, this.output, this.platform);
             }
+            this.output.endl();
+        }
+        for (int i = 0; i < this.debugInfos.length; i += 1) {
+            auto debugInfo = this.debugInfos[i];
+            this.output.append3s(debugInfo.key, " = ", debugInfo.value);
             this.output.endl();
         }
     }
@@ -293,13 +349,10 @@ class LLVMBackendFunction : BackendFunction {
     int regId;
     int blockId;
     StaticAlloca[] staticAllocas;
+    string debugSubProgram;
 
-    this(LLVMBackendModule mod, string name, BackendType ret, BackendType[] args)
+    this(this.mod, this.name, this.ret_, this.args, this.debugSubProgram)
     {
-        this.name = name;
-        this.mod = mod;
-        this.ret_ = ret;
-        this.args = args;
         this.output = new LineWriter;
         this.regId = 1;
     }
@@ -604,15 +657,17 @@ class LLVMBackendFunction : BackendFunction {
                 argstr ~= this.treg(args[i]);
         }
         argstr ~= ")";
+
+        string locationKey = this.mod.debugInfo("!DILocation(line: 0, column: 0, scope: " ~ this.debugSubProgram ~ ")");
         if (ret.instanceOf(BackendVoidType)) {
-            this.print("call void @" ~ name ~ argstr);
+            this.print("call void @" ~ name ~ argstr ~ ", !dbg " ~ locationKey);
         } else if (sret) {
-            this.print("call void @" ~ name ~ argstr);
+            this.print("call void @" ~ name ~ argstr ~ ", !dbg " ~ locationKey);
             this.defReg2(reg, ret, Reg(reg));
         } else {
             this.print(
                 "%reg" ~ itoa(reg)
-                ~ " = call " ~ retFmt ~ " @" ~ name ~ argstr);
+                ~ " = call " ~ retFmt ~ " @" ~ name ~ argstr ~ ", !dbg " ~ locationKey);
             this.defReg2(reg, ret, Reg(reg));
         }
         if (sret)
@@ -646,6 +701,7 @@ class LLVMBackendFunction : BackendFunction {
         bool sret = passByMemory(ret, this.mod.platform);
         string retFmt = llvmFmt(ret, this.mod.platform);
         if (sret) this.print("%reg" ~ itoa(reg) ~ ".ret = alloca " ~ retFmt);
+        string locationKey = this.mod.debugInfo("!DILocation(line: 0, column: 0, scope: " ~ this.debugSubProgram ~ ")");
         if (ret.instanceOf(BackendVoidType)) {
             this.output.appends("  call void ");
             this.outputReg(callReg);
@@ -675,7 +731,7 @@ class LLVMBackendFunction : BackendFunction {
             else
                 this.outputTreg(args[i]);
         }
-        this.output.appends(")");
+        this.output.append2s("), !dbg ", locationKey);
         this.output.endl();
         if (sret)
             this.print(
@@ -811,7 +867,10 @@ class LLVMBackendFunction : BackendFunction {
         else
             retstr = retFmt;
         argstr = argstr ~ ")";
-        this.mod.output.print("define " ~ retstr ~ " @" ~ this.name ~ argstr ~ "{");
+
+        string dbgKey = " !dbg " ~ this.debugSubProgram;
+
+        this.mod.output.print("define " ~ retstr ~ " @" ~ this.name ~ argstr ~ dbgKey ~ " {");
         for (int i = 0; i < this.args.length; i += 1) {
             string argFmt = llvmFmt(this.args[i], this.mod.platform);
             if (passByMemory(this.args[i], this.mod.platform))

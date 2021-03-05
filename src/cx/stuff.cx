@@ -53,6 +53,17 @@ class Function : FunctionDeclaration
         return this.parent.mangle() ~ "_" ~ this.name;
     }
 
+    string repr()
+    {
+        string repr = this.name;
+        if (hasThisArg) {
+            repr = this.contextType.repr() ~ "::" ~ repr;
+        }
+        auto mod = this.parent.instanceOf(Module);
+        if (mod) repr = mod.name ~ "." ~ repr;
+        return repr;
+    }
+
     override void declare(Generator generator)
     {
         string mangle = this.mangle();
@@ -186,8 +197,10 @@ class CompiledFunction : FinishedSymbol
 
         generator.fun = generator.mod.define(
             this.fun.mangle(),
+            this.fun.repr(),
             this.fun.ret.emit(generator.platform),
-            argTypes
+            argTypes,
+            this.fun.loc.toBackendLoc()
         );
 
         generator.frameReg = generator.fun.staticAlloca(this.stackframe.structType().emit(generator.platform));
@@ -2788,6 +2801,8 @@ class ModuleEntry
 
 class ASTModule
 {
+    Loc loc;
+
     string name;
 
     Package pak;
@@ -2800,7 +2815,7 @@ class ASTModule
 
     Either(ASTImport, ASTType, ASTExtern, ASTFunction, ASTTypeAlias, ASTSymbolAlias)[] entries;
 
-    this(this.name, this.pak, this.macroState, this.parent) { }
+    this(this.loc, this.name, this.pak, this.macroState, this.parent) { }
 
     void addTypeAlias(string name, ASTType type)
     {
@@ -2815,6 +2830,8 @@ class ASTModule
 
 class Module : Namespace
 {
+    Loc loc;
+
     string name;
 
     string mangledName;
@@ -2827,7 +2844,7 @@ class Module : Namespace
     // when this happens, this member references the previous module.
     Module parentModule;
 
-    this(this.name, this.pak, this.macroState, this.parentModule)
+    this(this.loc, this.name, this.pak, this.macroState, this.parentModule)
     {
         assert(!!pak);
         // this.mangledName = [(a == '.') ? '_' : a for a in name];
@@ -3865,7 +3882,7 @@ ASTModule parseMacroContinuation(CompilerBase compiler, Parser parser, ParserHel
 
     helper.proxyCall(astModule, identifier, newMacroState, config);
 
-    auto subModule = new ASTModule(astModule.name, astModule.pak, newMacroState, astModule);
+    auto subModule = new ASTModule(astModule.loc, astModule.name, astModule.pak, newMacroState, astModule);
 
     return parseModuleBody(compiler, parser, helper, subModule, config);
 }
@@ -4186,7 +4203,7 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
         parent = compileModule(astModule.parent, helper, config, compiler, platform, addDefaultModules);
     }
 
-    Module module_ = new Module(astModule.name, astModule.pak, astModule.macroState, parent);
+    Module module_ = new Module(astModule.loc, astModule.name, astModule.pak, astModule.macroState, parent);
     auto context = makeContext(compiler, platform, module_, module_.macroState);
     if (addDefaultModules)
     {
@@ -4277,15 +4294,14 @@ ASTModule getModule(CompilerBase compiler, string filename, Package pak, bool se
     string code = cxruntime_file_read(path);
     Parser parser = new Parser(path, code, basicObjectCache, compiler.linenr);
 
+    auto locAtModule = parser.loc();
     parser.expect("module");
     string modname = parseIdentifier2(parser, ".");
     parser.expect(";");
 
-    auto locAtModule = parser.loc();
-
     locAtModule.assert2s2(filename == moduleToFile(modname), filename, ": module doesn't match filename");
 
-    ASTModule baseModule = new ASTModule(modname, pak, new MacroState, null);
+    ASTModule baseModule = new ASTModule(locAtModule, modname, pak, new MacroState, null);
     ASTModule module_ = parseModuleBody(compiler, parser, helper, baseModule, config);
 
     config.astCache.add(path, module_);

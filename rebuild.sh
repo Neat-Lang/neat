@@ -10,6 +10,8 @@ else
 fi
 FLAGS="-O"
 # FLAGS=""
+
+FLAGS="${FLAGS} --HACK-rename-next-to-compiler"
 # new compiler, reset cache
 if [ ! -d build/src ]
 then

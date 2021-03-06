@@ -106,12 +106,13 @@ function rebuild_patch_ptr_offset {
 # progressively add a flag to the compiler invocation
 function transition {
     TRANSITION="$1"
+    shift
     mkdir build
     cp ../../build/cx build/cx
     cp -R ../../build/src build
-    build/cx -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_1 -transition=$TRANSITION
+    build/cx -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_1 -transition=$TRANSITION $@
     rm -rf .obj
-    build/cx_1 -Pcompiler:src src/main.cx -o build/cx_2 -transition=$TRANSITION -macro-transition=$TRANSITION
+    build/cx_1 -Pcompiler:src src/main.cx -o build/cx_2 -transition=$TRANSITION -macro-transition=$TRANSITION $@
     mv build/cx_2 build/cx
     rm -rf build/src
     cp -R src build/
@@ -119,12 +120,14 @@ function transition {
 # remove a flag that has become the default
 function detransition {
     TRANSITION="$1"
+    shift
     mkdir build
     cp ../../build/cx build/cx
     cp -R ../../build/src build
-    build/cx -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_1 -transition=$TRANSITION -macro-transition=$TRANSITION
+    build/cx -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_1 \
+        -transition=$TRANSITION -macro-transition=$TRANSITION $@
     rm -rf .obj
-    build/cx_1 -Pcompiler:src src/main.cx -o build/cx_2
+    build/cx_1 -Pcompiler:src src/main.cx -o build/cx_2 $@
     mv build/cx_2 build/cx
     rm -rf build/src
     cp -R src build/

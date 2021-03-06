@@ -179,8 +179,21 @@ bool cxruntime_waitpid(int pid) {
     return WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0;
 }
 
+// No idea why this is necessary.
+__attribute__((optnone))
+bool cxruntime_symbol_defined_in_main(struct String symbol) {
+    // even if a DL is loaded with RTLD_GLOBAL, main symbols are special.
+    // so we want to avoid redefining symbols that are in the main program.
+    void *main = dlopen(NULL, RTLD_LAZY);
+    char *symbolPtr = toStringz(symbol);
+    void *sym = dlsym(main, symbolPtr);
+    free(symbolPtr);
+    dlclose(main);
+    return sym ? true : false;
+}
+
 void cxruntime_dlcall(struct String dlfile, struct String fun, void* arg) {
-    void *handle = dlopen(toStringz(dlfile), RTLD_LAZY | RTLD_DEEPBIND);
+    void *handle = dlopen(toStringz(dlfile), RTLD_LAZY | RTLD_GLOBAL);
     if (!handle) fprintf(stderr, "can't open %.*s - %s\n", (int) dlfile.length, dlfile.ptr, dlerror());
     assert(!!handle);
     void *sym = dlsym(handle, toStringz(fun));

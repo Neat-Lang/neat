@@ -2106,7 +2106,7 @@ Statement unwindScope(Context context, Namespace target, Statement body_)
 
 class ASTIfStatement : ASTStatement
 {
-    ASTSymbol test;
+    Either(ASTSymbol, ASTVarDeclStatement) test;
 
     ASTStatement then;
 
@@ -2118,8 +2118,25 @@ class ASTIfStatement : ASTStatement
 
     override StatementCompileResult compile(Context context)
     {
-        Symbol test = this.test.compile(context);
-        auto thenPair = this.then.compile(context);
+        Statement prelude; // var decl statement
+        auto testSucceedsContext = context;
+        Symbol test;
+        this.test.case {
+            ASTSymbol symbol: {
+                test = symbol.compile(context);
+            }
+            ASTVarDeclStatement vardecl: {
+                auto pair = vardecl.compile(context);
+                prelude = pair.statement;
+                testSucceedsContext = pair.context;
+                // TODO lookup() that handles the stackframe thing
+                auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
+                test = beExpression2(
+                    testSucceedsContext.namespace.lookup(vardecl.name, context, stackframe),
+                    this.loc);
+            }
+        }
+        auto thenPair = this.then.compile(testSucceedsContext);
         Statement then = unwindScope(thenPair.context, context.namespace, thenPair.statement);
         Statement else_;
         if (this.else_) {
@@ -2127,20 +2144,20 @@ class ASTIfStatement : ASTStatement
             else_ = unwindScope(elsePair.context, context.namespace, elsePair.statement);
         }
 
-        return StatementCompileResult(
-            new IfStatement(truthy(context, beExpression(test), this.loc), then, else_),
-            context);
+        auto ifStmt = new IfStatement(truthy(context, beExpression(test), this.loc), then, else_);
+
+        return StatementCompileResult(sequence(prelude, ifStmt), context);
     }
 
     override ASTSymbol quote(Quoter quoter) {
         if (!else_) {
             return quoter.compilerCall("astIf", [
-                test.quote(quoter),
+                test.case(ASTSymbol symbol: symbol.quote(quoter), ASTVarDeclStatement stmt: stmt.quote(quoter)),
                 then.quote(quoter),
                 quoter.compiler.astIdentifier("null", loc.reloc)], loc.reloc);
         }
         return quoter.compilerCall("astIf", [
-            test.quote(quoter),
+            test.case(ASTSymbol symbol: symbol.quote(quoter), ASTVarDeclStatement stmt: stmt.quote(quoter)),
             then.quote(quoter),
             else_.quote(quoter)], loc.reloc);
     }
@@ -2155,8 +2172,11 @@ ASTIfStatement parseIf(Parser parser, LexicalContext lexicalContext)
         parser.revert();
         return null;
     }
+    Either(ASTSymbol, ASTVarDeclStatement) test;
     parser.expect("(");
-    ASTSymbol expr = parseExpression(parser, lexicalContext);
+    auto vardecl = parseVarDecl(parser, lexicalContext, true);
+    if (vardecl) test = vardecl;
+    else test = parseExpression(parser, lexicalContext);
     parser.expect(")");
     ASTStatement thenStmt = parseStatement(parser, lexicalContext);
     ASTStatement elseStatement;
@@ -2165,7 +2185,7 @@ ASTIfStatement parseIf(Parser parser, LexicalContext lexicalContext)
         elseStatement = parseStatement(parser, lexicalContext);
     }
     parser.commit();
-    return new ASTIfStatement(expr, thenStmt, elseStatement, parser.loc());
+    return new ASTIfStatement(test, thenStmt, elseStatement, parser.loc());
 }
 
 ASTStatement parseBreakCont(Parser parser, LexicalContext lexicalContext)
@@ -2388,7 +2408,8 @@ class ASTVarDeclStatement : ASTStatement
     }
 }
 
-ASTVarDeclStatement parseVarInitialization(Parser parser, LexicalContext lexicalContext, bool infer, ASTType type)
+ASTVarDeclStatement parseVarInitialization(
+    Parser parser, LexicalContext lexicalContext, bool infer, ASTType type, bool requireInitializer)
 {
     parser.begin();
     ASTSymbol initial;
@@ -2407,7 +2428,11 @@ ASTVarDeclStatement parseVarInitialization(Parser parser, LexicalContext lexical
             return null;
         }
         if (infer) {
-            parser.expect("=");
+            if (!parser.accept("="))
+            {
+                parser.revert();
+                return null;
+            }
             initial = parseExpression(parser, lexicalContext);
             if (!initial) parser.fail("variable initializer expected");
         }
@@ -2416,11 +2441,15 @@ ASTVarDeclStatement parseVarInitialization(Parser parser, LexicalContext lexical
             if (!initial) parser.fail("variable initializer expected");
         }
     }
+    if (requireInitializer && !initial) {
+        parser.revert();
+        return null;
+    }
     parser.commit();
     return new ASTVarDeclStatement(name, infer, type, initial, parser.loc());
 }
 
-ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext)
+ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext, bool requireInitializer)
 {
     parser.begin();
     bool infer = false;
@@ -2435,13 +2464,12 @@ ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext)
             return null;
         }
     }
-    auto decl = parseVarInitialization(parser, lexicalContext, infer, type);
+    auto decl = parseVarInitialization(parser, lexicalContext, infer, type, requireInitializer);
     if (!decl) {
         parser.revert();
         return null;
     }
     parser.commit();
-    parser.expect(";");
     return decl;
 }
 
@@ -2464,7 +2492,7 @@ ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
     ASTStatement[] decls;
     while (true) {
         if (decls.length) parser.expect(",");
-        ASTStatement decl = parseVarInitialization(parser, lexicalContext, infer, type);
+        ASTStatement decl = parseVarInitialization(parser, lexicalContext, infer, type, false);
         if (!decl) {
             parser.assert_(decls.length == 0, "couldn't parse continuing variable declaration");
             parser.revert();
@@ -2688,10 +2716,11 @@ ASTForLoop parseFor(Parser parser, LexicalContext lexicalContext)
         return null;
     }
     parser.expect("(");
-    ASTVarDeclStatement varDecl = parseVarDecl(parser, lexicalContext);
+    ASTVarDeclStatement varDecl = parseVarDecl(parser, lexicalContext, false);
     if (!varDecl) {
         parser.fail("loop declaration expected");
     }
+    parser.expect(";");
     ASTSymbol condition = parseExpression(parser, lexicalContext);
     parser.expect(";");
     ASTStatement step = parseAssignment(parser, lexicalContext);

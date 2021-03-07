@@ -33,9 +33,9 @@ do
         test_skipped=$((test_skipped+1))
         continue
     fi
-    echo test/runnable/"$file"...
-    executable=build/test/runnable/"$file"
-    if ! $CX $CXFLAGS test/runnable/"$file" -o "$executable" 2>&1 |cat>build/out.txt
+    echo "$file"...
+    executable=build/"$file"
+    if ! $CX $CXFLAGS "$file" -o "$executable" 2>&1 |cat>build/out.txt
     then
         build_failed=$((build_failed+1))
         cat build/out.txt
@@ -43,7 +43,7 @@ do
     then
         run_failed=$((run_failed+1))
     fi
-done < <(ls test/runnable)
+done < <(ls -q test/runnable/*.cx)
 
 # fail_compilation
 # tests should fail with an exit code, not a segfault
@@ -55,10 +55,10 @@ do
         test_skipped=$((test_skipped+1))
         continue
     fi
-    echo test/fail_compilation/"$file"...
-    executable=build/test/fail_compilation/"$file"
+    echo "$file"...
+    executable=build/"$file"
     set +e
-    $CX $CXFLAGS test/fail_compilation/"$file" -o "$executable" 2>&1 |cat>build/out.txt
+    $CX $CXFLAGS "$file" -o "$executable" 2>&1 |cat>build/out.txt
     EXIT=$?
     set -e
     if [ $EXIT -eq 0 ]; then
@@ -70,7 +70,7 @@ do
         build_crashed=$((build_crashed+1))
         cat build/out.txt
     fi
-done < <(ls test/fail_compilation)
+done < <(ls -q test/fail_compilation/*.cx)
 
 num_total=$((num_total - test_skipped))
 num_success=$((num_total - build_failed - run_failed - falsely_succeeded - build_crashed))

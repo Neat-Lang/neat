@@ -97,9 +97,9 @@ struct BackgroundCompilation
 }
 
 BackgroundCompilation emitModule(CompilerBase compiler, Backend backend, Platform platform, Module module_,
-    bool opt, bool m32, bool caching)
+    bool opt, bool m32, bool caching, bool forMacro)
 {
-    auto backendModule = backend.createModule(platform, module_.loc.toBackendLoc());
+    auto backendModule = backend.createModule(platform, module_.loc.toBackendLoc(), forMacro);
     auto backendModuleLLVM = backendModule.instanceOf(LLVMBackendModule);
     auto backendModuleC = backendModule.instanceOf(CBackendModule);
     auto hash = new Hash;
@@ -135,6 +135,9 @@ BackgroundCompilation emitModule(CompilerBase compiler, Backend backend, Platfor
     else hash.adds("gcc");
     if (m32) hash.adds("m32");
     if (opt) hash.adds("opt");
+    // Macros and binaries must not share objects!
+    // Macros have special magic to avoid dlopen issues.
+    if (forMacro) hash.adds("macro");
 
     auto symbols = module_.compile(compiler, platform);
 
@@ -183,7 +186,9 @@ class ParserHelperImpl : ParserHelper
 
     bool caching;
 
-    this(this.compiler, this.backend, this.x86_32, this.caching) { }
+    PlatformFlags platformFlags;
+
+    this(this.compiler, this.backend, this.x86_32, this.caching, this.platformFlags) { }
 
     // TODO why do we need 'config'?
     override void proxyCall(ASTModule astModule, string function_, MacroState macroState, ModuleParserConfig config)
@@ -192,7 +197,7 @@ class ParserHelperImpl : ParserHelper
         BackendType macroWordType;
         if (x86_32) macroWordType = new BackendIntType;
         else macroWordType = new BackendLongType;
-        auto platform = new Platform(macroWordType);
+        auto platform = new Platform(macroWordType, platformFlags);
 
         // throwaway compilation (TODO cache?)
         Module module_ = compileModule(astModule, this, config, compiler, platform, true);
@@ -212,7 +217,8 @@ class ParserHelperImpl : ParserHelper
         int[] pids;
         while (remainingModules.length > 0) {
             for (int i = 0; i < remainingModules.length; i += 1) {
-                auto compilation = emitModule(compiler, backend, platform, remainingModules[i], false, x86_32, caching);
+                auto compilation = emitModule(
+                    compiler, backend, platform, remainingModules[i], false, x86_32, caching, true);
                 objFiles ~= " " ~ compilation.objFile;
                 if (compilation.pid != 0) pids ~= compilation.pid;
                 libHash.adds(compilation.objFile);
@@ -295,11 +301,13 @@ ASTPackage parsePackage(string arg)
     return ASTPackage(name, path, deps);
 }
 
-Package[] resolvePackages(ASTPackage[] astPackages)
+Package[] resolvePackages(ASTPackage[] astPackages, bool HACK_renameNext)
 {
     Package[] result = [new Package(pkg.name, pkg.path) for pkg in astPackages];
     for (int i = 0; i < astPackages.length; i += 1) {
         auto astPackage = astPackages[i];
+        if (HACK_renameNext && result[i].name == "next")
+            result[i].HACK_rename = "compiler";
         for (int j = 0; j < astPackage.deps.length; j += 1) {
             Package dep;
             for (int k = 0; k < result.length; k += 1) {
@@ -903,10 +911,12 @@ void main(string[] args)
     bool dontLink;
     bool optimize;
     bool caching = true;
+    bool HACK_renameNext;
     bool x86_32, macro_x86_32;
     // auto backend = new ProxyBackend();
     Backend backend = new LLVMBackend();
     Backend macroBackend = backend;
+    PlatformFlags platformFlags, macroPlatformFlags;
     {
         string[] remArgs;
         for (size_t i = 0; i < args.length; i += 1) {
@@ -935,6 +945,8 @@ void main(string[] args)
                 dontLink = true;
             } else if (arg == "-x") {
                 caching = false;
+            } else if (arg == "--HACK-rename-next-to-compiler") {
+                HACK_renameNext = true;
             } else if (arg == "-backend=c") {
                 backend = new CBackend;
             } else if (arg == "-macro-backend=c") {
@@ -949,7 +961,7 @@ void main(string[] args)
         }
         args = remArgs;
     }
-    Package[] packages = resolvePackages(astPackages);
+    Package[] packages = resolvePackages(astPackages, HACK_renameNext);
 
     if (args.length != 1)
     {
@@ -966,7 +978,7 @@ void main(string[] args)
     BackendType nativeWordType;
     if (x86_32) nativeWordType = new BackendIntType;
     else nativeWordType = new BackendLongType;
-    auto platform = new Platform(nativeWordType);
+    auto platform = new Platform(nativeWordType, platformFlags);
 
     builtins.addTypeAlias("string", new FixedTypeAlias(new Array(new Character)));
     builtins.addTypeAlias("bool", new FixedTypeAlias(new Integer));
@@ -982,7 +994,7 @@ void main(string[] args)
     auto modParseConfig = new ModuleParserConfig(packages, defaultImports, astCache, cache);
     auto helper = new ParserHelperImpl(
         compilerImpl, macroBackend,
-        macro_x86_32, caching);
+        macro_x86_32, caching, macroPlatformFlags);
 
     Module compile(ASTModule astMod) {
         return compileModule(astMod, helper, modParseConfig, compilerImpl, platform, true);
@@ -1010,7 +1022,7 @@ void main(string[] args)
     while (remainingModules.length > 0) {
         for (int i = 0; i < remainingModules.length; i += 1) {
             auto compilation = emitModule(compilerImpl, backend, platform, remainingModules[i],
-                optimize, x86_32, caching);
+                optimize, x86_32, caching, false);
             fileArgs ~= " " ~ compilation.objFile;
             if (compilation.pid != 0) pids ~= compilation.pid;
         }

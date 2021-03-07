@@ -132,6 +132,7 @@ function detransition {
     rm -rf build/src
     cp -R src build/
 }
+FLAGS=""
 at_revision 'df8d6192c2ee16f5d3061e10d876452d0f9290e0' 'rebuild_patch_ptr_offset cx' 'build/cx'
 at_revision 'df8d6192c2ee16f5d3061e10d876452d0f9290e0' 'rebuild cx' 'build/cx'
 # add break/continue
@@ -239,6 +240,13 @@ at_revision '8704d9e17eafc7a2b7aa36e7d6f46fe5cc59d88e' 'rebuild cx' 'build/cx'
 at_revision '2c349743d50818dd682279c1b8133f9729cd2c50' 'rebuild cx' 'build/cx'
 # implement with()
 at_revision 'c025ace37cc708342a9a4bc4523afdcf9dbca74e' 'rebuild cx' 'build/cx'
+# __instanceof compares classinfo instead of class name
+at_revision '8ea062f885d198ce15a67587a5e78caaabdac1f4' 'rebuild cx' 'build/cx'
+FLAGS="${FLAGS} --HACK-rename-next-to-compiler"
+at_revision '8ea062f885d198ce15a67587a5e78caaabdac1f4' \
+    "transition instanceofClassinfo $FLAGS" 'build/cx'
+at_revision 'de774c02f7ab9246458f0a248867ddf26cd4dc49' \
+    "detransition instanceofClassinfo $FLAGS" 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

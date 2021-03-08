@@ -92,6 +92,7 @@ string replace(string str, string match, string replace) {
 
 struct BackgroundCompilation
 {
+    Hash hash;
     string objFile;
     int pid;
 }
@@ -150,7 +151,7 @@ BackgroundCompilation emitModule(CompilerBase compiler, Backend backend, Platfor
     }
 
     if (caching && cxruntime_file_exists(objFile))
-        return BackgroundCompilation(objFile, 0);
+        return BackgroundCompilation(hash, objFile, 0);
 
     auto generator = new Generator(platform, backendModule);
     module_.emit(generator, symbols);
@@ -173,7 +174,7 @@ BackgroundCompilation emitModule(CompilerBase compiler, Backend backend, Platfor
         }
         pid = build(srcFile, objFile);
     }
-    return BackgroundCompilation(objFile, pid);
+    return BackgroundCompilation(hash, objFile, pid);
 }
 
 class ParserHelperImpl : ParserHelper
@@ -221,7 +222,7 @@ class ParserHelperImpl : ParserHelper
                     compiler, backend, platform, remainingModules[i], false, x86_32, caching, true);
                 objFiles ~= " " ~ compilation.objFile;
                 if (compilation.pid != 0) pids ~= compilation.pid;
-                libHash.adds(compilation.objFile);
+                with (compilation.hash.state) libHash.apply(add, mult);
             }
             auto remainingSet = new ModuleSet(0);
             // TODO add()
@@ -1015,6 +1016,7 @@ void main(string[] args)
         allModules.add(mod);
     }
     toplevel.walkModules(&add);
+    auto binHash = new Hash;
     auto remainingModules = allModules.array();
 
     string fileArgs;
@@ -1024,6 +1026,7 @@ void main(string[] args)
             auto compilation = emitModule(compilerImpl, backend, platform, remainingModules[i],
                 optimize, x86_32, caching, false);
             fileArgs ~= " " ~ compilation.objFile;
+            with (compilation.hash.state) binHash.apply(add, mult);
             if (compilation.pid != 0) pids ~= compilation.pid;
         }
         auto remainingSet = new ModuleSet(0);
@@ -1045,6 +1048,14 @@ void main(string[] args)
 
     if (dontLink) return;
 
+    string binHashOutput = ".obj/hash_" ~ binHash.text() ~ ".c";
+    with (binHash.state) {
+        cxruntime_file_write(binHashOutput,
+"long long int compiler_hash_add() { return " ~ ltoa(add) ~ "LL; }
+long long int compiler_hash_mult() { return " ~ ltoa(mult) ~ "LL; }
+"       );
+    }
+    fileArgs ~= " " ~ binHashOutput;
     // int pid = getpid();
     // cxruntime_system("cat /proc/" ~ itoa(pid) ~ "/status");
     string flags = baseFlags ~ " -rdynamic";

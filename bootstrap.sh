@@ -247,6 +247,11 @@ at_revision '8ea062f885d198ce15a67587a5e78caaabdac1f4' \
     "transition instanceofClassinfo $FLAGS" 'build/cx'
 at_revision 'de774c02f7ab9246458f0a248867ddf26cd4dc49' \
     "detransition instanceofClassinfo $FLAGS" 'build/cx'
+# if (vardecl)
+at_revision '1db795ea97dc06123e3285c40a167bce16ca8905' 'rebuild cx' 'build/cx'
+# export binary hash
+at_revision '997b4702ebcb96f7b2e323993458bd712bfccb52' 'rebuild cx' 'build/cx'
+
 
 # unpack the last tagfile
 unpack_tagfile

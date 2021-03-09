@@ -11,6 +11,17 @@ fi
 FLAGS="-O"
 # FLAGS=""
 
+function checksum {
+    # approximate hash: outright remove all 16-byte constants
+    # I couldn't find another way to handle compiler_hash_{add,mult}
+    # remove the detritus at the start of the assembly line
+    REMOVE_BYTES='s/^ *[0-9a-f]*:\t\([0-9a-f]\{2\} \)* *\t\?//'
+    objdump -S $1 2>/dev/null |grep -v file\ format |\
+        sed -e "$REMOVE_BYTES" |\
+        sed -e 's/[0-9a-f]\{16\}//' |\
+        md5sum
+}
+
 FLAGS="${FLAGS} --HACK-rename-next-to-compiler"
 # new compiler, reset cache
 if [ ! -d build/src ]
@@ -22,7 +33,7 @@ I=1
 # see https://stackoverflow.com/questions/3601515/how-to-check-if-a-variable-is-set-in-bash
 if [ -z "${FAST+x}" ]; then rm -rf .obj; fi
 build/cx $FLAGS -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_test$I
-SUM="$(objdump -S build/cx_test$I |grep -v file\ format |md5sum)"
+SUM=$(checksum build/cx_test$I)
 SUMNEXT=""
 while true
 do
@@ -30,7 +41,7 @@ do
     # can remove once we have compiler hash
     if [ -z "${FAST+x}" ]; then rm -rf .obj; fi
     build/cx_test$I $FLAGS -Pcompiler:src src/main.cx -o build/cx_test$K
-    SUMNEXT="$(objdump -S build/cx_test$K |grep -v file\ format |md5sum)"
+    SUMNEXT=$(checksum build/cx_test$K)
     if [ "$SUM" == "$SUMNEXT" ]; then break; fi
     SUM="$SUMNEXT"
     if [ "${K+x}" == "${STAGE+x}" ]

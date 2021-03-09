@@ -251,6 +251,8 @@ at_revision 'de774c02f7ab9246458f0a248867ddf26cd4dc49' \
 at_revision '1db795ea97dc06123e3285c40a167bce16ca8905' 'rebuild cx' 'build/cx'
 # export binary hash
 at_revision '997b4702ebcb96f7b2e323993458bd712bfccb52' 'rebuild cx' 'build/cx'
+# apply binary hash to objects
+at_revision '28e52db8efba8505628014965f1f9c45cd2ae38c' 'rebuild cx' 'build/cx'
 
 
 # unpack the last tagfile

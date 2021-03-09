@@ -29,17 +29,12 @@ then
     cp -R src build/src
 fi
 I=1
-# can remove once we have compiler hash
-# see https://stackoverflow.com/questions/3601515/how-to-check-if-a-variable-is-set-in-bash
-if [ -z "${FAST+x}" ]; then rm -rf .obj; fi
 build/cx $FLAGS -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_test$I
 SUM=$(checksum build/cx_test$I)
 SUMNEXT=""
 while true
 do
     K=$((I+1))
-    # can remove once we have compiler hash
-    if [ -z "${FAST+x}" ]; then rm -rf .obj; fi
     build/cx_test$I $FLAGS -Pcompiler:src src/main.cx -o build/cx_test$K
     SUMNEXT=$(checksum build/cx_test$K)
     if [ "$SUM" == "$SUMNEXT" ]; then break; fi

@@ -317,6 +317,24 @@ ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
             continue;
         }
         parser.revert();
+        // what about templates that don't contain types? instead of duplicating this,
+        // there should be a function to parse an ast symbol and that symbol should
+        // be able to compile to a Type (Symbol).
+        // But for now, templates only have types.
+        // (this will also be needed to have things like Foo.Bar for nested types.)
+        {
+            parser.begin();
+            auto instanceLoc = parser.loc();
+            if (parser.accept("!") && !parser.accept("="))
+            {
+                auto templateArg = parseType(parser, lexicalContext);
+                parser.assert_(!!templateArg, "template argument required");
+                parser.commit();
+                current = new ASTTemplateInstance(current, templateArg, instanceLoc);
+                continue;
+            }
+            parser.revert();
+        }
         return current;
     }
 }
@@ -1990,7 +2008,7 @@ FunctionScopeStart findFunctionScopeStart(Namespace namespace)
 }
 
 // helper for binding values for stuff like compiler.$stmt
-class ExpressionAlias : Namespace
+class SymbolAlias : Namespace
 {
     string name;
 
@@ -2828,7 +2846,10 @@ class ASTModule
     // because we hit a macro declaration
     ASTModule parent;
 
-    Either(ASTImport, ASTSymbol, ASTExtern, ASTFunction, ASTSymbolAlias)[] entries;
+    Either(
+        ASTImport, ASTSymbol, ASTExtern, ASTFunction,
+        ASTSymbolAlias, ASTTemplateDecl
+    )[] entries;
 
     this(this.loc, this.name, this.pak, this.macroState, this.parent) { }
 
@@ -2838,6 +2859,25 @@ class ASTModule
     }
 }
 
+string mangleModuleName(string name, Package pak)
+{
+    // TODO non-nullable by default
+    assert(!!pak);
+    string mangledName;
+    // mangledName = [(a == '.') ? '_' : a for a in name];
+    for (int i = 0; i < name.length; i += 1) {
+        if (name[i .. i + 1] == ".") mangledName ~= "_";
+        else mangledName ~= name[i .. i + 1];
+    }
+    if (pak.HACK_rename == "") {
+        mangledName = pak.name ~ "_module_" ~ mangledName;
+    } else {
+        mangledName = pak.HACK_rename ~ "_module_" ~ mangledName;
+    }
+    return mangledName;
+}
+
+// TODO separate Module and ASTModule to get rid of macroState
 class Module : Namespace
 {
     Loc loc;
@@ -2846,28 +2886,13 @@ class Module : Namespace
 
     string mangledName;
 
-    Package pak;
-
     MacroState macroState;
 
     // whenever macro state changes, we begin a new submodule
     // when this happens, this member references the previous module.
     Module parentModule;
 
-    this(this.loc, this.name, this.pak, this.macroState, this.parentModule)
-    {
-        assert(!!pak);
-        // this.mangledName = [(a == '.') ? '_' : a for a in name];
-        for (int i = 0; i < this.name.length; i += 1) {
-            if (name[i .. i + 1] == ".") this.mangledName ~= "_";
-            else this.mangledName ~= name[i .. i + 1];
-        }
-        if (this.pak.HACK_rename == "") {
-            this.mangledName = this.pak.name ~ "_module_" ~ this.mangledName;
-        } else {
-            this.mangledName = this.pak.HACK_rename ~ "_module_" ~ this.mangledName;
-        }
-    }
+    this(this.loc, this.name, this.mangledName, this.macroState, this.parentModule) { }
 
     Module[] imports;
 
@@ -3901,6 +3926,102 @@ ASTModule parseMacroContinuation(CompilerBase compiler, Parser parser, ParserHel
     return parseModuleBody(compiler, parser, helper, subModule, config);
 }
 
+class ASTTemplateInstance : ASTSymbol
+{
+    ASTSymbol templateDecl;
+
+    ASTSymbol type;
+
+    Loc loc;
+
+    this(this.templateDecl, this.type, this.loc) { }
+
+    override Type compile(Context context)
+    {
+        auto symbol = this.templateDecl.compile(context);
+        auto type = beType(this.loc, this.type.compile(context));
+        auto templDecl = symbol.instanceOf(TemplateDecl);
+
+        loc.assert2s(!!templDecl, "cannot instantiate non-template");
+
+        return templDecl.resolve(context, this.loc, type);
+    }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTTemplateInstance'!"); assert(false); }
+}
+
+// very similar to ASTTemplateDecl
+// they'll differentiate themselves later, when constraints are added.
+class TemplateDecl : Symbol
+{
+    string name;
+
+    Namespace templateScope;
+
+    string typeParameterName;
+
+    ASTClassDecl content;
+
+    this(this.name, this.templateScope, this.typeParameterName, this.content) { }
+
+    Type resolve(Context context, Loc loc, Type parameter)
+    {
+        auto contextModule = findModule(context.namespace);
+        // TODO mut context
+        auto context = context.withNamespace(
+            context.compiler.symbolAlias(context.namespace, typeParameterName, parameter));
+        auto class_ = content.compile(context);
+        string moduleMangle = name ~ "_instance_" ~ parameter.mangle() ~ "_of_" ~ class_.mangle();
+
+        /*
+         * Emit instance into new module.
+         * This is so that an instantiation with the same types in different modules
+         * gets the same reused symbols.
+         */
+        Module module_ = new Module(loc, name, moduleMangle, contextModule.macroState, null);
+        module_.add("", class_);
+        module_.resolve();
+        print("module " ~ contextModule.mangledName ~ ": add " ~ module_.mangledName);
+        contextModule.addImport(module_);
+
+        return class_;
+    }
+}
+
+class ASTTemplateDecl
+{
+    string name;
+
+    string typeParameterName;
+
+    // TODO generalize
+    ASTClassDecl content;
+
+    this(this.name, this.typeParameterName, this.content) { }
+
+    Symbol compile(Context context)
+    {
+        return new TemplateDecl(name, context.namespace, typeParameterName, content);
+    }
+}
+
+ASTTemplateDecl parseTemplateDecl(Parser parser, LexicalContext lexicalContext)
+{
+    auto loc = parser.loc();
+    if (!acceptIdentifier(parser, "template"))
+    {
+        return null;
+    }
+    auto name = parseIdentifier(parser);
+    parser.expect("(");
+    auto typeParameter = parseIdentifier(parser);
+    parser.expect(")");
+    parser.expect("{");
+    auto classDecl = parseClassDecl(parser, lexicalContext);
+    parser.expect("}");
+    return new ASTTemplateDecl(name, typeParameter, classDecl);
+}
+
 struct ASTStructMember
 {
     string name;
@@ -4137,6 +4258,10 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             module_.entries ~= classDecl.instanceOf(ASTSymbol);
             continue;
         }
+        if (ASTTemplateDecl templateDecl = parseTemplateDecl(parser, lexicalContext)) {
+            module_.entries ~= templateDecl;
+            continue;
+        }
         if (ASTExtern extern_ = parseExtern(parser, lexicalContext)) {
             module_.entries ~= extern_;
             continue;
@@ -4201,7 +4326,8 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
         parent = compileModule(astModule.parent, helper, config, compiler, platform, addDefaultModules);
     }
 
-    Module module_ = new Module(astModule.loc, astModule.name, astModule.pak, astModule.macroState, parent);
+    string mangledName = mangleModuleName(astModule.name, astModule.pak);
+    Module module_ = new Module(astModule.loc, astModule.name, mangledName, astModule.macroState, parent);
     auto context = makeContext(compiler, platform, module_, module_.macroState);
     if (addDefaultModules)
     {
@@ -4245,6 +4371,8 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
                 module_.add(function_.name, function_.compile(context));
             ASTSymbolAlias symbolAlias:
                 module_.add(symbolAlias.name, symbolAlias.symbol.compile(context));
+            ASTTemplateDecl astTemplateDecl:
+                module_.add(astTemplateDecl.name, astTemplateDecl.compile(context));
         }
     }
     module_.resolve();

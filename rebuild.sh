@@ -9,7 +9,11 @@ else
     set -euxo pipefail
 fi
 FLAGS="-O"
-# FLAGS=""
+
+if [ \! -z ${FAST+x} ]
+then
+    FLAGS=""
+fi
 
 function checksum {
     # approximate hash: outright remove all 16-byte constants
@@ -30,6 +34,13 @@ then
 fi
 I=1
 build/cx $FLAGS -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_test$I
+
+if [ \! -z ${FAST+x} ]
+then
+    mv build/cx_test$I build/cx
+    exit
+fi
+
 SUM=$(checksum build/cx_test$I)
 SUMNEXT=""
 while true

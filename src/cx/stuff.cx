@@ -508,7 +508,7 @@ class DelegateFuncPtr : Expression
     override void hash(Hash hash) { hash.adds("DelegateFuncPtr"); this.dg.hash(hash); }
 }
 
-Expression call(Context context, Symbol target, Expression[] args, Loc loc)
+Expression call(Context context, Symbol target, Expression[] args, Loc loc, bool autoCall)
 {
     Expression[] args = args; // TODO mut Expression[] args,
     if (auto fundecl = target.instanceOf(FunctionDeclaration))
@@ -544,14 +544,15 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc)
     // auto funcptr = expr?.type().instanceOf(FunctionPointer);
     FunctionPointer funcptr;
     if (expr) funcptr = expr.type().instanceOf(FunctionPointer);
-    if (expr && funcptr)
+    if (expr && funcptr && !autoCall)
     {
         args = [expectImplicitConvertTo(context, arg, funcptr.args[i], loc) for i, arg in args];
         return new FuncPtrCall(expr, args, loc);
     }
     NestedFunctionPointer nestedfuncptr;
     if (expr) nestedfuncptr = expr.type().instanceOf(NestedFunctionPointer);
-    if (expr && nestedfuncptr)
+    // TODO unfuck this: nested functions and methods should not be expressions
+    if (expr && nestedfuncptr && !autoCall)
     {
         args = [expectImplicitConvertTo(context, arg, nestedfuncptr.args[i], loc) for i, arg in args];
         // TODO cache delegate
@@ -562,6 +563,7 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc)
         combinedArgs ~= args;
         return new FuncPtrCall(funcPtr, combinedArgs, loc);
     }
+    if (autoCall) return null;
     if (Struct struct_ = target.instanceOf(Struct))
     {
         loc.assert2s(args.length == struct_.members.length, "invalid number of args for struct constructor");
@@ -657,8 +659,10 @@ class WrapReference : Reference
     }
 }
 
-Expression callWithLifetime(Context context, Symbol target, Expression[] args, Loc loc) {
+Expression callWithLifetime(Context context, Symbol target, Expression[] args, Loc loc, bool autoCall) {
     Symbol target = target; // TODO mut Symbol target
+    // TODO
+    // assert(!target.instanceOf(Expression));
     Statement pre, post;
     for (int i = 0; i < args.length; i += 1) {
         auto arg = args[i];
@@ -688,7 +692,9 @@ Expression callWithLifetime(Context context, Symbol target, Expression[] args, L
             target = new ClassMethodPtr(method.funcPtr, tempThisPtr);
         }
     }
-    return new WrapExpression(pre, call(context, target, args, loc), post);
+    auto callResult = call(context, target, args, loc, autoCall);
+    if (!callResult) return null;
+    return new WrapExpression(pre, callResult, post);
 }
 
 class ASTCall : ASTSymbol
@@ -708,9 +714,9 @@ class ASTCall : ASTSymbol
         if (callMacroArgs.transformed) return callMacroArgs.transformed;
 
         auto target = this.target.compile(context);
-        auto args = [beExpression2(arg.compile(context), this.loc) for arg in this.args];
+        auto args = [beExpression3(context, arg.compile(context), this.loc) for arg in this.args];
 
-        return callWithLifetime(context, target, args, this.loc);
+        return callWithLifetime(context, target, args, this.loc, false);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -760,7 +766,7 @@ class ASTIndexAccess : ASTSymbol
 
     override Expression compile(Context context)
     {
-        Expression base = beExpression(this.base.compile(context));
+        Expression base = beExpression3(context, this.base.compile(context), this.loc);
 
         Expression do_(Reference base)
         {
@@ -772,14 +778,14 @@ class ASTIndexAccess : ASTSymbol
                 auto context = context.withNamespace(
                     context.compiler.exprAlias(context.namespace, "__array", base));
 
-                indexExpr = beExpression(this.index.compile(context));
+                indexExpr = beExpression3(context, this.index.compile(context), this.loc);
                 // TODO bounds check
                 ptrBase = new ArrayPointer(array_.elementType, base);
             } else {
                 if (!type.instanceOf(Pointer)) {
                     this.loc.fail("index access requires pointer or array");
                 }
-                indexExpr = beExpression(this.index.compile(context));
+                indexExpr = beExpression3(context, this.index.compile(context), this.loc);
                 ptrBase = base;
             }
 
@@ -811,7 +817,7 @@ class ASTArraySlice : ASTSymbol
     override Symbol compile(Context context)
     {
         Type sizeT = context.nativeWordType;
-        auto array = beExpression(this.array.compile(context));
+        auto array = beExpression3(context, this.array.compile(context), this.loc);
 
         Expression do_(Reference array)
         {
@@ -820,8 +826,10 @@ class ASTArraySlice : ASTSymbol
 
             return new ArraySlice(
                 array,
-                expectImplicitConvertTo(context, beExpression(this.lower.compile(context)), sizeT, this.loc),
-                expectImplicitConvertTo(context, beExpression(this.upper.compile(context)), sizeT, this.loc),
+                expectImplicitConvertTo(
+                    context, beExpression3(context, this.lower.compile(context), this.loc), sizeT, this.loc),
+                expectImplicitConvertTo(
+                    context, beExpression3(context, this.upper.compile(context), this.loc), sizeT, this.loc),
                 this.loc);
         }
         return context.compiler.consumeTemporary(context, false, array, &do_);
@@ -865,11 +873,7 @@ Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc
     {
         return accessMember(context, base, member, loc, allowUndefined);
     }
-    if (!base.instanceOf(Expression))
-    {
-        loc.assert2s(false, "expected expression for member access");
-    }
-    Expression baseExpr = beExpression(base);
+    Expression baseExpr = beExpression3(context, base, loc);
     Type baseType = baseExpr.type();
 
     if (baseType.instanceOf(Pointer)) {
@@ -919,7 +923,7 @@ Symbol accessMember(Context context, Symbol base, string member, Loc loc, bool a
     }
 
     loc.assert2s(!!base.instanceOf(Expression), "expected expression for member access");
-    Expression baseExpr = beExpression(base);
+    Expression baseExpr = beExpression3(context, base, loc);
 
     while (baseExpr.type().instanceOf(Pointer)) {
         baseExpr = new Dereference(baseExpr);
@@ -972,7 +976,7 @@ class ASTInstanceOf : ASTSymbol
 
     override Symbol compile(Context context)
     {
-        Expression base = beExpression(this.base.compile(context));
+        Expression base = beExpression3(context, this.base.compile(context), loc);
         auto type = base.type();
         loc.assert2s(!!type.instanceOf(Class), "Base of instanceOf must be a class.");
         Expression do_(Expression base) {
@@ -980,7 +984,7 @@ class ASTInstanceOf : ASTSymbol
             loc.assert2s(!!target, "Target of instanceOf must be class.");
             Symbol instanceOf = accessMember(context, base, "__instanceof", loc, false);
             Expression classInfo = new ClassInfo(target);
-            return new PointerCast(target, callWithLifetime(context, instanceOf, [classInfo], loc));
+            return new PointerCast(target, callWithLifetime(context, instanceOf, [classInfo], loc, false));
         }
         return context.compiler.exprWithTemporary(base, &do_);
     }
@@ -1050,6 +1054,7 @@ class ASTDereference : ASTSymbol
 
     override Symbol compile(Context context)
     {
+        // TODO now that we have symbols, this should not be an expression!
         return new Dereference(beExpression(this.base.compile(context)));
     }
 
@@ -1138,7 +1143,6 @@ class ASTReference : ASTSymbol
         if (ASTIdentifier ident = this.base.instanceOf(ASTIdentifier)) {
             auto frame = once new ReferenceExpression(new StackFrame(new Void));
             if (Symbol target = context.namespace.lookup(ident.name, context, frame)) {
-
                 if (Function fun = target.instanceOf(Function))
                     return new FunctionReference(fun);
                 if (auto nestfn = target.instanceOf(ClassMethodPtr))
@@ -1264,7 +1268,7 @@ class ASTNewExpression : ASTSymbol
         if (Class classType = type.instanceOf(Class)) {
             Expression classptr = new NewClassExpression(classType);
 
-            auto argExpressions = [beExpression2(arg.compile(context), this.loc) for arg in this.args];
+            auto argExpressions = [beExpression3(context, arg.compile(context), this.loc) for arg in this.args];
             this.loc.assert2s2(!!classType, "expected new <class>, not %s", type.repr());
 
             auto loc = this.loc; // TODO fix
@@ -1273,7 +1277,7 @@ class ASTNewExpression : ASTSymbol
                 auto ctor = accessMember(
                     context, new IgnoreLifetimeExpr(classptr), "__ctor", loc, false);
                 auto ctorCall = context.compiler.exprStatement(
-                    callWithLifetime(context, ctor, argExpressions, loc));
+                    callWithLifetime(context, ctor, argExpressions, loc, false));
 
                 return context.compiler.statementExpression(ctorCall, classptr);
             }
@@ -1284,7 +1288,7 @@ class ASTNewExpression : ASTSymbol
 
             Type sizeT = context.nativeWordType;
             auto length = expectImplicitConvertTo(
-                context, beExpression2(this.args[0].compile(context), this.loc), sizeT, this.loc);
+                context, beExpression3(context, this.args[0].compile(context), this.loc), sizeT, this.loc);
             return new ArrayAllocation(arrayType.elementType, length);
         }
         this.loc.assert2s2(false, "don't know how to allocate ", type.repr());
@@ -1719,7 +1723,7 @@ class ASTNegation : ASTSymbol
 
     override Expression compile(Context context)
     {
-        Expression isTrue = truthy(context, beExpression(this.next.compile(context)), this.loc);
+        Expression isTrue = truthy(context, beExpression3(context, this.next.compile(context), this.loc), this.loc);
 
         return new BinaryOp("==", isTrue, new IntLiteral(0), this.loc);
     }
@@ -1811,7 +1815,7 @@ class ASTReturnStatement : ASTStatement
 
     override StatementCompileResult compile(Context context)
     {
-        Expression expr = beExpression(this.value.compile(context));
+        Expression expr = beExpression3(context, this.value.compile(context), this.loc);
         Type ret = findFunctionScope(context.namespace).ret;
         expr = expectImplicitConvertTo(context, expr, ret, this.loc);
 
@@ -2125,10 +2129,10 @@ class ASTIfStatement : ASTStatement
     {
         Statement prelude; // var decl statement
         auto testSucceedsContext = context;
-        Symbol test;
+        Expression test;
         this.test.case {
             ASTSymbol symbol: {
-                test = symbol.compile(context);
+                test = beExpression3(context, symbol.compile(context), this.loc);
             }
             ASTVarDeclStatement vardecl: {
                 auto pair = vardecl.compile(context);
@@ -2136,7 +2140,7 @@ class ASTIfStatement : ASTStatement
                 testSucceedsContext = pair.context;
                 // TODO lookup() that handles the stackframe thing
                 auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
-                test = beExpression2(
+                test = beExpression3(context,
                     testSucceedsContext.namespace.lookup(vardecl.name, context, stackframe),
                     this.loc);
             }
@@ -2149,7 +2153,8 @@ class ASTIfStatement : ASTStatement
             else_ = unwindScope(elsePair.context, context.namespace, elsePair.statement);
         }
 
-        auto ifStmt = new IfStatement(truthy(context, beExpression(test), this.loc), then, else_);
+        auto test = truthy(context, test, this.loc);
+        auto ifStmt = new IfStatement(test, then, else_);
 
         return StatementCompileResult(sequence(prelude, ifStmt), context);
     }
@@ -2360,7 +2365,7 @@ class ASTVarDeclStatement : ASTStatement
         if (this.type) type = beType(this.loc, this.type.compile(context));
         if (this.initial)
         {
-            auto initial = beExpression2(this.initial.compile(context), this.loc);
+            auto initial = beExpression3(context, this.initial.compile(context), this.loc);
             if (this.infer) {
                 assert(!type);
                 type = initial.type();
@@ -2558,7 +2563,7 @@ class ASTWhile : ASTStatement
     {
         auto label = context.getLabel();
         auto loopContext = context.withNamespace(new LabelLoopScope(label, context.namespace));
-        auto condExpr = truthy(context, beExpression(this.cond.compile(loopContext)), this.loc);
+        auto condExpr = truthy(context, beExpression3(context, this.cond.compile(loopContext), this.loc), this.loc);
         auto bodyPair = this.body_.compile(loopContext);
         auto bodyStmt = unwindScope(bodyPair.context, context.namespace, bodyPair.statement);
 
@@ -2624,7 +2629,7 @@ class ASTStatementExpression : ASTSymbol
             statements[i] = result.statement;
             context = result.context;
         }
-        auto resultValue = beExpression2(this.expr.compile(context), loc);
+        auto resultValue = beExpression3(context, this.expr.compile(context), loc);
         auto resultType = resultValue.type();
 
         // as ASTReturn
@@ -2692,7 +2697,7 @@ class ASTForLoop : ASTStatement
     {
         auto declPair = this.declareLoopVar.compile(context);
         auto forScope = declPair.context;
-        Expression condition = beExpression(this.condition.compile(forScope));
+        Expression condition = beExpression3(context, this.condition.compile(forScope), this.loc);
         auto stepPair = this.step.compile(forScope);
 
         string label = context.getLabel();
@@ -2745,7 +2750,7 @@ class ASTDestroy : ASTSymbol
     this(this.target, this.loc) { }
 
     override Expression compile(Context context) {
-        auto expr = beExpression2(this.target.compile(context), loc);
+        auto expr = beExpression3(context, this.target.compile(context), loc);
         auto stmt = destroy(context, expr);
         if (!stmt) return once new VoidExpression;
         return new StatementExpression(stmt, once new VoidExpression, false);

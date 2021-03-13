@@ -35,9 +35,11 @@ do
     fi
     echo "$file"...
     executable=build/"$file"
-    if ! $CX $CXFLAGS "$file" -o "$executable" 2>&1 |cat>build/out.txt
+    CMD="$CX $CXFLAGS \"$file\" -o \"$executable\""
+    if ! eval $CMD 2>&1 |cat>build/out.txt
     then
         build_failed=$((build_failed+1))
+        echo $CMD
         cat build/out.txt
     elif ! "$executable"
     then
@@ -57,17 +59,20 @@ do
     fi
     echo "$file"...
     executable=build/"$file"
+    CMD="$CX $CXFLAGS \"$file\" -o \"$executable\""
     set +e
-    $CX $CXFLAGS "$file" -o "$executable" 2>&1 |cat>build/out.txt
+    eval $CMD 2>&1 |cat>build/out.txt
     EXIT=$?
     set -e
     if [ $EXIT -eq 0 ]; then
         falsely_succeeded=$((falsely_succeeded+1))
+        echo $CMD
         cat build/out.txt
         echo "Error expected but not found!"
     elif [ $EXIT -gt 128 ]; then
         # signal
         build_crashed=$((build_crashed+1))
+        echo $CMD
         cat build/out.txt
     fi
 done < <(ls -q test/fail_compilation/*.cx)

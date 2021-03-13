@@ -257,6 +257,8 @@ at_revision '28e52db8efba8505628014965f1f9c45cd2ae38c' 'rebuild cx' 'build/cx'
 at_revision 'e020aacbd3a027d5b4f69ec66e5ab1e39ac5b8be' 'rebuild cx' 'build/cx'
 # add class templates
 at_revision 'a03b948874b45bfed49c887ee0097406bc115b4a' 'rebuild cx' 'build/cx'
+# implicit function calls
+at_revision '2a6c1407465c2e15ad3a8d16a29d388808fe09f0' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

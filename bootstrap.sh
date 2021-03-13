@@ -253,7 +253,8 @@ at_revision '1db795ea97dc06123e3285c40a167bce16ca8905' 'rebuild cx' 'build/cx'
 at_revision '997b4702ebcb96f7b2e323993458bd712bfccb52' 'rebuild cx' 'build/cx'
 # apply binary hash to objects
 at_revision '28e52db8efba8505628014965f1f9c45cd2ae38c' 'rebuild cx' 'build/cx'
-
+# remove ASTType, stage 1
+at_revision 'e020aacbd3a027d5b4f69ec66e5ab1e39ac5b8be' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

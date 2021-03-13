@@ -8,9 +8,16 @@ import package(compiler).cx.parser_base;
 import package(compiler).cx.types;
 import package(compiler).helpers;
 
+struct ASTEitherDeclEntry
+{
+    Loc loc;
+
+    ASTSymbol symbol;
+}
+
 class ASTEitherDecl : ASTSymbol
 {
-    ASTSymbol[] partTypes;
+    ASTEitherDeclEntry[] partTypes;
 
     this(this.partTypes) { }
 
@@ -18,8 +25,7 @@ class ASTEitherDecl : ASTSymbol
     {
         Type[] partTypes = new Type[](this.partTypes.length);
         for (int i = 0; i < this.partTypes.length; i += 1) {
-            // TODO beType
-            partTypes[i] = this.partTypes[i].compile(context).instanceOf(Type);
+            partTypes[i] = beType(this.partTypes[i].loc, this.partTypes[i].symbol.compile(context));
         }
 
         return new Either(partTypes);
@@ -324,19 +330,19 @@ ASTSymbol parseEither(Parser parser, LexicalContext lexicalContext)
     }
     parser.commit();
 
-    ASTSymbol[] types;
+    ASTEitherDeclEntry[] entries;
     while (!parser.accept(")"))
     {
-        if (types.length > 0 && !parser.accept(","))
+        if (entries.length > 0 && !parser.accept(","))
         {
             parser.fail("',' or ')' expected");
         }
-        // FIXME remove
-        ASTSymbol type = lexicalContext.compiler.parseType(parser, lexicalContext).instanceOf(ASTSymbol);
+        Loc loc = parser.loc();
+        ASTSymbol type = lexicalContext.compiler.parseType(parser, lexicalContext);
         parser.assert_(!!type, "argument type expected");
-        types ~= type;
+        entries ~= ASTEitherDeclEntry(loc, type);
     }
-    return new ASTEitherDecl(types);
+    return new ASTEitherDecl(entries);
 }
 
 /**
@@ -376,8 +382,7 @@ class ASTEitherCaseExpr : ASTSymbol
         // TODO merge types directly
         for (int i = 0; i < this.cases.length; i += 1) {
             auto case_ = this.cases[i];
-            // TODO beType
-            auto caseType = case_.type.compile(context).instanceOf(Type);
+            auto caseType = beType(this.loc, case_.type.compile(context));
 
             auto namespace = context.compiler.variableDeclaration(context.namespace, case_.identifier, caseType);
             auto subContext = context.withNamespace(namespace);
@@ -403,8 +408,7 @@ class ASTEitherCaseExpr : ASTSymbol
 
         for (int i = 0; i < this.cases.length; i += 1) {
             auto case_ = this.cases[i];
-            // TODO beType
-            Type type = case_.type.compile(resultContext).instanceOf(Type);
+            Type type = beType(case_.loc, case_.type.compile(resultContext));
 
             int matched = -1;
             for (int k = 0; k < either.types.length; k += 1) {
@@ -452,8 +456,7 @@ ASTSymbol parseCaseExpr(Parser parser, LexicalContext lexicalContext, ASTSymbol 
     while (!parser.accept(")"))
     {
         if (cases.length) parser.expect(",");
-        // FIXME remove
-        ASTSymbol type = lexicalContext.compiler.parseType(parser, lexicalContext).instanceOf(ASTSymbol);
+        ASTSymbol type = lexicalContext.compiler.parseType(parser, lexicalContext);
         parser.assert_(!!type, "case type expected");
         string identifier = parseIdentifier(parser);
         parser.expect(":");
@@ -503,8 +506,7 @@ class ASTEitherCaseStmt : ASTStatement
         Statement ifTree = null;
         for (int i = 0; i < this.cases.length; i += 1) {
             auto case_ = this.cases[i];
-            // TODO beType
-            Type type = case_.type.compile(context).instanceOf(Type);
+            Type type = beType(case_.loc, case_.type.compile(context));
 
             int matched = -1;
             for (int k = 0; k < either.types.length; k += 1) {
@@ -573,18 +575,13 @@ class EitherMacro : Macro
     this() { }
 
     override void apply(MacroArgs args) {
-        auto typeArgs = args.instanceOf(TypeMacroArgs);
-        if (typeArgs) {
-            // TODO remove instanceOf
-            auto eitherResult = parseEither(typeArgs.parser, typeArgs.lexicalContext);
-            if (eitherResult) typeArgs.astType = eitherResult.instanceOf(typeof(typeArgs.astType));
+        if (auto typeArgs = args.instanceOf(TypeMacroArgs)) {
+            typeArgs.astType = parseEither(typeArgs.parser, typeArgs.lexicalContext);
         }
-        auto propArgs = args.instanceOf(ParsePropertyArgs);
-        if (propArgs) {
+        if (auto propArgs = args.instanceOf(ParsePropertyArgs)) {
             propArgs.result = parseCaseExpr(propArgs.parser, propArgs.lexicalContext, propArgs.left);
         }
-        auto stmtArgs = args.instanceOf(ParseStatementArgs);
-        if (stmtArgs) {
+        if (auto stmtArgs = args.instanceOf(ParseStatementArgs)) {
             stmtArgs.statement = parseCaseStmt(stmtArgs.parser, stmtArgs.lexicalContext);
         }
     }

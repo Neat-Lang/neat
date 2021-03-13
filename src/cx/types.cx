@@ -90,9 +90,9 @@ class Float : Type
     override void hash(Hash hash) { hash.adds("float"); }
 }
 
-class ASTPointer : ASTType
+class ASTPointer : ASTSymbol
 {
-    ASTType subType;
+    ASTSymbol subType;
 
     Loc loc;
 
@@ -100,7 +100,7 @@ class ASTPointer : ASTType
 
     override Type compile(Context context)
     {
-        Type subType = this.subType.compile(context);
+        Type subType = beType(this.loc, this.subType.compile(context));
 
         return new Pointer(subType);
     }
@@ -110,7 +110,7 @@ class ASTPointer : ASTType
     }
 }
 
-class ASTNamedType : ASTType
+class ASTBasicType : ASTSymbol
 {
     string name;
 
@@ -129,18 +129,11 @@ class ASTNamedType : ASTType
         if (name == "void") return new Void;
         if (name == "float") return new Float;
 
-        Symbol target = context.namespace.lookup(this.name, context, null);
-
-        this.loc.assert2s2(target && target.instanceOf(Type), this.name, " is not a type");
-        return target.instanceOf(Type);
+        this.loc.assert2s(false, this.name ~ " is not a basic type");
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        // $foo is quoted as 'foo'
-        if (name[0 .. 1] == "$") {
-            return quoter.compiler.astIdentifier(name[1 .. $], loc.reloc);
-        }
-        return quoter.compilerCall("astNamedType", [quoter.compiler.astStringLiteral(name, loc.reloc)], loc.reloc);
+        return quoter.compilerCall("astBasicType", [quoter.compiler.astStringLiteral(name, loc.reloc)], loc.reloc);
     }
 }
 
@@ -171,14 +164,14 @@ class TypeMacroArgs : MacroArgs
 {
     Parser parser;
     LexicalContext lexicalContext;
-    ASTType astType;
+    ASTSymbol astType;
     this(this.parser, this.lexicalContext) {
         this.astType = null;
     }
     override bool done() { return !!this.astType; }
 }
 
-ASTType parseLeafType(Parser parser, LexicalContext lexicalContext)
+ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
 {
     {
         auto typeMacroArgs = new TypeMacroArgs(parser, lexicalContext);
@@ -206,6 +199,7 @@ ASTType parseLeafType(Parser parser, LexicalContext lexicalContext)
         return null;
     }
 
+    // TODO remove parser cache for once()
     if (identifier == "long")
     {
         parser.commit();
@@ -243,22 +237,28 @@ ASTType parseLeafType(Parser parser, LexicalContext lexicalContext)
     }
 
     parser.commit();
-    return new ASTNamedType(identifier, parser.loc());
+    return lexicalContext.compiler.astIdentifier(identifier, parser.loc().reloc);
 }
 
-class ASTFunctionPointer : ASTType
+class ASTFunctionPointer : ASTSymbol
 {
-    ASTType ret;
+    ASTSymbol ret;
 
-    ASTType[] args;
+    ASTSymbol[] args;
 
-    this(this.ret, this.args) { }
+    Loc loc;
+
+    this(this.ret, this.args, this.loc) { }
 
     override Type compile(Context context)
     {
-        Type ret = this.ret.compile(context);
-        Type[] args = new Type[](this.args.length);
-        for (int i = 0; i < this.args.length; i += 1) args[i] = this.args[i].compile(context);
+        Type ret = beType(this.loc, this.ret.compile(context));
+        Type[] args;
+        for (int i = 0; i < this.args.length; i += 1)
+        {
+            auto arg = this.args[i];
+            args ~= beType(this.loc, arg.compile(context));
+        }
 
         return new FunctionPointer(ret, args);
     }
@@ -318,19 +318,25 @@ class FunctionPointer : Type
     }
 }
 
-class ASTNestedFunctionPointer : ASTType
+class ASTNestedFunctionPointer : ASTSymbol
 {
-    ASTType ret;
+    ASTSymbol ret;
 
-    ASTType[] args;
+    ASTSymbol[] args;
 
-    this(this.ret, this.args) { }
+    Loc loc;
+
+    this(this.ret, this.args, this.loc) { }
 
     override Type compile(Context context)
     {
-        Type ret = this.ret.compile(context);
-        Type[] args = new Type[](this.args.length);
-        for (int i = 0; i < this.args.length; i += 1) args[i] = this.args[i].compile(context);
+        Type ret = beType(loc, this.ret.compile(context));
+        Type[] args;
+        for (int i = 0; i < this.args.length; i += 1)
+        {
+            auto arg = this.args[i];
+            args ~= beType(this.loc, arg.compile(context));
+        }
 
         return new NestedFunctionPointer(ret, args);
     }

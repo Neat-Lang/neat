@@ -226,6 +226,38 @@ class Either : Type
         return null;
     }
 
+    override Expression implicitConvertTo(Context context, Expression source, Type targetType)
+    {
+        // Check that every member can be converted.
+        for (int i = 0; i < this.types.length; i += 1) {
+            auto member = new EitherMember(source, i);
+            auto converted = context.compiler.implicitConvertTo(context, member, targetType);
+            // print("try " ~ member.type.repr ~ " => " ~ targetType.repr);
+            if (!converted) return null;
+        }
+        Expression do1(Expression temporary) {
+            Statement do2(Reference target) {
+                Statement ifTree;
+                auto sourceType = new EitherType(source);
+                for (int i = 0; i < this.types.length; i += 1) {
+                    auto type = this.types[i];
+                    auto member = new EitherMember(source, i);
+                    auto converted = context.compiler.implicitConvertTo(context, member, targetType);
+                    if (!converted) return null;
+                    Loc nowhere;
+                    Expression test = context.compiler.binaryOp(
+                        "==", context, sourceType, context.compiler.intLiteral(i + 1), nowhere);
+                    Statement assign = context.compiler.assignStatement(target, member);
+                    ifTree = context.compiler.ifStatement(test, assign, ifTree);
+                }
+                return ifTree;
+            }
+            // TODO settle ownership
+            return context.compiler.exprWithScratchspace(targetType, false, &do2);
+        }
+        return context.compiler.exprWithTemporary(source, &do1);
+    }
+
     override bool same(Type type) {
         auto other = type.instanceOf(Either);
         if (!other || types.length != other.types.length)
@@ -378,8 +410,14 @@ class ASTEitherCaseExpr : ASTSymbol
 
         bool[] handled = new bool[](either.types.length);
 
-        Expression mergedExpr = null;
-        // TODO merge types directly
+        // TODO implicitConvertTo should only require Type - ie. return a Expression function(Expression).
+        Type[] resultTypes;
+        void mergeType(Loc loc, Expression expr) {
+            auto exprType = expr.type;
+            for (int i = 0; i < resultTypes.length; i += 1)
+                if (resultTypes[i].same(exprType)) return;
+            resultTypes ~= exprType;
+        }
         for (int i = 0; i < this.cases.length; i += 1) {
             auto case_ = this.cases[i];
             auto caseType = beType(this.loc, case_.type.compile(context));
@@ -387,20 +425,16 @@ class ASTEitherCaseExpr : ASTSymbol
             auto namespace = context.compiler.variableDeclaration(context.namespace, case_.identifier, caseType);
             auto subContext = context.withNamespace(namespace);
 
-            Expression expr = beExpression2(case_.expr.compile(subContext), case_.loc);
-
-            if (!mergedExpr) mergedExpr = expr;
-            else {
-                auto left = context.compiler.implicitConvertTo(context, expr, mergedExpr.type());
-                auto right = context.compiler.implicitConvertTo(context, mergedExpr, expr.type());
-                if (!left && !right) case_.loc.assert2s(false, "incompatible expression type");
-                else if (left && right && !left.type().same(right.type())) case_.loc.assert2s(false, "ambiguous expression type");
-                if (left) mergedExpr = left;
-                else if (right) mergedExpr = right;
-            }
+            Expression expr = beExpression3(context, case_.expr.compile(subContext), case_.loc);
+            mergeType(case_.loc, expr);
         }
 
-        auto mergeType = mergedExpr.type();
+        assert(resultTypes.length > 0);
+        Type mergeType;
+        if (resultTypes.length == 1) mergeType = resultTypes[0];
+        else {
+            mergeType = new Either(resultTypes);
+        }
         auto resultNamespace = context.compiler.variableDeclaration(context.namespace, "", mergeType);
         auto resultContext = context.withNamespace(resultNamespace);
         Reference resultVar = resultNamespace.accessDecl();

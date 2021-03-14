@@ -259,6 +259,10 @@ at_revision 'e020aacbd3a027d5b4f69ec66e5ab1e39ac5b8be' 'rebuild cx' 'build/cx'
 at_revision 'a03b948874b45bfed49c887ee0097406bc115b4a' 'rebuild cx' 'build/cx'
 # implicit function calls
 at_revision '2a6c1407465c2e15ad3a8d16a29d388808fe09f0' 'rebuild cx' 'build/cx'
+# exprWithScratchspace
+at_revision 'fdfb6a98d45883f4ccd50933ddf6753209dccb6a' 'rebuild cx' 'build/cx'
+# Either case: return new Either, impl convert
+at_revision '06ce1d7b9dc46db395b70cde61127d2f00bdac22' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

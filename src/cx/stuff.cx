@@ -325,7 +325,8 @@ ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
         {
             parser.begin;
             auto instanceLoc = parser.loc;
-            if (parser.accept("!") && !parser.accept("="))
+            // TODO better way to exclude all the negated operators
+            if (parser.accept("!") && !parser.accept("=") && !acceptIdentifier(parser, "is"))
             {
                 auto templateArg = parseType(parser, lexicalContext);
                 parser.assert_(!!templateArg, "template argument required");
@@ -1007,6 +1008,21 @@ ASTSymbol parseInstanceOf(Parser parser, LexicalContext lexicalContext, ASTSymbo
     return new ASTInstanceOf(left, type, parser.loc);
 }
 
+ASTSymbol parseTemplateInstantiation(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
+{
+    parser.begin;
+    auto instanceLoc = parser.loc;
+    // TODO better way to exclude !operator cases
+    if (!parser.accept("!") || parser.accept("=") || acceptIdentifier(parser, "is")) {
+        parser.revert;
+        return null;
+    }
+    auto templateArg = parseType(parser, lexicalContext);
+    parser.assert_(!!templateArg, "template argument required");
+    parser.commit;
+    return new ASTTemplateInstance(base, templateArg, instanceLoc);
+}
+
 ASTSymbol parseProperties(Parser parser, LexicalContext lexicalContext, ASTSymbol current)
 {
     ASTSymbol current = current; // TODO mut ASTSymbol current
@@ -1038,6 +1054,11 @@ ASTSymbol parseProperties(Parser parser, LexicalContext lexicalContext, ASTSymbo
         if (ASTSymbol indexAccess = parseIndex(parser, lexicalContext, current))
         {
             current = indexAccess;
+            continue;
+        }
+        if (ASTSymbol templateInstance = parseTemplateInstantiation(parser, lexicalContext, current))
+        {
+            current = templateInstance;
             continue;
         }
         return current;
@@ -3941,7 +3962,7 @@ class ASTTemplateInstance : ASTSymbol
 
     this(this.templateDecl, this.type, this.loc) { }
 
-    override Type compile(Context context)
+    override Symbol compile(Context context)
     {
         auto symbol = this.templateDecl.compile(context);
         auto type = beType(this.loc, this.type.compile(context));
@@ -3955,6 +3976,24 @@ class ASTTemplateInstance : ASTSymbol
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTTemplateInstance'!"); assert(false); }
 }
 
+class TemplateInstantiationNamespace : Namespace
+{
+    string parameterName;
+
+    Type parameterType;
+
+    this(this.parent, this.parameterName, this.parameterType) { }
+
+    override Symbol lookup(string name, Context context, Expression frame) {
+        if (name == parameterName) return parameterType;
+        return parent.lookup(name, context, frame);
+    }
+
+    override string mangle() {
+        return this.parent.mangle ~ "_instance_" ~ parameterType.mangle;
+    }
+}
+
 // very similar to ASTTemplateDecl
 // they'll differentiate themselves later, when constraints are added.
 class TemplateDecl : Symbol
@@ -3965,18 +4004,20 @@ class TemplateDecl : Symbol
 
     string typeParameterName;
 
-    ASTClassDecl content;
+    Either(ASTClassDecl, ASTFunction) content;
 
     this(this.name, this.templateScope, this.typeParameterName, this.content) { }
 
-    Type resolve(Context context, Loc loc, Type parameter)
+    Symbol resolve(Context context, Loc loc, Type parameter)
     {
         auto contextModule = findModule(context.namespace);
         // TODO mut context
         auto context = context.withNamespace(
-            context.compiler.symbolAlias(context.namespace, typeParameterName, parameter));
-        auto class_ = content.compile(context);
-        string moduleMangle = name ~ "_instance_" ~ parameter.mangle ~ "_of_" ~ class_.mangle;
+            new TemplateInstantiationNamespace(context.namespace, typeParameterName, parameter));
+        auto content = this.content.case(
+            ASTClassDecl decl: decl.compile(context),
+            ASTFunction fun: fun.compile(context).instanceOf(Function));
+        string moduleMangle = name ~ "_instance_" ~ parameter.mangle;
 
         /*
          * Emit instance into new module.
@@ -3984,12 +4025,17 @@ class TemplateDecl : Symbol
          * gets the same reused symbols.
          */
         Module module_ = new Module(loc, name, moduleMangle, contextModule.macroState, null);
-        module_.add("", class_);
+        content.case {
+            Class class_:
+                module_.add("", class_);
+            Function fun:
+                module_.add("", fun);
+        }
         module_.resolve;
         print("module " ~ contextModule.mangledName ~ ": add " ~ module_.mangledName);
         contextModule.addImport(module_);
 
-        return class_;
+        return content.case(Class class_: class_.instanceOf(Symbol), Function fun: fun.instanceOf(Symbol));
     }
 }
 
@@ -4000,7 +4046,7 @@ class ASTTemplateDecl
     string typeParameterName;
 
     // TODO generalize
-    ASTClassDecl content;
+    Either(ASTClassDecl, ASTFunction) content;
 
     this(this.name, this.typeParameterName, this.content) { }
 
@@ -4022,9 +4068,18 @@ ASTTemplateDecl parseTemplateDecl(Parser parser, LexicalContext lexicalContext)
     auto typeParameter = parseIdentifier(parser);
     parser.expect(")");
     parser.expect("{");
-    auto classDecl = parseClassDecl(parser, lexicalContext);
+    Either(ASTClassDecl, ASTFunction) member;
+    if (ASTClassDecl classDecl = parseClassDecl(parser, lexicalContext))
+    {
+        member = classDecl;
+    }
+    else if (ASTFunction fun = parseFunction(parser, lexicalContext))
+    {
+        member = fun;
+    }
+
     parser.expect("}");
-    return new ASTTemplateDecl(name, typeParameter, classDecl);
+    return new ASTTemplateDecl(name, typeParameter, member);
 }
 
 struct ASTStructMember

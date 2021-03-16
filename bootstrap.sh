@@ -265,6 +265,8 @@ at_revision 'fdfb6a98d45883f4ccd50933ddf6753209dccb6a' 'rebuild cx' 'build/cx'
 at_revision '06ce1d7b9dc46db395b70cde61127d2f00bdac22' 'rebuild cx' 'build/cx'
 # $stmt statementvar;
 at_revision '8c6579ffd1ca48a954bf50eb1fbcd801abb18e37' 'rebuild cx' 'build/cx'
+# extended for loops
+at_revision '30aaa695621a169ea8e345bc55a7e55e08668b6c' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

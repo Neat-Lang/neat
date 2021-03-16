@@ -2792,6 +2792,67 @@ ASTStatementStatement parseStatementStatement(Parser parser, LexicalContext lexi
     return new ASTStatementStatement(loc, variable);
 }
 
+// This is a placeholder for proper range semantics.
+ASTStatement parseExtFor(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin;
+    if (!acceptIdentifier(parser, "for") || !parser.accept("(")) {
+        parser.revert;
+        return null;
+    }
+    auto compiler = lexicalContext.compiler;
+    bool auto_;
+    ASTSymbol type;
+    if (parser.accept("auto")) auto_ = true;
+    else type = parseType(parser, lexicalContext);
+    auto identifierLoc = parser.loc;
+    auto identifier = parseIdentifier(parser);
+    if (!identifier.length || !parser.accept("<-")) {
+        parser.revert;
+        return null;
+    }
+    auto source = parseExpression(parser, lexicalContext);
+    if (!source) parser.fail("expression expected");
+    // range expression loop, for (int i <- 0..10)
+    if (parser.accept(".."))
+    {
+        auto lower = source;
+        auto upper = parseExpression(parser, lexicalContext);
+        if (!upper) parser.fail("range upper bound expected");
+        parser.expect(")");
+        auto body_ = parseStatement(parser, lexicalContext);
+        parser.commit;
+
+        auto loopvar = compiler.astIdentifier(identifier, identifierLoc.reloc);
+        if (auto_)
+            return compiler.$stmt {
+                for (auto $identifier = $lower; $loopvar < $upper; $loopvar += 1) {
+                    $stmt body_;
+                }
+            };
+        return compiler.$stmt {
+            for ($type $identifier = $lower; $loopvar < $upper; $loopvar += 1) {
+                $stmt body_;
+            }
+        };
+    }
+    // array loop, for (auto bla <- array)
+    parser.expect(")");
+    auto body_ = parseStatement(parser, lexicalContext);
+    parser.commit;
+
+    ASTStatement declIdentifier;
+    if (auto_) declIdentifier = compiler.$stmt auto $identifier = __source[__loopvar];;
+    else declIdentifier = compiler.$stmt $type $identifier = __source[__loopvar];;
+    return compiler.$stmt {
+        auto __source = $source;
+        for (int __loopvar = 0; __loopvar < __source.length; __loopvar += 1) {
+            $stmt declIdentifier;
+            $stmt body_;
+        }
+    };
+}
+
 class ASTDestroy : ASTSymbol
 {
     ASTSymbol target;
@@ -2835,6 +2896,8 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
     if (ASTStatement stmt = parseBreakCont(parser, lexicalContext))
         return stmt;
     if (ASTStatement stmt = parseWhile(parser, lexicalContext))
+        return stmt;
+    if (ASTStatement stmt = parseExtFor(parser, lexicalContext))
         return stmt;
     if (ASTStatement stmt = parseFor(parser, lexicalContext))
         return stmt;

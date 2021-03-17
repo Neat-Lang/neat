@@ -519,20 +519,14 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc, bool
     }
     if (ClassMethodPtr method = target.instanceOf(ClassMethodPtr))
     {
-        if (auto base = method.funcPtr.type.instanceOf(FunctionReferenceBase)) {
-            auto fundecl = base.getFunction;
-            if (args.length == fundecl.args.length) loc.fail("wrong number of args: " ~ ltoa(args.length));
-            args = [expectImplicitConvertTo(context, arg, fundecl.args[i].type, loc) for i, arg in args];
+        if (auto funcptr = method.funcPtr.type.instanceOf(FunctionPointer)) {
+            // this ptr
+            if (args.length != funcptr.args.length - 1)
+                loc.fail("wrong number of arguments: expected " ~ ltoa(funcptr.args.length - 1)
+                    ~ " but got " ~ ltoa(args.length));
+            args = [expectImplicitConvertTo(context, arg, funcptr.args[i+1], loc) for i, arg in args];
         } else {
-            if (auto funcptr = method.funcPtr.type.instanceOf(FunctionPointer)) {
-                // this ptr
-                if (args.length != funcptr.args.length - 1)
-                    loc.fail("wrong number of arguments: expected " ~ ltoa(funcptr.args.length - 1)
-                        ~ " but got " ~ ltoa(args.length));
-                args = [expectImplicitConvertTo(context, arg, funcptr.args[i+1], loc) for i, arg in args];
-            } else {
-                loc.fail("function reference or funcptr expected? but is '" ~ method.funcPtr.type.repr ~ "'");
-            }
+            loc.fail("function reference or funcptr expected? but is '" ~ method.funcPtr.type.repr ~ "'");
         }
         auto voidp = once new Pointer(new Void);
         Expression[] combinedArgs;
@@ -540,20 +534,20 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc, bool
         combinedArgs ~= args;
         return new FuncPtrCall(method.funcPtr, combinedArgs, loc);
     }
+    if (autoCall) return null;
     Expression expr = target.instanceOf(Expression);
     // TODO
     // auto funcptr = expr?.type.instanceOf(FunctionPointer);
     FunctionPointer funcptr;
     if (expr) funcptr = expr.type.instanceOf(FunctionPointer);
-    if (expr && funcptr && !autoCall)
+    if (expr && funcptr)
     {
         args = [expectImplicitConvertTo(context, arg, funcptr.args[i], loc) for i, arg in args];
         return new FuncPtrCall(expr, args, loc);
     }
     NestedFunctionPointer nestedfuncptr;
     if (expr) nestedfuncptr = expr.type.instanceOf(NestedFunctionPointer);
-    // TODO unfuck this: nested functions and methods should not be expressions
-    if (expr && nestedfuncptr && !autoCall)
+    if (expr && nestedfuncptr)
     {
         args = [expectImplicitConvertTo(context, arg, nestedfuncptr.args[i], loc) for i, arg in args];
         // TODO cache delegate
@@ -564,7 +558,6 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc, bool
         combinedArgs ~= args;
         return new FuncPtrCall(funcPtr, combinedArgs, loc);
     }
-    if (autoCall) return null;
     if (Struct struct_ = target.instanceOf(Struct))
     {
         loc.assert2s(args.length == struct_.members.length, "invalid number of args for struct constructor");
@@ -1078,7 +1071,6 @@ class ASTDereference : ASTSymbol
 
     override Symbol compile(Context context)
     {
-        // TODO now that we have symbols, this should not be an expression!
         return new Dereference(beExpression(this.base.compile(context)));
     }
 
@@ -1220,7 +1212,6 @@ class ClassInfo : Expression
     override int emit(Generator output)
     {
         this.classType.declare(output);
-        // TODO declare weak to ensure they are merged
         return output.fun.symbolList(this.classType.vtableSymbol);
     }
 
@@ -1295,13 +1286,12 @@ class ASTNewExpression : ASTSymbol
             auto argExpressions = [beExpression3(context, arg.compile(context), this.loc) for arg in this.args];
             this.loc.assert2s2(!!classType, "expected new <class>, not %s", type.repr);
 
-            auto loc = this.loc; // TODO fix
             Expression do_(Expression classptr) {
                 // don't clean up classptr after constructor call, we're continuing its lifetime
                 auto ctor = accessMember(
-                    context, new IgnoreLifetimeExpr(classptr), "__ctor", loc, false);
+                    context, new IgnoreLifetimeExpr(classptr), "__ctor", this.loc, false);
                 auto ctorCall = context.compiler.exprStatement(
-                    callWithLifetime(context, ctor, argExpressions, loc, false));
+                    callWithLifetime(context, ctor, argExpressions, this.loc, false));
 
                 return context.compiler.statementExpression(ctorCall, classptr);
             }
@@ -1397,14 +1387,11 @@ class ASTIdentifier : ASTSymbol
         if (this.moduleLevel) {
             auto module_ = findModule(context.namespace);
             symbol = module_.lookup(this.name, context, null);
-        } else if (context.namespace.instanceOf(Module)
-            || context.namespace.instanceOf(ClassScope)
-            || context.namespace.instanceOf(StructScope)) {
-            // TODO namespace.isFunctionScope
-            symbol = context.namespace.lookup(this.name, context, null);
-        } else {
+        } else if (context.namespace.isContextScope) {
             auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
             symbol = context.namespace.lookup(this.name, context, stackframe);
+        } else {
+            symbol = context.namespace.lookup(this.name, context, null);
         }
         this.loc.assert2s2(!!symbol, this.name, " not found");
         return symbol;
@@ -1976,6 +1963,7 @@ class FunctionScope : Namespace
     this(this.ret, this.extra, this.parent, this.mangle_, this.loc) {
         // TODO dedicated stackframe type so we don't need to keep recreating struct type instances
         this.structType = new Struct("", this.variables, this.loc, this.mangle_);
+        this.isContextScope = true;
     }
 
     LatentVariable declare(string name, Type type, bool owned)
@@ -2017,7 +2005,7 @@ FunctionScope findFunctionScope(Namespace namespace)
 // No-op marker namespace: this is the point that Return unrolls to.
 class FunctionScopeStart : Namespace
 {
-    this(this.parent) { }
+    this(this.parent) { this.isContextScope = true; }
 
     override Symbol lookup(string name, Context context, Expression frame) {
         return parent.lookup(name, context, frame);
@@ -2042,7 +2030,7 @@ class SymbolAlias : Namespace
 
     Symbol value;
 
-    this(this.parent, this.name, this.value) { }
+    this(this.parent, this.name, this.value) { this.isContextScope = parent.isContextScope; }
 
     override Symbol lookup(string name, Context context, Expression frame)
     {
@@ -2072,6 +2060,7 @@ class VariableDeclaration : DeclarationHolder
     this(this.parent, string name, Type type, bool owned)
     {
         this.variable = findFunctionScope(this).declare(name, type, owned);
+        this.isContextScope = true;
     }
 
     override Reference accessDecl()
@@ -2106,7 +2095,7 @@ class NestedFunctionDeclaration : Namespace
     Function nestedFunction;
 
     // TODO collision check
-    this(this.parent, this.nestedFunction) { }
+    this(this.parent, this.nestedFunction) { this.isContextScope = true; }
 
     override Symbol lookup(string name, Context context, Expression frame)
     {
@@ -3015,7 +3004,7 @@ class Module : Namespace
     // when this happens, this member references the previous module.
     Module parentModule;
 
-    this(this.loc, this.name, this.mangledName, this.macroState, this.parentModule) { }
+    this(this.loc, this.name, this.mangledName, this.macroState, this.parentModule) { this.isContextScope = false; }
 
     Module[] imports;
 
@@ -3312,7 +3301,7 @@ class ClassNamespace : Namespace
 {
     Class class_;
 
-    this(this.parent, this.class_) { }
+    this(this.parent, this.class_) { this.isContextScope = true; }
 
     override Symbol lookup(string name, Context context, Expression thisPtr)
     {
@@ -3402,7 +3391,6 @@ class Class : Type
             Reference classInfo = new Dereference(new PointerCast(
                 new Pointer(this.classInfoStruct),
                 new StructMemberReference(new Dereference(asStructPtr), 0)));
-            // TODO dereference-into-symbol so we can '&' it again
             if (this.final_) {
                 auto funcPtr = new FunctionReference(vtable[methodOffset]);
                 return new ClassMethodPtr(funcPtr, baseExpr);
@@ -3717,22 +3705,6 @@ class Class : Type
     }
 }
 
-class ClassScope : Namespace
-{
-    Class class_;
-
-    this(this.parent, this.class_) { }
-
-    override Symbol lookup(string name, Context context, Expression frame)
-    {
-        if (name == this.class_.name)
-        {
-            return this.class_;
-        }
-        return this.parent.lookup(name, context, frame);
-    }
-}
-
 struct ASTClassDeclMember
 {
     string name;
@@ -3800,7 +3772,7 @@ class ASTClassDecl : ASTSymbol
 
     void compile2(Context context, Class target)
     {
-        auto classScope = new ClassScope(context.namespace, target);
+        auto classScope = new SymbolAlias(context.namespace, target.name, target);
         Context classContext = context.withNamespace(classScope);
 
         target.members = [
@@ -4075,7 +4047,7 @@ class TemplateInstantiationNamespace : Namespace
 
     Type parameterType;
 
-    this(this.parent, this.parameterName, this.parameterType) { }
+    this(this.parent, this.parameterName, this.parameterType) { this.isContextScope = false; }
 
     override Symbol lookup(string name, Context context, Expression frame) {
         if (name == parameterName) return parameterType;
@@ -4198,7 +4170,7 @@ class StructNamespace : Namespace
 {
     Struct struct_;
 
-    this(this.parent, this.struct_) { }
+    this(this.parent, this.struct_) { this.isContextScope = true; }
 
     override Symbol lookup(string name, Context context, Expression thisPtr)
     {
@@ -4239,23 +4211,6 @@ class StructMethod : Function
     }
 }
 
-// TODO merge with ClassScope into AliasScope
-class StructScope : Namespace
-{
-    Struct struct_;
-
-    this(this.parent, this.struct_) { }
-
-    override Symbol lookup(string name, Context context, Expression frame)
-    {
-        if (name == this.struct_.name)
-        {
-            return this.struct_;
-        }
-        return this.parent.lookup(name, context, frame);
-    }
-}
-
 class ASTStructDecl : ASTSymbol
 {
     string name;
@@ -4277,7 +4232,7 @@ class ASTStructDecl : ASTSymbol
             for member in this.members];
 
         auto struct_ = new Struct(this.name, members, this.loc, context.namespace.mangle);
-        auto structScope = new StructScope(context.namespace, struct_); // make S visibile in struct S {}
+        auto structScope = new SymbolAlias(context.namespace, struct_.name, struct_); // make S visible in struct S {}
         auto structContext = context.withNamespace(structScope);
 
         struct_.methods = new FunctionDeclaration[](this.methods.length);

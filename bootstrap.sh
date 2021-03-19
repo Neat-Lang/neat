@@ -269,6 +269,8 @@ at_revision '8c6579ffd1ca48a954bf50eb1fbcd801abb18e37' 'rebuild cx' 'build/cx'
 at_revision '30aaa695621a169ea8e345bc55a7e55e08668b6c' 'rebuild cx' 'build/cx'
 # add __GENERATION__ at 1
 at_revision 'a588979560782f49f784f02c0f4f4cfed43b32db' 'rebuild cx' 'build/cx'
+# support type conversion on array ~ element
+at_revision '5c9e121ae34b0ebe03b0567a7e4273cbd1be75b3' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

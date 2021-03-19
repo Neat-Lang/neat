@@ -26,14 +26,14 @@ function checksum {
         md5sum
 }
 
-FLAGS="${FLAGS} --HACK-rename-next-to-compiler"
 # new compiler, reset cache
 if [ ! -d build/src ]
 then
     cp -R src build/src
 fi
 I=1
-build/cx $FLAGS -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_test$I
+NEXT=compiler$(($(build/cx -print-generation) + 1))
+build/cx $FLAGS -next-generation -P$NEXT:src -Pcompiler:build/src src/main.cx -o build/cx_test$I
 
 if [ \! -z ${FAST+x} ]
 then

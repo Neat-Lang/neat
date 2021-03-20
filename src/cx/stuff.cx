@@ -43,47 +43,6 @@ class DefineClass : FinishedSymbol
     }
 }
 
-class ASTFunction
-{
-    Loc loc;
-
-    string name;
-
-    ASTSymbol ret;
-
-    ASTArgument[] args;
-
-    bool isDeclaration;
-
-    ASTStatement statement;
-
-    MacroState macroState;
-
-    this(this.loc, this.name, this.ret, this.args, this.isDeclaration, this.statement,this.macroState) { }
-
-    FunctionDeclaration compile(Context context)
-    {
-        auto arguments = [
-            Argument(false, arg.name, beType(arg.loc, arg.type.compile(context))) for arg in this.args];
-
-        if (this.isDeclaration)
-        {
-            return new FunctionDeclaration(
-                this.name, beType(this.loc, this.ret.compile(context)), arguments);
-        }
-
-        auto fun = new Function(
-            this.loc,
-            this.name,
-            beType(this.loc, this.ret.compile(context)),
-            arguments,
-            this.statement, this.macroState, false);
-
-        fun.parent = context.namespace;
-        return fun;
-    }
-}
-
 ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
 {
     ASTSymbol current = parseLeafType(parser, lexicalContext);
@@ -917,56 +876,6 @@ class SizeOf : Expression
     override ExprInfo info() { return ExprInfo(Ownership.owned); }
 
     override void hash(Hash hash) { hash.adds("SizeOf"); type_.hash(hash); }
-}
-
-class ASTNewExpression : ASTSymbol
-{
-    ASTSymbol type;
-
-    ASTSymbol[] args;
-
-    Loc loc;
-
-    this(this.type, this.args, this.loc) { }
-
-    override Symbol compile(Context context)
-    {
-        Type type = beType(this.loc, this.type.compile(context));
-
-        if (Class classType = type.instanceOf(Class)) {
-            Expression classptr = new NewClassExpression(classType);
-
-            auto argExpressions = [beExpression3(context, arg.compile(context), this.loc) for arg in this.args];
-            this.loc.assert2s2(!!classType, "expected new <class>, not %s", type.repr);
-
-            Expression do_(Expression classptr) {
-                // don't clean up classptr after constructor call, we're continuing its lifetime
-                auto ctor = accessMember(
-                    context, new IgnoreLifetimeExpr(classptr), "__ctor", this.loc, false);
-                auto ctorCall = context.compiler.exprStatement(
-                    callWithLifetime(context, ctor, argExpressions, this.loc, false));
-
-                return context.compiler.statementExpression(ctorCall, classptr);
-            }
-            return context.compiler.exprWithTemporary(classptr, &do_);
-        }
-        if (Array arrayType = type.instanceOf(Array)) {
-            this.loc.assert2s(this.args.length == 1, "expected one argument to loc");
-
-            Type sizeT = context.nativeWordType;
-            auto length = expectImplicitConvertTo(
-                context, beExpression3(context, this.args[0].compile(context), this.loc), sizeT, this.loc);
-            return new ArrayAllocation(arrayType.elementType, length);
-        }
-        this.loc.assert2s2(false, "don't know how to allocate ", type.repr);
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        auto quotedArgs = [arg.quote(quoter) for arg in this.args];
-        return quoter.compilerCall("astNewExpression", [
-            this.type.quote(quoter),
-            quoter.compiler.astArrayLiteral(quotedArgs, loc.reloc)], loc.reloc);
-    }
 }
 
 ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)

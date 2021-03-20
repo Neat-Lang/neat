@@ -1,23 +1,18 @@
 module cx.struct_;
 
+macro import cx.macros.either;
 macro import cx.macros.listcomprehension;
 
 import backend.base;
 import cx.base;
 import cx.expr;
+import cx.function_;
 import cx.hash;
+import cx.parser;
 import cx.parser_base;
 import cx.statements;
+import cx.types;
 import helpers;
-
-class StructMemberDeclaration
-{
-    string name;
-
-    Type type;
-
-    this(this.name, this.type) { }
-}
 
 class Struct : Type
 {
@@ -264,4 +259,181 @@ class StructMemberReference : Reference
         base.hash(hash);
         hash.addl(index);
     }
+}
+
+struct ASTStructMember
+{
+    string name;
+
+    ASTSymbol type;
+}
+
+struct ASTStructMethod
+{
+    Loc loc;
+
+    string name;
+
+    ASTSymbol ret;
+
+    Either(ASTArgument, ASTThisAssignment)[] args;
+
+    ASTStatement body_;
+}
+
+class StructNamespace : Namespace
+{
+    Struct struct_;
+
+    this(this.parent, this.struct_) { this.isContextScope = true; }
+
+    override Symbol lookup(string name, Context context, Expression thisPtr)
+    {
+        auto thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr);
+
+        if (auto result = context.compiler.accessMemberWithLifetime(
+                context, thisPtr, name, Loc(null, ReLoc("", 0)), true))
+            return result;
+
+        // TODO "outer"?
+        if (!this.parent) return null;
+        return this.parent.lookup(name, context, null);
+    }
+}
+
+class StructMethod : Function
+{
+    Loc loc;
+
+    string mangledName;
+
+    this(this.loc, Struct structType, Context context, this.name, this.ret, this.args, this.statement,
+         this.macroState)
+    {
+        // TODO super()
+        auto structNamespace = new StructNamespace(context.namespace, structType);
+        auto ptr = new Pointer(structType);
+
+        this.hasThisArg = true;
+        this.contextType = ptr;
+        this.parent = structNamespace;
+        // TODO mangle types
+        this.mangledName = this.parent.mangle ~ "_" ~ ptr.target.instanceOf(Struct).name ~ "_" ~ this.name;
+    }
+
+    override string mangle()
+    {
+        return mangledName;
+    }
+}
+
+class ASTStructDecl : ASTSymbol
+{
+    string name;
+
+    ASTStructMember[] members;
+
+    ASTStructMethod[] methods;
+
+    MacroState macroState;
+
+    Loc loc;
+
+    this(this.name, this.members, this.methods, this.macroState, this.loc) { }
+
+    override Struct compile(Context context)
+    {
+        auto members = [
+            new StructMemberDeclaration(member.name, beType(this.loc, member.type.compile(context)))
+            for member in this.members];
+
+        auto struct_ = new Struct(this.name, members, this.loc, context.namespace.mangle);
+        // make S visible in struct S {}
+        auto structScope = context.compiler.symbolAlias(context.namespace, struct_.name, struct_);
+        auto structContext = context.withNamespace(structScope);
+
+        struct_.methods = new FunctionDeclaration[](this.methods.length);
+        for (int i <- 0 .. this.methods.length)
+        {
+            auto method = this.methods[i];
+            auto methodArgs = new Argument[](method.args.length);
+
+            for (int k <- 0 .. method.args.length) {
+                method.args[k].case {
+                    ASTArgument arg:
+                        methodArgs[k] = Argument(false, arg.name, beType(arg.loc, arg.type.compile(structContext)));
+                    ASTThisAssignment arg:
+                        assert(false); // TODO this.foo
+                }
+            }
+
+            struct_.methods[i] = new StructMethod(
+                method.loc,
+                struct_,
+                context,
+                method.name,
+                beType(this.loc, method.ret.compile(structContext)),
+                methodArgs,
+                method.body_, this.macroState);
+        }
+        return struct_;
+    }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTStructDecl'!"); assert(false); }
+}
+
+ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
+{
+    Loc loc = parser.loc;
+    parser.begin;
+    if (parseIdentifier(parser) != "struct")
+    {
+        parser.revert;
+        return null;
+    }
+    string name = parseIdentifier(parser);
+    assert(!!name.length);
+    ASTStructMember[] members;
+    ASTStructMethod[] methods;
+    parser.expect("{");
+    while (!parser.accept("}"))
+    {
+        ASTSymbol memberType;
+        string memberName;
+        if (parser.accept("this"))
+        {
+            memberType = new ASTBasicType("void", loc);
+            memberName = "__ctor";
+        }
+        else if (parser.accept("~this"))
+        {
+            memberType = new ASTBasicType("void", loc);
+            memberName = "__dtor";
+        }
+        else
+        {
+            memberType = lexicalContext.compiler.parseType(parser, lexicalContext);
+            if (!memberType) parser.fail("expected member type");
+            memberName = parseIdentifier(parser);
+            if (!memberName.length) parser.fail("expected member name");
+        }
+        if (parser.accept("(")) // method
+        {
+            auto args = parseArglist(parser, lexicalContext);
+            parser.assert_(
+                memberName != "__dtor" || args.length == 0, "destructor cannot take parameters");
+            ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext);
+            methods ~= ASTStructMethod(
+                parser.loc, memberName, memberType, args, stmt);
+        }
+        else
+        {
+            parser.assert_(memberName != "__ctor", "constructor cannot be member");
+            parser.assert_(memberName != "__dtor", "destructor cannot be member");
+            parser.expect(";");
+            members ~= ASTStructMember(memberName, memberType);
+        }
+    }
+    parser.commit;
+    return new ASTStructDecl(name, members, methods, lexicalContext.macroState, loc);
 }

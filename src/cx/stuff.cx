@@ -12,6 +12,7 @@ import cx.array;
 import cx.base;
 import cx.enums;
 import cx.expr;
+import cx.function_;
 import cx.hash;
 import cx.linenr;
 import cx.parser;
@@ -22,139 +23,7 @@ import cx.types;
 import cx.with_;
 import helpers;
 
-struct ASTArgument
-{
-    string name;
-
-    ASTSymbol type;
-
-    Loc loc;
-}
-
-class Function : FunctionDeclaration
-{
-    Loc loc;
-
-    ASTStatement statement;
-
-    MacroState macroState;
-
-    Namespace parent;
-
-    bool hasThisArg;
-
-    this(this.loc, this.name, this.ret, this.args, this.statement, this.macroState, this.hasThisArg)
-    {
-        this.contextType = null;
-        this.parent = null;
-    }
-
-    override string mangle()
-    {
-        if (this.name == "main") return "_main"; // globally unique
-        return this.parent.mangle() ~ "_" ~ this.name;
-    }
-
-    string repr()
-    {
-        string repr = this.name;
-        if (hasThisArg) {
-            repr = this.contextType.repr ~ "::" ~ repr;
-        }
-        if (auto mod = this.parent.instanceOf(Module)) repr = mod.name ~ "." ~ repr;
-        return repr;
-    }
-
-    override void declare(Generator generator)
-    {
-        string mangle = this.mangle;
-        if (generator.mod.declared(mangle)) return;
-
-        Type voidp = once new Pointer(new Void);
-
-        auto argTypes = [arg.type.emit(generator.platform) for arg in this.args];
-        if (this.contextType)
-            argTypes = [voidp.emit(generator.platform)] ~ argTypes;
-
-        generator.mod.declare(
-            mangle,
-            this.ret.emit(generator.platform),
-            argTypes
-        );
-    }
-
-    CompiledFunction compile(CompilerBase compiler, Platform platform)
-    {
-        auto stackframe = new FunctionScope(this.ret, this.contextType, this.parent, this.mangle, this.loc);
-        Namespace scope_ = stackframe;
-        int extra = 0;
-        if (this.contextType)
-            extra = 1;
-
-        auto argAssignments = new Statement[](this.args.length + extra);
-
-        VariableDeclaration thisDecl;
-        if (this.contextType)
-        {
-            bool owned = true; // is this right ... ?
-            // unnamed variable because of "first field in stackframe is 'this'" logic
-            string framePtrName;
-            if (this.hasThisArg) framePtrName = "this";
-            thisDecl = new VariableDeclaration(scope_, framePtrName, this.contextType, owned);
-
-            Type voidp = once new Pointer(new Void);
-
-            scope_ = thisDecl;
-
-            argAssignments[0] = new AssignStatement(
-                thisDecl.accessDecl2(compiler),
-                new PointerCast(this.contextType, new ArgExpr(0, voidp)));
-        }
-
-        auto context = makeContext(compiler, platform, scope_, this.macroState);
-
-        for (int i <- 0 .. this.args.length) {
-            Argument arg = this.args[i];
-            auto argExpr = new ArgExpr(extra + i, arg.type);
-
-            if (arg.isThisAssignment) {
-                this.loc.assert2s(!!thisDecl, "no this. args outside class");
-
-                auto target = accessMemberWithLifetime(
-                        context, thisDecl.accessDecl2(compiler), arg.name, this.loc, false)
-                    .instanceOf(Reference);
-                this.loc.assert2s2(!!target, "not a reference: ", arg.name);
-
-                auto stmt = arg.type.copyInto(context, target, argExpr);
-                if (!stmt) stmt = new AssignStatement(target, argExpr);
-                argAssignments[extra + i] = stmt;
-            } else {
-                auto argDecl = new VariableDeclaration(scope_, arg.name, arg.type, false);
-
-                argAssignments[extra + i] = new AssignStatement(argDecl.accessDecl2(compiler), argExpr);
-
-                scope_ = argDecl;
-            }
-        }
-
-        scope_ = new FunctionScopeStart(scope_);
-        context = context.withNamespace(scope_);
-
-        auto pair = this.statement.compile(context);
-        auto compiledStatement = unwindScope(pair.context, scope_, pair.statement);
-
-        return new CompiledFunction(this, compiledStatement, stackframe, argAssignments);
-    }
-}
-
 // TODO clear all this up
-abstract class FinishedSymbol
-{
-    abstract void emit(Generator generator) { assert(false); }
-    abstract void hash(Hash hash) { assert(false); }
-}
-
-// and this
 class DefineClass : FinishedSymbol
 {
     Class class_;
@@ -170,61 +39,6 @@ class DefineClass : FinishedSymbol
     {
         // only the actual vtable symbol, the methods are also hashed separately
         [hash.adds(method.mangle) for method in class_.vtable_];
-    }
-}
-
-class CompiledFunction : FinishedSymbol
-{
-    Function fun;
-
-    Statement compiledStatement;
-
-    FunctionScope stackframe;
-
-    Statement[] argAssignments;
-
-    this(this.fun, this.compiledStatement, this.stackframe, this.argAssignments) { }
-
-    override void emit(Generator generator)
-    {
-        if (!generator.once(this.fun.mangle)) { print("double-emit " ~ this.fun.mangle); assert(false); }
-        // print("emit " ~ this.fun.mangle);
-
-        assert(!generator.fun);
-        Type voidp = once new Pointer(new Void);
-
-        auto argTypes = [arg.type.emit(generator.platform) for arg in this.fun.args];
-        if (this.fun.contextType)
-            argTypes = [voidp.emit(generator.platform)] ~ argTypes;
-
-        generator.fun = generator.mod.define(
-            this.fun.mangle,
-            this.fun.repr,
-            this.fun.ret.emit(generator.platform),
-            argTypes,
-            this.fun.loc.toBackendLoc
-        );
-
-        generator.frameReg = generator.fun.staticAlloca(this.stackframe.structType.emit(generator.platform));
-
-        [assignment.emit(generator) for assignment in this.argAssignments];
-        this.compiledStatement.emit(generator);
-
-        generator.fun.ret(generator.fun.voidLiteral);
-        generator.fun.done;
-        generator.fun = null;
-        generator.frameReg = -1;
-    }
-
-    override void hash(Hash hash) {
-        hash.adds("fndef");
-        hash.adds(fun.mangle);
-        fun.ret.hash(hash);
-        if (fun.contextType) fun.contextType.hash(hash);
-        else hash.adds("null");
-        hash.addl(fun.args.length);
-        [({ hash.adds(arg.name); arg.type.hash(hash); }) for arg in fun.args];
-        this.compiledStatement.hash(hash);
     }
 }
 
@@ -360,29 +174,6 @@ ASTArgument[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
         args ~= ASTArgument(argname, argtype, loc);
     }
     return args;
-}
-
-class ArgExpr : Expression
-{
-    int index;
-
-    Type type_;
-
-    this(this.index, this.type_) { }
-
-    override int emit(Generator output)
-    {
-        return output.fun.arg(this.index);
-    }
-
-    override Type type()
-    {
-        return this.type_;
-    }
-
-    override ExprInfo info() { return ExprInfo(Ownership.borrowed); }
-
-    override void hash(Hash hash) { hash.adds("ArgExpr"); hash.addl(index); }
 }
 
 class FuncPtrCall : Expression
@@ -1907,123 +1698,6 @@ ASTReturnStatement parseReturn(Parser parser, LexicalContext lexicalContext)
     return new ASTReturnStatement(expr, parser.loc);
 }
 
-class StackFrame : Reference
-{
-    Type targetType;
-
-    this(this.targetType) { }
-
-    override Type type()
-    {
-        return this.targetType;
-    }
-
-    override int emit(Generator generator)
-    {
-        assert(false);
-    }
-
-    override int emitLocation(Generator generator)
-    {
-        return generator.frameReg;
-    }
-
-    override ExprInfo info() { return ExprInfo(Ownership.owned); }
-
-    override void hash(Hash hash) { hash.adds("StackFrame"); targetType.hash(hash); }
-}
-
-// variable without stackframe
-class LatentVariable
-{
-    string name;
-
-    Struct stackFrameType;
-
-    int offset;
-
-    bool owned;
-
-    this(this.name, this.stackFrameType, this.offset, this.owned) { }
-}
-
-class FunctionScope : Namespace
-{
-    Type ret;
-
-    Type extra;
-
-    StructMemberDeclaration[] variables;
-
-    string mangle_;
-
-    Loc loc;
-
-    Struct structType;
-
-    this(this.ret, this.extra, this.parent, this.mangle_, this.loc) {
-        // TODO dedicated stackframe type so we don't need to keep recreating struct type instances
-        this.structType = new Struct("", this.variables, this.loc, this.mangle_);
-        this.isContextScope = true;
-    }
-
-    LatentVariable declare(string name, Type type, bool owned)
-    {
-        this.variables ~= new StructMemberDeclaration(name, type);
-        this.structType = new Struct("", this.variables, this.loc, this.mangle_);
-
-        return new LatentVariable(name, this.structType, cast(int) this.variables.length - 1, owned);
-    }
-
-    override string mangle() { return this.mangle_; }
-
-    override Symbol lookup(string name, Context context, Expression frame)
-    {
-        assert(!!this.parent);
-
-        Expression nextFrame;
-        if (this.extra && frame)
-        {
-            // first field in stackframe must be parent
-            // TODO better?
-            auto framePtr = new PointerCast(once new Pointer(new Pointer(new Void)), frame);
-
-            nextFrame = new Dereference(framePtr);
-        }
-
-        return this.parent.lookup(name, context, nextFrame);
-    }
-}
-
-FunctionScope findFunctionScope(Namespace namespace)
-{
-    if (auto functionScope = namespace.instanceOf(FunctionScope))
-        return functionScope;
-    assert(!!namespace.parent);
-    return findFunctionScope(namespace.parent);
-}
-
-// No-op marker namespace: this is the point that Return unrolls to.
-class FunctionScopeStart : Namespace
-{
-    this(this.parent) { this.isContextScope = true; }
-
-    override Symbol lookup(string name, Context context, Expression frame) {
-        return parent.lookup(name, context, frame);
-    }
-}
-
-FunctionScopeStart findFunctionScopeStart(Namespace namespace)
-{
-    Namespace namespace = namespace; // TODO mut Namespace namespace
-    while (true) {
-        if (auto functionScopeStart = namespace.instanceOf(FunctionScopeStart))
-            return functionScopeStart;
-        assert(!!namespace.parent);
-        namespace = namespace.parent;
-    }
-}
-
 // helper for binding values for stuff like compiler.$stmt
 class SymbolAlias : Namespace
 {
@@ -2036,57 +1710,6 @@ class SymbolAlias : Namespace
     override Symbol lookup(string name, Context context, Expression frame)
     {
         if (this.name == name) return value;
-        if (this.parent) return this.parent.lookup(name, context, frame);
-        return null;
-    }
-}
-
-class BorrowedReference : Reference
-{
-    Reference base;
-
-    this(this.base) { }
-
-    override Type type() { return base.type; }
-    override int emit(Generator output) { return base.emit(output); }
-    override int emitLocation(Generator output) { return base.emitLocation(output); }
-    override void hash(Hash hash) { hash.adds("BorrowedReference"); base.hash(hash); }
-    override ExprInfo info() { return ExprInfo(Ownership.borrowed); }
-}
-
-class VariableDeclaration : DeclarationHolder
-{
-    LatentVariable variable;
-
-    this(this.parent, string name, Type type, bool owned)
-    {
-        this.variable = findFunctionScope(this).declare(name, type, owned);
-        this.isContextScope = true;
-    }
-
-    override Reference accessDecl2(CompilerBase compiler)
-    {
-        // Expression frame = compiler.reference(new StackFrame(variable.stackFrameType));
-        Expression frame = new ReferenceExpression(new StackFrame(variable.stackFrameType));
-        return access(frame);
-    }
-
-    Reference access(Expression frame)
-    {
-        Type stackFrameType = variable.stackFrameType;
-        auto frame = new PointerCast(new Pointer(stackFrameType), frame);
-        auto reference = new StructMemberReference(new Dereference(frame), variable.offset);
-        // an argument, for instance
-        if (!variable.owned) return new BorrowedReference(reference);
-        return reference;
-    }
-
-    override Symbol lookup(string name, Context context, Expression frame)
-    {
-        if (this.variable.name == name)
-        {
-            return access(frame);
-        }
         if (this.parent) return this.parent.lookup(name, context, frame);
         return null;
     }
@@ -2118,7 +1741,7 @@ Statement unwindScope(Context context, Namespace target, Statement body_)
     auto current = context.namespace;
     while (current !is target) {
         if (auto declHolder = current.instanceOf(DeclarationHolder)) {
-            auto var = declHolder.accessDecl2(context.compiler);
+            auto var = declHolder.accessDecl(context.compiler);
             auto type = var.type;
             auto destroy = type.endLifetime(context, var);
             result = sequence(result, destroy);
@@ -2392,7 +2015,7 @@ class ASTVarDeclStatement : ASTStatement
             auto decl = new VariableDeclaration(context.namespace, this.name, type, true);
 
             return StatementCompileResult(
-                move(context, decl.accessDecl2(context.compiler), initial),
+                move(context, decl.accessDecl(context.compiler), initial),
                 context.withNamespace(decl));
         }
         else
@@ -2400,7 +2023,7 @@ class ASTVarDeclStatement : ASTStatement
             auto decl = new VariableDeclaration(context.namespace, this.name, type, true);
 
             return StatementCompileResult(
-                new AssignStatement(decl.accessDecl2(context.compiler), new NullExpr(type)),
+                new AssignStatement(decl.accessDecl(context.compiler), new NullExpr(type)),
                 context.withNamespace(decl));
         }
     }
@@ -2917,6 +2540,7 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
     parser.fail("statement expected");
 }
 
+// TODO move to function_
 ASTFunction parseFunction(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
@@ -3716,11 +3340,6 @@ struct ASTClassDeclMember
     Loc loc;
 }
 
-struct ASTThisAssignment
-{
-    string name;
-}
-
 struct ASTClassDeclMethod
 {
     Loc loc;
@@ -3819,36 +3438,6 @@ class ASTClassDecl : ASTSymbol
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTClassDecl'!"); assert(false); }
-}
-
-Either(ASTArgument, ASTThisAssignment)[] parseArglist(Parser parser, LexicalContext lexicalContext)
-{
-    Either(ASTArgument, ASTThisAssignment)[] args;
-    while (!parser.accept(")"))
-    {
-        if (args.length > 0)
-        {
-            if (!parser.accept(","))
-            {
-                parser.fail("',' or ')' expected");
-            }
-        }
-        auto loc = parser.loc;
-        if (parser.accept("this."))
-        {
-            string argname = parseIdentifier(parser);
-            args ~= ASTThisAssignment(argname);
-        }
-        else
-        {
-            ASTSymbol argtype = parseType(parser, lexicalContext);
-            parser.assert_(!!argtype, "argument type expected");
-            string argname = parseIdentifier(parser);
-            parser.assert_(argname.length > 0, "argument name expected");
-            args ~= ASTArgument(argname, argtype, loc);
-        }
-    }
-    return args;
 }
 
 ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
@@ -4146,181 +3735,6 @@ ASTTemplateDecl parseTemplateDecl(Parser parser, LexicalContext lexicalContext)
 
     parser.expect("}");
     return new ASTTemplateDecl(name, typeParameter, member);
-}
-
-struct ASTStructMember
-{
-    string name;
-
-    ASTSymbol type;
-}
-
-struct ASTStructMethod
-{
-    Loc loc;
-
-    string name;
-
-    ASTSymbol ret;
-
-    Either(ASTArgument, ASTThisAssignment)[] args;
-
-    ASTStatement body_;
-}
-
-class StructNamespace : Namespace
-{
-    Struct struct_;
-
-    this(this.parent, this.struct_) { this.isContextScope = true; }
-
-    override Symbol lookup(string name, Context context, Expression thisPtr)
-    {
-        auto thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr);
-
-        if (auto result = accessMemberWithLifetime(context, thisPtr, name, Loc(null, ReLoc("", 0)), true))
-            return result;
-
-        // TODO "outer"?
-        if (!this.parent) return null;
-        return this.parent.lookup(name, context, null);
-    }
-}
-
-class StructMethod : Function
-{
-    Loc loc;
-
-    string mangledName;
-
-    this(this.loc, Struct structType, Context context, this.name, this.ret, this.args, this.statement,
-         this.macroState)
-    {
-        // TODO super()
-        auto structNamespace = new StructNamespace(context.namespace, structType);
-        auto ptr = new Pointer(structType);
-
-        this.hasThisArg = true;
-        this.contextType = ptr;
-        this.parent = structNamespace;
-        // TODO mangle types
-        this.mangledName = this.parent.mangle ~ "_" ~ ptr.target.instanceOf(Struct).name ~ "_" ~ this.name;
-    }
-
-    override string mangle()
-    {
-        return mangledName;
-    }
-}
-
-class ASTStructDecl : ASTSymbol
-{
-    string name;
-
-    ASTStructMember[] members;
-
-    ASTStructMethod[] methods;
-
-    MacroState macroState;
-
-    Loc loc;
-
-    this(this.name, this.members, this.methods, this.macroState, this.loc) { }
-
-    override Struct compile(Context context)
-    {
-        auto members = [
-            new StructMemberDeclaration(member.name, beType(this.loc, member.type.compile(context)))
-            for member in this.members];
-
-        auto struct_ = new Struct(this.name, members, this.loc, context.namespace.mangle);
-        auto structScope = new SymbolAlias(context.namespace, struct_.name, struct_); // make S visible in struct S {}
-        auto structContext = context.withNamespace(structScope);
-
-        struct_.methods = new FunctionDeclaration[](this.methods.length);
-        for (int i <- 0 .. this.methods.length)
-        {
-            auto method = this.methods[i];
-            auto methodArgs = new Argument[](method.args.length);
-
-            for (int k <- 0 .. method.args.length) {
-                method.args[k].case {
-                    ASTArgument arg:
-                        methodArgs[k] = Argument(false, arg.name, beType(arg.loc, arg.type.compile(structContext)));
-                    ASTThisAssignment arg:
-                        assert(false); // TODO this.foo
-                }
-            }
-
-            struct_.methods[i] = new StructMethod(
-                method.loc,
-                struct_,
-                context,
-                method.name,
-                beType(this.loc, method.ret.compile(structContext)),
-                methodArgs,
-                method.body_, this.macroState);
-        }
-        return struct_;
-    }
-
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTStructDecl'!"); assert(false); }
-}
-
-ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
-{
-    Loc loc = parser.loc;
-    parser.begin;
-    if (parseIdentifier(parser) != "struct")
-    {
-        parser.revert;
-        return null;
-    }
-    string name = parseIdentifier(parser);
-    assert(!!name.length);
-    ASTStructMember[] members;
-    ASTStructMethod[] methods;
-    parser.expect("{");
-    while (!parser.accept("}"))
-    {
-        ASTSymbol memberType;
-        string memberName;
-        if (parser.accept("this"))
-        {
-            memberType = new ASTBasicType("void", loc);
-            memberName = "__ctor";
-        }
-        else if (parser.accept("~this"))
-        {
-            memberType = new ASTBasicType("void", loc);
-            memberName = "__dtor";
-        }
-        else
-        {
-            memberType = parseType(parser, lexicalContext);
-            if (!memberType) parser.fail("expected member type");
-            memberName = parseIdentifier(parser);
-            if (!memberName.length) parser.fail("expected member name");
-        }
-        if (parser.accept("(")) // method
-        {
-            auto args = parseArglist(parser, lexicalContext);
-            parser.assert_(
-                memberName != "__dtor" || args.length == 0, "destructor cannot take parameters");
-            ASTStatement stmt = parseStatement(parser, lexicalContext);
-            methods ~= ASTStructMethod(
-                parser.loc, memberName, memberType, args, stmt);
-        }
-        else
-        {
-            parser.assert_(memberName != "__ctor", "constructor cannot be member");
-            parser.assert_(memberName != "__dtor", "destructor cannot be member");
-            parser.expect(";");
-            members ~= ASTStructMember(memberName, memberType);
-        }
-    }
-    parser.commit;
-    return new ASTStructDecl(name, members, methods, lexicalContext.macroState, loc);
 }
 
 Package selectPackage(Package[] packages, string name, Loc loc)

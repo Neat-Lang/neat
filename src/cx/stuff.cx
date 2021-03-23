@@ -1940,7 +1940,7 @@ class ASTNestedFunctionDeclStatement : ASTStatement
 
         auto namespace = new NestedFunctionDeclaration(context.namespace, fun_);
 
-        module_.update("__" ~ ptrId(this), fun_);
+        module_.register("__" ~ ptrId(this), fun_);
 
         return StatementCompileResult(
             new NoopStatement,
@@ -2385,6 +2385,71 @@ string mangleModuleName(string name, Package pak)
     return patchedPakName ~ "_module_" ~ mangledName;
 }
 
+struct Nothing { }
+
+struct ResolvingModuleEntry
+{
+    string name;
+
+    Symbol resolution;
+
+    Either(ASTFunction, ASTClassDecl, ASTStructDecl, Nothing) symbol;
+}
+
+class Resolver
+{
+    ResolvingModuleEntry[] entries;
+
+    this() { }
+
+    void add(string name, Either(ASTFunction, ASTClassDecl, ASTStructDecl, Nothing) astSymbol)
+    {
+        this.entries ~= ResolvingModuleEntry(name, null, astSymbol);
+    }
+
+    void register(string name, Symbol symbol)
+    {
+        int hit = cast(int) [first i for i, a in this.entries where a.name == name else -1];
+        if (hit == -1) {
+            entries ~= ResolvingModuleEntry(name, symbol, Nothing());
+            return;
+        }
+        entries[hit].resolution = symbol;
+    }
+
+    Symbol lookup(Context context, string name)
+    {
+        int hit = cast(int) [first i for i, a in this.entries where a.name == name else -1];
+        if (hit == -1) return null;
+        resolve(context, hit);
+        return this.entries[hit].resolution;
+    }
+
+    void resolve(Context context, int i)
+    {
+        if (!this.entries[i].resolution) {
+            this.entries[i].resolution = this.entries[i].symbol.case(
+                // TODO compile function statement immediately too
+                ASTFunction fun: cast(Symbol) fun.compile(context),
+                ASTClassDecl decl: cast(Symbol) decl.compile(context),
+                ASTStructDecl decl: cast(Symbol) decl.compile(context),
+                Nothing _: ({ assert(false); cast(Symbol) null; }));
+        }
+    }
+
+    void resolveAll(Context context)
+    {
+        for (int i = 0; i < this.entries.length; i += 1) {
+            resolve(context, i);
+        }
+        for (int i = 0; i < this.entries.length; i += 1) {
+            if (auto class_ = this.entries[i].resolution.instanceOf(Class)) {
+                class_.resolve;
+            }
+        }
+    }
+}
+
 class Module : Namespace
 {
     Loc loc;
@@ -2397,30 +2462,24 @@ class Module : Namespace
     // when this happens, this member references the previous module.
     Module parentModule;
 
-    this(this.loc, this.name, this.mangledName, this.parentModule) { this.isContextScope = false; }
+    Resolver resolver;
+
+    this(this.loc, this.name, this.mangledName, this.parentModule) {
+        this.isContextScope = false;
+        this.resolver = new Resolver;
+    }
+
+    void add(string name, Either(ASTFunction, ASTClassDecl, ASTStructDecl, Nothing) symbol)
+    {
+        this.resolver.add(name, symbol);
+    }
+
+    void register(string name, Symbol symbol)
+    {
+        this.resolver.register(name, symbol);
+    }
 
     Module[] imports;
-
-    ModuleEntry[] entries;
-
-    void add(string name, Symbol symbol)
-    {
-        this.entries ~= new ModuleEntry(name, symbol);
-    }
-
-    /**
-     * Sometimes we add a symbol twice, because the same module
-     * can get compiled twice. Then we use update() to avoid
-     * double-emitting the same function.
-     * The better solution would be to not rely on Module for
-     * determining which functions to recursively emit.
-     */
-    void update(string name, Symbol symbol)
-    {
-        auto pos = [first i for i, a in entries where a.name == name else -1];
-        if (pos == -1) add(name, symbol);
-        else entries[pos].value = symbol;
-    }
 
     void addImport(Module module_)
     {
@@ -2433,12 +2492,9 @@ class Module : Namespace
 
     override string mangle() { return this.mangledName; }
 
-    void resolve()
+    void resolve(Context context)
     {
-        for (auto entry <- this.entries) {
-            if (Class class_ = entry.value.instanceOf(Class))
-                class_.resolve;
-        }
+        this.resolver.resolveAll(context);
     }
 
     void walkModules(void delegate(Module) cb)
@@ -2454,18 +2510,19 @@ class Module : Namespace
         FinishedSymbol[] symbols;
 
         // must be a regular for loop so we can add entries during iteration
-        for (int i = 0; i < this.entries.length; i += 1) {
-            ModuleEntry entry = this.entries[i];
-            if (Function fun = entry.value.instanceOf(Function))
+        for (int i = 0; i < this.resolver.entries.length; i += 1) {
+            // TODO just get rid of this all
+            ResolvingModuleEntry entry = this.resolver.entries[i];
+            if (Function fun = entry.resolution.instanceOf(Function))
             {
                 symbols ~= fun.compile(compiler, platform);
             }
-            if (Class class_ = entry.value.instanceOf(Class)) {
+            if (Class class_ = entry.resolution.instanceOf(Class)) {
                 symbols ~= new DefineClass(class_);
                 // class_.define(generator);
                 symbols ~= [cast(FinishedSymbol) method.compile(compiler, platform) for method in class_.methods];
             }
-            if (Struct struct_ = entry.value.instanceOf(Struct)) {
+            if (Struct struct_ = entry.resolution.instanceOf(Struct)) {
                 symbols ~= [
                     cast(FinishedSymbol) method.instanceOf(StructMethod).compile(compiler, platform)
                     for method in struct_.methods];
@@ -2484,20 +2541,20 @@ class Module : Namespace
         [symbol.emit(generator) for symbol in symbols];
     }
 
-    Symbol lookupPublic(string name)
+    Symbol lookupPublic(Context context, string name)
     {
         // not counting imports (non-transitive)
-        return [first entry.value for entry in this.entries where entry.name == name else null];
+        return this.resolver.lookup(context, name);
     }
 
     override Symbol lookup(string name, Context context, Expression frame)
     {
         if (!!frame) { print("error: lookup with frame propagated to Module"); assert(false); }
 
-        if (Symbol public_ = this.lookupPublic(name)) return public_;
+        if (Symbol public_ = this.lookupPublic(context, name)) return public_;
         for (auto import_ <- this.imports) {
             assert(!!import_);
-            if (Symbol entry = import_.lookupPublic(name)) return entry;
+            if (Symbol entry = import_.lookupPublic(context, name)) return entry;
         }
         if (this.parent)
             return this.parent.lookup(name, context, frame);
@@ -2802,11 +2859,11 @@ class TemplateDecl : Symbol
         Module module_ = new Module(loc, name, moduleMangle, null);
         content.case {
             Class class_:
-                module_.add("", class_);
+                module_.register("", class_);
             Function fun:
-                module_.add("", fun);
+                module_.register("", fun);
         }
-        module_.resolve;
+        module_.resolve(context);
         contextModule.addImport(module_);
 
         return content.case(Class class_: class_.instanceOf(Symbol), Function fun: fun.instanceOf(Symbol));
@@ -2993,27 +3050,27 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
             ASTSymbol typeDecl: {
                 // TODO ASTSymbolDecl?
                 if (auto classDecl = typeDecl.instanceOf(ASTClassDecl)) {
-                    module_.add(classDecl.name, classDecl.compile(context));
+                    module_.add(classDecl.name, classDecl);
                 }
                 else if (auto structDecl = typeDecl.instanceOf(ASTStructDecl)) {
-                    module_.add(structDecl.name, structDecl.compile(context));
+                    module_.add(structDecl.name, structDecl);
                 }
                 else if (auto enumDecl = typeDecl.instanceOf(ASTEnumDecl)) {
-                    module_.add(enumDecl.name, enumDecl.compile(context));
+                    module_.register(enumDecl.name, enumDecl.compile(context));
                 }
                 else assert(false);
             }
             ASTExtern extern_:
-                module_.add(extern_.name, extern_.compile(context));
+                module_.register(extern_.name, extern_.compile(context));
             ASTFunction function_:
-                module_.add(function_.name, function_.compile(context));
+                module_.add(function_.name, function_);
             ASTSymbolAlias symbolAlias:
-                module_.add(symbolAlias.name, symbolAlias.symbol.compile(context));
+                module_.register(symbolAlias.name, symbolAlias.symbol.compile(context));
             ASTTemplateDecl astTemplateDecl:
-                module_.add(astTemplateDecl.name, astTemplateDecl.compile(context));
+                module_.register(astTemplateDecl.name, astTemplateDecl.compile(context));
         }
     }
-    module_.resolve;
+    module_.resolve(context);
     config.cache.add(baseKey, astModule, module_);
     return module_;
 }

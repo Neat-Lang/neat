@@ -78,11 +78,10 @@ class Function : FunctionDeclaration
         VariableDeclaration thisDecl;
         if (this.contextType)
         {
-            bool owned = true; // is this right ... ?
             // unnamed variable because of "first field in stackframe is 'this'" logic
             string framePtrName;
             if (this.hasThisArg) framePtrName = "this";
-            thisDecl = new VariableDeclaration(scope_, framePtrName, this.contextType, owned);
+            thisDecl = new VariableDeclaration(scope_, framePtrName, this.contextType, Ownership.borrowed);
 
             Type voidp = once new Pointer(new Void);
 
@@ -111,7 +110,7 @@ class Function : FunctionDeclaration
                 if (!stmt) stmt = compiler.assignStatement(target, argExpr);
                 argAssignments[extra + i] = stmt;
             } else {
-                auto argDecl = new VariableDeclaration(scope_, arg.name, arg.type, false);
+                auto argDecl = new VariableDeclaration(scope_, arg.name, arg.type, Ownership.borrowed);
 
                 argAssignments[extra + i] = compiler.assignStatement(argDecl.accessDecl(context.compiler), argExpr);
 
@@ -119,11 +118,10 @@ class Function : FunctionDeclaration
             }
         }
 
-        scope_ = new FunctionScopeStart(scope_);
         context = context.withNamespace(scope_);
 
         auto pair = this.statement.compile(context);
-        auto compiledStatement = compiler.unwindScope(pair.context, scope_, pair.statement);
+        auto compiledStatement = compiler.unwindScope(pair.context, stackframe, pair.statement);
 
         return new CompiledFunction(this, compiledStatement, stackframe, argAssignments);
     }
@@ -193,9 +191,9 @@ class LatentVariable
 
     int offset;
 
-    bool owned;
+    Ownership ownership;
 
-    this(this.name, this.stackFrameType, this.offset, this.owned) { }
+    this(this.name, this.stackFrameType, this.offset, this.ownership) { }
 }
 
 class FunctionScope : Namespace
@@ -220,12 +218,12 @@ class FunctionScope : Namespace
         this.isContextScope = true;
     }
 
-    LatentVariable declare(string name, Type type, bool owned)
+    LatentVariable declare(string name, Type type, Ownership ownership)
     {
         this.variables ~= new StructMemberDeclaration(name, type);
         this.structType = this.compiler.struct_("", this.variables, this.loc, this.mangle_);
 
-        return new LatentVariable(name, this.structType, cast(int) this.variables.length - 1, owned);
+        return new LatentVariable(name, this.structType, cast(int) this.variables.length - 1, ownership);
     }
 
     override string mangle() { return this.mangle_; }
@@ -260,9 +258,9 @@ class VariableDeclaration : DeclarationHolder
 {
     LatentVariable variable;
 
-    this(this.parent, string name, Type type, bool owned)
+    this(this.parent, string name, Type type, Ownership ownership)
     {
-        this.variable = findFunctionScope(this).declare(name, type, owned);
+        this.variable = findFunctionScope(this).declare(name, type, ownership);
         this.isContextScope = true;
     }
 
@@ -278,7 +276,7 @@ class VariableDeclaration : DeclarationHolder
         auto frame = new PointerCast(new Pointer(stackFrameType), frame);
         auto reference = compiler.structMemberReference(compiler.dereference(frame), variable.offset);
         // an argument, for instance
-        if (!variable.owned) return new BorrowedReference(reference);
+        if (variable.ownership == Ownership.borrowed) return new BorrowedReference(reference);
         return reference;
     }
 
@@ -353,27 +351,6 @@ class ArgExpr : Expression
     override ExprInfo info() { return ExprInfo(Ownership.borrowed); }
 
     override void hash(Hash hash) { hash.adds("ArgExpr"); hash.addl(index); }
-}
-
-// No-op marker namespace: this is the point that Return unrolls to.
-class FunctionScopeStart : Namespace
-{
-    this(this.parent) { this.isContextScope = true; }
-
-    override Symbol lookup(string name, Context context, Expression frame) {
-        return parent.lookup(name, context, frame);
-    }
-}
-
-FunctionScopeStart findFunctionScopeStart(Namespace namespace)
-{
-    Namespace namespace = namespace; // TODO mut Namespace namespace
-    while (true) {
-        if (auto functionScopeStart = namespace.instanceOf(FunctionScopeStart))
-            return functionScopeStart;
-        assert(!!namespace.parent);
-        namespace = namespace.parent;
-    }
 }
 
 Either(ASTArgument, ASTThisAssignment)[] parseArglist(Parser parser, LexicalContext lexicalContext)

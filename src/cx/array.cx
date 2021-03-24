@@ -2,6 +2,7 @@ module cx.array;
 
 macro import cx.macros.either;
 macro import cx.macros.hash;
+macro import cx.macros.once;
 macro import cx.macros.quasiquoting;
 
 import backend.base;
@@ -71,8 +72,16 @@ class Array : Type
 
         Statement assign(Expression source) {
             auto context = context.withNamespace(context.compiler.exprAlias(context.namespace, "source", source));
+            auto refCountIncFun = once new FunctionDeclaration(
+                "cxruntime_refcount_inc", new Void, [
+                    Argument(false, "label", new Array(new Character)),
+                    Argument(false, "ptr", new Pointer(new Void))]);
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "cxruntime_refcount_inc", refCountIncFun));
             // count up reference
-            auto stmt = compiler.$stmt if (source.base) *cast(size_t*) source.base += 1;;
+            auto stmt = compiler.$stmt if (source.base) {
+                cxruntime_refcount_inc("array acquire", source.base);
+            };
             auto result = stmt.compile(context);
             return compiler.sequenceStatement([
                 result.statement,
@@ -374,13 +383,8 @@ Expression releaseArray(Context context, Expression value) {
     {
         return compiler.$stmt {
             if (!value.base) return;
-            size_t* refs = cast(size_t*) value.base;
-            if (*refs <= 0) {
-                cxruntime_refcount_violation("array release", refs);
-                // assert(false);
-            }
-            *refs -= 1;
-            if (*refs != 0) return;
+            if (!cxruntime_refcount_dec("array release", value.base))
+                return;
             for (int i <- 0 .. value.length) {
                 __destroy(value[i]);
             }

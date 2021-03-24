@@ -361,10 +361,29 @@ void print_backtrace()
     free(strings);
 }
 
-void cxruntime_refcount_violation(struct String s, void *ptr)
+void cxruntime_refcount_violation(struct String s, long long int *ptr)
 {
-    printf("<%.*s: refcount logic violated: %lld at %p\n", (int) s.length, s.ptr, *(long long int*) ptr, ptr);
+    printf("<%.*s: refcount logic violated: %lld at %p\n", (int) s.length, s.ptr, *ptr, ptr);
     print_backtrace();
+}
+
+void cxruntime_refcount_inc(struct String s, long long int *ptr)
+{
+    long long int result = __atomic_add_fetch(ptr, 1, __ATOMIC_RELEASE);
+    if (result <= 1) {
+        cxruntime_refcount_violation(s, ptr);
+    }
+}
+
+int cxruntime_refcount_dec(struct String s, long long int *ptr)
+{
+    long long int result = __atomic_sub_fetch(ptr, 1, __ATOMIC_ACQUIRE);
+    if (result <= -1)
+    {
+        cxruntime_refcount_violation(s, ptr);
+    }
+
+    return result == 0;
 }
 
 struct Cache

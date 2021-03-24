@@ -396,8 +396,8 @@ class Class : Type
         Context context = context; // TODO mut Context context
         Statement do_(Expression source) {
             auto sizeT = context.nativeWordType;
-            auto refCountViolationFun = once new FunctionDeclaration(
-                "cxruntime_refcount_violation", new Void, [
+            auto refCountIncFun = once new FunctionDeclaration(
+                "cxruntime_refcount_inc", new Void, [
                     Argument(false, "label", new Array(new Character)),
                     Argument(false, "ptr", new Pointer(new Void))]);
 
@@ -406,16 +406,13 @@ class Class : Type
             context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "size_t", sizeT));
             context = context.withNamespace(context.compiler.exprAlias(
-                        context.namespace, "cxruntime_refcount_violation", refCountViolationFun));
+                        context.namespace, "cxruntime_refcount_inc", refCountIncFun));
             context = context.withNamespace(context.compiler.exprAlias(
                         context.namespace, "inc_name", new StringLiteral("inc " ~ this.name)));
 
             auto incref = context.compiler.$stmt
             if (!!this) {
-                if ((cast(size_t*) this)[1] <= 0) {
-                    cxruntime_refcount_violation(inc_name, &(cast(size_t*) this)[1]);
-                }
-                (cast(size_t*) this)[1] += 1;
+                cxruntime_refcount_inc(inc_name, &(cast(size_t*) this)[1]);
             };
             auto assign = context.compiler.assignStatement(target, source);
             return context.compiler.sequence(incref.compile(context).statement, assign);
@@ -442,24 +439,21 @@ class Class : Type
         // TODO do in __destroy() once we have function imports
         auto freeFun = once new FunctionDeclaration(
             "free", new Void, [Argument(false, "ptr", new Pointer(new Void))]);
-        auto refCountViolationFun = once new FunctionDeclaration(
-            "cxruntime_refcount_violation", new Void, [
+        auto refCountDecFun = once new FunctionDeclaration(
+            "cxruntime_refcount_dec", new Integer, [
                 Argument(false, "label", new Array(new Character)),
                 Argument(false, "ptr", new Pointer(new Void))]);
 
         context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "free", freeFun));
         context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "cxruntime_refcount_violation", refCountViolationFun));
+                    context.namespace, "cxruntime_refcount_dec", refCountDecFun));
         context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "dec_name", new StringLiteral("dec " ~ this.name)));
         auto stmt = context.compiler.$stmt
             if (!!this) {
-                if ((cast(size_t*) this)[1] <= 0) {
-                    cxruntime_refcount_violation(dec_name, &(cast(size_t*) this)[1]);
-                }
-                (cast(size_t*) this)[1] -= 1;
-                if ((cast(size_t*) this)[1] == 0) {
+                if (cxruntime_refcount_dec(dec_name, &(cast(size_t*) this)[1]))
+                {
                     this.__destroy;
                     free(this);
                 }

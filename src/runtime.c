@@ -40,7 +40,7 @@ int _arraycmp(void* a, void* b, size_t la, size_t lb, size_t sz) {
     if (la != lb) return 0;
     return memcmp(a, b, la * sz) == 0;
 }
-static char* toStringz(struct String str) {
+char* toStringz(struct String str) {
     char *buffer = malloc(str.length + 1);
     strncpy(buffer, str.ptr, str.length);
     buffer[str.length] = 0;

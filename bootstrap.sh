@@ -273,6 +273,10 @@ at_revision 'a588979560782f49f784f02c0f4f4cfed43b32db' 'rebuild cx' 'build/cx'
 at_revision '5c9e121ae34b0ebe03b0567a7e4273cbd1be75b3' 'rebuild cx' 'build/cx'
 # accessDecl(CompilerBase) part 1
 at_revision 'd2ca576122c04360f1dc2acea39c93996d15795b' 'rebuild cx' 'build/cx'
+# cast(char) int, cast(int) char
+at_revision '1ffb69395d42975da6d087579c0669182560e94e' 'rebuild cx' 'build/cx'
+# add \xHH
+at_revision '318cf76dd8c488471d365ead0576b2b51b3e7d83' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

@@ -114,18 +114,14 @@ int cxruntime_linenr(struct String haystack, struct String needle, int* linep, i
     }
     abort();
 }
-int cxruntime_isAlpha(char ch) {
-    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
-}
-int cxruntime_isDigit(char ch) {
-    return ch >= '0' && ch <= '9';
-}
+// TODO remove
 int cxruntime_file_exists(struct String file) {
     char *fn = toStringz(file);
     int ret = access(fn, F_OK) != -1;
     free(fn);
     return ret;
 }
+// TODO remove
 struct String cxruntime_file_read(struct String file) {
     // thanks,
     // https://stackoverflow.com/questions/14002954/c-programming-how-to-read-the-whole-file-contents-into-a-buffer
@@ -143,6 +139,7 @@ struct String cxruntime_file_read(struct String file) {
     return (struct String) { fsize, buffer };
 }
 
+// TODO remove
 void cxruntime_file_write(struct String file, struct String content) {
     char *fn = toStringz(file);
     FILE *f = fopen(fn, "wb");

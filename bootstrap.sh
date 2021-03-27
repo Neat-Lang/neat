@@ -277,6 +277,8 @@ at_revision 'd2ca576122c04360f1dc2acea39c93996d15795b' 'rebuild cx' 'build/cx'
 at_revision '1ffb69395d42975da6d087579c0669182560e94e' 'rebuild cx' 'build/cx'
 # add \xHH
 at_revision '318cf76dd8c488471d365ead0576b2b51b3e7d83' 'rebuild cx' 'build/cx'
+# fix template emission
+at_revision '495eec5f6de89ed2289bc26ed37e2ada39f9da95' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

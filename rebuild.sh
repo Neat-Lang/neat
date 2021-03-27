@@ -9,6 +9,7 @@ else
     set -euxo pipefail
 fi
 FLAGS="-O"
+#FLAGS=""
 
 if [ \! -z ${FAST+x} ]
 then

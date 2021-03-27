@@ -2439,7 +2439,7 @@ struct ResolvingModuleEntry
 
     Symbol resolution;
 
-    Either(ASTFunction, ASTClassDecl, ASTStructDecl, Nothing) symbol;
+    Either(ASTFunction, ASTClassDecl, ASTStructDecl, ASTAliasDecl, Nothing) symbol;
 }
 
 class Resolver
@@ -2448,7 +2448,7 @@ class Resolver
 
     this() { }
 
-    void add(string name, Either(ASTFunction, ASTClassDecl, ASTStructDecl, Nothing) astSymbol)
+    void add(string name, Either(ASTFunction, ASTClassDecl, ASTStructDecl, ASTAliasDecl) astSymbol)
     {
         this.entries ~= ResolvingModuleEntry(name, null, astSymbol);
     }
@@ -2476,9 +2476,10 @@ class Resolver
         if (!this.entries[i].resolution) {
             this.entries[i].resolution = this.entries[i].symbol.case(
                 // TODO compile function statement immediately too
-                ASTFunction fun: cast(Symbol) fun.compile(context),
-                ASTClassDecl decl: cast(Symbol) decl.compile(context),
-                ASTStructDecl decl: cast(Symbol) decl.compile(context),
+                ASTFunction fun:  fun.compile(context),
+                ASTClassDecl decl: decl.compile(context),
+                ASTStructDecl decl: decl.compile(context),
+                ASTAliasDecl decl: decl.target.compile(context),
                 Nothing _: ({ assert(false); cast(Symbol) null; }));
         }
     }
@@ -2515,7 +2516,7 @@ class Module : Namespace
         this.resolver = new Resolver;
     }
 
-    void add(string name, Either(ASTFunction, ASTClassDecl, ASTStructDecl, Nothing) symbol)
+    void add(string name, Either(ASTFunction, ASTClassDecl, ASTStructDecl, ASTAliasDecl) symbol)
     {
         this.resolver.add(name, symbol);
     }
@@ -2966,6 +2967,7 @@ Package selectPackage(Package[] packages, string name, Loc loc)
     return result;
 }
 
+// TODO remove
 class ASTSymbolAlias
 {
     string name;
@@ -2973,6 +2975,30 @@ class ASTSymbolAlias
     ASTSymbol symbol;
 
     this(this.name, this.symbol) { }
+}
+
+class ASTAliasDecl : ASTSymbol
+{
+    string name;
+
+    ASTSymbol target;
+
+    this(this.name, this.target) { }
+
+    override Symbol compile(Context context) {
+        return this.target.compile(context);
+    }
+}
+
+ASTAliasDecl parseAliasDecl(Parser parser, LexicalContext lexicalContext) {
+    if (!parser.accept("alias")) return null;
+    auto loc = parser.loc;
+    string name = parseIdentifier(parser);
+    loc.assert2s(name.length > 0, "alias name expected");
+    parser.expect("=");
+    auto target = parseExpression(parser, lexicalContext);
+    parser.expect(";");
+    return new ASTAliasDecl(name, target);
 }
 
 ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule module_,
@@ -3016,6 +3042,10 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
         }
         if (ASTEnumDecl enumDecl = parseEnumDecl(parser, lexicalContext)) {
             module_.entries ~= enumDecl;
+            continue;
+        }
+        if (ASTAliasDecl aliasDecl = parseAliasDecl(parser, lexicalContext)) {
+            module_.entries ~= aliasDecl;
             continue;
         }
         if (ASTModule submod = parseMacroContinuation(compiler, parser, helper, module_, config))
@@ -3094,16 +3124,19 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
 
                 module_.addImport(importedModule);
             }
-            ASTSymbol typeDecl: {
+            ASTSymbol symbol: {
                 // TODO ASTSymbolDecl?
-                if (auto classDecl = typeDecl.instanceOf(ASTClassDecl)) {
+                if (auto classDecl = symbol.instanceOf(ASTClassDecl)) {
                     module_.add(classDecl.name, classDecl);
                 }
-                else if (auto structDecl = typeDecl.instanceOf(ASTStructDecl)) {
+                else if (auto structDecl = symbol.instanceOf(ASTStructDecl)) {
                     module_.add(structDecl.name, structDecl);
                 }
-                else if (auto enumDecl = typeDecl.instanceOf(ASTEnumDecl)) {
+                else if (auto enumDecl = symbol.instanceOf(ASTEnumDecl)) {
                     module_.register(enumDecl.name, enumDecl.compile(context));
+                }
+                else if (auto aliasDecl = symbol.instanceOf(ASTAliasDecl)) {
+                    module_.add(aliasDecl.name, aliasDecl);
                 }
                 else assert(false);
             }

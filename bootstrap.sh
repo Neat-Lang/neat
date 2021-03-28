@@ -279,8 +279,8 @@ at_revision '1ffb69395d42975da6d087579c0669182560e94e' 'rebuild cx' 'build/cx'
 at_revision '318cf76dd8c488471d365ead0576b2b51b3e7d83' 'rebuild cx' 'build/cx'
 # fix template emission
 at_revision '495eec5f6de89ed2289bc26ed37e2ada39f9da95' 'rebuild cx' 'build/cx'
-# tuples, tuple names
-at_revision '05a20e1cc5c0ba5da8ea1aafb20e3d76490354b2' 'rebuild cx' 'build/cx'
+# tuples, tuple names, tuple refs
+at_revision '3f4925db6f8e3f2f1d48e4e532aa144be7c5214a' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

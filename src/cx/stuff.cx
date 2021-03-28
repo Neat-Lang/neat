@@ -115,6 +115,228 @@ ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
     }
 }
 
+class TupleExpr : Expression
+{
+    Expression[] members;
+
+    this(this.members) { }
+
+    override Type type() {
+        return new TupleType([member.type for member in this.members]);
+    }
+    override int emit(Generator output) {
+        return output.fun.structLiteral(
+            type.emit(output.platform),
+            [member.emit(output) for member in this.members]);
+    }
+    override ExprInfo info() {
+        // TODO lifetime tracking in tuples
+        // global if all == global
+        // owned if all == owned or global
+        // gifted otherwise
+        return ExprInfo(Ownership.owned);
+    }
+    override void hash(Hash hash) {
+        hash.adds("tuple_expr");
+        hash.addl(this.members.length);
+        [member.hash(hash) for member in this.members];
+    }
+}
+
+class ASTTupleExpr : ASTSymbol
+{
+    Loc loc;
+
+    ASTSymbol[] members;
+
+    this(this.loc, this.members) { }
+
+    override Expression compile(Context context) {
+        return new TupleExpr([beExpression2(member.compile(context), loc) for member in this.members]);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        print("cannot quote 'ASTTupleExpr'!");
+        assert(false);
+    }
+}
+
+ASTSymbol parseTupleExpression(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin;
+    auto loc = parser.loc;
+    if (!parser.accept("(")) {
+        parser.revert;
+        return null;
+    }
+    ASTSymbol[] members;
+    while (!parser.accept(")"))
+    {
+        if (members.length && !parser.accept(",")) {
+            // be a bit lenient for (bla bla)
+            if (members.length == 1) {
+                parser.revert;
+                return null;
+            }
+            auto loc = parser.loc;
+            loc.assert2s(false, "tuple: ',' expected");
+        }
+        auto member = parseExpression(parser, lexicalContext);
+        if (!member) {
+            // (bla bla) still
+            if (members.length <= 1) {
+                parser.revert;
+                return null;
+            }
+            // FIXME parser.loc.assert2s
+            auto loc = parser.loc;
+            loc.assert2s(false, "tuple: member expected");
+        }
+        members ~= member;
+    }
+    // (bla) is not a tuple, it's a paren expression
+    if (members.length == 1) {
+        parser.revert;
+        return null;
+    }
+    parser.commit;
+    return new ASTTupleExpr(loc, members);
+}
+
+class TupleMemberExpr : Expression
+{
+    Loc loc;
+
+    Expression tuple;
+
+    int index;
+
+    this(this.loc, this.tuple, this.index) { }
+
+    override Type type() {
+        // FIXME we should check this earlier
+        if (auto tuple = this.tuple.type.instanceOf(TupleType)) {
+            loc.assert2s(this.index >= 0 && this.index < tuple.types.length, "tuple index out of range");
+            return tuple.types[index];
+        }
+        // This should never happen!
+        // TODO index overload on types
+        loc.assert2s(false, "tuple index on non-tuple type");
+    }
+    override int emit(Generator output) {
+        // TODO free unused fields
+        auto tuple = this.tuple.emit(output);
+        return output.fun.field(this.tuple.type.emit(output.platform), tuple, index);
+    }
+    override ExprInfo info() {
+        return tuple.info;
+    }
+    override void hash(Hash hash) {
+        hash.adds("tuple_member");
+        hash.addl(index);
+        tuple.hash(hash);
+    }
+}
+
+class TupleType : Type
+{
+    Type[] types;
+
+    this(this.types) { }
+
+    override BackendType emit(Platform platform) {
+        return new BackendStructType([type.emit(platform) for type in types]);
+    }
+
+    override bool same(Type type) {
+        if (auto other = type.instanceOf(TupleType)) {
+            return other.types.length == types.length &&
+                [all type.same(other.types[i]) for i, type in types];
+        }
+        return false;
+    }
+
+    // TODO this is begging for [join ", " a.repr]
+    override string repr() {
+        string res = "(";
+        for (int i <- 0..types.length) {
+            if (i) res ~= ", ";
+            res ~= types[i].repr;
+        }
+        res ~= ")";
+        return res;
+    }
+
+    override string mangle() {
+        string res = "tuple_";
+        for (int i <- 0..types.length) {
+            if (i) res ~= "_";
+            res ~= types[i].mangle;
+        }
+        return res;
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("tuple");
+        hash.addl(this.types.length);
+        [type.hash(hash) for type in this.types];
+    }
+}
+
+class ASTTupleType : ASTSymbol
+{
+    Loc loc;
+
+    ASTSymbol[] members;
+
+    this(this.loc, this.members) { }
+
+    override Type compile(Context context) {
+        Type[] typeMembers = [beType(this.loc, member.compile(context)) for member in members];
+        return new TupleType(typeMembers);
+    }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTSymbol'!"); assert(false); }
+}
+
+ASTSymbol parseTupleType(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin;
+    auto loc = parser.loc;
+    if (!parser.accept("(")) {
+        parser.revert;
+        return null;
+    }
+    ASTSymbol[] members;
+    while (!parser.accept(")"))
+    {
+        if (members.length && !parser.accept(",")) {
+            // be a bit lenient for (bla bla)
+            if (members.length == 1) {
+                parser.revert;
+                return null;
+            }
+            loc.assert2s(false, "tuple: ',' expected");
+        }
+        auto type = parseType(parser, lexicalContext);
+        // FIXME parser.loc.assert2s
+        auto loc = parser.loc;
+        if (!type) {
+            // (bla bla) still
+            if (members.length <= 1) {
+                parser.revert;
+                return null;
+            }
+            // FIXME parser.loc.assert2s
+            auto loc = parser.loc;
+            loc.assert2s(false, "tuple: type expected");
+        }
+        members ~= type;
+    }
+    parser.commit;
+    return new ASTTupleType(loc, members);
+}
+
 ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
 {
     {
@@ -122,6 +344,11 @@ ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
         lexicalContext.macroState.applyMacro(typeMacroArgs);
         if (typeMacroArgs.astType) return typeMacroArgs.astType;
     }
+
+    // must be before any () parsing for types we may add.
+    if (auto symbol = parseTupleType(parser, lexicalContext))
+        return symbol;
+
     auto loc = parser.loc;
     parser.begin;
 
@@ -587,10 +814,17 @@ class ASTIndexAccess : ASTSymbol
     override Expression compile(Context context)
     {
         Expression base = beExpression3(context, this.base.compile(context), this.loc);
+        auto type = base.type;
+        // TODO refcounting
+        if (type.instanceOf(TupleType))
+        {
+            auto indexExpr = beExpression3(context, this.index.compile(context), this.loc).instanceOf(IntLiteral);
+            this.loc.assert2s(!!indexExpr, "int literal expected for tuple access");
+            return new TupleMemberExpr(this.loc, base, indexExpr.value);
+        }
 
         Expression do_(Reference base)
         {
-            auto type = base.type;
             Expression indexExpr;
             Expression ptrBase;
 
@@ -740,7 +974,7 @@ Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc
 
 Symbol accessMember(Context context, Symbol base, string member, Loc loc, bool allowUndefined) {
     if (auto type = base.instanceOf(Type)) {
-        return type.accessMember(context, null, member);
+        return type.accessMember(loc, context, null, member);
     }
 
     loc.assert2s(!!base.instanceOf(Expression), "expected expression for member access");
@@ -750,7 +984,7 @@ Symbol accessMember(Context context, Symbol base, string member, Loc loc, bool a
         baseExpr = new Dereference(baseExpr);
     }
 
-    if (auto field = baseExpr.type.accessMember(context, baseExpr, member))
+    if (auto field = baseExpr.type.accessMember(loc, context, baseExpr, member))
         return field;
 
     if (allowUndefined) return null;
@@ -992,6 +1226,10 @@ ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
         ASTSymbol value = parseExpressionLeaf(parser, lexicalContext);
 
         return new ASTCastExpr(target, value, loc);
+    }
+    if (auto tuple = parseTupleExpression(parser, lexicalContext))
+    {
+        return tuple;
     }
     if (parser.accept("!"))
     {

@@ -115,34 +115,6 @@ ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
     }
 }
 
-class TupleExpr : Expression
-{
-    Expression[] members;
-
-    this(this.members) { }
-
-    override Type type() {
-        return new TupleType([member.type for member in this.members]);
-    }
-    override int emit(Generator output) {
-        return output.fun.structLiteral(
-            type.emit(output.platform),
-            [member.emit(output) for member in this.members]);
-    }
-    override ExprInfo info() {
-        // TODO lifetime tracking in tuples
-        // global if all == global
-        // owned if all == owned or global
-        // gifted otherwise
-        return ExprInfo(Ownership.owned);
-    }
-    override void hash(Hash hash) {
-        hash.adds("tuple_expr");
-        hash.addl(this.members.length);
-        [member.hash(hash) for member in this.members];
-    }
-}
-
 class ASTTupleExpr : ASTSymbol
 {
     Loc loc;
@@ -152,7 +124,20 @@ class ASTTupleExpr : ASTSymbol
     this(this.loc, this.members) { }
 
     override Expression compile(Context context) {
-        return new TupleExpr([beExpression2(member.compile(context), loc) for member in this.members]);
+        Expression[] memberValues = [beExpression3(context, member.compile(context), loc) for member in members];
+
+        auto type = new TupleType([TupleMember("", member.type) for member in memberValues]);
+        Statement do_(Reference target) {
+            Statement init;
+            for (int i <- 0 .. memberValues.length) {
+                auto field = new TupleMemberRef(loc, target, i);
+                auto setField = memberValues[i].type.copyInto(context, field, memberValues[i]);
+                if (!setField) setField = context.compiler.assignStatement(field, memberValues[i]);
+                init = sequence(init, setField);
+            }
+            return init;
+        }
+        return context.compiler.exprWithScratchspace(type, true, &do_);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -216,8 +201,8 @@ class TupleMemberExpr : Expression
     override Type type() {
         // FIXME we should check this earlier
         if (auto tuple = this.tuple.type.instanceOf(TupleType)) {
-            loc.assert2s(this.index >= 0 && this.index < tuple.types.length, "tuple index out of range");
-            return tuple.types[index];
+            loc.assert2s(this.index >= 0 && this.index < tuple.members.length, "tuple index out of range");
+            return tuple.members[index].type;
         }
         // This should never happen!
         // TODO index overload on types
@@ -238,50 +223,115 @@ class TupleMemberExpr : Expression
     }
 }
 
+// TODO merge with TupleMemberExpression somehow... mixin? static if (is(T == Reference))?
+class TupleMemberRef : Reference
+{
+    Loc loc;
+
+    Reference tuple;
+
+    int index;
+
+    this(this.loc, this.tuple, this.index) { }
+
+    override Type type() {
+        // FIXME we should check this earlier
+        if (auto tuple = this.tuple.type.instanceOf(TupleType)) {
+            loc.assert2s(this.index >= 0 && this.index < tuple.members.length, "tuple index out of range");
+            return tuple.members[index].type;
+        }
+        // This should never happen!
+        // TODO index overload on types
+        loc.assert2s(false, "tuple index on non-tuple type");
+    }
+    override int emit(Generator output) {
+        // TODO free unused fields
+        auto tuple = this.tuple.emit(output);
+        return output.fun.field(this.tuple.type.emit(output.platform), tuple, index);
+    }
+    override ExprInfo info() {
+        return tuple.info;
+    }
+    override int emitLocation(Generator output) {
+        auto tupleLocation = this.tuple.instanceOf(Reference).emitLocation(output);
+        return output.fun.fieldOffset(this.tuple.type.emit(output.platform), tupleLocation, index);
+    }
+    override void hash(Hash hash) {
+        hash.adds("tuple_member_ref");
+        hash.addl(index);
+        tuple.hash(hash);
+    }
+}
+
+struct TupleMember
+{
+    string name;
+    Type type;
+}
+
 class TupleType : Type
 {
-    Type[] types;
+    TupleMember[] members;
 
-    this(this.types) { }
+    this(this.members) { }
 
     override BackendType emit(Platform platform) {
-        return new BackendStructType([type.emit(platform) for type in types]);
+        return new BackendStructType([member.type.emit(platform) for member in members]);
     }
 
     override bool same(Type type) {
         if (auto other = type.instanceOf(TupleType)) {
-            return other.types.length == types.length &&
-                [all type.same(other.types[i]) for i, type in types];
+            return other.members.length == members.length &&
+                [all member.type.same(other.members[i].type) for i, member in members];
         }
         return false;
     }
 
     override string repr() {
-        return "(" ~ [join ", " type.repr for type in types] ~ ")";
+        return "(" ~ [join ", " member.type.repr for member in members] ~ ")";
     }
 
     override string mangle() {
-        return "tuple_" ~ [join "_" type.mangle for type in types];
+        return "tuple_" ~ [join "_" member.type.mangle for member in members];
+    }
+
+    override Symbol accessMember(Loc loc, Context context, Expression base, string field)
+    {
+        if (!base) return null;
+        int index = [first cast(int) i for i, member in members where member.name == field else -1];
+        loc.assert2s(index != -1, "no such tuple field: " ~ field);
+        if (auto ref_ = base.instanceOf(Reference)) {
+            return new TupleMemberRef(loc, ref_, index);
+        }
+        return new TupleMemberExpr(loc, base, index);
     }
 
     override void hash(Hash hash) {
         hash.adds("tuple");
-        hash.addl(this.types.length);
-        [type.hash(hash) for type in this.types];
+        hash.addl(this.members.length);
+        [member.type.hash(hash) for member in this.members];
     }
+}
+
+struct ASTTupleMember
+{
+    string name;
+    ASTSymbol type;
 }
 
 class ASTTupleType : ASTSymbol
 {
     Loc loc;
 
-    ASTSymbol[] members;
+    ASTTupleMember[] members;
 
     this(this.loc, this.members) { }
 
     override Type compile(Context context) {
-        Type[] typeMembers = [beType(this.loc, member.compile(context)) for member in members];
-        return new TupleType(typeMembers);
+        TupleMember[] members = [
+            TupleMember(member.name, beType(this.loc, member.type.compile(context)))
+            for member in this.members];
+        return new TupleType(members);
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTSymbol'!"); assert(false); }
@@ -295,7 +345,7 @@ ASTSymbol parseTupleType(Parser parser, LexicalContext lexicalContext)
         parser.revert;
         return null;
     }
-    ASTSymbol[] members;
+    ASTTupleMember[] members;
     while (!parser.accept(")"))
     {
         if (members.length && !parser.accept(",")) {
@@ -319,7 +369,8 @@ ASTSymbol parseTupleType(Parser parser, LexicalContext lexicalContext)
             auto loc = parser.loc;
             loc.assert2s(false, "tuple: type expected");
         }
-        members ~= type;
+        string name = parseIdentifier(parser);
+        members ~= ASTTupleMember(name, type);
     }
     parser.commit;
     return new ASTTupleType(loc, members);
@@ -804,6 +855,7 @@ class ASTIndexAccess : ASTSymbol
         Expression base = beExpression3(context, this.base.compile(context), this.loc);
         auto type = base.type;
         // TODO refcounting
+        // TODO overload
         if (type.instanceOf(TupleType))
         {
             auto indexExpr = beExpression3(context, this.index.compile(context), this.loc).instanceOf(IntLiteral);

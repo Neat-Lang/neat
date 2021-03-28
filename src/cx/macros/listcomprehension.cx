@@ -17,6 +17,8 @@ class ASTListComprehension : ASTSymbol
 
     ASTSymbol default_;
 
+    ASTSymbol joinKey;
+
     string iname; // iteration variable
 
     string varname;
@@ -27,7 +29,7 @@ class ASTListComprehension : ASTSymbol
 
     Loc loc;
 
-    this(this.iterationMode, this.expr, this.default_,
+    this(this.iterationMode, this.expr, this.default_, this.joinKey,
          this.iname, this.varname, this.source, this.where, this.loc)
     {
         if (!iname.length) iname = "__i";
@@ -91,6 +93,26 @@ class ASTListComprehension : ASTSymbol
                 }
                 __result;
             })).compile(context);
+        } else if (iterationMode == "join") {
+            assert(!default_);
+            auto test = compiler.$expr true;
+            if (where) test = compiler.$expr $where && $test;
+            return (compiler.$expr ({
+                auto __source = $source;
+                string __result;
+                bool __first = true;
+                for (size_t $iname = 0; $i < __source.length; $i += 1) {
+                    auto $varname = __source[$i];
+                    if ($test) {
+                        if (__first) {
+                            __first = false;
+                            __result ~= $joinKey;
+                        }
+                        __result ~= $expr;
+                    }
+                }
+                __result;
+            })).compile(context);
         } else if (iterationMode == "first") {
             assert(!!default_);
             auto test = compiler.$expr true;
@@ -146,11 +168,18 @@ class ListComprehension : Macro
             parser.revert();
             return null;
         }
-        ASTSymbol default_;
         string iterationMode;
+        ASTSymbol default_;
+        ASTSymbol joinKey;
         if (acceptIdentifier(parser, "any")) iterationMode = "any";
         else if (acceptIdentifier(parser, "all")) iterationMode = "all";
         else if (acceptIdentifier(parser, "first")) iterationMode = "first";
+        else if (acceptIdentifier(parser, "join")) {
+            iterationMode = "join";
+            joinKey = compiler.parseExpression(parser, lexicalContext);
+            auto loc = parser.loc;
+            loc.assert2s(!!joinKey, "join key expected");
+        }
         auto expr = compiler.parseExpression(parser, lexicalContext);
         if (!expr) {
             parser.revert();
@@ -191,7 +220,7 @@ class ListComprehension : Macro
         }
         parser.expect("]");
         parser.commit();
-        return new ASTListComprehension(iterationMode, expr, default_, iname, varname, source, where, loc);
+        return new ASTListComprehension(iterationMode, expr, default_, joinKey, iname, varname, source, where, loc);
     }
 }
 

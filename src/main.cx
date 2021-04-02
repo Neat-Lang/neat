@@ -376,11 +376,43 @@ struct CachedRuntimeFunction
     Module rtMod;
 }
 
+class UmlClassGraph : GlobalStats
+{
+    (string base, string child)[] inheritance;
+
+    this() { }
+
+    override void observe(Type type) {
+        if (auto class_ = type.instanceOf(Class)) {
+            if (class_.superClass) {
+                auto pair = (class_.superClass.name, class_.name);
+                // TODO
+                // if (![any a == pair for a in this.inheritance])
+                if (![any a[0] == pair[0] && a[1] == pair[1] for a in this.inheritance])
+                    this.inheritance ~= pair;
+            }
+        }
+    }
+
+    void writeTo(string filename) {
+        string diagram = "Digraph G {\n";
+        void addl(string s) { diagram ~= "  " ~ s ~ "\n"; }
+        for (auto pair <- inheritance) {
+            addl(pair.base ~ " -> " ~ pair.child ~ " [dir=back, arrowhead=empty];");
+        }
+        diagram ~= "}\n";
+        write(filename, diagram);
+    }
+}
+
 class CompilerImpl : CompilerBase
 {
     ASTModule[] defaultImports;
 
-    this(this.defaultImports) { this.linenr = new LineNumberRegistry; }
+    this(this.defaultImports) {
+        this.linenr = new LineNumberRegistry;
+        this.stats = new UmlClassGraph;
+    }
 
     CachedRuntimeFunction[] cachedRuntimeFunctions;
 
@@ -950,6 +982,7 @@ void main(string[] args)
     // TODO mut
     Backend macroBackend; macroBackend = backend;
     int generation = __GENERATION__;
+    string umlFile;
     PlatformFlags platformFlags, macroPlatformFlags;
     {
         string[] remArgs;
@@ -993,6 +1026,10 @@ void main(string[] args)
             } else if (arg == "-next-generation") {
                 // build the next generation of the compiler (used by rebuild.sh)
                 generation = __GENERATION__ + 1;
+            } else if (arg == "-uml") {
+                assert(i + 1 < args.length);
+                umlFile = args[i + 1];
+                i += 1;
             } else {
                 remArgs ~= arg;
             }
@@ -1084,6 +1121,10 @@ void main(string[] args)
     for (int pid <- pids) {
         if (!cxruntime_waitpid(pid))
             assert(false);
+    }
+
+    if (umlFile != "") {
+        compilerImpl.stats.instanceOf(UmlClassGraph).writeTo(umlFile);
     }
 
     if (dontLink) return;

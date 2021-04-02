@@ -45,7 +45,7 @@ class DefineClass : FinishedSymbol
 
 ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
 {
-    ASTSymbol current = parseLeafType(parser, lexicalContext);
+    ASTSymbol current = parser.parseLeafType(lexicalContext);
     if (!current) return null;
     while (true)
     {
@@ -56,7 +56,7 @@ ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
             continue;
         }
         parser.begin;
-        string identifier = parseIdentifier(parser);
+        string identifier = parser.parseIdentifier;
         if (identifier == "function" || identifier == "delegate")
         {
             parser.expect("(");
@@ -70,7 +70,7 @@ ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
                         parser.fail("',' or ')' expected");
                     }
                 }
-                ASTSymbol argType = parseType(parser, lexicalContext);
+                ASTSymbol argType = parser.parseType(lexicalContext);
                 assert(!!argType);
 
                 args ~= argType;
@@ -103,7 +103,7 @@ ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
             // TODO better way to exclude all the negated operators
             if (parser.accept("!") && !parser.accept("=") && !acceptIdentifier(parser, "is"))
             {
-                auto templateArg = parseType(parser, lexicalContext);
+                auto templateArg = parser.parseType(lexicalContext);
                 parser.assert_(!!templateArg, "template argument required");
                 parser.commit;
                 current = new ASTTemplateInstance(current, templateArg, instanceLoc);
@@ -124,7 +124,7 @@ class ASTTupleExpr : ASTSymbol
     this(this.loc, this.members) { }
 
     override Expression compile(Context context) {
-        Expression[] memberValues = [beExpression3(context, member.compile(context), loc) for member in members];
+        Expression[] memberValues = [member.compile(context).beExpressionImplCall(context, loc) for member in members];
 
         auto type = new TupleType([("", member.type) for member in memberValues]);
         Statement do_(Reference target) {
@@ -166,7 +166,7 @@ ASTSymbol parseTupleExpression(Parser parser, LexicalContext lexicalContext)
             auto loc = parser.loc;
             loc.assert2s(false, "tuple: ',' expected");
         }
-        auto member = parseExpression(parser, lexicalContext);
+        auto member = parser.parseExpression(lexicalContext);
         if (!member) {
             // (bla bla) still
             if (members.length <= 1) {
@@ -343,7 +343,7 @@ ASTSymbol parseTupleType(Parser parser, LexicalContext lexicalContext)
             }
             loc.assert2s(false, "tuple: ',' expected");
         }
-        auto type = parseType(parser, lexicalContext);
+        auto type = parser.parseType(lexicalContext);
         // FIXME parser.loc.assert2s
         auto loc = parser.loc;
         if (!type) {
@@ -356,7 +356,7 @@ ASTSymbol parseTupleType(Parser parser, LexicalContext lexicalContext)
             auto loc = parser.loc;
             loc.assert2s(false, "tuple: type expected");
         }
-        string name = parseIdentifier(parser);
+        string name = parser.parseIdentifier;
         members ~= (name, type);
     }
     parser.commit;
@@ -372,7 +372,7 @@ ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
     }
 
     // must be before any () parsing for types we may add.
-    if (auto symbol = parseTupleType(parser, lexicalContext))
+    if (auto symbol = parser.parseTupleType(lexicalContext))
         return symbol;
 
     auto loc = parser.loc;
@@ -388,7 +388,7 @@ ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
         return new ASTTypeof(expr, loc);
     }
 
-    string identifier = parseIdentifier(parser);
+    string identifier = parser.parseIdentifier;
 
     if (!identifier.length)
     {
@@ -448,11 +448,11 @@ ASTArgument[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
             }
         }
         auto loc = parser.loc;
-        ASTSymbol argtype = parseType(parser, lexicalContext);
+        ASTSymbol argtype = parser.parseType(lexicalContext);
         if (!argtype) {
             parser.fail("type expected");
         }
-        string argname = parseIdentifier(parser);
+        string argname = parser.parseIdentifier;
         args ~= ASTArgument(argname, argtype, loc);
     }
     return args;
@@ -790,7 +790,7 @@ class ASTCall : ASTSymbol
              * Check if "foo" has a property "bar".
              * If not, call bar(foo, baz) instead.
              */
-            auto base = isExpressionImplCall(context, astMemberAccess.base.compile(context), this.loc);
+            auto base = astMemberAccess.base.compile(context).isExpressionImplCall(context, this.loc);
             if (base) {
                 auto member = accessMember(context, base, astMemberAccess.member, astMemberAccess.loc, true);
                 if (!member) {
@@ -1050,7 +1050,7 @@ class ASTMember : ASTMemberBase
         // UFCS part two
         // support `foo.bar` as implicit `bar(foo)` if `foo` has no member `bar`
         // TODO merge with ASTCall UFCS code (they should be the same)
-        auto base = isExpressionImplCall(context, this.base.compile(context), this.loc);
+        auto base = this.base.compile(context).isExpressionImplCall(context, this.loc);
         if (base) {
             auto member = accessMember(context, base, this.member, this.loc, true);
             if (!member) {
@@ -1084,7 +1084,7 @@ ASTMember parseMember(Parser parser, ASTSymbol base)
         parser.revert;
         return null;
     }
-    string name = parseIdentifier(parser);
+    string name = parser.parseIdentifier;
     parser.assert_(name.length > 0, "member expected");
     parser.commit;
     return new ASTMember(base, name, parser.loc);
@@ -1099,7 +1099,7 @@ ASTSymbol parseTemplateInstantiation(Parser parser, LexicalContext lexicalContex
         parser.revert;
         return null;
     }
-    auto templateArg = parseType(parser, lexicalContext);
+    auto templateArg = parser.parseType(lexicalContext);
     parser.assert_(!!templateArg, "template argument required");
     parser.commit;
     return new ASTTemplateInstance(base, templateArg, instanceLoc);
@@ -1110,7 +1110,7 @@ ASTSymbol parseProperties(Parser parser, LexicalContext lexicalContext, ASTSymbo
     ASTSymbol current = current; // TODO mut ASTSymbol current
     while (true)
     {
-        if (ASTSymbol instanceOf = parseInstanceOf(parser, lexicalContext, current))
+        if (ASTSymbol instanceOf = parser.parseInstanceOf(lexicalContext, current))
         {
             current = instanceOf;
             continue;
@@ -1123,22 +1123,22 @@ ASTSymbol parseProperties(Parser parser, LexicalContext lexicalContext, ASTSymbo
             current = macroArgs.result;
             continue;
         }
-        if (ASTSymbol call = parseCall(parser, lexicalContext, current))
+        if (ASTSymbol call = parser.parseCall(lexicalContext, current))
         {
             current = call;
             continue;
         }
-        if (ASTSymbol memberAccess = parseMember(parser, current))
+        if (ASTSymbol memberAccess = parser.parseMember(current))
         {
             current = memberAccess;
             continue;
         }
-        if (ASTSymbol indexAccess = parseIndex(parser, lexicalContext, current))
+        if (ASTSymbol indexAccess = parser.parseIndex(lexicalContext, current))
         {
             current = indexAccess;
             continue;
         }
-        if (ASTSymbol templateInstance = parseTemplateInstantiation(parser, lexicalContext, current))
+        if (ASTSymbol templateInstance = parser.parseTemplateInstantiation(lexicalContext, current))
         {
             current = templateInstance;
             continue;
@@ -1274,7 +1274,7 @@ ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
     }
     if (acceptIdentifier(parser, "new"))
     {
-        ASTSymbol type = parseType(parser, lexicalContext);
+        ASTSymbol type = parser.parseType(lexicalContext);
         if (!type) {
             parser.fail("type expected");
         }
@@ -1289,7 +1289,7 @@ ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
     if (acceptIdentifier(parser, "cast"))
     {
         parser.expect("(");
-        ASTSymbol target = parseType(parser, lexicalContext);
+        ASTSymbol target = parser.parseType(lexicalContext);
         if (!target) {
             parser.fail("type expected");
         }
@@ -1526,14 +1526,14 @@ ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
     parser.begin;
     if (parser.accept(".")) {
         // .name is module level
-        string name = parseIdentifier(parser);
+        string name = parser.parseIdentifier;
         if (name.length) {
             parser.commit;
             return new ASTIdentifier(name, true, loc);
         }
     }
     parser.revert;
-    string name = parseIdentifier(parser);
+    string name = parser.parseIdentifier;
     if (name.length)
     {
         if (name == "$") {
@@ -1859,7 +1859,7 @@ class VoidExpression : Expression
 ASTReturnStatement parseReturn(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
-    string identifier = parseIdentifier(parser);
+    string identifier = parser.parseIdentifier;
     if (identifier != "return")
     {
         parser.revert;
@@ -1997,7 +1997,7 @@ class ASTIfStatement : ASTStatement
 ASTIfStatement parseIf(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
-    string identifier = parseIdentifier(parser);
+    string identifier = parser.parseIdentifier;
     if (identifier != "if")
     {
         parser.revert;
@@ -2023,7 +2023,7 @@ ASTStatement parseBreakCont(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto loc = parser.loc;
-    string identifier = parseIdentifier(parser);
+    string identifier = parser.parseIdentifier;
     if (identifier == "break")
     {
         parser.expect(";");
@@ -2262,7 +2262,7 @@ ASTVarDeclStatement parseVarInitialization(
     }
     else
     {
-        name = parseIdentifier(parser);
+        name = parser.parseIdentifier;
         if (!name.length)
         {
             parser.revert;
@@ -2298,7 +2298,7 @@ ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext, b
     if (acceptIdentifier(parser, "auto")) {
         infer = true;
     } else {
-        type = parseType(parser, lexicalContext);
+        type = parser.parseType(lexicalContext);
         if (!type)
         {
             parser.revert;
@@ -2323,7 +2323,7 @@ ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
     if (acceptIdentifier(parser, "auto")) {
         infer = true;
     } else {
-        type = parseType(parser, lexicalContext);
+        type = parser.parseType(lexicalContext);
         if (!type)
         {
             parser.revert;
@@ -2597,7 +2597,7 @@ ASTStatementStatement parseStatementStatement(Parser parser, LexicalContext lexi
 {
     auto loc = parser.loc;
     if (!parser.accept("$stmt")) return null;
-    auto variable = parseIdentifier(parser);
+    auto variable = parser.parseIdentifier;
     if (!variable.length) parser.fail("ASTStatement variable expected");
     parser.expect(";");
     return new ASTStatementStatement(loc, variable);
@@ -2615,9 +2615,9 @@ ASTStatement parseExtFor(Parser parser, LexicalContext lexicalContext)
     bool auto_;
     ASTSymbol type;
     if (parser.accept("auto")) auto_ = true;
-    else type = parseType(parser, lexicalContext);
+    else type = parser.parseType(lexicalContext);
     auto identifierLoc = parser.loc;
-    auto identifier = parseIdentifier(parser);
+    auto identifier = parser.parseIdentifier;
     if (!identifier.length || !parser.accept("<-")) {
         parser.revert;
         return null;
@@ -2738,13 +2738,13 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
 ASTFunction parseFunction(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
-    ASTSymbol ret = parseType(parser, lexicalContext);
+    ASTSymbol ret = parser.parseType(lexicalContext);
     if (!ret)
     {
         parser.revert;
         return null;
     }
-    string name = parseIdentifier(parser);
+    string name = parser.parseIdentifier;
     if (!name.length || !parser.accept("("))
     {
         parser.revert;
@@ -3023,8 +3023,8 @@ ASTExtern parseExtern(Parser parser, LexicalContext lexicalContext)
         parser.expect("C");
         parser.expect(")");
         auto retLoc = parser.loc;
-        ASTSymbol ret = parseType(parser, lexicalContext);
-        string name = parseIdentifier(parser);
+        ASTSymbol ret = parser.parseType(lexicalContext);
+        string name = parser.parseIdentifier;
         if (!name.length) parser.fail("identifier expected");
         parser.expect("(");
         ASTArgument[] args = parseIdentifierList(parser, lexicalContext);
@@ -3112,7 +3112,7 @@ ASTImport parseImport(Parser parser)
     if (acceptIdentifier(parser, "package"))
     {
         parser.expect("(");
-        pak = parseIdentifier(parser);
+        pak = parser.parseIdentifier;
         parser.expect(")");
         parser.expect(".");
     }
@@ -3188,7 +3188,7 @@ ASTModule parseMacroContinuation(CompilerBase compiler, Parser parser, ParserHel
         return null;
     }
     parser.commit;
-    string identifier = parseIdentifier(parser);
+    string identifier = parser.parseIdentifier;
     parser.expect(")");
     parser.expect(";");
 
@@ -3311,9 +3311,9 @@ ASTTemplateDecl parseTemplateDecl(Parser parser, LexicalContext lexicalContext)
     {
         return null;
     }
-    auto name = parseIdentifier(parser);
+    auto name = parser.parseIdentifier;
     parser.expect("(");
-    auto typeParameter = parseIdentifier(parser);
+    auto typeParameter = parser.parseIdentifier;
     parser.expect(")");
     parser.expect("{");
     Either(ASTClassDecl, ASTFunction) member;
@@ -3363,7 +3363,7 @@ class ASTAliasDecl : ASTSymbol
 ASTAliasDecl parseAliasDecl(Parser parser, LexicalContext lexicalContext) {
     if (!parser.accept("alias")) return null;
     auto loc = parser.loc;
-    string name = parseIdentifier(parser);
+    string name = parser.parseIdentifier;
     loc.assert2s(name.length > 0, "alias name expected");
     parser.expect("=");
     auto target = parseExpression(parser, lexicalContext);

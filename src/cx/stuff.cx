@@ -782,6 +782,31 @@ class ASTCall : ASTSymbol
 
     override Expression compile(Context context)
     {
+        if (auto astMemberAccess = this.target.instanceOf(ASTMember))
+        {
+            /**
+             * UFCS:
+             * Syntax is foo.bar(baz).
+             * Check if "foo" has a property "bar".
+             * If not, call bar(foo, baz) instead.
+             */
+            auto base = isExpressionImplCall(context, astMemberAccess.base.compile(context), this.loc);
+            if (base) {
+                auto member = accessMember(context, base, astMemberAccess.member, astMemberAccess.loc, true);
+                if (!member) {
+                    auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
+                    auto callable = context.namespace.lookup(astMemberAccess.member, context, stackframe);
+                    // if `foo` has no `bar` but there is a `bar` symbol:
+                    if (callable) {
+                        // rewrite foo.bar(baz) to bar(foo, baz)
+                        auto target = new ASTIdentifier(astMemberAccess.member, false, astMemberAccess.loc);
+                        auto args = [astMemberAccess.base] ~ this.args;
+                        return (new ASTCall(target, args, this.loc)).compile(context);
+                    }
+                }
+            }
+        }
+
         auto callMacroArgs = new CallMacroArgs(this.target, this.args, context, this.loc);
         context.macroState.applyMacro(callMacroArgs);
         if (callMacroArgs.transformed) return callMacroArgs.transformed;
@@ -1022,6 +1047,25 @@ class ASTMember : ASTMemberBase
 {
     override Symbol compile(Context context)
     {
+        // UFCS part two
+        // support `foo.bar` as implicit `bar(foo)` if `foo` has no member `bar`
+        // TODO merge with ASTCall UFCS code (they should be the same)
+        auto base = isExpressionImplCall(context, this.base.compile(context), this.loc);
+        if (base) {
+            auto member = accessMember(context, base, this.member, this.loc, true);
+            if (!member) {
+                auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
+                auto callable = context.namespace.lookup(this.member, context, stackframe);
+                // if `foo` has no `bar` but there is a `bar` symbol:
+                if (callable) {
+                    auto target = new ASTIdentifier(this.member, false, this.loc);
+                    // bar(foo)
+                    auto args = [this.base];
+                    return (new ASTCall(target, args, this.loc)).compile(context);
+                }
+            }
+        }
+
         return accessMemberWithLifetime(context, this.base.compile(context), this.member, this.loc, false);
     }
 

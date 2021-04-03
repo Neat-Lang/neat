@@ -209,7 +209,8 @@ class ParserHelperImpl : ParserHelper
         auto platform = new Platform(macroWordType, platformFlags);
 
         // throwaway compilation (TODO cache?)
-        Module module_ = compileModule(astModule, this, config, compiler, platform, true);
+        auto context = makeContext(compiler, platform, null, astModule.macroState);
+        Module module_ = compileModule(context, astModule, true);
         auto allModules = new ModuleSet(0);
         void add(Module mod) { allModules.add(mod); }
         module_.walkModules(&add);
@@ -409,6 +410,8 @@ class CompilerImpl : CompilerBase
 {
     ASTModule[] defaultImports;
 
+    (string key, Module mod)[] modules;
+
     this(this.defaultImports) {
         this.linenr = new LineNumberRegistry;
         this.stats = new UmlClassGraph;
@@ -416,7 +419,7 @@ class CompilerImpl : CompilerBase
 
     CachedRuntimeFunction[] cachedRuntimeFunctions;
 
-    Module delegate(ASTModule) compile;
+    Module delegate(ASTModule, bool) compile;
 
     // parser
     override ASTSymbol parseExpression(Parser parser, LexicalContext lexicalContext)
@@ -827,9 +830,9 @@ class CompilerImpl : CompilerBase
         return new StatementExpression(statement, expression, false);
     }
 
-    void addDefaultImports(Module module_)
+    override void addDefaultImports(ModuleBase module_)
     {
-        auto defaultMods = [compile(mod) for mod in this.defaultImports];
+        auto defaultMods = [compile(mod, false) for mod in this.defaultImports];
         [module_.addImport(mod) for mod in defaultMods];
     }
 
@@ -892,6 +895,14 @@ class CompilerImpl : CompilerBase
     override Type struct_(string name, StructMemberDeclaration[] members, Loc loc, string manglePrefix)
     {
         return new Struct(name, members, loc, manglePrefix);
+    }
+
+    override ModuleBase findModule(string key) {
+        return [first a.mod for a in this.modules where a.key == key else null];
+    }
+
+    override void addModule(string key, ModuleBase module_) {
+        this.modules ~= (key, module_.instanceOf(Module));
     }
 }
 
@@ -1068,18 +1079,18 @@ void main(string[] args)
     auto defaultImports = new ASTModule[](0) ~ builtins;
     auto compilerImpl = new CompilerImpl(defaultImports);
     auto astCache = new ASTModuleCache;
-    auto cache = new ModuleCache;
-    auto modParseConfig = new ModuleParserConfig(packages, defaultImports, astCache, cache);
+    auto modParseConfig = new ModuleParserConfig(packages, defaultImports, astCache);
     auto helper = new ParserHelperImpl(
         compilerImpl, macroBackend,
         macro_x86_32, caching, macroPlatformFlags);
 
-    Module compile(ASTModule astMod) {
-        return compileModule(astMod, helper, modParseConfig, compilerImpl, platform, true);
+    Module compile(ASTModule astMod, bool addDefaultImports) {
+        auto context = makeContext(compilerImpl, platform, null, astMod.macroState);
+        return compileModule(context, astMod, addDefaultImports);
     }
     compilerImpl.compile = &compile;
     auto astToplevel = getModule(compilerImpl, args[0], null, false, helper, modParseConfig, Loc(null, ReLoc("", 0)));
-    auto toplevel = compile(astToplevel);
+    auto toplevel = compile(astToplevel, true);
 
     string baseFlags;
     if (optimize) baseFlags ~= " -Ofast";

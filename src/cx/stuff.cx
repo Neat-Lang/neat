@@ -2875,7 +2875,7 @@ class Resolver
     }
 }
 
-class Module : Namespace
+class Module : ModuleBase
 {
     Loc loc;
 
@@ -2906,8 +2906,8 @@ class Module : Namespace
 
     Module[] imports;
 
-    void addImport(Module module_)
-    {
+    override void addImport(ModuleBase module_) {
+        auto module_ = module_.instanceOf(Module);
         assert(!!module_);
         // TODO error?
         if ([any a.mangledName == module_.mangledName for a in this.imports])
@@ -3128,46 +3128,20 @@ ASTImportStatement parseImportStatement(Parser parser)
     return new ASTImportStatement(modname, pak, isMacroImport, parser.loc);
 }
 
-class ASTModuleCacheEntry
-{
-    string path;
-    ASTModule mod;
-    this(this.path, this.mod) { }
-}
-
 class ASTModuleCache
 {
-    ASTModuleCacheEntry[] modules;
+    (string path, ASTModule mod)[] modules;
     this() { }
     ASTModule find(string path) {
         return [first a.mod for a in this.modules where a.path == path else null];
     }
     void add(string path, ASTModule mod) {
-        this.modules ~= new ASTModuleCacheEntry(path, mod);
+        this.modules ~= (path, mod);
     }
 }
 
-class ModuleCacheEntry
-{
-    string key;
-    Module mod;
-    this(this.key, this.mod) { }
-}
-
-class ModuleCache
-{
-    ModuleCacheEntry[] modules;
-    this() { }
-    string key(string base, ASTModule mod) {
-        return base ~ "_" ~ mod.pak.name ~ "_" ~ mod.name;
-    }
-    Module find(string base, ASTModule mod) {
-        string key = this.key(base, mod);
-        return [first a.mod for a in this.modules where a.key == key else null];
-    }
-    void add(string base, ASTModule astModule, Module module_) {
-        this.modules ~= new ModuleCacheEntry(this.key(base, astModule), module_);
-    }
+string astModuleKey(string base, ASTModule mod) {
+    return base ~ "_" ~ mod.pak.name ~ "_" ~ mod.name;
 }
 
 class ModuleParserConfig
@@ -3178,9 +3152,7 @@ class ModuleParserConfig
 
     ASTModuleCache astCache;
 
-    ModuleCache cache;
-
-    this(this.packages, this.defaultImports, this.astCache, this.cache) { }
+    this(this.packages, this.defaultImports, this.astCache) { }
 }
 
 ASTModule parseMacroContinuation(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule astModule,
@@ -3451,32 +3423,27 @@ ASTModule resolveImport(CompilerBase compiler, ASTModule module_, ASTImportState
         compiler, moduleToFile(import_.name), pak, true, helper, config, import_.loc);
 }
 
-Module compileModule(ASTModule astModule, ModuleParserConfig config,
-                     CompilerBase compiler, Platform platform, bool addDefaultModules)
+Module compileModule(Context context, ASTModule astModule, bool addDefaultModules)
 {
-    string baseKey = platform.nativeWordType.repr;
-    if (Module mod = config.cache.find(baseKey, astModule))
-        return mod;
+    string moduleKey = astModuleKey(context.platform.nativeWordType.repr, astModule);
+    // TODO
+    // if (Module mod = context.compiler.findModule(moduleKey)?.instanceOf(Module))
+    if (auto mod = context.compiler.findModule(moduleKey))
+        return mod.instanceOf(Module);
 
     Module parent = null;
 
     if (astModule.parent)
     {
-        parent = compileModule(astModule.parent, config, compiler, platform, addDefaultModules);
+        parent = compileModule(context, astModule.parent, addDefaultModules);
     }
 
     string mangledName = mangleModuleName(astModule.name, astModule.pak);
     Module module_ = new Module(astModule.loc, astModule.name, mangledName, parent);
-    auto context = makeContext(compiler, platform, module_, astModule.macroState);
-    if (addDefaultModules)
-    {
-        // TODO add to ASTModule (addImport that handles updating the macro state
-        // so that adding default macro imports works)
-        // NOTE once these are in ASTModule, we can take out ModuleParserConfig here and also from proxyCall.
-        for (auto defaultMod <- config.defaultImports) {
-            auto import_ = compileModule(defaultMod, config, compiler, platform, false);
-            module_.addImport(import_);
-        }
+    auto context = context.withNamespace(module_);
+
+    if (addDefaultModules) {
+        context.compiler.addDefaultImports(module_);
     }
 
     for (auto entry <- astModule.entries)
@@ -3486,7 +3453,7 @@ Module compileModule(ASTModule astModule, ModuleParserConfig config,
         entry.case {
             ASTImport import_:
             {
-                auto importedModule = compileModule(import_.module_, config, compiler, platform, true);
+                auto importedModule = compileModule(context, import_.module_, true);
 
                 module_.addImport(importedModule);
             }
@@ -3517,7 +3484,7 @@ Module compileModule(ASTModule astModule, ModuleParserConfig config,
         }
     }
     module_.resolve(context);
-    config.cache.add(baseKey, astModule, module_);
+    context.compiler.addModule(moduleKey, module_);
     return module_;
 }
 

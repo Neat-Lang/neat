@@ -208,11 +208,11 @@ void _main(struct StringArray args);
 
 int main(int argc, char **argv) {
     struct StringArray args = (struct StringArray) {
-        argc - 1,
-        malloc(sizeof(struct String) * (argc - 1))
+        argc,
+        malloc(sizeof(struct String) * argc)
     };
-    for (int i = 0; i < argc - 1; i++) {
-        args.ptr[i] = (struct String) { strlen(argv[i + 1]), argv[i + 1] };
+    for (int i = 0; i < argc; i++) {
+        args.ptr[i] = (struct String) { strlen(argv[i]), argv[i] };
     }
     _main(args);
     free(args.ptr);

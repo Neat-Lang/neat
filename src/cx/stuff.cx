@@ -3086,6 +3086,15 @@ class ASTImport
 {
     string name;
 
+    ASTModule module_;
+
+    this(this.name, this.module_) { }
+}
+
+class ASTImportStatement
+{
+    string name;
+
     string pak;
 
     bool isMacroImport;
@@ -3095,7 +3104,7 @@ class ASTImport
     this(this.name, this.pak, this.isMacroImport, this.loc) { }
 }
 
-ASTImport parseImport(Parser parser)
+ASTImportStatement parseImportStatement(Parser parser)
 {
     parser.begin;
     bool isMacroImport = acceptIdentifier(parser, "macro");
@@ -3116,7 +3125,7 @@ ASTImport parseImport(Parser parser)
     parser.commit;
     string modname = parseIdentifier2(parser, ".");
     parser.expect(";");
-    return new ASTImport(modname, pak, isMacroImport, parser.loc);
+    return new ASTImportStatement(modname, pak, isMacroImport, parser.loc);
 }
 
 class ASTModuleCacheEntry
@@ -3374,11 +3383,10 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
 
     while (!parser.eof)
     {
-        if (ASTImport import_ = parseImport(parser)) {
+        if (ASTImportStatement import_ = parseImportStatement(parser)) {
+            auto importedModule = resolveImport(compiler, module_, import_, helper, config);
             if (import_.isMacroImport)
             {
-                auto importedModule = resolveImport(compiler, module_, import_, helper, config);
-
                 module_.macroState = module_.macroState.dup;
                 lexicalContext = new LexicalContext(compiler, module_.macroState);
 
@@ -3386,7 +3394,7 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             }
             else
             {
-                module_.entries ~= import_;
+                module_.entries ~= new ASTImport(import_.name, importedModule);
             }
             continue;
         }
@@ -3428,7 +3436,7 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
     return module_;
 }
 
-ASTModule resolveImport(CompilerBase compiler, ASTModule module_, ASTImport import_, ParserHelper helper,
+ASTModule resolveImport(CompilerBase compiler, ASTModule module_, ASTImportStatement import_, ParserHelper helper,
     ModuleParserConfig config)
 {
     // TODO mut
@@ -3443,15 +3451,7 @@ ASTModule resolveImport(CompilerBase compiler, ASTModule module_, ASTImport impo
         compiler, moduleToFile(import_.name), pak, true, helper, config, import_.loc);
 }
 
-Module compileImport(ASTModule module_, ASTImport import_, ParserHelper helper,
-                     CompilerBase compiler, ModuleParserConfig config, Platform platform)
-{
-    auto astModule = resolveImport(compiler, module_, import_, helper, config);
-
-    return compileModule(astModule, helper, config, compiler, platform, true);
-}
-
-Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfig config,
+Module compileModule(ASTModule astModule, ModuleParserConfig config,
                      CompilerBase compiler, Platform platform, bool addDefaultModules)
 {
     string baseKey = platform.nativeWordType.repr;
@@ -3462,7 +3462,7 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
 
     if (astModule.parent)
     {
-        parent = compileModule(astModule.parent, helper, config, compiler, platform, addDefaultModules);
+        parent = compileModule(astModule.parent, config, compiler, platform, addDefaultModules);
     }
 
     string mangledName = mangleModuleName(astModule.name, astModule.pak);
@@ -3474,7 +3474,7 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
         // so that adding default macro imports works)
         // NOTE once these are in ASTModule, we can take out ModuleParserConfig here and also from proxyCall.
         for (auto defaultMod <- config.defaultImports) {
-            auto import_ = compileModule(defaultMod, helper, config, compiler, platform, false);
+            auto import_ = compileModule(defaultMod, config, compiler, platform, false);
             module_.addImport(import_);
         }
     }
@@ -3486,7 +3486,7 @@ Module compileModule(ASTModule astModule, ParserHelper helper, ModuleParserConfi
         entry.case {
             ASTImport import_:
             {
-                auto importedModule = compileImport(astModule, import_, helper, compiler, config, platform);
+                auto importedModule = compileModule(import_.module_, config, compiler, platform, true);
 
                 module_.addImport(importedModule);
             }

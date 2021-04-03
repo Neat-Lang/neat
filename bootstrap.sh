@@ -283,6 +283,8 @@ at_revision '495eec5f6de89ed2289bc26ed37e2ada39f9da95' 'rebuild cx' 'build/cx'
 at_revision '3f4925db6f8e3f2f1d48e4e532aa144be7c5214a' 'rebuild cx' 'build/cx'
 # UFCS!
 at_revision '7acee9ee1b5991e08d89c568e3a50205ac12b75a' 'rebuild cx' 'build/cx'
+# executable as main argument
+at_revision '9ce663e39be09838e6a8ca397ff0909cc61e55ed' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

@@ -3044,26 +3044,24 @@ string moduleToFile(string module_)
     return modulePath ~ ".cx";
 }
 
-string findFileInPackage(string filename, Package pak, Loc loc, void delegate(Package) foundPak)
+(string, Package) findFileInPackage(string filename, Package pak, Loc loc)
 {
     string fileInPackage = pak.path ~ "/" ~ filename;
     if (exists(fileInPackage)) {
-        foundPak(pak);
-        return fileInPackage;
+        return (fileInPackage, pak);
     }
     for (auto dep <- pak.deps) {
         string fileInDep = dep.path ~ "/" ~ filename;
 
         if (exists(fileInDep)) {
-            foundPak(dep);
-            return fileInDep;
+            return (fileInDep, dep);
         }
     }
     loc.assert2s(false, "cannot find file '" ~ filename ~ "' in package '" ~ pak.name ~ "' or dependencies");
 }
 
 // TODO rewrite this once we have a std.path
-string findResidualFilename(string filename, Package[] packages, void delegate(Package) foundPackage)
+(string, Package) findResidualFilename(string filename, Package[] packages)
 {
     // TODO split then check
     assert(exists(filename));
@@ -3071,15 +3069,13 @@ string findResidualFilename(string filename, Package[] packages, void delegate(P
         string path = package_.path;
         if (filename.length >= path.length
             && filename[0 .. path.length] == path) {
-            foundPackage(package_);
-            return filename[path.length + 1 .. $];
+            return (filename[path.length + 1 .. $], package_);
         }
     }
     // TODO handle "../" paths
     for (auto package_ <- packages) {
         if (package_.path == ".") {
-            foundPackage(package_);
-            return filename;
+            return (filename, package_);
         }
     }
     print("file '" ~ filename ~ "' is not in folder of any package");
@@ -3535,15 +3531,15 @@ ASTModule getModule(CompilerBase compiler, string filename, Package pak, bool se
     string path; path = filename;
     if (search) {
         assert2s(!!pak, "search, but no package");
-        // This is very janky and should not work, because it overwrites pak while findFileInPackage has it borrowed.
-        // FIXME result(), result()
-        void result1(Package resultPak) { pak = resultPak; }
-        path = findFileInPackage(filename, pak, loc, &result1);
+        // TODO destructuring tuple
+        auto pair = findFileInPackage(filename, pak, loc);
+        path = pair[0];
+        pak = pair[1];
     } else {
         assert2s(!pak, "no search, but package");
-        // This is very janky and should not work, because it overwrites pak while findFileInPackage has it borrowed.
-        void result2(Package resultPak) { pak = resultPak; }
-        filename = findResidualFilename(filename, config.packages, &result2);
+        auto pair = findResidualFilename(filename, config.packages);
+        filename = pair[0];
+        pak = pair[1];
     }
     assert(!!pak);
     if (ASTModule mod = config.astCache.find(path)) return mod;

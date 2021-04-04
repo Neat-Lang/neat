@@ -148,6 +148,10 @@ void cxruntime_file_write(struct String file, struct String content) {
     free(fn);
 }
 
+FILE* cxruntime_stdout() {
+    return stdout;
+}
+
 void cxruntime_system(struct String command) {
     char *cmd = toStringz(command);
     int ret = system(cmd);

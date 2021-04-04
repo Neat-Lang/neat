@@ -308,6 +308,10 @@ function macro_transition {
 at_revision 'aec1a7c0f3804f6bcd28227275f3b15516a8d565' 'macro_transition' 'build/cx'
 # fix context scope flag in import namespace
 at_revision '1f69f70de69eaf651a9b726cc5dd775931407e10' 'rebuild cx' 'build/cx'
+# support cx.ini
+at_revision 'fd3eb8998a26e96ea95ff84ccb6c0a73a19c0925' 'rebuild cx' 'build/cx'
+# allow aliasing types
+at_revision '2a3e93bfcbaacd98873e37c2e3a79b4ea323b9c4' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

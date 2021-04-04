@@ -2700,6 +2700,7 @@ ASTSymbol parseDestroy(Parser parser, LexicalContext lexicalContext)
 
 ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
 {
+    auto loc = parser.loc;
     if (ASTStatement stmt = parseReturn(parser, lexicalContext))
         return stmt;
     if (ASTStatement stmt = parseIf(parser, lexicalContext))
@@ -2714,6 +2715,12 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
         return stmt;
     if (ASTStatement stmt = parseScope(parser, lexicalContext))
         return stmt;
+    if (auto import_ = parseImportStatement(parser)) {
+        loc.assert2s(!import_.isMacroImport, "can't import macro in function");
+        auto importedModule = lexicalContext.resolveImport(import_).instanceOf(ASTModule);
+
+        return new ASTImport(importedModule);
+    }
     if (ASTStatement stmt = parseNestedFunctionDecl(parser, lexicalContext))
         return stmt;
     if (ASTStatement stmt = parseStatementStatement(parser, lexicalContext))
@@ -2765,7 +2772,7 @@ class ModuleEntry
     this(this.name, this.value) { }
 }
 
-class ASTModule
+class ASTModule : ASTModuleBase
 {
     Loc loc;
 
@@ -3082,26 +3089,38 @@ string moduleToFile(string module_)
     assert(false);
 }
 
-class ASTImport
+class ImportNamespace : Namespace
 {
-    string name;
+    Module module_;
 
-    ASTModule module_;
+    this(this.parent, this.module_) { }
 
-    this(this.name, this.module_) { }
+    override Symbol lookup(string name, Context context, Expression frame) {
+        if (auto ret = module_.lookupPublic(context, name)) {
+            return ret;
+        }
+        return this.parent.lookup(name, context, frame);
+    }
 }
 
-class ASTImportStatement
+// Classes do double duty for both module-level and statement-level imports
+class ASTImport : ASTStatement
 {
-    string name;
+    ASTModule module_;
 
-    string pak;
+    this(this.module_) { }
 
-    bool isMacroImport;
+    override StatementCompileResult compile(Context context) {
+        auto module_ = compileModule(context, this.module_, true);
+        auto namespace = new ImportNamespace(context.namespace, module_);
 
-    Loc loc;
+        return StatementCompileResult(
+            new NoopStatement,
+            context.withNamespace(namespace));
+        assert(false);
+    }
 
-    this(this.name, this.pak, this.isMacroImport, this.loc) { }
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTImportStatement' yet!");assert(false); }
 }
 
 ASTImportStatement parseImportStatement(Parser parser)
@@ -3351,22 +3370,26 @@ ASTAliasDecl parseAliasDecl(Parser parser, LexicalContext lexicalContext) {
 ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule module_,
     ModuleParserConfig config)
 {
-    LexicalContext lexicalContext = new LexicalContext(compiler, module_.macroState);
+    ASTModuleBase resolveImport(ASTImportStatement import_) {
+        return .resolveImport(compiler, module_.pak, import_, helper, config);
+    }
+
+    LexicalContext lexicalContext = new LexicalContext(compiler, module_.macroState, &resolveImport);
 
     while (!parser.eof)
     {
         if (ASTImportStatement import_ = parseImportStatement(parser)) {
-            auto importedModule = resolveImport(compiler, module_, import_, helper, config);
+            auto importedModule = lexicalContext.resolveImport(import_).instanceOf(ASTModule);
             if (import_.isMacroImport)
             {
                 module_.macroState = module_.macroState.dup;
-                lexicalContext = new LexicalContext(compiler, module_.macroState);
+                lexicalContext = new LexicalContext(compiler, module_.macroState, &resolveImport);
 
                 lexicalContext.macroState.addImport(importedModule.macroState);
             }
             else
             {
-                module_.entries ~= new ASTImport(import_.name, importedModule);
+                module_.entries ~= new ASTImport(importedModule);
             }
             continue;
         }
@@ -3408,11 +3431,11 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
     return module_;
 }
 
-ASTModule resolveImport(CompilerBase compiler, ASTModule module_, ASTImportStatement import_, ParserHelper helper,
+ASTModule resolveImport(CompilerBase compiler, Package pak, ASTImportStatement import_, ParserHelper helper,
     ModuleParserConfig config)
 {
     // TODO mut
-    Package pak; pak = module_.pak;
+    Package pak = pak;
     // TODO enum SearchMode { Transitive, Direct, Commandline }
     bool transitive = true;
     if (import_.pak.length) {

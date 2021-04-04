@@ -42,6 +42,8 @@ then
     exit
 fi
 
+cp cx.ini build/
+
 SUM=$(checksum build/cx_test$I)
 SUMNEXT=""
 while true

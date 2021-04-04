@@ -306,6 +306,8 @@ function macro_transition {
 }
 # switch override `Type type()` to `Type type;` field in `Expression`.
 at_revision 'aec1a7c0f3804f6bcd28227275f3b15516a8d565' 'macro_transition' 'build/cx'
+# fix context scope flag in import namespace
+at_revision '1f69f70de69eaf651a9b726cc5dd775931407e10' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

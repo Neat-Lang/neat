@@ -19,6 +19,7 @@ import cx.struct_;
 import cx.stuff;
 import cx.types;
 import helpers;
+import std.file : realpath;
 
 extern(C) int getpid();
 extern(C) void cxruntime_system(string command);
@@ -281,6 +282,7 @@ struct ASTPackage
 {
     string name;
     string path;
+    bool syspkg;
     string[] deps;
 }
 
@@ -297,7 +299,7 @@ string slice(string* text, string marker)
     return result;
 }
 
-ASTPackage parsePackage(string arg)
+ASTPackage parsePackage(string arg, bool syspkg)
 {
     string name = slice(&arg, ":");
     assert(name.length > 0);
@@ -308,12 +310,16 @@ ASTPackage parsePackage(string arg)
     {
         deps ~= slice(&arg, ",");
     }
-    return ASTPackage(name, path, deps);
+    return ASTPackage(name, path, syspkg, deps);
 }
 
-Package[] resolvePackages(ASTPackage[] astPackages)
-{
-    Package[] result = [new Package(pkg.name, pkg.path) for pkg in astPackages];
+string resolvePath(ASTPackage pak, string execPath) {
+    if (!pak.syspkg) return realpath(pak.path);
+    return realpath(execPath ~ "/" ~ pak.path);
+}
+
+Package[] resolvePackages(ASTPackage[] astPackages, string execPath) {
+    Package[] result = [new Package(pkg.name, resolvePath(pkg, execPath)) for pkg in astPackages];
     for (int i <- 0 .. astPackages.length) {
         auto astPackage = astPackages[i];
         for (auto dep <- astPackage.deps) {
@@ -977,27 +983,30 @@ class ModuleSet
     }
 }
 
-void main(string[] args)
+class Options
 {
-    string[] args = args; // TODO mut string[] args
-    // workaround for extern(C) main change
-    if (args[0].find("cx") != -1) args = args[1 .. $];
     string output;
-    string[] nextArgs;
     string[] linkerArgs;
     ASTPackage[] astPackages;
     bool dontLink;
     bool optimize;
-    bool caching = true;
-    bool x86_32, macro_x86_32;
-    // auto backend = new ProxyBackend();
-    Backend backend = new LLVMBackend();
-    // TODO mut
-    Backend macroBackend; macroBackend = backend;
-    int generation = __GENERATION__;
+    bool caching;
+    // TODO bool a, b
+    bool x86_32; bool macro_x86_32;
+    Backend backend;
+    Backend macroBackend;
+    int generation;
     string umlFile;
-    PlatformFlags platformFlags, macroPlatformFlags;
-    {
+    PlatformFlags platformFlags; PlatformFlags macroPlatformFlags;
+
+    this() {
+        this.backend = new LLVMBackend();
+        this.macroBackend = this.backend;
+        this.caching = true;
+        this.generation = __GENERATION__;
+    }
+
+    string[] parseArgs(string[] args) {
         string[] remArgs;
         for (size_t i = 0; i < args.length; i += 1) {
             string arg = args[i];
@@ -1007,56 +1016,97 @@ void main(string[] args)
             // package: like includes, but scoped
             // -Pname:path[:dep1[,dep2]*]?
             if (flag == "-P") {
-                astPackages ~= parsePackage(arg[2 .. $]);
+                addPackage(arg[2 .. $], false);
+            } else if (arg == "-package") {
+                assert(i + 1 < args.length);
+                addPackage(args[i + 1], false);
+                i += 1;
+            } else if (flag == "-S") {
+                addPackage(arg[2 .. $], true);
+            } else if (arg == "-syspackage") {
+                assert(i + 1 < args.length);
+                addPackage(args[i + 1], true);
+                i += 1;
             } else if (flag == "-l") {
-                linkerArgs ~= arg;
+                this.linkerArgs ~= arg;
             } else if (flag == "-L") {
-                linkerArgs ~= arg[2 .. $];
-            } else if (arg == "--") {
-                nextArgs = args[i + 1 .. $];
-                break;
+                this.linkerArgs ~= arg[2 .. $];
             } else if (arg == "-o") {
                 assert(i + 1 < args.length);
-                output = args[i + 1];
+                this.output = args[i + 1];
                 i += 1;
             } else if (arg == "-O") {
-                optimize = true;
+                this.optimize = true;
             } else if (arg == "-c") {
-                dontLink = true;
+                this.dontLink = true;
             } else if (arg == "-x") {
-                caching = false;
+                this.caching = false;
             } else if (arg == "-backend=c") {
-                backend = new CBackend;
+                this.backend = new CBackend;
             } else if (arg == "-macro-backend=c") {
-                macroBackend = new CBackend;
+                this.macroBackend = new CBackend;
             } else if (arg == "-m32") {
-                x86_32 = true;
+                this.x86_32 = true;
             } else if (arg == "-macro-m32") {
-                macro_x86_32 = true;
+                this.macro_x86_32 = true;
             } else if (arg == "-print-generation") {
                 print(itoa(__GENERATION__));
-                return;
+                exit(0); // TODO return :exit
             } else if (arg == "-next-generation") {
                 // build the next generation of the compiler (used by rebuild.sh)
-                generation = __GENERATION__ + 1;
+                this.generation = __GENERATION__ + 1;
             } else if (arg == "-uml") {
                 assert(i + 1 < args.length);
-                umlFile = args[i + 1];
+                this.umlFile = args[i + 1];
                 i += 1;
             } else {
                 remArgs ~= arg;
             }
         }
-        args = remArgs;
+        return remArgs;
     }
-    Package[] packages = resolvePackages(astPackages);
+
+    void addPackage(string pak, bool relative) {
+        auto pak = parsePackage(pak, relative);
+        if ([any a.name == pak.name for a in this.astPackages]) {
+            print("warn: package double-specified: " ~ pak.name ~ "; using newer definition");
+            this.astPackages = [a for a in this.astPackages where a.name != pak.name];
+        }
+        this.astPackages ~= pak;
+    }
+
+    void parseConfig(string path) {
+        if (!path.exists) return;
+        auto lines = path.read.split("\n");
+        string[] args;
+        for (auto line <- lines) {
+            // TODO slice()
+            auto words = line.split(" ");
+            args ~= words[0];
+            if (words.length > 1) args ~= words[1 .. $].join(" ");
+        }
+        parseArgs(args);
+    }
+}
+
+void main(string[] args)
+{
+    string[] args = args; // TODO mut string[] args
+    string executable = args[0];
+    args = args[1 .. $];
+    string execPath = executable.realpath.dirname;
+    auto options = new Options;
+    // TODO make configurable somehow? commandline arg?
+    options.parseConfig(execPath ~ "/cx.ini");
+    args = options.parseArgs(args);
+    Package[] packages = options.astPackages.resolvePackages(execPath);
 
     if (args.length != 1)
     {
         print("Usage: cx [-Pname:path[:dep1[,dep2]*]?]* FILE.cx");
         return;
     }
-    if (!output.length) output = removeExtension(args[0]);
+    if (!options.output.length) options.output = removeExtension(args[0]);
 
     cxruntime_system("mkdir -p .obj");
     createBuilderScripts;
@@ -1064,9 +1114,9 @@ void main(string[] args)
     Loc loc; // bleh!
     auto builtins = new ASTModule(loc, "", new Package("builtins", ""), new MacroState, null);
     BackendType nativeWordType;
-    if (x86_32) nativeWordType = new BackendIntType;
+    if (options.x86_32) nativeWordType = new BackendIntType;
     else nativeWordType = new BackendLongType;
-    auto platform = new Platform(nativeWordType, platformFlags);
+    auto platform = new Platform(nativeWordType, options.platformFlags);
 
     builtins.addSymbolAlias("string", new FixedTypeAlias(new Array(new Character)));
     builtins.addSymbolAlias("bool", new FixedTypeAlias(new Integer));
@@ -1074,15 +1124,15 @@ void main(string[] args)
     builtins.addSymbolAlias("true", new FixedExpressionAlias(new IntLiteral(1)));
     builtins.addSymbolAlias("false", new FixedExpressionAlias(new IntLiteral(0)));
     builtins.addSymbolAlias("null", new FixedExpressionAlias(new NullExpr(new Pointer(new Void))));
-    builtins.addSymbolAlias("__GENERATION__", new FixedExpressionAlias(new IntLiteral(generation)));
+    builtins.addSymbolAlias("__GENERATION__", new FixedExpressionAlias(new IntLiteral(options.generation)));
 
     auto defaultImports = new ASTModule[](0) ~ builtins;
     auto compilerImpl = new CompilerImpl(defaultImports);
     auto astCache = new ASTModuleCache;
     auto modParseConfig = new ModuleParserConfig(packages, defaultImports, astCache);
     auto helper = new ParserHelperImpl(
-        compilerImpl, macroBackend,
-        macro_x86_32, caching, macroPlatformFlags);
+        compilerImpl, options.macroBackend,
+        options.macro_x86_32, options.caching, options.macroPlatformFlags);
 
     Module compile(ASTModule astMod, bool addDefaultImports) {
         auto context = makeContext(compilerImpl, platform, null, astMod.macroState);
@@ -1093,10 +1143,10 @@ void main(string[] args)
     auto toplevel = compile(astToplevel, true);
 
     string baseFlags;
-    if (optimize) baseFlags ~= " -Ofast";
-    if (x86_32) baseFlags ~= " -m32";
+    if (options.optimize) baseFlags ~= " -Ofast";
+    if (options.x86_32) baseFlags ~= " -m32";
 
-    if (backend.instanceOf(LLVMBackend) && optimize)
+    if (options.backend.instanceOf(LLVMBackend) && options.optimize)
         baseFlags ~= " -flto";
 
     auto allModules = new ModuleSet(0);
@@ -1107,14 +1157,14 @@ void main(string[] args)
     auto binHash = new Hash;
     auto remainingModules = allModules.array;
 
-    binHash.addl(generation);
+    binHash.addl(options.generation);
 
     string fileArgs;
     int[] pids;
     while (remainingModules.length > 0) {
         for (auto remainingModule <- remainingModules) {
-            auto compilation = emitModule(compilerImpl, backend, platform, remainingModule,
-                optimize, x86_32, caching, false);
+            auto compilation = emitModule(compilerImpl, options.backend, platform, remainingModule,
+                options.optimize, options.x86_32, options.caching, false);
             fileArgs ~= " " ~ compilation.objFile;
             with (compilation.hash.state) binHash.apply(add, mult);
             if (compilation.pid != 0) pids ~= compilation.pid;
@@ -1136,11 +1186,11 @@ void main(string[] args)
             assert(false);
     }
 
-    if (umlFile != "") {
-        compilerImpl.stats.instanceOf(UmlClassGraph).writeTo(umlFile);
+    if (options.umlFile != "") {
+        compilerImpl.stats.instanceOf(UmlClassGraph).writeTo(options.umlFile);
     }
 
-    if (dontLink) return;
+    if (options.dontLink) return;
 
     string binHashOutput = ".obj/hash_" ~ binHash.text ~ ".c";
     with (binHash.state) {
@@ -1154,10 +1204,10 @@ long long int compiler_hash_mult() { return " ~ ltoa(mult) ~ "LL; }
     // cxruntime_system("cat /proc/" ~ itoa(pid) ~ "/status");
     string flags = baseFlags ~ " -rdynamic";
     string linkerFlags = " -ldl";
-    for (auto linkerArg <- linkerArgs) linkerFlags ~= " " ~ linkerArg;
+    for (auto linkerArg <- options.linkerArgs) linkerFlags ~= " " ~ linkerArg;
     string compiler = "clang -Wno-unused-command-line-argument -fpic";
-    if (backend.instanceOf(CBackend)) compiler = "gcc";
-    string cmd = compiler ~ flags ~ fileArgs ~ " src/runtime.c -o " ~ output ~ linkerFlags;
+    if (options.backend.instanceOf(CBackend)) compiler = "gcc";
+    string cmd = compiler ~ flags ~ fileArgs ~ " src/runtime.c -o " ~ options.output ~ linkerFlags;
     print("$ " ~ cmd);
     cxruntime_system(cmd);
 }

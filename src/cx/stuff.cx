@@ -2701,7 +2701,7 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
         loc.assert2s(!import_.isMacroImport, "can't import macro in function");
         auto importedModule = lexicalContext.resolveImport(import_).instanceOf(ASTModule);
 
-        return new ASTImport(importedModule);
+        return new ASTImport(importedModule, import_.symbols);
     }
     if (ASTStatement stmt = parseNestedFunctionDecl(parser, lexicalContext))
         return stmt;
@@ -2893,15 +2893,16 @@ class Module : ModuleBase
         this.resolver.register(name, symbol);
     }
 
-    Module[] imports;
+    (Module mod, string[] symbols)[] imports;
 
-    override void addImport(ModuleBase module_) {
+    override void addImport(ModuleBase module_, string[] symbols) {
         auto module_ = module_.instanceOf(Module);
         assert(!!module_);
         // TODO error?
-        if ([any a.mangledName == module_.mangledName for a in this.imports])
+        // TODO merge symbols?
+        if ([any a.mod.mangledName == module_.mangledName for a in this.imports])
             return;
-        this.imports ~= module_;
+        this.imports ~= (module_, symbols);
     }
 
     override string mangle() { return this.mangledName; }
@@ -2916,7 +2917,7 @@ class Module : ModuleBase
         cb(this);
         if (this.parentModule)
             this.parentModule.walkModules(cb);
-        [import_.walkModules(cb) for import_ in imports];
+        [import_.mod.walkModules(cb) for import_ in imports];
     }
 
     FinishedSymbol[] compile(CompilerBase compiler, Platform platform)
@@ -2966,9 +2967,12 @@ class Module : ModuleBase
         if (!!frame) { print("error: lookup with frame propagated to Module"); assert(false); }
 
         if (Symbol public_ = this.lookupPublic(context, name)) return public_;
-        for (auto import_ <- this.imports) {
+        for (auto pair <- this.imports) {
+            auto import_ = pair.mod;
             assert(!!import_);
-            if (Symbol entry = import_.lookupPublic(context, name)) return entry;
+            if (!pair.symbols.length || [any a == name for a in pair.symbols]) {
+                if (Symbol entry = import_.lookupPublic(context, name)) return entry;
+            }
         }
         if (this.parent)
             return this.parent.lookup(name, context, frame);
@@ -3075,11 +3079,15 @@ class ImportNamespace : Namespace
 {
     Module module_;
 
-    this(this.parent, this.module_) { }
+    string[] symbols;
+
+    this(this.parent, this.module_, this.symbols) { }
 
     override Symbol lookup(string name, Context context, Expression frame) {
-        if (auto ret = module_.lookupPublic(context, name)) {
-            return ret;
+        if (!symbols.length || [any symbol == name for symbol in symbols]) {
+            if (auto ret = module_.lookupPublic(context, name)) {
+                return ret;
+            }
         }
         return this.parent.lookup(name, context, frame);
     }
@@ -3090,11 +3098,13 @@ class ASTImport : ASTStatement
 {
     ASTModule module_;
 
-    this(this.module_) { }
+    string[] symbols; // symbols imported. null for "all".
+
+    this(this.module_, string[] symbols) { }
 
     override StatementCompileResult compile(Context context) {
         auto module_ = compileModule(context, this.module_, true);
-        auto namespace = new ImportNamespace(context.namespace, module_);
+        auto namespace = new ImportNamespace(context.namespace, module_, this.symbols);
 
         return StatementCompileResult(
             new NoopStatement,
@@ -3102,7 +3112,7 @@ class ASTImport : ASTStatement
         assert(false);
     }
 
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTImportStatement' yet!");assert(false); }
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTImport' yet!");assert(false); }
 }
 
 ASTImportStatement parseImportStatement(Parser parser)
@@ -3125,8 +3135,30 @@ ASTImportStatement parseImportStatement(Parser parser)
 
     parser.commit;
     string modname = parseIdentifier2(parser, ".");
+    string[] symbols;
+    if (!isMacroImport && parser.accept(":")) {
+        string expectIdentifier(Parser parser) {
+            auto ident = parser.parseIdentifier;
+            auto loc = parser.loc;
+            // TODO parser.loc
+            loc.assert2s(ident.length > 0, "identifier expected");
+            return ident;
+        }
+        bool peek(Parser parser, string str) {
+            parser.begin;
+            auto ret = parser.accept(str);
+            parser.revert;
+            return ret;
+        }
+        // : [symbol] [, symbol]* ,? ;
+        symbols ~= parser.expectIdentifier;
+        while (parser.accept(",")) {
+            if (parser.peek(";")) { break; }
+            symbols ~= parser.expectIdentifier;
+        }
+    }
     parser.expect(";");
-    return new ASTImportStatement(modname, pak, isMacroImport, parser.loc);
+    return new ASTImportStatement(modname, pak, isMacroImport, symbols, parser.loc);
 }
 
 class ASTModuleCache
@@ -3259,7 +3291,7 @@ class TemplateDecl : Symbol
                 module_.register("", fun);
         }
         module_.resolve(context);
-        contextModule.addImport(module_);
+        contextModule.addImport(module_, []);
 
         return content.case(Class class_: class_.instanceOf(Symbol), Function fun: fun.instanceOf(Symbol));
     }
@@ -3371,7 +3403,7 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             }
             else
             {
-                module_.entries ~= new ASTImport(importedModule);
+                module_.entries ~= new ASTImport(importedModule, import_.symbols);
             }
             continue;
         }
@@ -3460,7 +3492,7 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultModule
             {
                 auto importedModule = compileModule(context, import_.module_, true);
 
-                module_.addImport(importedModule);
+                module_.addImport(importedModule, import_.symbols);
             }
             ASTSymbol symbol: {
                 // TODO ASTSymbolDecl?

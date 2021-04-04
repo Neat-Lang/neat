@@ -285,6 +285,27 @@ at_revision '3f4925db6f8e3f2f1d48e4e532aa144be7c5214a' 'rebuild cx' 'build/cx'
 at_revision '7acee9ee1b5991e08d89c568e3a50205ac12b75a' 'rebuild cx' 'build/cx'
 # executable as main argument
 at_revision '9ce663e39be09838e6a8ca397ff0909cc61e55ed' 'rebuild cx' 'build/cx'
+# used when the contents of macros have to change between compiler versions, but there's no change in functionality
+function macro_transition {
+    mkdir build
+    cp ../../build/cx build/cx
+
+    NEXT=compiler$(($(build/cx -print-generation) + 1))
+
+    cp -R ../../build/src/ build/
+    # use old macros for first round
+    cp -R ../../build/src/cx/macros/ src/cx/
+    build/cx -next-generation -Pcompiler:build/src -P$NEXT:src src/main.cx -o build/cx_1 $@
+    # use new macros even for previous-generation imports
+    cp -R ../../src/cx/macros/ src/cx/
+    cp -R ../../src/cx/macros/ build/src/cx/
+    build/cx_1 -Pcompiler:src src/main.cx -o build/cx_2 $@
+    mv build/cx_2 build/cx
+    rm -rf build/src
+    cp -R src build/
+}
+# switch override `Type type()` to `Type type;` field in `Expression`.
+at_revision 'aec1a7c0f3804f6bcd28227275f3b15516a8d565' 'macro_transition' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

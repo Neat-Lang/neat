@@ -1,0 +1,155 @@
+module std.thread;
+
+import c.pthread;
+
+extern(C) void assert(bool);
+
+class Mutex
+{
+    pthread_mutex_t mutex;
+
+    this() { pthread_mutex_init(&mutex, null); }
+    void lock() { pthread_mutex_lock(&mutex); }
+    void unlock() { pthread_mutex_unlock(&mutex); }
+}
+
+class CondVar
+{
+    pthread_cond_t cond;
+
+    this() { pthread_cond_init(&cond, null); }
+    void wait(Mutex mutex) { pthread_cond_wait(&cond, &mutex.mutex); }
+    void signal() { pthread_cond_signal(&cond); }
+    void broadcast() { pthread_cond_broadcast(&cond); }
+}
+
+template Waitable(T)
+{
+    class Waitable
+    {
+        Mutex mutex;
+        CondVar signal;
+        T value;
+        this(this.value) {
+            this.mutex = new Mutex;
+            this.signal = new CondVar;
+        }
+        void set(T value) {
+            mutex.lock;
+            this.value = value;
+            signal.broadcast;
+            mutex.unlock;
+        }
+        void update(T delegate(T) action) {
+            mutex.lock;
+            this.value = action(this.value);
+            signal.broadcast;
+            mutex.unlock;
+        }
+        // TODO move into waitFor
+        T id(T value) { return value; }
+        void waitFor(bool delegate(T) condition) {
+            waitReact(condition, &id);
+        }
+        void waitReact(bool delegate(T) condition, T delegate(T) react) {
+            mutex.lock;
+            while (true) {
+                if (condition(this.value)) {
+                    this.value = react(this.value);
+                    signal.broadcast;
+                    mutex.unlock;
+                    return;
+                }
+                signal.wait(mutex);
+            }
+        }
+    }
+}
+
+class Semaphore
+{
+    Waitable!int waitable;
+
+    this(int i) { this.waitable = new Waitable!int(i); }
+
+    void acquire() {
+        bool greaterZero(int i) { return i > 0; }
+        int decrement(int i) { return i - 1; }
+        waitable.waitReact(&greaterZero, &decrement);
+    }
+    void release() {
+        int increment(int i) { return i + 1; }
+        waitable.update(&increment);
+    }
+}
+
+abstract class Task
+{
+    abstract void run() { assert(false); }
+}
+
+class Thread
+{
+    pthread_t thr;
+
+    void delegate() run;
+    this(this.run) { }
+    void start() {
+        pthread_create(&thr, null, &call_thread_dg, &run);
+    }
+}
+
+class ThreadPool
+{
+    Mutex mutex;
+    Task[] tasks;
+    Thread[] threads;
+    int queuedTasks;
+    Semaphore waitingTasks;
+    Semaphore doneTasks;
+
+    this(int i) {
+        this.mutex = new Mutex;
+        this.waitingTasks = new Semaphore(0);
+        this.doneTasks = new Semaphore(0);
+        for (int j <- 0..i) {
+            auto thread = new Thread(&run);
+            thread.start;
+            threads ~= thread;
+        }
+    }
+    void run() {
+        while (true) {
+            // TODO why is this broken, probably double calls getTask
+            // getTask.run;
+            auto task = getTask;
+            task.run;
+            this.doneTasks.release;
+        }
+    }
+    void waitComplete(void delegate(float) progress) {
+        this.mutex.lock;
+        int tasks = this.queuedTasks;
+        this.queuedTasks = 0;
+        this.mutex.unlock;
+        for (int i <- 0..tasks) {
+            this.doneTasks.acquire;
+            progress((i + 1) * 1.0 / tasks);
+        }
+    }
+    void addTask(Task task) {
+        mutex.lock;
+        tasks ~= task;
+        this.queuedTasks += 1;
+        mutex.unlock;
+        this.waitingTasks.release;
+    }
+    Task getTask()  {
+        this.waitingTasks.acquire;
+        mutex.lock;
+        auto ret = tasks[$ - 1];
+        tasks = tasks[0 .. $ - 1];
+        mutex.unlock;
+        return ret;
+    }
+}

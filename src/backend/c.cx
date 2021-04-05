@@ -3,6 +3,7 @@ module backend.c;
 import backend.base;
 import helpers;
 macro import cx.macros.either;
+macro import cx.macros.listcomprehension;
 
 class CBackend : Backend {
     this() { }
@@ -66,7 +67,8 @@ class CBackendModule : BackendModule {
     override void declare(string name, BackendType ret, BackendType[] args)
     {
         if (this.declared(name)) return;
-        if (name == "memcpy" || name == "malloc" || name == "calloc") return; // in header
+        if (name == "memcpy" || name == "malloc" || name == "calloc"
+            || name == "strlen" || name == "realpath") return; // in header
         string argstr = "(";
         for (int i = 0; i < args.length; i += 1) {
             if (i) argstr = argstr ~ ", ";
@@ -199,6 +201,85 @@ string typeFmt(CBackendModule mod, BackendType type) {
     assert(false);
 }
 
+struct Arg { int index; }
+struct ShortLiteral { int value; }
+struct ByteLiteral { int value; }
+struct IntLiteralInstr { long value; }
+struct LongLiteral { long value; }
+struct WordLiteral { Platform platform; long value; }
+struct FloatLiteral { float value; }
+struct StringLiteralInstr { string text; }
+struct ZeroLiteral { BackendType type; }
+struct StructLiteral { BackendType struct_; int[] regs; }
+struct SymbolList { string name; }
+struct BinOp { string op; BackendType type; int left; int right; }
+struct BitCast { int from; BackendType to; }
+struct ZeroExtend { int value; BackendType to; }
+struct SignExtend { int value; BackendType to; }
+struct Trunc { int value; BackendType to; }
+struct IntToFloat { int reg; }
+struct FloatToInt { int reg; }
+struct CallInstr { BackendType ret; string name; int[] args; }
+struct GetFuncPtr { string name; }
+struct CallFuncPtr { BackendType type; int reg; int[] args; }
+struct Load { BackendType type; int reg; }
+struct StaticAlloca { BackendType type; }
+struct Field { BackendType type; int reg; size_t index; }
+struct FieldOffset { BackendType type; int reg; int index; }
+struct PtrOffset { BackendType type; int ptrReg; int offsetReg; }
+struct Store { BackendType type; int targetReg; int valueReg; }
+struct Return { int reg; }
+struct SetLabel { string label; }
+struct Branch { string label; }
+struct TestBranch { int reg; string thenLabel; string elseLabel; }
+
+alias Instr = Either(
+    Arg, ShortLiteral, ByteLiteral, IntLiteralInstr, LongLiteral,
+    WordLiteral, FloatLiteral, StringLiteralInstr,
+    ZeroLiteral, StructLiteral, SymbolList, BinOp, BitCast,
+    ZeroExtend, SignExtend, Trunc, IntToFloat, FloatToInt,
+    CallInstr, GetFuncPtr, CallFuncPtr, Load, StaticAlloca, Field,
+    FieldOffset, PtrOffset, Store, Return, SetLabel, Branch, TestBranch
+);
+
+/**
+ * SSA results can be held back for a future instruction to compose.
+ * However, whenever a global state change point is reached,
+ * such as a store, or function call, all held SSA
+ * instructions must be flushed.
+ */
+
+// flow for 1 use:
+// pending -> held -> done
+// pending -> held -> persisted
+// flow for multiple uses:
+// pending -> persisted
+enum SSAMode
+{
+    pending,
+    // reg$reg
+    persisted,
+    // (int) 5
+    held,
+    done
+}
+
+struct Value {
+    string type;
+    string value;
+    bool exactType;
+}
+
+struct SSAInstr {
+    SSAMode mode;
+    int reg; // -1 for terminators
+    // inc for every instr that uses us.
+    // one-use instrs can be inlined.
+    int uses;
+    Value heldValue;
+    Instr instr;
+}
+
 class CBackendFunction : BackendFunction {
     string name;
     CBackendModule mod;
@@ -206,8 +287,9 @@ class CBackendFunction : BackendFunction {
     BackendType[] args;
 
     LineWriter output;
-    int regId;
     int blockId;
+
+    SSAInstr[] instrs;
 
     this(CBackendModule mod, string name, BackendType ret, BackendType[] args)
     {
@@ -216,253 +298,427 @@ class CBackendFunction : BackendFunction {
         this.ret_ = ret;
         this.args = args;
         this.output = new LineWriter;
-        this.regId = 1;
     }
     void print(string msg) {
         this.output.append("  ");
         this.output.append(msg);
         this.output.endl;
     }
-    int nextReg() {
-        int result = this.regId;
-        this.regId = this.regId + 1;
-        return result;
-    }
     override string getLabel() {
         return "Label" ~ itoa(this.blockId);
     }
     override void setLabel(string label) {
-        this.print(label ~ ":;");
+        addInstr(SetLabel(label));
+    }
+    int addInstr(Instr instr) {
+        int reg = cast(int) this.instrs.length;
+        this.instrs ~= SSAInstr(SSAMode.pending, reg, 0, Value("", "", true), instr);
+        return reg;
+    }
+    void addBlockEnderInstr(Instr instr) {
+        this.instrs ~= SSAInstr(SSAMode.pending, -1, 0, Value("", "", true), instr);
+    }
+    void useReg(int reg) {
+        this.instrs[reg].uses += 1;
     }
     override int arg(int index) {
-        int reg = this.nextReg;
-        string typestr = typeFmt(mod, this.args[index]);
-        this.print(typestr ~ " reg" ~ itoa(reg) ~ " = arg" ~ itoa(index) ~ ";");
-        return reg;
+        return addInstr(Arg(index));
     }
     override int intLiteral(long value) {
-        int reg = this.nextReg;
-        this.print("int reg" ~ itoa(reg) ~ " = " ~ ltoa(value) ~ ";");
-        return reg;
+        return addInstr(IntLiteralInstr(value));
     }
     override int shortLiteral(int value) {
-        int reg = this.nextReg;
-        this.print("short reg" ~ itoa(reg) ~ " = " ~ itoa(value) ~ ";");
-        return reg;
+        return addInstr(ShortLiteral(value));
     }
     override int byteLiteral(int value) {
-        int reg = this.nextReg;
-        this.print("char reg" ~ itoa(reg) ~ " = " ~ itoa(value) ~ ";");
-        return reg;
+        return addInstr(ByteLiteral(value));
     }
     override int longLiteral(long value) {
-        int reg = this.nextReg;
-        this.print("long long int reg" ~ itoa(reg) ~ " = " ~ ltoa(value) ~ ";");
-        return reg;
+        return addInstr(LongLiteral(value));
     }
     override int floatLiteral(float value) {
-        int reg = this.nextReg;
-        this.print("float reg" ~ itoa(reg) ~ " = " ~ ftoa(value) ~ ";");
-        return reg;
+        return addInstr(FloatLiteral(value));
     }
     override int wordLiteral(Platform platform, size_t value) {
-        int reg = this.nextReg;
-        this.print("int reg" ~ itoa(reg) ~ " = " ~ ltoa(value) ~ ";");
-        return reg;
+        return addInstr(WordLiteral(platform, value));
     }
     override int stringLiteral(string text) {
-        string escapedText;
-        // TODO ord()
-        for (int i = 0; i < text.length; i += 1) {
-            if (text[i .. i + 1] == "\"") escapedText ~= "\\\"";
-            else if (text[i .. i + 1] == "\\") escapedText ~= "\\\\";
-            else if (text[i .. i + 1] == "\r") escapedText ~= "\\r";
-            else if (text[i .. i + 1] == "\n") escapedText ~= "\\n\\\n";
-            else escapedText ~= text[i .. i + 1];
-        }
-        int reg = this.nextReg;
-        this.print("char *reg" ~ itoa(reg) ~ " = \"" ~ escapedText ~ "\";");
-        return reg;
+        return addInstr(StringLiteralInstr(text));
     }
     override int voidLiteral() {
         return zeroLiteral(this.ret_);
     }
     override int zeroLiteral(BackendType type) {
-        int reg = this.nextReg;
-        if (!type.instanceOf(BackendVoidType)) {
-            string typestr = typeFmt(mod, type);
-            string init = "0";
-            if (type.instanceOf(BackendStructType)) init = "{0}";
-            this.print(typestr ~ " reg" ~ itoa(reg) ~ " = " ~ init ~ ";");
-        }
-        return reg;
+        return addInstr(ZeroLiteral(type));
     }
     override int structLiteral(BackendType struct_, int[] regs) {
-        int reg = this.nextReg;
-        string typestr = typeFmt(mod, struct_);
-        string fields;
-        for (int i = 0; i < regs.length; i += 1) {
-            if (i) fields ~= ", ";
-            fields ~= "reg" ~ itoa(regs[i]);
-        }
-        this.print(typestr ~ " reg" ~ itoa(reg) ~ " = (" ~ typestr ~ ") { " ~ fields ~ "};");
-        return reg;
+        [useReg(reg) for reg in regs];
+        return addInstr(StructLiteral(struct_, regs));
     }
     override int symbolList(string name) {
-        int reg = this.nextReg;
-        this.print("void *reg" ~ itoa(reg) ~ " = " ~ name ~ ";");
-        return reg;
+        return addInstr(SymbolList(name));
     }
     override int binop(string op, BackendType type, int left, int right) {
-        int reg = this.nextReg;
-        string typestr = typeFmt(mod, type);
-        if (isBooleanOp(op)) {
-            typestr = "int";
-        }
-        this.print(typestr ~ " reg" ~ itoa(reg) ~ " = reg" ~ itoa(left) ~ " " ~ op ~ " reg" ~ itoa(right) ~ ";");
-        return reg;
+        useReg(left); useReg(right);
+        return addInstr(BinOp(op, type, left, right));
     }
     override int bitcast(int from, BackendType to) {
-        int reg = this.nextReg;
-        this.output.append("  ");
-        typeFmtInto(mod, to, output);
-        this.output.appendsi(" reg", reg);
-        this.output.append(" = (");
-        typeFmtInto(mod, to, output);
-        if (to.instanceOf(BackendPointerType))
-            this.output.appendsis(") (size_t) reg", from, ";");
-        else
-            this.output.appendsis(") reg", from, ";");
-        this.output.endl;
-        return reg;
+        useReg(from);
+        return addInstr(BitCast(from, to));
     }
     override int zeroExtend(int value, BackendType to) {
-        int reg = this.nextReg;
-        .print("zext " ~ to.repr);
-        assert(false);
-        return reg;
+        useReg(value);
+        return addInstr(ZeroExtend(value, to));
     }
     override int signExtend(int value, BackendType to) {
-        int reg = this.nextReg;
-        // TODO revisit when we have unsigned types
-        this.print(typeFmt(mod, to) ~ " reg" ~ itoa(reg)
-            ~ " = (" ~ typeFmt(mod, to) ~ ") reg" ~ itoa(value) ~ ";");
-        return reg;
+        useReg(value);
+        return addInstr(SignExtend(value, to));
     }
     override int trunc(int value, BackendType to) {
-        int reg = this.nextReg;
-        this.print(typeFmt(mod, to) ~ " reg" ~ itoa(reg)
-            ~ " = (" ~ typeFmt(mod, to) ~ ") reg" ~ itoa(value) ~ ";");
-        return reg;
+        useReg(value);
+        return addInstr(Trunc(value, to));
     }
     override int intToFloat(int value) {
-        int reg = this.nextReg;
-        this.print("float reg" ~ itoa(reg) ~ " = reg" ~ itoa(value) ~ ";");
-        return reg;
+        useReg(value);
+        return addInstr(IntToFloat(value));
     }
     override int floatToInt(int value) {
-        int reg = this.nextReg;
-        this.print("int reg" ~ itoa(reg) ~ " = (int) reg" ~ itoa(value) ~ ";");
-        return reg;
+        useReg(value);
+        return addInstr(FloatToInt(value));
     }
     override int call(BackendType ret, string name, int[] args) {
-        int reg = this.nextReg;
-        string argstr;
-        for (int i = 0; i < args.length; i += 1) {
-            if (i) argstr ~= ", ";
-            argstr ~= "reg" ~ itoa(args[i]);
-        }
-        if (ret.instanceOf(BackendVoidType)) {
-            this.print(name ~ "(" ~ argstr ~ ");");
-        } else {
-            this.print(typeFmt(mod, ret) ~ " reg" ~ itoa(reg) ~ " = " ~ name ~ "(" ~ argstr ~ ");");
-        }
-        return reg;
+        [useReg(arg) for arg in args];
+        return addInstr(CallInstr(ret, name, args));
     }
     override int getFuncPtr(string name) {
-        int reg = this.nextReg;
-        this.print("__auto_type reg" ~ itoa(reg) ~ " = " ~ name ~ ";");
-        return reg;
+        return addInstr(GetFuncPtr(name));
     }
     override int callFuncPtr(BackendType type, int callReg, int[] args) {
-        auto backendFpType = type.instanceOf(BackendFunctionPointerType);
-        assert(!!backendFpType);
-        auto ret = backendFpType.ret;
-        int reg = this.nextReg;
-        string argstr;
-        for (int i = 0; i < args.length; i += 1) {
-            if (i) argstr ~= ", ";
-            argstr ~= "reg" ~ itoa(args[i]);
-        }
-        if (ret.instanceOf(BackendVoidType)) {
-            this.print("reg" ~ itoa(callReg) ~ "(" ~ argstr ~ ");");
-        } else {
-            this.print(typeFmt(mod, ret) ~ " reg" ~ itoa(reg) ~ " = reg" ~ itoa(callReg) ~ "(" ~ argstr ~ ");");
-        }
-        return reg;
+        useReg(callReg);
+        [useReg(arg) for arg in args];
+        return addInstr(CallFuncPtr(type, callReg, args));
     }
     override int load(BackendType backendType, int source) {
-        int reg = this.nextReg;
-        if (backendType.instanceOf(BackendVoidType)) return reg;
-        this.print(typeFmt(mod, backendType) ~ " reg" ~ itoa(reg) ~ " = *reg" ~ itoa(source) ~ ";");
-        return reg;
+        useReg(source);
+        return addInstr(Load(backendType, source));
     }
     override int staticAlloca(BackendType backendType) {
-        int reg = this.nextReg;
-        if (backendType.instanceOf(BackendVoidType)) return reg;
-        string typefmt = typeFmt(mod, backendType);
-        string init = "0";
-        if (backendType.instanceOf(BackendStructType)) init = "{0}";
-        this.print(typefmt ~ " reg" ~ itoa(reg) ~ "_frame = (" ~ typefmt ~ ") " ~ init ~ ";");
-        this.print(typefmt ~ " *reg" ~ itoa(reg) ~ " = &reg" ~ itoa(reg) ~ "_frame;");
-        return reg;
+        return addInstr(StaticAlloca(backendType));
     }
     override int field(BackendType backendType, int source, size_t index) {
-        auto backendStructType = backendType.instanceOf(BackendStructType);
-        assert(!!backendStructType);
-
-        int reg = this.nextReg;
-        string typefmt = typeFmt(mod, backendStructType.members[index]);
-        this.print(typefmt ~ " reg" ~ itoa(reg) ~ " = reg" ~ itoa(source) ~ "._" ~ ltoa(index) ~ ";");
-        return reg;
+        useReg(source);
+        return addInstr(Field(backendType, source, index));
     }
     override int fieldOffset(BackendType backendType, int source, int index) {
-        auto backendStructType = backendType.instanceOf(BackendStructType);
-        assert(!!backendStructType);
-
-        int reg = this.nextReg;
-        string typefmt = typeFmt(mod, backendStructType);
-        string memberfmt = typeFmt(mod, backendStructType.members[index]);
-        this.print(memberfmt ~ "* reg" ~ itoa(reg) ~ " = &((" ~ typefmt ~ "*) reg" ~ itoa(source) ~ ")->_" ~ itoa(index) ~ ";");
-        return reg;
+        useReg(source);
+        return addInstr(FieldOffset(backendType, source, index));
     }
     override int ptrOffset(BackendType backendType, int ptrReg, int offsetReg) {
-        int reg = this.nextReg;
-        string typefmt = typeFmt(mod, backendType);
-        this.print(typefmt ~ "* reg" ~ itoa(reg) ~ " = &((" ~ typefmt ~ "*) reg" ~ itoa(ptrReg) ~ ")[reg" ~ itoa(offsetReg) ~ "];");
-        return reg;
+        useReg(ptrReg);
+        useReg(offsetReg);
+        return addInstr(PtrOffset(backendType, ptrReg, offsetReg));
     }
-    override void store(BackendType backendType, int target_reg, int value_reg) {
-        string typeStr = typeFmt(mod, backendType);
-        if (!backendType.instanceOf(BackendVoidType))
-            this.print("*(" ~ typeStr ~ "*) reg" ~ itoa(target_reg) ~ " = reg" ~ itoa(value_reg) ~ ";");
+    override void store(BackendType backendType, int targetReg, int valueReg) {
+        useReg(targetReg);
+        useReg(valueReg);
+        addInstr(Store(backendType, targetReg, valueReg));
     }
     override void ret(int reg) {
-        if (this.ret_.instanceOf(BackendVoidType)) {
-            this.print("return;");
-        } else {
-            this.print("return reg" ~ itoa(reg) ~ ";");
-        }
+        useReg(reg);
+        addBlockEnderInstr(Return(reg));
     }
     override void branch(string label) {
-        this.print("goto " ~ label ~ ";");
+        addBlockEnderInstr(Branch(label));
         this.blockId = this.blockId + 1;
     }
     override void testBranch(int reg, string thenLabel, string elseLabel) {
-        this.print("if (reg" ~ itoa(reg) ~ ") goto " ~ thenLabel ~ "; else goto " ~ elseLabel ~ ";");
+        useReg(reg);
+        addBlockEnderInstr(TestBranch(reg, thenLabel, elseLabel));
         this.blockId = this.blockId + 1;
     }
+    void flush() {
+        string valueFormat(Value value, bool parens) {
+            import std.string : endsWith;
+
+            if (value.type == "") return value.value;
+            if (value.exactType) return value.value;
+            if (value.value == "0" && value.type.endsWith("*"))
+                return "NULL";
+            string castExpr = "(" ~ value.type ~ ") " ~ value.value;
+            if (parens) return "(" ~ castExpr ~ ")";
+            else return castExpr;
+        }
+        string reg2(int reg, string type) {
+            auto ssaInstr = this.instrs[reg];
+            if (ssaInstr.mode == SSAMode.held || ssaInstr.mode == SSAMode.persisted) {
+                if (ssaInstr.mode == SSAMode.held) this.instrs[reg].mode = SSAMode.done;
+
+                auto value = ssaInstr.heldValue;
+                if (type != value.type) value = Value(type, value.value, false);
+
+                return valueFormat(value, true);
+            }
+            assert(false);
+        }
+        string reg(int reg) {
+            return reg2(reg, this.instrs[reg].heldValue.type);
+        }
+        Value regExt(int reg) {
+            auto ssaInstr = this.instrs[reg];
+            if (ssaInstr.mode == SSAMode.held) {
+                this.instrs[reg].mode = SSAMode.done;
+                return ssaInstr.heldValue;
+            }
+            assert(ssaInstr.mode == SSAMode.persisted);
+            return ssaInstr.heldValue;
+        }
+        void delegate(size_t) flushRegsDg;
+        Value dispatch(int regId) {
+            auto ssaInstr = this.instrs[regId];
+            Value ret;
+            void flushRegs() { flushRegsDg(regId - 1); }
+            ssaInstr.instr.case {
+                Arg arg: {
+                    string typestr = typeFmt(mod, this.args[arg.index]);
+                    ret = Value(typestr, "arg" ~ itoa(arg.index), false);
+                }
+                IntLiteralInstr intLiteral: {
+                    ret = Value("int", ltoa(intLiteral.value), true);
+                }
+                ShortLiteral shortLiteral: {
+                    ret = Value("short", itoa(shortLiteral.value), true);
+                }
+                ByteLiteral byteLiteral: {
+                    ret = Value("char", itoa(byteLiteral.value), true);
+                }
+                LongLiteral longLiteral: {
+                    ret = Value("long long int", ltoa(longLiteral.value), true);
+                }
+                FloatLiteral floatLiteral: {
+                    ret = Value("float", ftoa(floatLiteral.value), true);
+                }
+                WordLiteral wordLiteral: {
+                    ret = Value("int", ltoa(wordLiteral.value), true);
+                }
+                StringLiteralInstr stringLiteral: {
+                    auto text = stringLiteral.text;
+                    string escapedText;
+                    // TODO ord()
+                    for (int i = 0; i < text.length; i += 1) {
+                        if (text[i .. i + 1] == "\"") escapedText ~= "\\\"";
+                        else if (text[i .. i + 1] == "\\") escapedText ~= "\\\\";
+                        else if (text[i .. i + 1] == "\r") escapedText ~= "\\r";
+                        else if (text[i .. i + 1] == "\n") escapedText ~= "\\n";
+                        else if (text[i .. i + 1] == "\0") escapedText ~= "\\0";
+                        else escapedText ~= text[i .. i + 1];
+                    }
+                    ret = Value("char*", "\"" ~ escapedText ~ "\"", true);
+                }
+                ZeroLiteral zeroLiteral: {
+                    auto type = zeroLiteral.type;
+                    if (!type.instanceOf(BackendVoidType)) {
+                        string typestr = typeFmt(mod, type);
+                        string init = "0";
+                        if (type.instanceOf(BackendStructType)) init = "{0}";
+                        ret = Value(typestr, init, false);
+                    }
+                    else ret = Value("", "", true);
+                }
+                StructLiteral structLiteral: {
+                    string typestr = typeFmt(mod, structLiteral.struct_);
+                    string fields = [join ", " reg(a) for a in structLiteral.regs];
+                    ret = Value(typestr, "{" ~ fields ~ "}", false);
+                }
+                SymbolList symbolList: {
+                    ret = Value("void*", symbolList.name, true);
+                }
+                BinOp binOp: {
+                    string typestr = typeFmt(mod, binOp.type);
+                    if (isBooleanOp(binOp.op)) {
+                        typestr = "int";
+                    }
+                    ret = Value(typestr, "(" ~ reg(binOp.left) ~ " " ~ binOp.op ~ " " ~ reg(binOp.right) ~ ")", true);
+                }
+                BitCast bitcast: {
+                    BackendType to = bitcast.to;
+                    string typestr = typeFmt(mod, to);
+                    auto from = regExt(bitcast.from);
+
+                    ret = Value(typestr, from.value, false);
+                }
+                ZeroExtend zeroExtend: {
+                    // TODO this is not zero extend... does it matter for the compiler?
+                    string type = typeFmt(mod, zeroExtend.to);
+                    ret = Value(type, reg(zeroExtend.value), true);
+                }
+                SignExtend signExtend: {
+                    // TODO revisit when we have unsigned types
+                    string type = typeFmt(mod, signExtend.to);
+                    ret = Value(type, reg(signExtend.value), true);
+                }
+                Trunc trunc: {
+                    string type = typeFmt(mod, trunc.to);
+                    ret = Value(type, reg(trunc.value), false);
+                }
+                IntToFloat intToFloat: {
+                    ret = Value("float", reg(intToFloat.reg), true);
+                }
+                FloatToInt floatToInt: {
+                    ret = Value("int", reg(floatToInt.reg), false);
+                }
+                CallInstr call: {
+                    string argstr = [join ", " reg(a) for a in call.args];
+                    flushRegs;
+                    if (call.ret.instanceOf(BackendVoidType)) {
+                        ret = Value("", call.name ~ "(" ~ argstr ~ ")", true);
+                    } else {
+                        string type = typeFmt(mod, call.ret);
+                        ret = Value(type, call.name ~ "(" ~ argstr ~ ")", true);
+                    }
+                }
+                GetFuncPtr getFuncPtr: {
+                    ret = Value("", getFuncPtr.name, false);
+                }
+                CallFuncPtr callFuncPtr: {
+                    auto backendFpType = callFuncPtr.type.instanceOf(BackendFunctionPointerType);
+                    assert(!!backendFpType);
+                    auto retType = backendFpType.ret;
+                    string argstr = [join ", " reg(a) for a in callFuncPtr.args];
+                    string target = reg(callFuncPtr.reg);
+                    flushRegs;
+                    if (retType.instanceOf(BackendVoidType)) {
+                        ret = Value("", target ~ "(" ~ argstr ~ ")", true);
+                    } else {
+                        string type = typeFmt(mod, retType);
+                        ret = Value(type, target ~ "(" ~ argstr ~ ")", true);
+                    }
+                }
+                Load load: {
+                    if (!load.type.instanceOf(BackendVoidType)) {
+                        string type = typeFmt(mod, load.type);
+                        ret = Value(type, "*" ~ reg(load.reg), true);
+                    } else ret = Value("", "", true);
+                }
+                StaticAlloca staticAlloca: {
+                    flushRegs; // TODO is this right?
+                    if (!staticAlloca.type.instanceOf(BackendVoidType)) {
+                        string typefmt = typeFmt(mod, staticAlloca.type);
+                        string init = "0";
+                        if (staticAlloca.type.instanceOf(BackendStructType)) init = "{0}";
+                        this.print(typefmt ~ " reg" ~ itoa(regId) ~ "_frame = " ~ init ~ ";");
+                        ret = Value(typefmt ~ "*", "&reg" ~ itoa(regId) ~ "_frame", true);
+                    } else ret = Value("", "", true);
+                }
+                Field field: {
+                    auto backendStructType = field.type.instanceOf(BackendStructType);
+                    assert(!!backendStructType);
+
+                    string typefmt = typeFmt(mod, backendStructType.members[field.index]);
+                    ret = Value(typefmt, "(" ~ reg(field.reg) ~ ")._" ~ ltoa(field.index), true);
+                }
+                FieldOffset fieldOffset: {
+                    auto backendStructType = fieldOffset.type.instanceOf(BackendStructType);
+                    assert(!!backendStructType);
+
+                    int index = fieldOffset.index;
+                    string typefmt = typeFmt(mod, backendStructType) ~ "*";
+                    string memberfmt = typeFmt(mod, backendStructType.members[index]);
+                    ret = Value(memberfmt ~ "*", "&(" ~ reg2(fieldOffset.reg, typefmt) ~ ")->_" ~ itoa(index), true);
+                }
+                PtrOffset ptrOffset: {
+                    string typefmt = typeFmt(mod, ptrOffset.type) ~ "*";
+                    ret = Value(
+                        typefmt,
+                        "&(" ~ reg2(ptrOffset.ptrReg, typefmt) ~ ")"
+                            ~ "[" ~ reg(ptrOffset.offsetReg) ~ "]",
+                        true);
+                }
+                Store store: {
+                    auto targetReg = reg(store.targetReg);
+                    auto valueReg = reg(store.valueReg);
+                    flushRegs;
+                    string typeStr = typeFmt(mod, store.type);
+                    if (!store.type.instanceOf(BackendVoidType))
+                        this.print("*(" ~ typeStr ~ "*) " ~ targetReg
+                            ~ " = " ~ valueReg ~ ";");
+                    ret = Value("", "", true);
+                }
+                Return return_: {
+                    if (this.ret_.instanceOf(BackendVoidType)) {
+                        this.print("return;");
+                    } else {
+                        this.print("return " ~ reg(return_.reg) ~ ";");
+                    }
+                    flushRegs;
+                    ret = Value("", "", true);
+                }
+                SetLabel setLabel: {
+                    flushRegs;
+                    this.print(setLabel.label ~ ":;");
+                    ret = Value("", "", true);
+                }
+                Branch branch: {
+                    flushRegs;
+                    this.print("goto " ~ branch.label ~ ";");
+                    ret = Value("", "", true);
+                }
+                TestBranch testBranch: {
+                    auto testReg = reg(testBranch.reg);
+                    flushRegs;
+                    this.print("if (" ~ testReg ~ ") "
+                        ~ "goto " ~ testBranch.thenLabel ~ "; "
+                        ~ "else goto " ~ testBranch.elseLabel ~ ";");
+                    ret = Value("", "", true);
+                }
+            }
+            return ret;
+        }
+        void persistReg(int regId) {
+            Value value;
+            auto ssaInstr = this.instrs[regId];
+            if (ssaInstr.mode == SSAMode.held) {
+                value = ssaInstr.heldValue;
+            } else {
+                assert(ssaInstr.mode == SSAMode.pending);
+                value = dispatch(regId);
+            }
+            if (value.type == "") {
+                if (value.value != "")
+                    this.print(value.value ~ ";");
+            } else {
+                import std.string : startsWith;
+
+                string init; init = value.value;
+                if (!init.startsWith("{")) init = valueFormat(value, false);
+                this.print(value.type ~ " reg" ~ itoa(regId) ~ " = " ~ init ~ ";");
+            }
+            this.instrs[regId].mode = SSAMode.persisted;
+            this.instrs[regId].heldValue = Value(value.type, "reg" ~ itoa(regId), true);
+        }
+        void flushRegsImpl(size_t limit) {
+            for (int regId <- 0 .. limit) {
+                auto ssaInstr = this.instrs[regId];
+                if (ssaInstr.mode == SSAMode.held) {
+                    persistReg(regId);
+                }
+            }
+        }
+        flushRegsDg = &flushRegsImpl;
+        for (int regId <- 0 .. this.instrs.length) {
+            auto ssaInstr = this.instrs[regId];
+            assert(ssaInstr.mode == SSAMode.pending);
+            if (ssaInstr.uses == 1) {
+                auto value = dispatch(regId);
+                this.instrs[regId].mode = SSAMode.held;
+                this.instrs[regId].heldValue = value;
+            } else {
+                persistReg(regId);
+            }
+        }
+        flushRegsImpl(this.instrs.length);
+    }
     override void done() {
+        flush;
         string argstr = "(";
         this.print("/*unreachable*/");
         for (int i = 0; i < this.args.length; i += 1) {
@@ -592,11 +848,6 @@ class LineWriter
         assert(offset == sum);
         return res;
     }
-}
-
-void typeFmtInto(CBackendModule mod, BackendType type, LineWriter output)
-{
-    output.append(typeFmt(mod, type));
 }
 
 void defineCIntrinsics(CBackendModule mod, Platform platform) {

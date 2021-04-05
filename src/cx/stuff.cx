@@ -761,11 +761,11 @@ class ASTCall : ASTSymbol
 {
     ASTSymbol target;
 
-    ASTSymbol[] args;
+    (ASTSymbol sym, string name)[] args;
 
     Loc loc;
 
-    this(this.target, this.args, this.loc) { }
+    this(this.target, (ASTSymbol, string)[] args, this.loc) { this.args = args; }
 
     override Expression compile(Context context)
     {
@@ -787,25 +787,38 @@ class ASTCall : ASTSymbol
                     if (callable) {
                         // rewrite foo.bar(baz) to bar(foo, baz)
                         auto target = new ASTIdentifier(astMemberAccess.member, false, astMemberAccess.loc);
-                        auto args = [astMemberAccess.base] ~ this.args;
+                        auto args = [(astMemberAccess.base, "")] ~ this.args;
                         return (new ASTCall(target, args, this.loc)).compile(context);
                     }
                 }
             }
         }
 
-        auto callMacroArgs = new CallMacroArgs(this.target, this.args, context, this.loc);
+        auto callMacroArgs = new CallMacroArgs(this.target, [a.sym for a in this.args], context, this.loc);
         context.macroState.applyMacro(callMacroArgs);
         if (callMacroArgs.transformed) return callMacroArgs.transformed;
 
         auto target = this.target.compile(context);
-        auto args = [beExpression3(context, arg.compile(context), this.loc) for arg in this.args];
+        if (auto fundecl = target.instanceOf(FunctionDeclaration))
+        {
+            this.loc.assert2s(fundecl.args.length == this.args.length, "unexpected number of arguments");
+            for (int i <- 0 .. fundecl.args.length) {
+                auto arg = fundecl.args[i];
+                if (this.args[i].name.length > 0) {
+                    this.loc.assert2s(
+                        this.args[i].name == arg.name,
+                        "expected parameter named '" ~ arg.name ~ "', but got '" ~ this.args[i].name ~ "'");
+                }
+            }
+        }
+
+        auto args = [beExpression3(context, arg.sym.compile(context), this.loc) for arg in this.args];
 
         return callWithLifetime(context, target, args, this.loc, false);
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        auto args = [arg.quote(quoter) for arg in this.args];
+        auto args = [arg.sym.quote(quoter) for arg in this.args];
         return quoter.compilerCall("astCall", [
             this.target.quote(quoter),
             quoter.compiler.astArrayLiteral(args, this.loc.reloc)
@@ -834,7 +847,24 @@ ASTCall parseCall(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
         parser.revert;
         return null;
     }
-    auto args = parseSymbolList(parser, lexicalContext);
+    (ASTSymbol sym, string name)[] args;
+    while (!parser.accept(")"))
+    {
+        if (args.length > 0)
+            parser.expect(",");
+        // foo(a, b, c, )
+        if (parser.accept(")")) break;
+
+        string name;
+        parser.begin;
+        string n = parser.parseIdentifier;
+        if (n.length > 0 && !parser.accept("==") && parser.accept("=")) {
+            name = n;
+            parser.commit;
+        } else parser.revert;
+        ASTSymbol arg = parser.parseExpression(lexicalContext);
+        args ~= (arg, name);
+    }
     parser.commit;
     return new ASTCall(base, args, parser.loc);
 }
@@ -1047,7 +1077,7 @@ class ASTMember : ASTMemberBase
                 if (callable) {
                     auto target = new ASTIdentifier(this.member, false, this.loc);
                     // bar(foo)
-                    auto args = [this.base];
+                    auto args = [(this.base, "")];
                     return (new ASTCall(target, args, this.loc)).compile(context);
                 }
             }

@@ -32,6 +32,9 @@ if [ ! -d build/src ]
 then
     cp -R src build/src
 fi
+
+rm build/cx.ini
+
 I=1
 NEXT=compiler$(($(build/cx -print-generation) + 1))
 build/cx $FLAGS -next-generation -P$NEXT:src -Pcompiler:build/src src/main.cx -o build/cx_test$I

@@ -53,6 +53,9 @@ function at_revision {
         rm -rf build/src
         cp -R build/$rev/build/src build/
     fi
+    if [ -f build/$rev/build/cx.ini ]; then
+        cp build/$rev/build/cx.ini build/
+    fi
     rm -rf build/$rev
 
     # now create the archive
@@ -314,6 +317,8 @@ at_revision 'fd3eb8998a26e96ea95ff84ccb6c0a73a19c0925' 'rebuild cx' 'build/cx'
 at_revision '2a3e93bfcbaacd98873e37c2e3a79b4ea323b9c4' 'rebuild cx' 'build/cx'
 # fix imports that are never used except at function level
 at_revision 'dc04c08b0213c017ac2a7e06160b85510307e838' 'rebuild cx' 'build/cx'
+# object cache, fallback for missing filename
+at_revision '607e4dd167697c89d2d1bcc2a991337c382cbdb7' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

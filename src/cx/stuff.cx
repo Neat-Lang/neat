@@ -2893,7 +2893,8 @@ class Module : ModuleBase
         this.resolver.register(name, symbol);
     }
 
-    (Module mod, string[] symbols)[] imports;
+    // bool visible: whether it affects lookups
+    (Module mod, bool visible, string[] symbols)[] imports;
 
     override void addImport(ModuleBase module_, string[] symbols) {
         auto module_ = module_.instanceOf(Module);
@@ -2902,7 +2903,13 @@ class Module : ModuleBase
         // TODO merge symbols?
         if ([any a.mod.mangledName == module_.mangledName for a in this.imports])
             return;
-        this.imports ~= (module_, symbols);
+        this.imports ~= (module_, true, symbols);
+    }
+
+    void addModuleDependency(Module module_) {
+        string[] empty;
+        // TODO , [])
+        this.imports ~= (module_, false, empty);
     }
 
     override string mangle() { return this.mangledName; }
@@ -2967,11 +2974,12 @@ class Module : ModuleBase
         if (!!frame) { print("error: lookup with frame propagated to Module"); assert(false); }
 
         if (Symbol public_ = this.lookupPublic(context, name)) return public_;
-        for (auto pair <- this.imports) {
-            auto import_ = pair.mod;
-            assert(!!import_);
-            if (!pair.symbols.length || [any a == name for a in pair.symbols]) {
-                if (Symbol entry = import_.lookupPublic(context, name)) return entry;
+        for (auto import_ <- this.imports) {
+            if (!import_.visible) continue;
+            auto importMod = import_.mod;
+            assert(!!importMod);
+            if (!import_.symbols.length || [any a == name for a in import_.symbols]) {
+                if (Symbol entry = importMod.lookupPublic(context, name)) return entry;
             }
         }
         if (this.parent)
@@ -3113,6 +3121,9 @@ class ASTImport : ASTStatement
     override StatementCompileResult compile(Context context) {
         auto module_ = compileModule(context, this.module_, true);
         auto namespace = new ImportNamespace(context.namespace, module_, this.symbols);
+        auto contextModule = findParent!Module(context.namespace);
+
+        contextModule.addModuleDependency(module_);
 
         return StatementCompileResult(
             new NoopStatement,
@@ -3299,7 +3310,7 @@ class TemplateDecl : Symbol
                 module_.register("", fun);
         }
         module_.resolve(context);
-        contextModule.addImport(module_, []);
+        contextModule.addModuleDependency(module_);
 
         return content.case(Class class_: class_.instanceOf(Symbol), Function fun: fun.instanceOf(Symbol));
     }

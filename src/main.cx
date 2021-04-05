@@ -101,8 +101,40 @@ struct BackgroundCompilation
     int pid;
 }
 
-BackgroundCompilation emitModule(CompilerBase compiler, Backend backend, Platform platform, Module module_,
-    bool opt, bool m32, bool caching, bool forMacro)
+// how many levels of cache are we even on rn
+class ObjectCache
+{
+    (string earlyHash, Hash resultHash, string objFile, int pid)[] entries;
+
+    int[] donePids;
+
+    this() { }
+
+    bool has(string earlyHash) {
+        return [any a.earlyHash == earlyHash for a in entries];
+    }
+
+    void add(string earlyHash, Hash resultHash, string objFile, int pid) {
+        this.entries ~= (earlyHash, resultHash, objFile, pid);
+    }
+
+    BackgroundCompilation get(string earlyHash) {
+        typeof(entries[0]) nothing;
+        auto entry = [first a for a in entries where a.earlyHash == earlyHash else nothing];
+        return BackgroundCompilation(entry.resultHash, entry.objFile, entry.pid);
+    }
+
+    void waitpid(int pid) {
+        if (pid == 0) return;
+        if ([any a == pid for a in donePids]) return;
+        if (!cxruntime_waitpid(pid))
+            assert(false);
+        donePids ~= pid;
+    }
+}
+
+BackgroundCompilation emitModule(CompilerBase compiler, ObjectCache cache, Backend backend, Platform platform,
+    Module module_, bool opt, bool m32, bool caching, bool forMacro)
 {
     auto backendModule = backend.createModule(platform, module_.loc.toBackendLoc, forMacro);
     auto backendModuleLLVM = backendModule.instanceOf(LLVMBackendModule);
@@ -111,15 +143,9 @@ BackgroundCompilation emitModule(CompilerBase compiler, Backend backend, Platfor
 
     hash.apply(compiler_hash_add, compiler_hash_mult);
 
-    string join(string[] values, string joiner) {
-        string ret;
-        for (int i <- 0 .. values.length) {
-            if (i) ret ~= joiner;
-            ret ~= values[i];
-        }
-        return ret;
-    }
     int build(string src, string obj) {
+        import std.string : join;
+
         string exec;
         string[] args;
         if (backendModuleLLVM) {
@@ -131,7 +157,7 @@ BackgroundCompilation emitModule(CompilerBase compiler, Backend backend, Platfor
             else { exec = "gcc"; args = ["-c", "-fpic", src, "-o", obj]; }
             if (m32) args ~= "-m32";
         }
-        string cmd = exec ~ " " ~ join(args, " ");
+        string cmd = exec ~ " " ~ args.join(" ");
         int pid = cxruntime_execbg(exec, args);
         print("$ " ~ cmd ~ " [&" ~ itoa(pid) ~ "]");
         return pid;
@@ -146,10 +172,15 @@ BackgroundCompilation emitModule(CompilerBase compiler, Backend backend, Platfor
     // Macros have special magic to avoid dlopen issues.
     if (forMacro) hash.adds("macro");
 
-    auto symbols = module_.compile(compiler, platform);
-
     string moduleMangle = module_.mangle;
     hash.adds(moduleMangle);
+
+    string earlyHash = hash.text;
+    if (cache.has(earlyHash)) {
+        return cache.get(earlyHash);
+    }
+
+    auto symbols = module_.compile(compiler, platform);
     [symbol.hash(hash) for symbol in symbols];
 
     string objFile = ".obj/" ~ hash.text ~ ".o";
@@ -158,8 +189,11 @@ BackgroundCompilation emitModule(CompilerBase compiler, Backend backend, Platfor
         objFile = ".obj/" ~ hash.text ~ ".bc";
     }
 
-    if (caching && exists(objFile))
+    if (caching && exists(objFile)) {
+        // preexisting object
+        cache.add(earlyHash, hash, objFile, 0);
         return BackgroundCompilation(hash, objFile, 0);
+    }
 
     auto generator = new Generator(platform, backendModule);
     module_.emit(generator, symbols);
@@ -182,12 +216,15 @@ BackgroundCompilation emitModule(CompilerBase compiler, Backend backend, Platfor
         }
         pid = build(srcFile, objFile);
     }
+    cache.add(earlyHash, hash, objFile, pid);
     return BackgroundCompilation(hash, objFile, pid);
 }
 
 class ParserHelperImpl : ParserHelper
 {
     CompilerBase compiler;
+
+    ObjectCache cache;
 
     Backend backend;
 
@@ -197,7 +234,7 @@ class ParserHelperImpl : ParserHelper
 
     PlatformFlags platformFlags;
 
-    this(this.compiler, this.backend, this.x86_32, this.caching, this.platformFlags) { }
+    this(this.compiler, this.cache, this.backend, this.x86_32, this.caching, this.platformFlags) { }
 
     // TODO why do we need 'config'?
     override void proxyCall(ASTModule astModule, string function_, MacroState macroState, ModuleParserConfig config)
@@ -228,9 +265,9 @@ class ParserHelperImpl : ParserHelper
         while (remainingModules.length > 0) {
             for (auto remainingModule <- remainingModules) {
                 auto compilation = emitModule(
-                    compiler, backend, platform, remainingModule, false, x86_32, caching, true);
+                    compiler, cache, backend, platform, remainingModule, false, x86_32, caching, true);
                 objFiles ~= " " ~ compilation.objFile;
-                if (compilation.pid != 0) pids ~= compilation.pid;
+                pids ~= compilation.pid;
                 with (compilation.hash.state) libHash.apply(add, mult);
             }
             auto remainingSet = new ModuleSet(0);
@@ -245,10 +282,7 @@ class ParserHelperImpl : ParserHelper
             remainingModules = remainingSet.array;
         }
 
-        for (auto pid <- pids) {
-            if (!cxruntime_waitpid(pid))
-                assert(false);
-        }
+        [cache.waitpid(pid) for pid in pids];
 
         auto simpleContext = makeContext(compiler, platform, null, null);
         auto fun = module_.lookup(function_, simpleContext, null).instanceOf(Function);
@@ -1129,9 +1163,10 @@ void main(string[] args)
     auto defaultImports = new ASTModule[](0) ~ builtins;
     auto compilerImpl = new CompilerImpl(defaultImports);
     auto astCache = new ASTModuleCache;
+    auto objectCache = new ObjectCache;
     auto modParseConfig = new ModuleParserConfig(packages, defaultImports, astCache);
     auto helper = new ParserHelperImpl(
-        compilerImpl, options.macroBackend,
+        compilerImpl, objectCache, options.macroBackend,
         options.macro_x86_32, options.caching, options.macroPlatformFlags);
 
     Module compile(ASTModule astMod, bool addDefaultImports) {
@@ -1163,7 +1198,7 @@ void main(string[] args)
     int[] pids;
     while (remainingModules.length > 0) {
         for (auto remainingModule <- remainingModules) {
-            auto compilation = emitModule(compilerImpl, options.backend, platform, remainingModule,
+            auto compilation = emitModule(compilerImpl, objectCache, options.backend, platform, remainingModule,
                 options.optimize, options.x86_32, options.caching, false);
             fileArgs ~= " " ~ compilation.objFile;
             with (compilation.hash.state) binHash.apply(add, mult);
@@ -1181,10 +1216,7 @@ void main(string[] args)
         remainingModules = remainingSet.array;
     }
 
-    for (int pid <- pids) {
-        if (!cxruntime_waitpid(pid))
-            assert(false);
-    }
+    [objectCache.waitpid(pid) for pid in pids];
 
     if (options.umlFile != "") {
         compilerImpl.stats.instanceOf(UmlClassGraph).writeTo(options.umlFile);

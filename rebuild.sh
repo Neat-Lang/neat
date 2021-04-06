@@ -33,7 +33,7 @@ then
     cp -R src build/src
 fi
 
-rm build/cx.ini
+rm build/cx.ini || true
 
 I=1
 NEXT=compiler$(($(build/cx -print-generation) + 1))

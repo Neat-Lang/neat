@@ -319,6 +319,8 @@ at_revision '2a3e93bfcbaacd98873e37c2e3a79b4ea323b9c4' 'rebuild cx' 'build/cx'
 at_revision 'dc04c08b0213c017ac2a7e06160b85510307e838' 'rebuild cx' 'build/cx'
 # object cache, fallback for missing filename
 at_revision '607e4dd167697c89d2d1bcc2a991337c382cbdb7' 'rebuild cx' 'build/cx'
+# move Either classes into the compiler
+at_revision 'cde31c3b08efd0146379488361782b22f385c917' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

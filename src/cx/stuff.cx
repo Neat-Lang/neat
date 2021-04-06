@@ -324,6 +324,12 @@ class ASTTupleType : ASTSymbol
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTTupleType'!"); assert(false); }
 }
 
+/**
+ * Tuples:
+ * - (int, float): int and float
+ * - (int | float): int or float
+ * - (int, int | int): (int and int) or int
+ */
 ASTSymbol parseTupleType(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
@@ -332,35 +338,55 @@ ASTSymbol parseTupleType(Parser parser, LexicalContext lexicalContext)
         parser.revert;
         return null;
     }
-    (string, ASTSymbol)[] members;
+    ASTEitherDeclEntry[] declEntries;
+    (string name, Loc loc, ASTSymbol sym)[] members;
+    void flush() {
+        assert(members.length > 0);
+
+        if (members.length == 1 && members[0].name == "") {
+            declEntries ~= ASTEitherDeclEntry(members[0].loc, members[0].sym);
+        } else {
+            declEntries ~= ASTEitherDeclEntry(
+                members[0].loc,
+                new ASTTupleType(loc, [(a.name, a.sym) for a in members]));
+        }
+        members = [];
+    }
     while (!parser.accept(")"))
     {
-        if (members.length && !parser.accept(",")) {
-            // be a bit lenient for (bla bla)
-            if (members.length == 1) {
-                parser.revert;
-                return null;
+        if (members.length) {
+            bool tuplesep, eithersep;
+            if (parser.accept(",")) tuplesep = true;
+            else if (parser.accept("|")) eithersep = true;
+            else {
+                // be a bit lenient for (bla bla)
+                if (members.length == 1) {
+                    parser.revert;
+                    return null;
+                }
+                loc.assert2s(false, "tuple: ',' or '|' expected");
             }
-            loc.assert2s(false, "tuple: ',' expected");
+            if (eithersep) {
+                flush;
+            }
         }
-        auto type = parser.parseType(lexicalContext);
-        // FIXME parser.loc.assert2s
         auto loc = parser.loc;
+        auto type = parser.parseType(lexicalContext);
         if (!type) {
             // (bla bla) still
             if (members.length <= 1) {
                 parser.revert;
                 return null;
             }
-            // FIXME parser.loc.assert2s
-            auto loc = parser.loc;
             loc.assert2s(false, "tuple: type expected");
         }
         string name = parser.parseIdentifier;
-        members ~= (name, type);
+        members ~= (name, loc, type);
     }
+    flush;
     parser.commit;
-    return new ASTTupleType(loc, members);
+    if (declEntries.length == 1) return declEntries[0].symbol;
+    return new ASTEitherDecl(declEntries);
 }
 
 ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)

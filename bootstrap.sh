@@ -323,6 +323,8 @@ at_revision '607e4dd167697c89d2d1bcc2a991337c382cbdb7' 'rebuild cx' 'build/cx'
 at_revision 'cde31c3b08efd0146379488361782b22f385c917' 'rebuild cx' 'build/cx'
 # Either tuple syntax
 at_revision 'a7b0f886bb2d548d79206e634ab24ada76d04732' 'rebuild cx' 'build/cx'
+# symbol identifiers, unnamed-variable destructuring
+at_revision 'd3ad0e8bf7f767303b598c108dcf3e3e3769fb43' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

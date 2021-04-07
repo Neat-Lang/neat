@@ -276,6 +276,8 @@ abstract class Expression : Symbol
 
 Expression beExpression(Symbol symbol)
 {
+    if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
+        return new SymbolIdentifierExpression(symbolIdent.name);
     Expression expr = symbol.instanceOf(Expression);
     assert(!!expr);
     return expr;
@@ -283,6 +285,8 @@ Expression beExpression(Symbol symbol)
 
 Expression beExpression2(Symbol symbol, Loc loc)
 {
+    if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
+        return new SymbolIdentifierExpression(symbolIdent.name);
     Expression expr = symbol.instanceOf(Expression);
 
     loc.assert2s(!!expr, "expression expected");
@@ -293,6 +297,8 @@ Type beType(Loc loc, Symbol symbol)
 {
     if (auto type = symbol.instanceOf(Type))
         return type;
+    if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
+        return new SymbolIdentifierType(symbolIdent.name);
     loc.assert2s(false, "type expected");
 }
 
@@ -322,6 +328,41 @@ class PointerCast : Expression
     override ExprInfo info() { return value.info; }
 
     override void hash(Hash hash) { hash.adds("ptrcast"); target.hash(hash); value.hash(hash); }
+}
+
+/**
+ * `SymbolIdentifier` is the core of the :name symbol type impl.
+ * Because :foo a = :foo; and we can't double inherit,
+ * `SymbolIdentifier` has special handling in `beType` and `beExpression`.
+ */
+class SymbolIdentifier : Symbol
+{
+    string name;
+    this(this.name) { }
+}
+
+class SymbolIdentifierType : Type
+{
+    string name;
+    this(this.name) { }
+    override BackendType emit(Platform platform) { return new BackendVoidType; }
+    override bool same(Type type) {
+        if (auto other = type.instanceOf(SymbolIdentifierType))
+            return other.name == this.name;
+        return false;
+    }
+    override string repr() { return ":" ~ this.name; }
+    override string mangle() { return "symbol_" ~ name; }
+    override void hash(Hash hash) { hash.adds("SymbolType"); hash.adds(name); }
+}
+
+class SymbolIdentifierExpression : Expression
+{
+    string name;
+    this(this.name) { this.type = new SymbolIdentifierType(name); }
+    override int emit(Generator output) { return output.fun.voidLiteral; }
+    override ExprInfo info() { return ExprInfo(Ownership.global); }
+    override void hash(Hash hash) { hash.adds("SymbolExpr"); hash.adds(name); }
 }
 
 /*
@@ -731,6 +772,9 @@ struct Context
 
 Expression isExpressionImplCall(Symbol symbol, Context context, Loc loc)
 {
+    if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
+        return new SymbolIdentifierExpression(symbolIdent.name);
+
     // implicit function calls
     Expression expr = context.compiler.implicitCall(context, symbol, loc);
     if (!expr) expr = symbol.instanceOf(Expression);

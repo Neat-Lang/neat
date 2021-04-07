@@ -214,11 +214,11 @@ class LLVMBackendModule : BackendModule {
                 if (retByMemory) {
                     this.output.appends("void ");
                 } else {
-                    llvmFmtInto(type.ret, this.output, this.platform);
+                    llvmFmtInto2(type.ret, this.output, this.platform, true);
                 }
                 this.output.append3s(" @", decl.name, "(");
                 if (retByMemory) {
-                    llvmFmtInto(type.ret, this.output, this.platform);
+                    llvmFmtInto2(type.ret, this.output, this.platform, true);
                     this.output.appends("* sret %ret");
                     if (type.args.length) this.output.appends(", ");
                 }
@@ -248,13 +248,20 @@ class LLVMBackendModule : BackendModule {
 }
 
 string llvmFmt(BackendType type, Platform platform) {
+    return type.llvmFmt2(platform, false);
+}
+
+string llvmFmt2(BackendType type, Platform platform, bool returnType) {
     assert(!!type);
     if (type.instanceOf(BackendLongType)) return "i64";
     if (type.instanceOf(BackendIntType)) return "i32";
     if (type.instanceOf(BackendShortType)) return "i16";
     if (type.instanceOf(BackendCharType)) return "i8";
     if (type.instanceOf(BackendFloatType)) return "float";
-    if (type.instanceOf(BackendVoidType)) return "void";
+    if (type.instanceOf(BackendVoidType)) {
+        if (returnType) return "void";
+        return "{}";
+    }
     auto backendSpacerType = type.instanceOf(BackendSpacerType);
     if (backendSpacerType) return "[" ~ ltoa(backendSpacerType.size_) ~ " x i8]";
     auto backendPointerType = type.instanceOf(BackendPointerType);
@@ -262,14 +269,14 @@ string llvmFmt(BackendType type, Platform platform) {
         if (backendPointerType.target.instanceOf(BackendVoidType)) {
             return "i8*";
         }
-        return llvmFmt(backendPointerType.target, platform) ~ "*";
+        return llvmFmt2(backendPointerType.target, platform, false) ~ "*";
     }
     auto backendStructType = type.instanceOf(BackendStructType);
     if (backendStructType) {
         string res = "{ ";
         for (int i = 0; i < backendStructType.members.length; i += 1) {
             if (i) res ~= ", ";
-            res ~= llvmFmt(backendStructType.members[i], platform);
+            res ~= llvmFmt2(backendStructType.members[i], platform, false);
         }
         res ~= " }";
         return res;
@@ -279,25 +286,25 @@ string llvmFmt(BackendType type, Platform platform) {
         bool sret = passByMemory(backendFpType.ret, platform);
         string res;
         if (sret) res ~= "void";
-        else res ~= llvmFmt(backendFpType.ret, platform);
+        else res ~= llvmFmt2(backendFpType.ret, platform, true);
         res ~= "(";
         if (sret) {
-            res ~= llvmFmt(backendFpType.ret, platform) ~ "*";
+            res ~= llvmFmt2(backendFpType.ret, platform, true) ~ "*";
             if (backendFpType.args.length) res ~= ", ";
         }
         for (int i = 0; i < backendFpType.args.length; i += 1) {
             if (i) res ~= ", ";
             if (passByMemory(backendFpType.args[i], platform))
-                res ~= llvmFmt(backendFpType.args[i], platform) ~ "*";
+                res ~= llvmFmt2(backendFpType.args[i], platform, false) ~ "*";
             else
-                res ~= llvmFmt(backendFpType.args[i], platform);
+                res ~= llvmFmt2(backendFpType.args[i], platform, false);
         }
         res = res ~ ")*";
         return res;
     }
     auto backendSAtype = type.instanceOf(BackendStaticArrayType);
     if (backendSAtype) {
-        return "[" ~ itoa(backendSAtype.length) ~ " x " ~ llvmFmt(backendSAtype.element, platform) ~ "]";
+        return "[" ~ itoa(backendSAtype.length) ~ " x " ~ llvmFmt2(backendSAtype.element, platform, false) ~ "]";
     }
     print(type.repr);
     assert(false);
@@ -866,7 +873,7 @@ class LLVMBackendFunction : BackendFunction {
         string argstr = "(";
         this.print("unreachable");
         bool sret = passByMemory(this.ret_, this.mod.platform);
-        string retFmt = llvmFmt(this.ret_, this.mod.platform);
+        string retFmt = llvmFmt2(this.ret_, this.mod.platform, true);
         if (sret) {
             argstr ~= retFmt ~ "* sret %ret";
             if (this.args.length) argstr ~= ", ";
@@ -1004,14 +1011,22 @@ class LineWriter
     }
 }
 
-void llvmFmtInto(BackendType type, LineWriter output, Platform platform)
+void llvmFmtInto(BackendType type, LineWriter output, Platform platform) {
+    return type.llvmFmtInto2(output, platform, false);
+}
+
+void llvmFmtInto2(BackendType type, LineWriter output, Platform platform, bool returnType)
 {
     if (type.instanceOf(BackendLongType)) { output.append("i64"); return; }
     if (type.instanceOf(BackendIntType)) { output.append("i32"); return; }
     if (type.instanceOf(BackendShortType)) { output.append("i16"); return; }
     if (type.instanceOf(BackendCharType)) { output.append("i8"); return; }
     if (type.instanceOf(BackendFloatType)) { output.append("float"); return; }
-    if (type.instanceOf(BackendVoidType)) { output.append("void"); return; }
+    if (type.instanceOf(BackendVoidType)) {
+        if (returnType) output.append("void");
+        else output.append("{}");
+        return;
+    }
     auto backendSpacerType = type.instanceOf(BackendSpacerType);
     if (backendSpacerType) {
         output.append("[");
@@ -1025,7 +1040,7 @@ void llvmFmtInto(BackendType type, LineWriter output, Platform platform)
             output.append("i8*");
             return;
         }
-        llvmFmtInto(backendPointerType.target, output, platform);
+        llvmFmtInto2(backendPointerType.target, output, platform, false);
         output.append("*");
         return;
     }
@@ -1034,7 +1049,7 @@ void llvmFmtInto(BackendType type, LineWriter output, Platform platform)
         output.append("{ ");
         for (int i = 0; i < backendStructType.members.length; i += 1) {
             if (i) output.append(", ");
-            llvmFmtInto(backendStructType.members[i], output, platform);
+            llvmFmtInto2(backendStructType.members[i], output, platform, false);
         }
         output.append(" }");
         return;
@@ -1045,20 +1060,20 @@ void llvmFmtInto(BackendType type, LineWriter output, Platform platform)
         if (sret)
             output.append("void");
         else
-            llvmFmtInto(backendFpType.ret, output, platform);
+            llvmFmtInto2(backendFpType.ret, output, platform, true);
         output.append("(");
         if (sret) {
-            llvmFmtInto(backendFpType.ret, output, platform);
+            llvmFmtInto2(backendFpType.ret, output, platform, true);
             if (backendFpType.args.length) output.append("*,");
             else output.append("*");
         }
         for (int i = 0; i < backendFpType.args.length; i += 1) {
             if (i) output.append(", ");
             if (passByMemory(backendFpType.args[i], platform)) {
-                llvmFmtInto(backendFpType.args[i], output, platform);
+                llvmFmtInto2(backendFpType.args[i], output, platform, false);
                 output.appends("*");
             } else
-                llvmFmtInto(backendFpType.args[i], output, platform);
+                llvmFmtInto2(backendFpType.args[i], output, platform, false);
         }
         output.append(")*");
         return;
@@ -1068,7 +1083,7 @@ void llvmFmtInto(BackendType type, LineWriter output, Platform platform)
         output.append("[");
         output.append(itoa(backendSAtype.length));
         output.append(" x ");
-        llvmFmtInto(backendSAtype.element, output, platform);
+        llvmFmtInto2(backendSAtype.element, output, platform, false);
         output.append("]");
         return;
     }

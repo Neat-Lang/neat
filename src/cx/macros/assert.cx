@@ -25,12 +25,12 @@ class ASTAssertion : ASTStatement
         this.loc = loc;
     }
 
-    Expression identTest(Context context, ASTIdentifier ident) {
+    Expression symbolTest(Context context, ASTSymbol sym) {
         auto context = context.withNamespace(context.compiler.exprAlias(
-                context.namespace, "identName", context.compiler.stringLiteral(repr(ident))));
+                context.namespace, "identName", context.compiler.stringLiteral(repr(sym))));
 
         return (
-            context.compiler.$expr "because " ~ identName ~ " = "/* ~ itoa($ident)*/
+            context.compiler.$expr identName ~ " = " ~ itoa(cast(int) $sym)
         ).compile(context).instanceOf(Expression);
     }
 
@@ -82,31 +82,57 @@ class ASTAssertion : ASTStatement
                 ret;
             })).compile(context).instanceOf(Expression);
         }
-        if (left.type.instanceOf(Integer) && right.type.instanceOf(Integer)) {
+        if (true || left.type.instanceOf(Integer) && right.type.instanceOf(Integer)) {
             if (right.instanceOf(IntLiteral)) {
                 return (
-                    context.compiler.$expr leftStr ~ " = " ~ itoa(left)
+                    context.compiler.$expr leftStr ~ " = " ~ itoa(cast(int) left)
                 ).compile(context).instanceOf(Expression);
             }
             return (
                 context.compiler.$expr
-                    "because " ~ leftStr ~ " = " ~ itoa(left)
-                    ~ " and " ~ rightStr ~ " = " ~ itoa(right)
+                    leftStr ~ " = " ~ itoa(cast(int) left)
+                    ~ " and " ~ rightStr ~ " = " ~ itoa(cast(int) right)
             ).compile(context).instanceOf(Expression);
         }
         return null;
     }
 
-    Expression dispatch(Context context, ASTSymbol sym) {
-        auto ident = sym.instanceOf(ASTIdentifier);
-        if (ident)
-        {
-            return identTest(context, ident);
+    Expression negTest(Context context, ASTNegation astNegation)
+    {
+        auto context = context;
+
+        void set(string name, Symbol value) {
+            context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, name, value));
         }
-        auto binop = sym.instanceOf(ASTBinaryOp);
-        if (binop)
+
+        auto nextRecurse = dispatch(context, astNegation.next);
+        if (!nextRecurse) return null;
+        set("nextRecurse", nextRecurse);
+        string nextStr = repr(astNegation.next);
+        set("nextStr", context.compiler.stringLiteral(nextStr));
+
+        return (
+            context.compiler.$expr nextRecurse ~ " was true"
+        ).compile(context).instanceOf(Expression);
+    }
+
+    Expression dispatch(Context context, ASTSymbol sym) {
+        if (auto ident = sym.instanceOf(ASTIdentifier))
+        {
+            return symbolTest(context, ident);
+        }
+        if (auto member = sym.instanceOf(ASTMember))
+        {
+            return symbolTest(context, member);
+        }
+        if (auto binop = sym.instanceOf(ASTBinaryOp))
         {
             return binopTest(context, binop);
+        }
+        if (auto neg = sym.instanceOf(ASTNegation))
+        {
+            return negTest(context, neg);
         }
         return null;
     }
@@ -177,16 +203,19 @@ class ASTAssertion : ASTStatement
 
 string repr(ASTSymbol expr) {
     assert(!!expr);
-    auto ident = expr.instanceOf(ASTIdentifier);
-    if (ident) {
+    if (auto ident = expr.instanceOf(ASTIdentifier)) {
         return ident.name;
     }
-    auto binop = expr.instanceOf(ASTBinaryOp);
-    if (binop) {
+    if (auto neg = expr.instanceOf(ASTNegation)) {
+        return "!" ~ repr(neg.next);
+    }
+    if (auto member = expr.instanceOf(ASTMemberBase)) {
+        return repr(member.base) ~ "." ~ member.member;
+    }
+    if (auto binop = expr.instanceOf(ASTBinaryOp)) {
         return "(" ~ repr(binop.left) ~ " " ~ binop.op ~ " " ~ repr(binop.right) ~ ")";
     }
-    auto intl = expr.instanceOf(ASTIntLiteral);
-    if (intl) {
+    if (auto intl = expr.instanceOf(ASTIntLiteral)) {
         return itoa(intl.value);
     }
     return "TODO";

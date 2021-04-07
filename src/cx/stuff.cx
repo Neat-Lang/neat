@@ -540,7 +540,7 @@ class FuncPtrCall : Expression
     }
 
     // we take over the returned value
-    override ExprInfo info() { return ExprInfo(Ownership.gifted); }
+    override ExprInfo info() { return ExprInfo(false, Ownership.gifted); }
 
     override void hash(Hash hash) {
         hash.adds("FuncPtrCall");
@@ -575,7 +575,7 @@ class DelegateExpr : Expression
         return output.fun.structLiteral(thisType, [nullReg, thisReg, funcReg]);
     }
 
-    override ExprInfo info() { return ExprInfo(Ownership.owned); }
+    override ExprInfo info() { return ExprInfo(false, Ownership.owned); }
 
     override void hash(Hash hash) { hash.adds("DelegateExpr"); this.funcPtr.hash(hash); this.thisPtr.hash(hash); }
 }
@@ -595,7 +595,7 @@ class DelegateDataPtr : Expression
         return output.fun.field(this.dg.type.emit(output.platform), reg, 1);
     }
 
-    override ExprInfo info() { return ExprInfo(Ownership.owned); }
+    override ExprInfo info() { return ExprInfo(false, Ownership.owned); }
 
     override void hash(Hash hash) { hash.adds("DelegateDataPtr"); this.dg.hash(hash); }
 }
@@ -618,7 +618,7 @@ class DelegateFuncPtr : Expression
         return output.fun.field(this.dg.type.emit(output.platform), reg, 2);
     }
 
-    override ExprInfo info() { return ExprInfo(Ownership.owned); }
+    override ExprInfo info() { return ExprInfo(false, Ownership.owned); }
 
     override void hash(Hash hash) { hash.adds("DelegateFuncPtr"); this.dg.hash(hash); }
 }
@@ -1275,7 +1275,7 @@ class Dereference : Reference
 
     // avoid doing memory management until we figure out how to handle pointers.
     // (or if we need to at all.)
-    override ExprInfo info() { return ExprInfo(Ownership.owned); }
+    override ExprInfo info() { return ExprInfo(false, Ownership.owned); }
 
     override void hash(Hash hash) { hash.adds("Dereference"); base.hash(hash); }
 }
@@ -1328,7 +1328,7 @@ class SizeOf : Expression
         return output.fun.intLiteral(size);
     }
 
-    override ExprInfo info() { return ExprInfo(Ownership.owned); }
+    override ExprInfo info() { return ExprInfo(false, Ownership.owned); }
 
     override void hash(Hash hash) { hash.adds("SizeOf"); targetType.hash(hash); }
 }
@@ -1938,7 +1938,7 @@ class VoidExpression : Expression
     {
         return generator.fun.voidLiteral;
     }
-    override ExprInfo info() { return ExprInfo(Ownership.owned); }
+    override ExprInfo info() { return ExprInfo(false, Ownership.owned); }
     override void hash(Hash hash) { hash.adds("VoidExpression"); }
 }
 
@@ -2252,6 +2252,8 @@ class ASTVarDeclStatement : ASTStatement
 {
     string name;
 
+    bool mutable;
+
     bool infer;
 
     ASTSymbol type;
@@ -2260,7 +2262,7 @@ class ASTVarDeclStatement : ASTStatement
 
     Loc loc;
 
-    this(this.name, this.infer, this.type, this.initial, this.loc)
+    this(this.name, this.mutable, this.infer, this.type, this.initial, this.loc)
     {
         assert(infer == !type);
         assert(!infer || initial);
@@ -2281,18 +2283,20 @@ class ASTVarDeclStatement : ASTStatement
                 initial = expectImplicitConvertTo(context, initial, type, this.loc);
             }
 
-            auto ownership = Ownership.owned;
             if (initial.info.ownership == Ownership.owned)
             {
+                this.loc.assert2s(!mutable, "initializer is owned and we're declared mutable :(");
                 // don't double-own the value, it's covered by its own ownership
-                auto decl = new VariableDeclaration(context.namespace, this.name, type, Ownership.borrowed, false);
+                auto decl = new VariableDeclaration(
+                    context.namespace, this.name, type, ExprInfo(mutable, Ownership.borrowed), false);
 
                 return StatementCompileResult(
                     context.compiler.assignStatement(decl.accessDecl(context.compiler), initial),
                     context.withNamespace(decl));
             }
 
-            auto decl = new VariableDeclaration(context.namespace, this.name, type, Ownership.owned, false);
+            auto decl = new VariableDeclaration(
+                context.namespace, this.name, type, ExprInfo(mutable, Ownership.owned), false);
 
             return StatementCompileResult(
                 move(context, decl.accessDecl(context.compiler), initial),
@@ -2300,7 +2304,8 @@ class ASTVarDeclStatement : ASTStatement
         }
         else
         {
-            auto decl = new VariableDeclaration(context.namespace, this.name, type, Ownership.owned, false);
+            auto decl = new VariableDeclaration(
+                context.namespace, this.name, type, ExprInfo(mutable, Ownership.owned), false);
 
             return StatementCompileResult(
                 new AssignStatement(decl.accessDecl(context.compiler), new NullExpr(type)),
@@ -2336,7 +2341,7 @@ class ASTVarDeclStatement : ASTStatement
 }
 
 ASTVarDeclStatement parseVarInitialization(
-    Parser parser, LexicalContext lexicalContext, bool infer, ASTSymbol type, bool requireInitializer)
+    Parser parser, LexicalContext lexicalContext, bool infer, bool mutable, ASTSymbol type, bool requireInitializer)
 {
     parser.begin;
     ASTSymbol initial;
@@ -2373,25 +2378,30 @@ ASTVarDeclStatement parseVarInitialization(
         return null;
     }
     parser.commit;
-    return new ASTVarDeclStatement(name, infer, type, initial, parser.loc);
+    return new ASTVarDeclStatement(name, mutable, infer, type, initial, parser.loc);
 }
 
 ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext, bool requireInitializer)
 {
     parser.begin;
     bool infer = false;
+    bool mutable = false;
     ASTSymbol type;
+    if (parser.acceptIdentifier("mut")) mutable = true;
     if (acceptIdentifier(parser, "auto")) {
         infer = true;
     } else {
         type = parser.parseType(lexicalContext);
         if (!type)
         {
-            parser.revert;
-            return null;
+            if (mutable) infer = true;
+            else {
+                parser.revert;
+                return null;
+            }
         }
     }
-    auto decl = parseVarInitialization(parser, lexicalContext, infer, type, requireInitializer);
+    auto decl = parseVarInitialization(parser, lexicalContext, infer, mutable, type, requireInitializer);
     if (!decl) {
         parser.revert;
         return null;
@@ -2403,9 +2413,11 @@ ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext, b
 ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
-    bool infer = false;
-    ASTSymbol type;
     auto loc = parser.loc;
+    bool infer = false;
+    bool mutable = false;
+    ASTSymbol type;
+    if (parser.acceptIdentifier("mut")) mutable = true;
     if (acceptIdentifier(parser, "auto")) {
         infer = true;
     } else {
@@ -2419,7 +2431,7 @@ ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
     ASTStatement[] decls;
     while (true) {
         if (decls.length) parser.expect(",");
-        ASTStatement decl = parseVarInitialization(parser, lexicalContext, infer, type, false);
+        ASTStatement decl = parseVarInitialization(parser, lexicalContext, infer, mutable, type, false);
         if (!decl) {
             parser.assert_(decls.length == 0, "couldn't parse continuing variable declaration");
             parser.revert;

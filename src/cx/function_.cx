@@ -83,7 +83,7 @@ class Function : FunctionDeclaration
             string framePtrName;
             if (this.hasThisArg) framePtrName = "this";
             thisDecl = new VariableDeclaration(
-                scope_, framePtrName, this.contextType, Ownership.borrowed, framePtrName == "");
+                scope_, framePtrName, this.contextType, ExprInfo(false, Ownership.borrowed), framePtrName == "");
 
             Type voidp = once new Pointer(new Void);
 
@@ -112,7 +112,8 @@ class Function : FunctionDeclaration
                 if (!stmt) stmt = compiler.assignStatement(target, argExpr);
                 argAssignments[extra + i] = stmt;
             } else {
-                auto argDecl = new VariableDeclaration(scope_, arg.name, arg.type, Ownership.borrowed, false);
+                auto argDecl = new VariableDeclaration(
+                    scope_, arg.name, arg.type, ExprInfo(false, Ownership.borrowed), false);
 
                 argAssignments[extra + i] = compiler.assignStatement(argDecl.accessDecl(context.compiler), argExpr);
 
@@ -193,9 +194,9 @@ class LatentVariable
 
     int offset;
 
-    Ownership ownership;
+    ExprInfo info;
 
-    this(this.name, this.stackFrameType, this.offset, this.ownership) { }
+    this(this.name, this.stackFrameType, this.offset, this.info) { }
 }
 
 class FunctionScope : Namespace
@@ -220,12 +221,15 @@ class FunctionScope : Namespace
         this.isContextScope = true;
     }
 
-    LatentVariable declare(string name, Type type, Ownership ownership)
+    LatentVariable declare(string name, Type type, ExprInfo info)
     {
+        assert(info.ownership != Ownership.gifted);
+        assert(!info.mutable || info.ownership == Ownership.owned);
+
         this.variables ~= new StructMemberDeclaration(name, type);
         this.structType = this.compiler.struct_("", this.variables, this.loc, this.mangle_);
 
-        return new LatentVariable(name, this.structType, cast(int) this.variables.length - 1, ownership);
+        return new LatentVariable(name, this.structType, cast(int) this.variables.length - 1, info);
     }
 
     override string mangle() { return this.mangle_; }
@@ -254,9 +258,9 @@ class VariableDeclaration : DeclarationHolder
 
     bool hidden;
 
-    this(this.parent, string name, Type type, Ownership ownership, this.hidden)
+    this(this.parent, string name, Type type, ExprInfo info, this.hidden)
     {
-        this.variable = findParent!FunctionScope(this).declare(name, type, ownership);
+        this.variable = findParent!FunctionScope(this).declare(name, type, info);
         this.isContextScope = true;
     }
 
@@ -272,8 +276,10 @@ class VariableDeclaration : DeclarationHolder
         auto frame = new PointerCast(new Pointer(stackFrameType), frame);
         auto reference = compiler.structMemberReference(compiler.dereference(frame), variable.offset);
         // an argument, for instance
-        if (variable.ownership == Ownership.borrowed) return new BorrowedReference(reference);
-        return reference;
+        auto info = variable.info;
+        if (info.ownership != Ownership.borrowed)
+            info.ownership = Ownership.owned;
+        return new InfoReference(reference, info);
     }
 
     override Symbol lookup(string name, Context context, Expression frame)
@@ -311,21 +317,24 @@ class StackFrame : Reference
         return generator.frameReg;
     }
 
-    override ExprInfo info() { return ExprInfo(Ownership.owned); }
+    override ExprInfo info() { return ExprInfo(false, Ownership.owned); }
 
     override void hash(Hash hash) { hash.adds("StackFrame"); targetType.hash(hash); }
 }
 
-class BorrowedReference : Reference
+class InfoReference : Reference
 {
     Reference base;
 
-    this(this.base) { this.type = base.type; }
+    ExprInfo info_;
+
+    this(this.base, this.info_) { this.type = base.type; }
 
     override int emit(Generator output) { return base.emit(output); }
     override int emitLocation(Generator output) { return base.emitLocation(output); }
-    override void hash(Hash hash) { hash.adds("BorrowedReference"); base.hash(hash); }
-    override ExprInfo info() { return ExprInfo(Ownership.borrowed); }
+    // TODO hash ExprInfo
+    override void hash(Hash hash) { hash.adds("InfoReference"); base.hash(hash); }
+    override ExprInfo info() { return this.info_; }
 }
 
 class ArgExpr : Expression
@@ -339,7 +348,7 @@ class ArgExpr : Expression
         return output.fun.arg(this.index);
     }
 
-    override ExprInfo info() { return ExprInfo(Ownership.borrowed); }
+    override ExprInfo info() { return ExprInfo(false, Ownership.borrowed); }
 
     override void hash(Hash hash) { hash.adds("ArgExpr"); hash.addl(index); }
 }
@@ -394,7 +403,7 @@ class FunctionReference : FunctionReferenceBase
         return output.fun.getFuncPtr(this.fun.mangle);
     }
 
-    override ExprInfo info() { return ExprInfo(Ownership.owned); }
+    override ExprInfo info() { return ExprInfo(false, Ownership.owned); }
 
     override void hash(Hash hash) { hash.adds("FunctionReference"); hash.adds(fun.mangle); }
 }

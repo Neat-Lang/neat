@@ -325,6 +325,10 @@ at_revision 'cde31c3b08efd0146379488361782b22f385c917' 'rebuild cx' 'build/cx'
 at_revision 'a7b0f886bb2d548d79206e634ab24ada76d04732' 'rebuild cx' 'build/cx'
 # symbol identifiers, unnamed-variable destructuring
 at_revision 'd3ad0e8bf7f767303b598c108dcf3e3e3769fb43' 'rebuild cx' 'build/cx'
+# astDeclareVar mut transition 1
+at_revision '8f8a5166109cedc95be515500d34b65565f1221c' 'rebuild cx' 'build/cx'
+# astDeclareVar mut transition 2
+at_revision '76d02ada9a5123b9683703661da6c2f52ed4f67b' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

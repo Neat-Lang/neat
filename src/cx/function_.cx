@@ -112,12 +112,25 @@ class Function : FunctionDeclaration
                 if (!stmt) stmt = compiler.assignStatement(target, argExpr);
                 argAssignments[extra + i] = stmt;
             } else {
-                auto argDecl = new VariableDeclaration(
-                    scope_, arg.name, arg.type, ExprInfo(false, Ownership.borrowed), false);
+                if (arg.mutable) {
+                    // we're mutable, but functions borrow the caller args - copy them, then declare the arg owned.
+                    auto argDecl = new VariableDeclaration(
+                        scope_, arg.name, arg.type, ExprInfo(true, Ownership.owned), false);
+                    auto target = argDecl.accessDecl(context.compiler);
 
-                argAssignments[extra + i] = compiler.assignStatement(argDecl.accessDecl(context.compiler), argExpr);
+                    mut auto assign = arg.type.copyInto(context, target, argExpr);
+                    if (!assign) assign = compiler.assignStatement(target, argExpr);
 
-                scope_ = argDecl;
+                    argAssignments[extra + i] = assign;
+                    scope_ = argDecl;
+                } else {
+                    auto argDecl = new VariableDeclaration(
+                        scope_, arg.name, arg.type, ExprInfo(false, Ownership.borrowed), false);
+
+                    argAssignments[extra + i] = compiler.assignStatement(argDecl.accessDecl(context.compiler), argExpr);
+
+                    scope_ = argDecl;
+                }
             }
         }
 
@@ -374,11 +387,13 @@ class ArgExpr : Expression
         }
         else
         {
+            mut bool mutable;
+            if (parser.acceptIdentifier("mut")) mutable = true;
             ASTSymbol argtype = lexicalContext.compiler.parseType(parser, lexicalContext);
             parser.assert_(!!argtype, "argument type expected");
             string argname = parseIdentifier(parser);
             parser.assert_(argname.length > 0, "argument name expected");
-            args ~= ASTArgument(argname, argtype, loc);
+            args ~= ASTArgument(argname, mutable, argtype, loc);
         }
     }
     return args;
@@ -430,7 +445,7 @@ class ASTFunction
     FunctionDeclaration compile(Context context)
     {
         auto arguments = [
-            Argument(false, arg.name, beType(arg.loc, arg.type.compile(context))) for arg in this.args];
+            Argument(false, arg.name, arg.mutable, beType(arg.loc, arg.type.compile(context))) for arg in this.args];
 
         if (this.isDeclaration)
         {

@@ -500,12 +500,14 @@ ASTArgument[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
             }
         }
         auto loc = parser.loc;
+        mut bool mutable;
+        if (parser.acceptIdentifier("mut")) mutable = true;
         ASTSymbol argtype = parser.parseType(lexicalContext);
         if (!argtype) {
             parser.fail("type expected");
         }
         string argname = parser.parseIdentifier;
-        args ~= ASTArgument(argname, argtype, loc);
+        args ~= ASTArgument(argname, mutable, argtype, loc);
     }
     return args;
 }
@@ -2284,18 +2286,18 @@ class ASTVarDeclStatement : ASTStatement
                 initial = expectImplicitConvertTo(context, initial, type, this.loc);
             }
 
-            if (initial.info.ownership == Ownership.owned)
+            if (initial.info.ownership == Ownership.owned && !this.mutable)
             {
-                this.loc.assert2s(!mutable, "initializer is owned and we're declared mutable :(");
                 // don't double-own the value, it's covered by its own ownership
+                // we aren't mutable, so we can safely borrow the initializer.
                 auto decl = new VariableDeclaration(
-                    context.namespace, this.name, type, ExprInfo(mutable, Ownership.borrowed), false);
+                    context.namespace, this.name, type, ExprInfo(false, Ownership.borrowed), false);
+                auto assign = context.compiler.assignStatement(decl.accessDecl(context.compiler), initial);
 
-                return StatementCompileResult(
-                    context.compiler.assignStatement(decl.accessDecl(context.compiler), initial),
-                    context.withNamespace(decl));
+                return StatementCompileResult(assign, context.withNamespace(decl));
             }
 
+            // otherwise we'll hold a reference ourselves.
             auto decl = new VariableDeclaration(
                 context.namespace, this.name, type, ExprInfo(mutable, Ownership.owned), false);
 
@@ -3133,7 +3135,7 @@ class ASTExtern
 
     FunctionDeclaration compile(Context context)
     {
-        auto args = [Argument(false, arg.name, beType(arg.loc, arg.type.compile(context))) for arg in this.args];
+        auto args = [Argument(false, arg.name, false, beType(arg.loc, arg.type.compile(context))) for arg in this.args];
 
         return new FunctionDeclaration(this.name, beType(this.retLoc, this.ret.compile(context)), args);
     }

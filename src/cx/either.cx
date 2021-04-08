@@ -356,6 +356,8 @@ struct ASTEitherCaseExprCase
 
     string identifier;
 
+    bool return_;
+
     ASTSymbol expr;
 }
 
@@ -385,8 +387,9 @@ class ASTEitherCaseExpr : ASTSymbol
                 if (resultTypes[i].same(exprType)) return;
             resultTypes ~= exprType;
         }
-        for (int i <- 0 .. this.cases.length) {
-            auto case_ = this.cases[i];
+        for (auto case_ <- this.cases) {
+            if (case_.return_) continue;
+
             auto caseType = beType(this.loc, case_.type.compile(context));
 
             auto namespace = context.compiler.variableDeclaration(
@@ -428,8 +431,14 @@ class ASTEitherCaseExpr : ASTSymbol
             Reference variable = namespace.accessDecl2(context.compiler);
             Statement assignment = context.compiler.assignStatement(variable, new EitherMember(baseExpr, matched));
             Expression userExpr = beExpression3(context, case_.expr.compile(resultContext.withNamespace(namespace)), case_.loc);
-            Expression typeCorrectedUserExpr = context.compiler.expectImplicitConvertTo(context, userExpr, mergeType, case_.loc);
-            Statement userStmt = context.compiler.assignStatement(resultVar, typeCorrectedUserExpr);
+            mut Statement userStmt;
+            if (case_.return_) {
+                // TODO cast?
+                userStmt = context.compiler.returnStatement(userExpr);
+            } else {
+                Expression typeCorrectedUserExpr = context.compiler.expectImplicitConvertTo(context, userExpr, mergeType, case_.loc);
+                userStmt = context.compiler.assignStatement(resultVar, typeCorrectedUserExpr);
+            }
             Statement then = context.compiler.sequenceStatement([assignment, userStmt]);
             Expression test = context.compiler.binaryOp(
                 "==", context, new EitherType(baseExpr), context.compiler.intLiteral(matched + 1), this.loc);
@@ -464,9 +473,10 @@ ASTSymbol parseEitherCaseExpr(Parser parser, LexicalContext lexicalContext, ASTS
         parser.assert_(!!type, "case type expected");
         string identifier = parseIdentifier(parser);
         parser.expect(":");
+        bool return_ = parser.acceptIdentifier("return");
         Loc loc = parser.loc();
         ASTSymbol expr = lexicalContext.compiler.parseExpression(parser, lexicalContext);
-        cases ~= ASTEitherCaseExprCase(loc, type, identifier, expr);
+        cases ~= ASTEitherCaseExprCase(loc, type, identifier, return_, expr);
     }
     return new ASTEitherCaseExpr(parser.loc(), current, cases);
 }

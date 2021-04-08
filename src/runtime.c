@@ -94,10 +94,10 @@ struct String cxruntime_ptr_id(void* ptr) {
 int cxruntime_toInt(float f) { return (int) f; }
 
 int cxruntime_linenr(struct String haystack, struct String needle, int* linep, int* columnp) {
-    if (needle.ptr < haystack.ptr && needle.ptr >= haystack.ptr + haystack.length)
+    if (needle.ptr < haystack.ptr || needle.ptr > haystack.ptr + haystack.length)
         return false;
     size_t lineStart = 0, lineEnd = 0, lineNr = 0;
-    while (lineStart < haystack.length)
+    while (lineStart <= haystack.length)
     {
         while (lineEnd < haystack.length && haystack.ptr[lineEnd] != '\n') lineEnd++;
         if (lineEnd < haystack.length && haystack.ptr[lineEnd] == '\n') lineEnd++;
@@ -112,6 +112,7 @@ int cxruntime_linenr(struct String haystack, struct String needle, int* linep, i
         lineNr++;
         lineStart = lineEnd;
     }
+    fprintf(stderr, "internal error determining line number for '%.*s'\n", (int) needle.length, needle.ptr);
     abort();
 }
 // TODO remove

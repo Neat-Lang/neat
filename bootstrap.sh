@@ -329,6 +329,8 @@ at_revision 'd3ad0e8bf7f767303b598c108dcf3e3e3769fb43' 'rebuild cx' 'build/cx'
 at_revision '8f8a5166109cedc95be515500d34b65565f1221c' 'rebuild cx' 'build/cx'
 # astDeclareVar mut transition 2
 at_revision '76d02ada9a5123b9683703661da6c2f52ed4f67b' 'rebuild cx' 'build/cx'
+# arguments can be mut
+at_revision 'b44d62c2a601e4a9ee101e11517e8d8bbb11c3de' 'macro_transition' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

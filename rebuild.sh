@@ -42,6 +42,9 @@ build/cx $FLAGS -next-generation -P$NEXT:src -Pcompiler:build/src src/main.cx -o
 if [ \! -z ${FAST+x} ]
 then
     mv build/cx_test$I build/cx
+    # store compiler source next to compiler
+    rm -rf build/src
+    cp -R src build/
     exit
 fi
 

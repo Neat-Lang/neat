@@ -1,0 +1,218 @@
+module glfw;
+
+macro import cx.macros.cimport;
+
+import c_header("GL/gl.h");
+import c_header("GL/glext.h", "-include GL/gl.h -DGL_GLEXT_PROTOTYPES");
+import c_header("GLFW/glfw3.h");
+import std.math;
+import std.string : toStringz;
+
+extern(C) void assert(bool);
+
+struct Vertex {
+    float x, y;
+    float r, g, b;
+}
+
+Vertex[] vertices() {
+    return [
+        Vertex(-0.6, -0.4, 1, 0, 0),
+        Vertex(0.6, -0.4, 0, 1, 0),
+        Vertex(0,  0.6, 0, 0, 1)];
+}
+
+string vertexShader() {
+    return "#version 110
+uniform mat4 MVP;
+attribute vec3 vCol;
+attribute vec2 vPos;
+varying vec3 color;
+void main()
+{
+    gl_Position = MVP * vec4(vPos, 0.0, 1.0);
+    color = vCol;
+};";
+}
+
+string fragmentShader() {
+    return "#version 110
+varying vec3 color;
+void main()
+{
+    gl_FragColor = vec4(color, 1.0);
+}";
+}
+
+/*
+void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
+{
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
+        glfwSetWindowShouldClose(window, GLFW_TRUE);
+}
+*/
+
+// this is all super unoptimized
+struct mat4x4 {
+    float v11, v12, v13, v14;
+    float v21, v22, v23, v24;
+    float v31, v32, v33, v34;
+    float v41, v42, v43, v44;
+    mat4x4 rotateZ(float by) {
+        return mul(mat4x4_rotationZ(by));
+    }
+    mat4x4 mul(mat4x4 other) {
+        /**
+         *          A B C D
+         *          E F G H
+         *          I J K L
+         *          M N O P
+         * a b c d aA
+         * e f g h
+         * i j k l
+         * m n o p
+         */
+        auto tr = other.transpose;
+        float rowmul(int row, int col) {
+            return index(row, 0) * tr.index(0, col)
+                + index(row, 1) * tr.index(1, col)
+                + index(row, 2) * tr.index(2, col)
+                + index(row, 3) * tr.index(3, col);
+        }
+        return mat4x4(
+            rowmul(0, 0), rowmul(0, 1), rowmul(0, 2), rowmul(0, 3),
+            rowmul(1, 0), rowmul(1, 1), rowmul(1, 2), rowmul(1, 3),
+            rowmul(2, 0), rowmul(2, 1), rowmul(2, 2), rowmul(2, 3),
+            rowmul(3, 0), rowmul(3, 1), rowmul(3, 2), rowmul(3, 3));
+
+    }
+    float index(int row, int col) {
+        // TODO static arrays
+        if (row == 0) {
+            if (col == 0) return v11; if (col == 1) return v12; if (col == 2) return v13; if (col == 3) return v14;
+        } else if (row == 1) {
+            if (col == 0) return v21; if (col == 1) return v22; if (col == 2) return v23; if (col == 3) return v24;
+        } else if (row == 2) {
+            if (col == 0) return v31; if (col == 1) return v32; if (col == 2) return v33; if (col == 3) return v34;
+        } else if (row == 3) {
+            if (col == 0) return v41; if (col == 1) return v42; if (col == 2) return v43; if (col == 3) return v44;
+        }
+        assert(false);
+    }
+    mat4x4 transpose() {
+        return mat4x4(
+            v11, v21, v21, v41,
+            v12, v22, v32, v42,
+            v13, v23, v33, v43,
+            v14, v24, v34, v44);
+    }
+}
+
+// TODO static methods
+mat4x4 mat4x4_identity() {
+    return mat4x4(
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1);
+}
+
+mat4x4 mat4x4_rotationZ(float angle) {
+    float cos = cos(angle), sin = sin(angle);
+    return mat4x4(
+        cos, -sin, 0, 0,
+        sin,  cos, 0, 0,
+          0,    0, 1, 0,
+          0,    0, 0, 1);
+}
+
+mat4x4 mat4x4_ortho(float left, float right, float bottom, float top, float near, float far) {
+    float dx = right - left, dy = top - bottom, dz = far - near;
+    float tx = -(right + left) / (right - left);
+    float ty = -(top + bottom) / (top - bottom);
+    float tz = -(far + near) / (far - near);
+    return mat4x4(
+        2/dx,    0,    0, tx,
+           0, 2/dy,    0, ty,
+           0,    0, 2/dz, tz,
+           0,    0,    0,  1);
+}
+
+void main() {
+    GLuint vertex_shader, fragment_shader, program;
+
+    if (!glfwInit)
+        return;
+
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+
+    auto window = glfwCreateWindow(640, 480, "Simple example".toStringz, null, null);
+    if (!window)
+    {
+        glfwTerminate;
+        return;
+    }
+
+    // glfwSetKeyCallback(window, key_callback);
+
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(1);
+
+    GLuint vertex_buffer;
+    glGenBuffers(1, &vertex_buffer);
+    glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
+    auto vertices = vertices;
+    glBufferData(GL_ARRAY_BUFFER, 20 * 3 /*sizeof(vertices)*/, cast(void*) vertices.ptr, GL_STATIC_DRAW);
+
+    auto vertex_shader = glCreateShader(GL_VERTEX_SHADER);
+    char* vertexShaderPtr = vertexShader.toStringz;
+    glShaderSource(vertex_shader, 1, &vertexShaderPtr, null);
+    glCompileShader(vertex_shader);
+
+    auto fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
+    char* fragmentShaderPtr = fragmentShader.toStringz;
+    glShaderSource(fragment_shader, 1, &fragmentShaderPtr, null);
+    glCompileShader(fragment_shader);
+
+    auto program = glCreateProgram;
+    glAttachShader(program, vertex_shader);
+    glAttachShader(program, fragment_shader);
+    glLinkProgram(program);
+
+    auto mvp_location = glGetUniformLocation(program, "MVP".toStringz);
+    auto vpos_location = glGetAttribLocation(program, "vPos".toStringz);
+    auto vcol_location = glGetAttribLocation(program, "vCol".toStringz);
+
+    glEnableVertexAttribArray(vpos_location);
+    glVertexAttribPointer(vpos_location, 2, GL_FLOAT, false,
+                          /*sizeof(vertices[0])*/20, null);
+    glEnableVertexAttribArray(vcol_location);
+    glVertexAttribPointer(vcol_location, 3, GL_FLOAT, false,
+                          /*sizeof(vertices[0])*/20, cast(void*) (/*sizeof(float)*/4 * 2));
+
+    while (!glfwWindowShouldClose(window)) {
+        int width, height;
+        glfwGetFramebufferSize(window, &width, &height);
+        auto ratio = width * 1.0 / height;
+
+        glViewport(0, 0, width, height);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        mut auto m = mat4x4_identity;
+        m = m.rotateZ(cast(float) glfwGetTime);
+        auto p = mat4x4_ortho(-ratio, ratio, -1, 1, 1, -1);
+        auto mvp = p.mul(m);
+
+        glUseProgram(program);
+        glUniformMatrix4fv(mvp_location, 1, false, cast(GLfloat*) &mvp);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+
+        glfwSwapBuffers(window);
+        glfwPollEvents;
+    }
+
+    glfwDestroyWindow(window);
+
+    glfwTerminate;
+}

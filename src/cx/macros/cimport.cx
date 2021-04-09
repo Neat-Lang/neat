@@ -32,6 +32,13 @@ class CImportMacro : Macro
         parser.expect("\"");
         auto includeSym = parser.parseStringLiteral("\"");
         parser.assert_(!!includeSym, "string expected");
+        mut string flags;
+        if (parser.accept(",")) {
+            parser.expect("\"");
+            auto flagsSym = parser.parseStringLiteral("\"");
+            parser.assert_(!!flagsSym, "flags string expected");
+            flags = flagsSym.text ~ " ";
+        }
         parser.expect(")");
 
         string include = includeSym.text;
@@ -40,7 +47,9 @@ class CImportMacro : Macro
         auto headerBase = "#include <" ~ include ~ ">\n";
         // TODO randomize
         ".obj/cimport.h".write(headerBase);
-        cxruntime_system("gcc -dD -E .obj/cimport.h > .obj/cimport.h.out");
+        string cmd = "gcc " ~ flags ~ "-dD -E .obj/cimport.h > .obj/cimport.h.out";
+        print("$ " ~ cmd);
+        cxruntime_system(cmd);
         auto csource = read(".obj/cimport.h.out");
         auto linenrs = new LineNumberRegistry;
         auto cparser = new Parser(".obj/cimport.h.out", csource, linenrs);
@@ -51,7 +60,7 @@ class CImportMacro : Macro
         cparserHelper.mod = new ASTModule(cparser.loc, modName, pak, null, null);
 
         void add(string name, (ASTExtern | ASTSymbol) symbol) {
-            if (true)
+            if (false)
                 symbol.case {
                     ASTExtern ex:
                         print("define " ~ ex.name ~ ": " ~ ex.repr);
@@ -89,7 +98,6 @@ class CImportMacro : Macro
         while (!cparser.eof) {
             if (!cparserHelper.sysmod && cparser.accept("# 1 \"<command-line>\"")) {
                 // start of actual include
-                print("MEOWWW");
                 cparserHelper.sysmod = cparserHelper.mod;
                 cparserHelper.mod = new ASTModule(cparser.loc, modName, pak, null, null);
             }
@@ -133,6 +141,12 @@ class CImportMacro : Macro
                         while (true) {
                             if (cparser.accept(")") && cparser.accept(";")) {
                                 cparser.commit;
+                                if (args.length == 1) {
+                                    auto first = args[0].type.instanceOf(ASTBasicType);
+                                    if (first && first.name == "void") {
+                                        args = [];
+                                    }
+                                }
                                 add(retDecl.name, new ASTExtern(retDecl.name, retDecl.type, args, loc));
                                 success = true;
                                 break;
@@ -146,7 +160,7 @@ class CImportMacro : Macro
                             args ~= ASTArgument(argDecl.name, false, argDecl.type, argloc);
                         }
                         if (success) continue;
-                        print("fail " ~ retDecl.name ~ ": " ~ cparser.text[0 .. 100]);
+                        // print("fail " ~ retDecl.name ~ ": " ~ cparser.text[0 .. 100]);
                     }
                 }
                 // cparser.assert_(false, "here 2?");
@@ -228,8 +242,10 @@ class CParserHelper {
         assert(!!current);
         // TODO polysemous null
         ASTSymbol nullSymbol;
+        parser.accept("const");
         while (parser.accept("*")) {
             current = new ASTPointer(current, parser.loc);
+            parser.accept("const");
         }
         auto name = parser.parseIdentifier;
         auto loc = parser.loc;
@@ -251,6 +267,9 @@ class CParserHelper {
             begin;
             auto loc = parser.loc;
             if (parser.acceptIdentifier("void")) { commit; return new ASTBasicType("void", loc); }
+            if (parser.acceptIdentifier("float")) { commit; return new ASTBasicType("float", loc); }
+            if (parser.acceptIdentifier("double")) { commit; return new ASTBasicType("double", loc); }
+            bool signed = parser.acceptIdentifier("signed");
             bool unsigned = parser.acceptIdentifier("unsigned");
             bool long_ = parser.acceptIdentifier("long");
             bool longlong = long_ && parser.acceptIdentifier("long");
@@ -261,7 +280,7 @@ class CParserHelper {
             if (long_) { commit; return new CLong; }
             if (short_) { commit; return new ASTBasicType("short", loc); }
             if (char_) { commit; return new ASTBasicType("char", loc); }
-            if (unsigned || int_) { commit; return new ASTBasicType("int", loc); }
+            if (signed || unsigned || int_) { commit; return new ASTBasicType("int", loc); }
             revert;
             return null;
         // }

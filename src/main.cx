@@ -712,17 +712,30 @@ class CompilerImpl : CompilerBase
         return wrap(assign, result, cleanup);
     }
 
-    override Expression consumeTemporary(Context context, bool allowRefReturn, Expression expr, Expression delegate(Reference) dg)
+    override Expression consumeTemporary(
+        Context context, bool allowRefReturn, bool mayUnwind, Expression expr, Expression delegate(Reference) dg)
     {
         auto type = expr.type;
-        // "owned" by the temporary()
+        // "owned" by consumeTemporary()
         auto temp = new PairedTemporary(type, false);
         auto result = dg(temp);
         if (!result) return null;
 
-        Statement assign = new InitializeTemporaryStatement(temp, expr);
+        mut bool doCleanup;
+        if (expr.info.ownership == Ownership.gifted) doCleanup = true;
+
+        mut Statement assign = new InitializeTemporaryStatement(temp, expr);
+        // if `dg()` may not unwind, it doesn't matter that expr is borrowed
+        // since we never hit the unwind cleanup on our "owned" temp.
+        if (mayUnwind && expr.info.ownership == Ownership.borrowed) {
+            auto copyInto = type.copyInto(context, temp, expr);
+            if (copyInto) {
+                assign = sequence(new UninitializeTemporaryStatement(temp), copyInto);
+                doCleanup = true;
+            }
+        }
         mut Statement cleanup;
-        if (expr.info.ownership == Ownership.gifted) {
+        if (doCleanup) {
             cleanup = type.endLifetime(context, temp);
         }
         if (allowRefReturn)
@@ -733,14 +746,20 @@ class CompilerImpl : CompilerBase
     override Statement consumeTemporaryStmt(Context context, Expression expr, Statement delegate(Reference) dg)
     {
         auto type = expr.type;
-        // "owned" by the temporary()
+        // "owned" by consumeTemporaryStmt()
         auto temp = new PairedTemporary(type, false);
         auto result = dg(temp);
         if (!result) return null;
 
-        Statement assign = new InitializeTemporaryStatement(temp, expr);
+        mut Statement assign = new InitializeTemporaryStatement(temp, expr);
+        if (expr.info.ownership == Ownership.borrowed) {
+            auto copyInto = type.copyInto(context, temp, expr);
+            if (copyInto) {
+                assign = sequence(new UninitializeTemporaryStatement(temp), copyInto);
+            }
+        }
         mut Statement cleanup;
-        if (expr.info.ownership == Ownership.gifted) {
+        if (expr.info.ownership == Ownership.gifted || expr.info.ownership == Ownership.borrowed) {
             cleanup = type.endLifetime(context, temp);
         }
         return .sequence(.sequence(assign, result), cleanup);

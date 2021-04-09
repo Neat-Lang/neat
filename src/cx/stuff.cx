@@ -644,11 +644,24 @@ Expression call(Context context, Symbol target, Expression[] args, Loc loc, bool
         } else {
             loc.fail("function reference or funcptr expected? but is '" ~ method.funcPtr.type.repr ~ "'");
         }
-        auto voidp = once new Pointer(new Void);
-        mut Expression[] combinedArgs;
-        combinedArgs ~= new PointerCast(voidp, method.thisPtr);
-        combinedArgs ~= args;
-        return new FuncPtrCall(method.funcPtr, combinedArgs, loc);
+        Expression doPtr(Expression thisPtr) {
+            auto voidp = once new Pointer(new Void);
+            mut Expression[] combinedArgs;
+            combinedArgs ~= new PointerCast(voidp, thisPtr);
+            combinedArgs ~= args;
+            return new FuncPtrCall(method.funcPtr, combinedArgs, loc);
+        }
+        Expression doRef(Reference thisValue) {
+            return doPtr(context.compiler.reference(thisValue));
+        }
+        if (method.valueIsPtr) {
+            return context.compiler.exprWithTemporaryExpr(method.thisValue, &doPtr);
+        } else if (auto ref_ = method.thisValue.instanceOf(Reference)) {
+            auto ptr = context.compiler.reference(ref_);
+            return context.compiler.exprWithTemporaryExpr(ptr, &doPtr);
+        } else {
+            return context.compiler.exprWithTemporary(method.thisValue, &doRef);
+        }
     }
     if (autoCall) return null;
     Expression expr = target.instanceOf(Expression);
@@ -795,16 +808,22 @@ Expression callWithLifetime(Context context, Symbol target, Expression[] args, L
     // TODO mut Expression[] args
     auto args = args_;
     ClassMethodPtr method = target.instanceOf(ClassMethodPtr);
-    if (method && method.thisPtr.info.ownership == Ownership.gifted) { // foo().bar()
-        auto thisPtrType = method.thisPtr.type;
-        // for endLifetime call
-        auto tempThisPtr = new PairedTemporary(thisPtrType, true);
-        Statement setThisPtr = new InitializeTemporaryStatement(tempThisPtr, method.thisPtr);
-        if (Statement cleanupThisPtr = thisPtrType.endLifetime(context, tempThisPtr))
-        {
-            pre = sequence(pre, setThisPtr);
-            post = sequence(cleanupThisPtr, post);
-            target = new ClassMethodPtr(method.funcPtr, tempThisPtr);
+    if (method && method.thisValue.info.ownership == Ownership.gifted) { // foo().bar()
+        mut Statement setRef;
+        void doRef(Reference tempThis) {
+            if (Statement cleanupThis = method.thisValue.type.endLifetime(context, tempThis))
+            {
+                pre = sequence(pre, setRef);
+                post = sequence(cleanupThis, post);
+                target = new ClassMethodPtr(method.funcPtr, tempThis, method.valueIsPtr);
+            }
+        }
+        if (auto ref_ = method.thisValue.instanceOf(Reference)) doRef(ref_);
+        else {
+            // create reference for endLifetime call
+            auto tempThis = new PairedTemporary(method.thisValue.type, true);
+            setRef = new InitializeTemporaryStatement(tempThis, method.thisValue);
+            doRef(tempThis);
         }
     }
     auto callResult = call(context, target, args, loc, autoCall);
@@ -1298,8 +1317,19 @@ class ASTReference : ASTSymbol
             if (Symbol target = context.namespace.lookup(ident.name, context, frame)) {
                 if (Function fun = target.instanceOf(Function))
                     return new FunctionReference(fun);
-                if (auto nestfn = target.instanceOf(ClassMethodPtr))
-                    return new DelegateExpr(nestfn.funcPtr, nestfn.thisPtr);
+                if (auto nestfn = target.instanceOf(ClassMethodPtr)) {
+                    Expression doExpr(Expression thisPtr) {
+                        return new DelegateExpr(nestfn.funcPtr, thisPtr);
+                    }
+                    Expression doRef(Reference thisValue) {
+                        return doExpr(context.compiler.reference(thisValue));
+                    }
+                    if (nestfn.valueIsPtr) {
+                        return context.compiler.exprWithTemporaryExpr(nestfn.thisValue, &doExpr);
+                    } else {
+                        return context.compiler.exprWithTemporary(nestfn.thisValue, &doRef);
+                    }
+                }
             }
         }
         Expression baseExpression = beExpression2(this.base.compile(context), this.loc);
@@ -1999,7 +2029,7 @@ class NestedFunctionDeclaration : Namespace
         {
             auto framePtr = new PointerCast(once new Pointer(new Void), frame);
 
-            return new ClassMethodPtr(new FunctionReference(this.nestedFunction), framePtr);
+            return new ClassMethodPtr(new FunctionReference(this.nestedFunction), framePtr, true);
         }
         if (this.parent) return this.parent.lookup(name, context, frame);
         return null;

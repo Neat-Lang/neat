@@ -837,15 +837,6 @@ class CompilerImpl : CompilerBase
         return .move(context, target, source);
     }
 
-    override Statement stmtWithTemporary(Expression value, Statement delegate(Expression) callback)
-    {
-        auto temp = new PairedTemporary(value.type, value.info.ownership == Ownership.gifted);
-        auto start = new InitializeTemporaryStatement(temp, value);
-        auto stmt = callback(temp);
-        if (!stmt) return null;
-        return new SequenceStatement([start, stmt]);
-    }
-
     override Expression exprWithScratchspace(Type type, bool temporary, Statement delegate(Reference) callback)
     {
         auto temp = new PairedTemporary(type, temporary);
@@ -855,10 +846,55 @@ class CompilerImpl : CompilerBase
         return wrap(sequence(initialize, stmt), temp, null);
     }
 
-    override Expression exprWithTemporary(Expression value, Expression delegate(Expression) callback)
+    override Statement stmtWithTemporary(Expression value, Statement delegate(Reference) callback)
     {
         auto temp = new PairedTemporary(value.type, value.info.ownership == Ownership.gifted);
         auto start = new InitializeTemporaryStatement(temp, value);
+        auto stmt = callback(temp);
+        if (!stmt) return null;
+        return new SequenceStatement([start, stmt]);
+    }
+
+    override Expression exprWithTemporary(Expression value, Expression delegate(Reference) callback)
+    {
+        // TODO: the way gifted works here is almost certainly wrong,
+        // cause the Reference can be read multiple times - that's
+        // what it's for.
+        auto temp = new PairedTemporary(value.type, value.info.ownership == Ownership.gifted);
+        auto start = new InitializeTemporaryStatement(temp, value);
+        auto expr = callback(temp);
+        if (!expr) return null;
+        return new StatementExpression(start, expr, false);
+    }
+
+    override Statement stmtWithTemporaryExpr(Expression value, Statement delegate(Expression) callback)
+    {
+        // TODO: does endLifetime *really* need to take a Reference?
+        // cause that's the only reason we need to stmtWithTemporary here.
+        if (value.info.ownership == Ownership.gifted) {
+            Statement do_(Reference ref_) {
+                return callback(ref_);
+            }
+            return stmtWithTemporary(value, &do_);
+        }
+        auto temp = new PairedTemporaryExpr(value.type, value.info.ownership);
+        auto start = new InitializeTemporaryExprStatement(temp, value);
+        auto stmt = callback(temp);
+        if (!stmt) return null;
+        return new SequenceStatement([start, stmt]);
+    }
+
+    override Expression exprWithTemporaryExpr(Expression value, Expression delegate(Expression) callback)
+    {
+        // see above
+        if (value.info.ownership == Ownership.gifted) {
+            Expression do_(Reference ref_) {
+                return callback(ref_);
+            }
+            return exprWithTemporary(value, &do_);
+        }
+        auto temp = new PairedTemporaryExpr(value.type, value.info.ownership);
+        auto start = new InitializeTemporaryExprStatement(temp, value);
         auto expr = callback(temp);
         if (!expr) return null;
         return new StatementExpression(start, expr, false);

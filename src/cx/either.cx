@@ -396,7 +396,7 @@ class ASTEitherCaseExpr : ASTSymbol
                 context.namespace, case_.identifier, caseType, false);
             auto subContext = context.withNamespace(namespace);
 
-            Expression expr = beExpression3(context, case_.expr.compile(subContext), case_.loc);
+            Expression expr = case_.expr.compile(subContext).beExpressionImplCall(context, case_.loc);
             mergeType(case_.loc, expr);
         }
 
@@ -430,7 +430,8 @@ class ASTEitherCaseExpr : ASTSymbol
             // FIXME rename to accessDecl
             Reference variable = namespace.accessDecl2(context.compiler);
             Statement assignment = context.compiler.assignStatement(variable, new EitherMember(baseExpr, matched));
-            Expression userExpr = beExpression3(context, case_.expr.compile(resultContext.withNamespace(namespace)), case_.loc);
+            Expression userExpr = case_.expr.compile(resultContext.withNamespace(namespace))
+                .beExpressionImplCall(context, case_.loc);
             mut Statement userStmt;
             if (case_.return_) {
                 // TODO cast?
@@ -510,45 +511,48 @@ class ASTEitherCaseStmt : ASTStatement
     this(this.loc, this.base, this.cases) { }
 
     override StatementCompileResult compile(Context context) {
-        auto baseExpr = beExpression3(context, base.compile(context), loc);
+        auto baseExpr = base.compile(context).beExpressionImplCall(context, loc);
         auto baseType = baseExpr.type;
         auto either = baseType.instanceOf(Either);
 
         loc.assert2s(!!either, "Expected Either for case expression");
 
-        bool[] handled = new bool[](either.types.length);
-        mut Statement ifTree = null;
-        for (auto case_ <- this.cases) {
-            Type type = beType(case_.loc, case_.type.compile(context));
+        Statement do_(Expression baseExpr) {
+            bool[] handled = new bool[](either.types.length);
+            mut Statement ifTree = null;
+            for (auto case_ <- this.cases) {
+                Type type = beType(case_.loc, case_.type.compile(context));
 
-            mut int matched = -1;
-            for (int k <- 0 .. either.types.length) {
-                if (type.same(either.types[k])) {
-                    case_.loc.assert2s(matched == -1, "either type " ~ type.repr() ~ " matched twice");
-                    matched = k;
+                mut int matched = -1;
+                for (int k <- 0 .. either.types.length) {
+                    if (type.same(either.types[k])) {
+                        case_.loc.assert2s(matched == -1, "either type " ~ type.repr() ~ " matched twice");
+                        matched = k;
+                    }
+                }
+                case_.loc.assert2s(matched != -1, "Type is not listed in Either!");
+                handled[matched] = true;
+
+                with (context.compiler) {
+                    auto namespace = variableDeclaration(context.namespace, case_.identifier, type, false);
+                    // FIXME rename to accessDecl
+                    Reference variable = namespace.accessDecl2(context.compiler);
+                    Statement assignment = assignStatement(variable, new EitherMember(baseExpr, matched));
+                    auto userStmtPair = case_.stmt.compile(context.withNamespace(namespace));
+                    Statement then = sequenceStatement([assignment, userStmtPair.statement]);
+                    Expression test = binaryOp(
+                        "==", context, new EitherType(baseExpr), intLiteral(matched + 1), this.loc);
+
+                    ifTree = ifStatement(test, then, ifTree);
                 }
             }
-            case_.loc.assert2s(matched != -1, "Type is not listed in Either!");
-            handled[matched] = true;
-
-            with (context.compiler) {
-                auto namespace = variableDeclaration(context.namespace, case_.identifier, type, false);
-                // FIXME rename to accessDecl
-                Reference variable = namespace.accessDecl2(context.compiler);
-                Statement assignment = assignStatement(variable, new EitherMember(baseExpr, matched));
-                auto userStmtPair = case_.stmt.compile(context.withNamespace(namespace));
-                Statement then = sequenceStatement([assignment, userStmtPair.statement]);
-                Expression test = binaryOp(
-                    "==", context, new EitherType(baseExpr), intLiteral(matched + 1), this.loc);
-
-                ifTree = ifStatement(test, then, ifTree);
+            for (int i <- 0 .. handled.length) {
+                loc.assert2s(handled[i], "Type " ~ either.types[i].repr() ~ " not handled!");
             }
-        }
-        for (int i <- 0 .. handled.length) {
-            loc.assert2s(handled[i], "Type " ~ either.types[i].repr() ~ " not handled!");
+            return ifTree;
         }
         return StatementCompileResult(
-            ifTree,
+            context.compiler.stmtWithTemporaryExpr(baseExpr, &do_),
             context);
     }
 
@@ -573,8 +577,9 @@ ASTStatement parseEitherCaseStmt(Parser parser, LexicalContext lexicalContext)
     mut ASTEitherCaseStmtCase[] cases;
     while (!parser.accept("}"))
     {
-        ASTSymbol type = lexicalContext.compiler.parseType(parser, lexicalContext).instanceOf(ASTSymbol);
+        auto type = lexicalContext.compiler.parseType(parser, lexicalContext);
         parser.assert_(!!type, "case type expected");
+        // identifier can be empty
         string identifier = parseIdentifier(parser);
         parser.expect(":");
         Loc loc = parser.loc();

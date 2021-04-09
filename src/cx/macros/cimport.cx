@@ -1,0 +1,353 @@
+module cx.macros.cimport;
+
+import package(compiler).cx.base;
+import package(compiler).cx.linenr;
+import package(compiler).cx.parser_base;
+import package(compiler).cx.parser;
+import package(compiler).cx.stuff;
+import package(compiler).cx.types;
+import package(compiler).helpers;
+
+extern(C) void cxruntime_system(string command);
+
+class CImportMacro : Macro
+{
+    this() { }
+
+    override void apply(MacroArgs args) {
+        auto args = args.instanceOf(ParseImportArgs);
+        if (args) {
+            args.module_ = this.parse(args.parser, args.lexicalContext);
+        }
+    }
+
+    ASTModuleBase parse(Parser parser, LexicalContext lexicalContext) {
+        import std.string : replace;
+
+        auto loc = parser.loc;
+        if (!parser.acceptIdentifier("c_header"))
+            return null;
+        parser.expect("(");
+        // TODO move into cx.base
+        parser.expect("\"");
+        auto includeSym = parser.parseStringLiteral("\"");
+        parser.assert_(!!includeSym, "string expected");
+        parser.expect(")");
+
+        string include = includeSym.text;
+        string modName = include.replace("/", "_").replace(".", "_");
+
+        auto headerBase = "#include <" ~ include ~ ">\n";
+        // TODO randomize
+        ".obj/cimport.h".write(headerBase);
+        cxruntime_system("gcc -dD -E .obj/cimport.h > .obj/cimport.h.out");
+        auto csource = read(".obj/cimport.h.out");
+        auto linenrs = new LineNumberRegistry;
+        auto cparser = new Parser(".obj/cimport.h.out", csource, linenrs);
+
+        auto cparserHelper = new CParserHelper(cparser);
+
+        auto pak = new Package("c_header", "");
+        cparserHelper.mod = new ASTModule(cparser.loc, modName, pak, null, null);
+
+        void add(string name, (ASTExtern | ASTSymbol) symbol) {
+            if (true)
+                symbol.case {
+                    ASTExtern ex:
+                        print("define " ~ ex.name ~ ": " ~ ex.repr);
+                    ASTSymbol sym:
+                        if (!sym.instanceOf(ASTIntLiteral)) {
+                            print("define " ~ name ~ " = " ~ sym.repr);
+                        }
+                }
+            cparserHelper.mod.entries ~= symbol.case(ASTExtern a: a, ASTSymbol sym: new ASTSymbolAlias(name, sym));
+        }
+
+        void eatline() {
+            auto pos = cparser.text.find("\n");
+            if (pos == -1) cparser.drop(cparser.text.length);
+            else cparser.drop(pos + 1);
+        }
+        void eatAttribute() {
+            if (cparser.accept("__attribute__")) {
+                cparser.accept("("); cparser.accept("(");
+                mut int parenlevel = 2;
+                while (parenlevel) {
+                    auto open = cparser.text.find("("), close = cparser.text.find(")");
+                    assert(close != -1);
+                    if (open != -1 && open < close) {
+                        cparser.drop(open + 1);
+                        parenlevel += 1;
+                    } else {
+                        cparser.drop(close + 1);
+                        parenlevel -= 1;
+                    }
+                }
+            }
+        }
+
+        while (!cparser.eof) {
+            if (!cparserHelper.sysmod && cparser.accept("# 1 \"<command-line>\"")) {
+                // start of actual include
+                print("MEOWWW");
+                cparserHelper.sysmod = cparserHelper.mod;
+                cparserHelper.mod = new ASTModule(cparser.loc, modName, pak, null, null);
+            }
+            if (cparser.accept("#define ")) {
+                auto identifier = cparser.parseIdentifier;
+                if (cparser.accept("(")) { eatline; continue; }
+                auto loc = cparser.loc;
+                auto num = cparserHelper.parseCNumber;
+                num.case {
+                    (:failure): { eatline; continue; }
+                    (:success, int i): add(identifier, new ASTIntLiteral(i, loc));
+                }
+                cparser.assert_(cparser.text.startsWith("\n"), "unknown text");
+                // cparser.expect("\n");
+                continue;
+            }
+            if (cparser.accept("typedef")) {
+                auto type = cparserHelper.parseType;
+                if (!type) { eatline; continue; }
+                auto decl = cparserHelper.parseTypedDecl(type);
+                if (!decl.type) { eatline; continue; }
+                if (!cparser.accept(";")) { eatline; continue; }
+                add(decl.name, decl.type);
+                continue;
+            }
+            if (cparser.accept("#")) {
+                eatline;
+                continue;
+            }
+            cparser.accept("extern");
+            eatAttribute;
+            {
+                auto loc = cparser.loc;
+                cparser.begin;
+                auto retBase = cparserHelper.parseType;
+                if (retBase) {
+                    auto retDecl = cparserHelper.parseTypedDecl(retBase);
+                    if (retDecl.type && retDecl.name.length > 0 && cparser.accept("(")) {
+                        mut ASTArgument[] args;
+                        mut bool success;
+                        while (true) {
+                            if (cparser.accept(")") && cparser.accept(";")) {
+                                cparser.commit;
+                                add(retDecl.name, new ASTExtern(retDecl.name, retDecl.type, args, loc));
+                                success = true;
+                                break;
+                            }
+                            if (args.length && !cparser.accept(",")) break;
+                            auto argloc = cparser.loc;
+                            auto argBasetype = cparserHelper.parseType;
+                            if (!argBasetype) break;
+                            auto argDecl = cparserHelper.parseTypedDecl(argBasetype);
+                            if (!argDecl.type) break;
+                            args ~= ASTArgument(argDecl.name, false, argDecl.type, argloc);
+                        }
+                        if (success) continue;
+                        print("fail " ~ retDecl.name ~ ": " ~ cparser.text[0 .. 100]);
+                    }
+                }
+                // cparser.assert_(false, "here 2?");
+                cparser.revert;
+            }
+            // cparser.assert_(false, "here?");
+            eatline;
+        }
+
+        return cparserHelper.mod;
+    }
+}
+
+class CLong : ASTSymbol
+{
+    this() { }
+
+    override Type compile(Context context) {
+        // FIXME this does not apply on win32
+        return context.nativeWordType;
+    }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'CLong'!"); assert(false); }
+    override string repr() { return "long int(C)"; }
+}
+
+class CStaticArray : ASTSymbol
+{
+    ASTSymbol type;
+
+    int count;
+
+    Loc loc;
+
+    this(this.type, this.count, this.loc) { }
+
+    override Type compile(Context context) {
+        import package(compiler).cx.struct_ : Struct;
+
+        // TODO give this a better type
+        mut StructMemberDeclaration[] members;
+        for (int i <- 0 .. count)
+            members ~= new StructMemberDeclaration("_" ~ itoa(i), beType(this.loc, type.compile(context)));
+
+        return new Struct("SA_hack", members, this.loc, context.namespace.mangle);
+    }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'CStaticArray'!"); assert(false); }
+    override string repr() { return type.repr ~ "[" ~ itoa(count) ~ "](C)"; }
+}
+
+class CParserHelper {
+    Parser parser;
+
+    ASTModule mod, sysmod;
+
+    this(this.parser) { }
+
+    ASTSymbol parseType() {
+        parser.acceptIdentifier("const");
+        if (auto ret = parseBasicCType) {
+            return ret;
+        }
+        auto ident = parser.parseIdentifier;
+        if (ident == "struct") {
+            return parseStructType;
+        }
+        if (ident == "enum") {
+            return parseEnumType;
+        }
+        if (ident.length > 0) {
+            if (auto definedSym = this.mod.getSymbolAlias(ident)) return definedSym;
+            if (auto definedSym = this.sysmod.getSymbolAlias(ident)) return definedSym;
+        }
+    }
+
+    (ASTSymbol type, string name) parseTypedDecl(ASTSymbol baseType) {
+        mut auto current = baseType;
+        assert(!!current);
+        // TODO polysemous null
+        ASTSymbol nullSymbol;
+        while (parser.accept("*")) {
+            current = new ASTPointer(current, parser.loc);
+        }
+        auto name = parser.parseIdentifier;
+        auto loc = parser.loc;
+        while (parser.accept("[")) {
+            auto n = parseCNumber; auto num = n.case(
+                (:failure): return (nullSymbol, ""),
+                (:success, int i): i);
+            // parser.expect("]");
+            if (!parser.accept("]")) return (nullSymbol, "");
+            current = new CStaticArray(current, num, loc);
+        }
+        return (current, name);
+    }
+
+    ASTSymbol parseBasicCType() {
+        // TODO fix refcount again
+        // with (parser) {
+        void begin() parser.begin; void revert() parser.revert; void commit() parser.commit;
+            begin;
+            auto loc = parser.loc;
+            if (parser.acceptIdentifier("void")) { commit; return new ASTBasicType("void", loc); }
+            bool unsigned = parser.acceptIdentifier("unsigned");
+            bool long_ = parser.acceptIdentifier("long");
+            bool longlong = long_ && parser.acceptIdentifier("long");
+            bool short_ = parser.acceptIdentifier("short");
+            bool char_ = parser.acceptIdentifier("char");
+            bool int_ = parser.acceptIdentifier("int");
+            if (longlong) { commit; return new ASTBasicType("long", loc); }
+            if (long_) { commit; return new CLong; }
+            if (short_) { commit; return new ASTBasicType("short", loc); }
+            if (char_) { commit; return new ASTBasicType("char", loc); }
+            if (unsigned || int_) { commit; return new ASTBasicType("int", loc); }
+            revert;
+            return null;
+        // }
+    }
+
+    ASTSymbol parseStructType() {
+        import package(compiler).cx.struct_ : ASTStructDecl;
+
+        auto loc = parser.loc;
+        auto name = parser.parseIdentifier;
+        mut (string name, ASTSymbol)[] members;
+        auto emptyStruct = new ASTStructDecl(name, [], [], null, loc); // opaque
+        if (!parser.accept("{"))
+            return emptyStruct;
+        void scanToClosingBracket() {
+            mut int bracketDepth = 1;
+            // TODO factor out with () skipping
+            while (bracketDepth) {
+                auto open = parser.text.find("{"), close = parser.text.find("}");
+                assert(close != -1);
+                if (open != -1 && open < close) {
+                    parser.drop(open + 1);
+                    bracketDepth += 1;
+                } else {
+                    parser.drop(close + 1);
+                    bracketDepth -= 1;
+                }
+            }
+        }
+        while (!parser.accept("}")) {
+            parser.begin;
+            auto baseType = parseType;
+            if (!baseType) { parser.revert; scanToClosingBracket; return emptyStruct; }
+            mut auto memberDecl = parseTypedDecl(baseType);
+            void flush() {
+                members ~= (memberDecl.name, memberDecl.type);
+            }
+            while (parser.accept(",")) {
+                flush;
+                memberDecl = parseTypedDecl(baseType);
+            }
+            flush;
+            // parser.expect(";");
+            if (!parser.accept(";")) { parser.revert; scanToClosingBracket; return emptyStruct; }
+            parser.commit;
+        }
+        return new ASTStructDecl(name, members, [], null, loc);
+    }
+
+    ASTSymbol parseEnumType() {
+        // TODO export enum members as aliases
+        auto loc = parser.loc;
+        parser.parseIdentifier;
+        if (!parser.accept("{")) return null; // wat
+        auto close = parser.text.find("}");
+        parser.drop(close + 1);
+        return new ASTBasicType("int", loc);
+    }
+
+    (:failure | :success, int i) parseCNumber() {
+        // TODO fix refcount again
+        // with (parser) {
+            parser.begin;
+            mut int num;
+            bool accept(string s) { return parser.accept(s); }
+            parser.parseNumber.case {
+                (:failure): { parser.revert; return :failure; }
+                (:success, int i): num = i;
+            }
+            // weird C shit
+            if (accept("e") || accept("E") || accept(".") || accept(",")) {
+                parser.revert;
+                return :failure;
+            }
+            accept("U"); accept("u");
+            accept("L"); accept("l");
+            accept("L"); accept("l");
+            parser.commit;
+            return (:success, num);
+        // }
+    }
+}
+
+void addCImportMacro(MacroState macroState)
+{
+    macroState.addMacro(new CImportMacro);
+}
+
+macro(addCImportMacro);

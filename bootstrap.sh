@@ -333,6 +333,8 @@ at_revision '76d02ada9a5123b9683703661da6c2f52ed4f67b' 'rebuild cx' 'build/cx'
 at_revision 'b44d62c2a601e4a9ee101e11517e8d8bbb11c3de' 'macro_transition' 'build/cx'
 # either expr case return
 at_revision '475bce773390ca3ebb34fb0ced7a8e03188be9df' 'macro_transition' 'build/cx'
+# fix either statement to not double-evaluate its lhs
+at_revision '151b7a4700eed13a25d5e4ac7cbed5cf56104bb2' 'macro_transition' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

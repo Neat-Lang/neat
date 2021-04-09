@@ -1630,15 +1630,15 @@ ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
         }
         parser.revert;
     }
-    float f;
-    if (parseFloat(parser, &f))
-    {
-        return new ASTFloatLiteral(f);
+    parseFloat(parser).case {
+        (:failure): {}
+        (:success, float f):
+            return new ASTFloatLiteral(f);
     }
-    int i;
-    if (parseNumber(parser, &i))
-    {
-        return new ASTIntLiteral(i, loc);
+    parseNumber(parser).case {
+        (:failure): {}
+        (:success, int i):
+            return new ASTIntLiteral(i, loc);
     }
     if (parser.accept("\""))
     {
@@ -2818,7 +2818,7 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
         return stmt;
     if (ASTStatement stmt = parseScope(parser, lexicalContext))
         return stmt;
-    if (auto import_ = parseImportStatement(parser)) {
+    if (auto import_ = parseImportStatement(parser, lexicalContext)) {
         loc.assert2s(!import_.isMacroImport, "can't import macro in function");
         auto importedModule = lexicalContext.resolveImport(import_).instanceOf(ASTModule);
 
@@ -3258,7 +3258,7 @@ class ASTImport : ASTStatement
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTImport' yet!");assert(false); }
 }
 
-ASTImportStatement parseImportStatement(Parser parser)
+ASTImportStatement parseImportStatement(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     bool isMacroImport = acceptIdentifier(parser, "macro");
@@ -3267,17 +3267,27 @@ ASTImportStatement parseImportStatement(Parser parser)
         parser.revert;
         return null;
     }
-    mut string pak;
-    if (acceptIdentifier(parser, "package"))
-    {
-        parser.expect("(");
-        pak = parser.parseIdentifier;
-        parser.expect(")");
-        parser.expect(".");
+
+    mut (:normal, string name, string pak | :macro_, ASTModuleBase module_) target;
+    parser.commit;
+
+    auto macroArgs = new ParseImportArgs(parser, lexicalContext);
+    lexicalContext.macroState.applyMacro(macroArgs);
+    if (macroArgs.done) target = (:macro_, macroArgs.module_);
+    else {
+        mut string pak;
+        if (acceptIdentifier(parser, "package"))
+        {
+            parser.expect("(");
+            pak = parser.parseIdentifier;
+            parser.expect(")");
+            parser.expect(".");
+        }
+
+        string modname = parseIdentifier2(parser, ".");
+        target = (:normal, modname, pak);
     }
 
-    parser.commit;
-    string modname = parseIdentifier2(parser, ".");
     mut string[] symbols;
     if (!isMacroImport && parser.accept(":")) {
         string expectIdentifier(Parser parser) {
@@ -3301,7 +3311,7 @@ ASTImportStatement parseImportStatement(Parser parser)
         }
     }
     parser.expect(";");
-    return new ASTImportStatement(modname, pak, isMacroImport, symbols, parser.loc);
+    return new ASTImportStatement(target, isMacroImport, symbols, parser.loc);
 }
 
 class ASTModuleCache
@@ -3536,7 +3546,7 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
 
     while (!parser.eof)
     {
-        if (ASTImportStatement import_ = parseImportStatement(parser)) {
+        if (auto import_ = parseImportStatement(parser, lexicalContext)) {
             auto importedModule = lexicalContext.resolveImport(import_).instanceOf(ASTModule);
             if (import_.isMacroImport)
             {
@@ -3592,16 +3602,19 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
 ASTModule resolveImport(CompilerBase compiler, Package pak, ASTImportStatement import_, ParserHelper helper,
     ModuleParserConfig config)
 {
+    (string name, string pak) target = import_.target.case(
+        (:normal, string name, string pak): (name, pak),
+        (:macro_, ASTModuleBase module_): return module_.instanceOf(ASTModule));
     // TODO mut
     mut Package pak = pak;
     // TODO enum SearchMode { Transitive, Direct, Commandline }
     mut bool transitive = true;
-    if (import_.pak.length) {
-        pak = selectPackage(config.packages, import_.pak, import_.loc);
+    if (target.pak.length) {
+        pak = selectPackage(config.packages, target.pak, import_.loc);
         transitive = false;
     }
     return getModule(
-        compiler, moduleToFile(import_.name), pak, true, helper, config, import_.loc);
+        compiler, moduleToFile(target.name), pak, true, helper, config, import_.loc);
 }
 
 Module compileModule(Context context, ASTModule astModule, bool addDefaultModules)

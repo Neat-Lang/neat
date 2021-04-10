@@ -130,10 +130,7 @@ class ASTTupleExpr : ASTSymbol
         Statement do_(Reference target) {
             mut Statement init;
             for (int i <- 0 .. memberValues.length) {
-                auto field = new TupleMemberRef(loc, target, i);
-                mut auto setField = memberValues[i].type.copyInto(context, field, memberValues[i]);
-                if (!setField) setField = context.compiler.assignStatement(field, memberValues[i]);
-                init = sequence(init, setField);
+                init = sequence(init, move(context, new TupleMemberRef(loc, target, i), memberValues[i]));
             }
             return init;
         }
@@ -299,6 +296,58 @@ class TupleType : Type
             return new TupleMemberRef(loc, ref_, index);
         }
         return new TupleMemberExpr(loc, base, index);
+    }
+
+    // basically just like struct
+    override Statement copyInto(Context context, Reference target, Expression source)
+    {
+        Statement do1(Expression targetptr) {
+            auto target = context.compiler.dereference(targetptr);
+            Statement do2(Expression source) {
+                mut Statement[] assigns;
+                mut bool anySpecialAssignments;
+                Loc nowhere;
+                for (int i <- 0 .. members.length) {
+                    auto targetField = new TupleMemberRef(nowhere, target, i);
+                    auto sourceField = new TupleMemberExpr(nowhere, source, i);
+                    mut auto copyInto = members[i].type.copyInto(context, targetField, sourceField);
+                    if (copyInto) anySpecialAssignments = true;
+                    if (!copyInto) copyInto = context.compiler.assignStatement(targetField, sourceField);
+                    assigns ~= copyInto;
+                }
+                if (!anySpecialAssignments) return null;
+                return context.compiler.sequenceStatement(assigns);
+            }
+            return context.compiler.stmtWithTemporaryExpr(source, &do2);
+        }
+        return context.compiler.stmtWithTemporaryExpr(context.compiler.reference(target), &do1);
+    }
+
+    // also like struct
+    override Statement endLifetime(Context context, Reference ref_)
+    {
+        auto compiler = context.compiler;
+
+        Statement doRef(Expression refptr) {
+            auto context = context.withNamespace(
+                compiler.exprAlias(context.namespace, "ref_", compiler.dereference(refptr)));
+
+            Loc nowhere;
+            mut ASTStatement[] destructors;
+            for (int i <- 0 .. members.length) {
+                auto member = new TupleMemberRef(nowhere, ref_, i);
+                auto destroy = members[i].type.endLifetime(context, member);
+                auto index = compiler.astIntLiteral(i, nowhere.reloc);
+                if (destroy) {
+                    destructors ~= compiler.$stmt __destroy(ref_[$index]);;
+                }
+            }
+            if (!destructors.length) return null;
+            ASTStatement body_ = compiler.astSequence(destructors, nowhere.reloc);
+
+            return body_.compile(context).statement;
+        }
+        return compiler.stmtWithTemporaryExpr(compiler.reference(ref_), &doRef);
     }
 
     override void hash(Hash hash) {

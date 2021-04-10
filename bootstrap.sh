@@ -335,6 +335,8 @@ at_revision 'b44d62c2a601e4a9ee101e11517e8d8bbb11c3de' 'macro_transition' 'build
 at_revision '475bce773390ca3ebb34fb0ced7a8e03188be9df' 'rebuild cx' 'build/cx'
 # fix either statement to not double-evaluate its lhs
 at_revision '151b7a4700eed13a25d5e4ac7cbed5cf56104bb2' 'rebuild cx' 'build/cx'
+# tuple refcounting
+at_revision '9af0785adc3a2295cfd4d180aee90337631bced9' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

@@ -23,9 +23,11 @@ struct StringArray
 };
 
 struct String string_alloc(size_t length) {
-    void *memory = malloc(sizeof(size_t) + length + 1);
-    *(size_t*) memory = 1; // references
-    return (struct String) { length, memory + sizeof(size_t), memory };
+    void *memory = malloc(sizeof(size_t) * 3 + length + 1);
+    ((size_t*) memory)[0] = 1; // references
+    ((size_t*) memory)[1] = length; // capacity
+    ((size_t*) memory)[2] = length; // used
+    return (struct String) { length, memory + sizeof(size_t) * 3, memory };
 }
 
 void print(struct String str) { printf("%.*s\n", (int) str.length, str.ptr); }
@@ -332,9 +334,9 @@ void poly_add_long(void *state, long long int value)
 
 struct String poly_hex_value(PolyHashState *state)
 {
-    char *ptr = malloc(sizeof(state->add) + 1);
-    snprintf(ptr, sizeof(state->add) + 1, "%.*llX", (int) sizeof(state->add), state->add);
-    return (struct String) { .length = sizeof(state->add), .ptr = ptr };
+    struct String ret = string_alloc(sizeof(state->add) + 1);
+    ret.length = snprintf(ret.ptr, ret.length, "%.*llX", (int) sizeof(state->add), state->add);
+    return ret;
 }
 
 long long int poly_hash_whole_string(struct String s)

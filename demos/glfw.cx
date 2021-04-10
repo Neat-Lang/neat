@@ -1,46 +1,47 @@
 module glfw;
 
+macro import cx.macros.assert;
 macro import cx.macros.cimport;
 
 import c_header("GL/gl.h");
 import c_header("GL/glext.h", "-include GL/gl.h -DGL_GLEXT_PROTOTYPES");
 import c_header("GLFW/glfw3.h");
+import c_header("SOIL.h");
 import std.math;
 import std.string : toStringz;
 
-extern(C) void assert(bool);
-
 struct Vertex {
     float x, y;
-    float r, g, b;
+    float u, v;
 }
 
 Vertex[] vertices() {
     return [
-        Vertex(-0.6, -0.4, 1, 0, 0),
-        Vertex(0.6, -0.4, 0, 1, 0),
-        Vertex(0,  0.6, 0, 0, 1)];
+        Vertex(-0.6, -0.4, 1, 0),
+        Vertex( 0.6, -0.4, 0, 0),
+        Vertex( 0,    0.6, 0, 1)];
 }
 
 string vertexShader() {
     return "#version 110
 uniform mat4 MVP;
-attribute vec3 vCol;
 attribute vec2 vPos;
-varying vec3 color;
+attribute vec2 vTexPos;
+varying vec2 texCoord;
 void main()
 {
     gl_Position = MVP * vec4(vPos, 0.0, 1.0);
-    color = vCol;
+    texCoord = vTexPos;
 };";
 }
 
 string fragmentShader() {
     return "#version 110
-varying vec3 color;
+varying vec2 texCoord;
+uniform sampler2D tex;
 void main()
 {
-    gl_FragColor = vec4(color, 1.0);
+    gl_FragColor = texture2D(tex, texCoord);
 }";
 }
 
@@ -139,17 +140,13 @@ mat4x4 mat4x4_ortho(float left, float right, float bottom, float top, float near
 }
 
 void main() {
-    GLuint vertex_shader, fragment_shader, program;
-
-    if (!glfwInit)
-        return;
+    if (!glfwInit) return;
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 
     auto window = glfwCreateWindow(640, 480, "Simple example".toStringz, null, null);
-    if (!window)
-    {
+    if (!window) {
         glfwTerminate;
         return;
     }
@@ -163,7 +160,7 @@ void main() {
     glGenBuffers(1, &vertex_buffer);
     glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
     auto vertices = vertices;
-    glBufferData(GL_ARRAY_BUFFER, 20 * 3 /*sizeof(vertices)*/, cast(void*) vertices.ptr, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, 16 * 3 /*sizeof(vertices)*/, cast(void*) vertices.ptr, GL_STATIC_DRAW);
 
     auto vertex_shader = glCreateShader(GL_VERTEX_SHADER);
     char* vertexShaderPtr = vertexShader.toStringz;
@@ -174,6 +171,18 @@ void main() {
     char* fragmentShaderPtr = fragmentShader.toStringz;
     glShaderSource(fragment_shader, 1, &fragmentShaderPtr, null);
     glCompileShader(fragment_shader);
+    int isCompiled;
+    glGetShaderiv(fragment_shader, GL_COMPILE_STATUS, &isCompiled);
+    if (!isCompiled) {
+        int maxLength = 0;
+        glGetShaderiv(fragment_shader, GL_INFO_LOG_LENGTH, &maxLength);
+
+        auto errorLog = new string(maxLength);
+        glGetShaderInfoLog(fragment_shader, maxLength, &maxLength, errorLog.ptr);
+
+        print(errorLog);
+        return;
+    }
 
     auto program = glCreateProgram;
     glAttachShader(program, vertex_shader);
@@ -182,14 +191,19 @@ void main() {
 
     auto mvp_location = glGetUniformLocation(program, "MVP".toStringz);
     auto vpos_location = glGetAttribLocation(program, "vPos".toStringz);
-    auto vcol_location = glGetAttribLocation(program, "vCol".toStringz);
+    auto vtexpos_location = glGetAttribLocation(program, "vTexPos".toStringz);
+
+    auto tex = SOIL_load_OGL_texture("some_grass_or_we.png".toStringz,
+        SOIL_LOAD_AUTO, SOIL_CREATE_NEW_ID, SOIL_FLAG_MIPMAPS + SOIL_FLAG_INVERT_Y +
+        SOIL_FLAG_NTSC_SAFE_RGB + SOIL_FLAG_COMPRESS_TO_DXT);
+    assert(tex != 0);
 
     glEnableVertexAttribArray(vpos_location);
     glVertexAttribPointer(vpos_location, 2, GL_FLOAT, false,
-                          /*sizeof(vertices[0])*/20, null);
-    glEnableVertexAttribArray(vcol_location);
-    glVertexAttribPointer(vcol_location, 3, GL_FLOAT, false,
-                          /*sizeof(vertices[0])*/20, cast(void*) (/*sizeof(float)*/4 * 2));
+                          /*sizeof(Vertex)*/16, null);
+    glEnableVertexAttribArray(vtexpos_location);
+    glVertexAttribPointer(vtexpos_location, 2, GL_FLOAT, false,
+                          /*sizeof(Vertex)*/16, cast(void*) (/*sizeof(float)*/4 * 2));
 
     while (!glfwWindowShouldClose(window)) {
         int width, height;
@@ -205,6 +219,9 @@ void main() {
 
         glUseProgram(program);
         glUniformMatrix4fv(mvp_location, 1, false, cast(GLfloat*) &mvp);
+
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glDrawArrays(GL_TRIANGLES, 0, 3);
 
         glfwSwapBuffers(window);

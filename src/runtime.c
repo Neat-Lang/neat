@@ -390,10 +390,16 @@ int cxruntime_refcount_dec(struct String s, long long int *ptr)
     return result == 0;
 }
 
+struct CacheEntry
+{
+    void* ptr;
+    void(*free)(void*);
+};
+
 struct Cache
 {
     size_t length;
-    void **entries;
+    struct CacheEntry *entries;
 };
 
 __thread struct Cache cxruntime_cache = {0};
@@ -402,25 +408,36 @@ int cxruntime_cache_isset(int key)
 {
     if (key >= cxruntime_cache.length)
         return false;
-    return cxruntime_cache.entries[key] != NULL;
+    return cxruntime_cache.entries[key].ptr != NULL;
 }
 
 void *cxruntime_cache_get(int key)
 {
-    return cxruntime_cache.entries[key];
+    return cxruntime_cache.entries[key].ptr;
 }
 
-void cxruntime_cache_set(int key, void *ptr)
+void cxruntime_cache_clear()
+{
+    for (int i = 0; i < cxruntime_cache.length; i++) {
+        struct CacheEntry entry = cxruntime_cache.entries[i];
+        if (entry.ptr != NULL) {
+            entry.free(entry.ptr);
+        }
+    }
+    free(cxruntime_cache.entries);
+    cxruntime_cache.entries = NULL;
+    cxruntime_cache.length = 0;
+}
+
+void cxruntime_cache_set(int key, void *ptr, void(*free)(void*))
 {
     assert(ptr != NULL);
     if (key >= cxruntime_cache.length) {
         size_t oldlen = cxruntime_cache.length;
         size_t newlen = key + 1;
-        cxruntime_cache.entries = realloc(cxruntime_cache.entries, sizeof(void*) * newlen);
-        memset(cxruntime_cache.entries + oldlen, 0, sizeof(void*) * (newlen - oldlen));
+        cxruntime_cache.entries = realloc(cxruntime_cache.entries, sizeof(struct CacheEntry) * newlen);
+        memset(cxruntime_cache.entries + oldlen, 0, sizeof(struct CacheEntry) * (newlen - oldlen));
         cxruntime_cache.length = newlen;
     }
-    cxruntime_cache.entries[key] = ptr;
+    cxruntime_cache.entries[key] = (struct CacheEntry) { .ptr = ptr, .free = free };
 }
-
-void cxruntime_cache_clear() { }

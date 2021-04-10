@@ -30,10 +30,12 @@ class ASTOnceExpression : ASTSymbol
         auto cacheSet = new FunctionDeclaration(
             "cxruntime_cache_set", new Void, [
                 Argument(false, "key", false, new Integer),
-                Argument(false, "ptr", false, new Pointer(new Void))]);
+                Argument(false, "ptr", false, new Pointer(new Void)),
+                Argument(false, "free", false, new FunctionPointer(new Void, [cast(Type) new Pointer(new Void)]))]);
         auto cacheGet = new FunctionDeclaration(
             "cxruntime_cache_get", new Pointer(new Void), [
                 Argument(false, "key", false, new Integer)]);
+        auto rtFree = genRtFree(context, target.compile(context).instanceOf(Expression).type);
 
         context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "cxruntime_cache_isset", cacheIsSet));
@@ -41,15 +43,36 @@ class ASTOnceExpression : ASTSymbol
                     context.namespace, "cxruntime_cache_set", cacheSet));
         context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "cxruntime_cache_get", cacheGet));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "rt_free", rtFree));
 
         return (context.compiler.$expr ({
             if (!cxruntime_cache_isset($key))
             {
-                cxruntime_cache_set($key, cast(void*) $target);
+                cxruntime_cache_set($key, cast(void*) $target, &rt_free);
             }
             cast(typeof($target)) cxruntime_cache_get($key);
         })).compile(context);
     }
+}
+
+class FixedSymbolAlias : ASTSymbol
+{
+    Symbol symbol;
+    this(this.symbol) { }
+    override Symbol compile(Context context) { return this.symbol; }
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'FixedSymbolAlias'"); assert(false); }
+}
+
+FunctionDeclaration genRtFree(Context context, Type type) {
+    ASTStatement body_() {
+        auto type = new FixedSymbolAlias(type);
+        return context.compiler.$stmt __destroy(cast($type) ptr);;
+    }
+
+    Argument[] args = [Argument(false, "ptr", false, new Pointer(new Void))];
+    return context.compiler.createRuntimeFunction(
+        context, "cache_free_" ~ type.mangle, new Void, args, &body_);
 }
 
 class OnceMacro : Macro

@@ -27,11 +27,13 @@ function checksum {
         md5sum
 }
 
-# new compiler, reset cache
 if [ ! -d build/src ]
 then
     cp -R src build/src
 fi
+
+# compiler now always looks inside the build dir
+cp src/runtime.c build/src/
 
 rm build/cx.ini || true
 

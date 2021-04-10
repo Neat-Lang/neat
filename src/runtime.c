@@ -23,7 +23,7 @@ struct StringArray
 };
 
 struct String string_alloc(size_t length) {
-    void *memory = malloc(sizeof(size_t) * 3 + length + 1);
+    void *memory = malloc(sizeof(size_t) * 3 + length);
     ((size_t*) memory)[0] = 1; // references
     ((size_t*) memory)[1] = length; // capacity
     ((size_t*) memory)[2] = length; // used
@@ -64,33 +64,33 @@ float cxruntime_atof(struct String str) {
 }
 struct String cxruntime_itoa(int i) {
     int len = snprintf(NULL, 0, "%i", i);
-    struct String res = string_alloc(len);
-    snprintf(res.ptr, len + 1, "%i", i);
+    struct String res = string_alloc(len + 1);
+    res.length = snprintf(res.ptr, res.length, "%i", i);
     return res;
 }
 struct String cxruntime_ltoa(long long l) {
     int len = snprintf(NULL, 0, "%lld", l);
-    struct String res = string_alloc(len);
-    snprintf(res.ptr, len + 1, "%lld", l);
+    struct String res = string_alloc(len + 1);
+    res.length = snprintf(res.ptr, res.length, "%lld", l);
     return res;
 }
 struct String cxruntime_ftoa(float f) {
     int len = snprintf(NULL, 0, "%f", f);
-    struct String res = string_alloc(len);
-    snprintf(res.ptr, len + 1, "%f", f);
+    struct String res = string_alloc(len + 1);
+    res.length = snprintf(res.ptr, res.length, "%f", f);
     return res;
 }
 struct String cxruntime_ftoa_hex(float f) {
     double d = f;
     int len = snprintf(NULL, 0, "%llx", *(long long int*) &d);
-    struct String res = string_alloc(len);
-    snprintf(res.ptr, len + 1, "%llx", *(long long int*) &d);
+    struct String res = string_alloc(len + 1);
+    res.length = snprintf(res.ptr, res.length, "%llx", *(long long int*) &d);
     return res;
 }
 struct String cxruntime_ptr_id(void* ptr) {
     int len = snprintf(NULL, 0, "%p", ptr);
-    struct String res = string_alloc(len);
-    snprintf(res.ptr, len + 1, "%p", ptr);
+    struct String res = string_alloc(len + 1);
+    res.length = snprintf(res.ptr, res.length, "%p", ptr);
     return res;
 }
 int cxruntime_toInt(float f) { return (int) f; }
@@ -262,7 +262,7 @@ void fnv_add_long(void *state, long long int value)
 
 struct String fnv_hex_value(void *state)
 {
-    char *ptr = malloc(sizeof(FNVState) + 1);
+    char *ptr = malloc(sizeof(FNVState) * 2 + 1);
     snprintf(ptr, sizeof(FNVState) + 1, "%.*llX", (int) sizeof(FNVState), *(long long int*) state);
     return (struct String) { .length = sizeof(FNVState), .ptr = ptr };
 }
@@ -334,7 +334,7 @@ void poly_add_long(void *state, long long int value)
 
 struct String poly_hex_value(PolyHashState *state)
 {
-    struct String ret = string_alloc(sizeof(state->add) + 1);
+    struct String ret = string_alloc(sizeof(state->add) * 2 + 1);
     ret.length = snprintf(ret.ptr, ret.length, "%.*llX", (int) sizeof(state->add), state->add);
     return ret;
 }
@@ -422,3 +422,5 @@ void cxruntime_cache_set(int key, void *ptr)
     }
     cxruntime_cache.entries[key] = ptr;
 }
+
+void cxruntime_cache_clear() { }

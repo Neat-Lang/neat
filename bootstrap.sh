@@ -339,6 +339,9 @@ at_revision '151b7a4700eed13a25d5e4ac7cbed5cf56104bb2' 'rebuild cx' 'build/cx'
 at_revision '9af0785adc3a2295cfd4d180aee90337631bced9' 'rebuild cx' 'build/cx'
 # no-op cxruntime_cache_clear, fix hash string alloc
 at_revision '12bd0030e530b8431f57693ddc3137a7d3484049' 'rebuild cx' 'build/cx'
+# implconv tuples to tuples
+at_revision '119fca3f605d927330805b843672506dbe38988e' 'rebuild cx' 'build/cx'
+
 
 # unpack the last tagfile
 unpack_tagfile

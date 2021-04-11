@@ -1500,7 +1500,7 @@ ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
         loc.assert2s(!!next, "expression expected for negation");
         return new ASTBinaryOp("-", new ASTIntLiteral(0, loc), next, loc);
     }
-    if (ASTSymbol expr = parseExpressionBase(parser, lexicalContext))
+    if (ASTSymbol expr = parseExpressionIncDec(parser, lexicalContext))
         return parseProperties(parser, lexicalContext, expr);
     return null;
 }
@@ -1695,6 +1695,72 @@ ASTStringLiteral parseStringLiteral(Parser parser, string endMarker)
     }
 
     return new ASTStringLiteral(replaceEscapes(str), loc);
+}
+
+// i++, i--, ++i, --i
+class ASTPrePostIncDec : ASTSymbol
+{
+    Loc loc;
+
+    ASTSymbol target;
+
+    ((:pre | :post) when, (:inc | :dec) what) op;
+
+    this(this.loc, this.op, this.target) { }
+
+    override Symbol compile(Context context) {
+        auto target = target.compile(context).beExpressionImplCall(context, loc);
+        loc.assert2s5(
+            !!target.instanceOf(Reference),
+            "cannot ", op.when.case((:pre): "pre", (:post): "post"), "-",
+            op.what.case((:inc): "inc", (:dec): "dec"), "rement non-reference target");
+        Expression do_(Expression refptr) {
+            auto context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, "ref_", context.compiler.dereference(refptr)));
+
+            return op.when.case(
+                (:pre): op.what.case(
+                    (:inc): context.compiler.$expr ({ ref_ += 1; ref_; }),
+                    (:dec): context.compiler.$expr ({ ref_ -= 1; ref_; })
+                ),
+                (:post): op.what.case(
+                    (:inc): context.compiler.$expr ({ auto ret = ref_; ref_ += 1; ret; }),
+                    (:dec): context.compiler.$expr ({ auto ret = ref_; ref_ -= 1; ret; })))
+                .compile(context).beExpression;
+        }
+        auto refptr = context.compiler.reference(target.instanceOf(Reference));
+        return context.compiler.exprWithTemporaryExpr(refptr, &do_);
+    }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTPreOp'!"); assert(false); }
+    override string repr() {
+        auto opText = op.what.case((:inc): "++", (:dec): "--");
+        return op.when.case((:pre): opText ~ target.repr, (:post): target.repr ~ opText);
+    }
+}
+
+ASTSymbol parseExpressionIncDec(Parser parser, LexicalContext lexicalContext)
+{
+    mut (:inc | :dec | :none) pre = :none, post = :none;
+    auto loc1 = parser.loc;
+    if (parser.accept("++")) pre = :inc;
+    else if (parser.accept("--")) pre = :dec;
+    mut auto ret = parseExpressionBase(parser, lexicalContext);
+    if (!ret) return null;
+    auto loc2 = parser.loc;
+    if (parser.accept("++")) post = :inc;
+    else if (parser.accept("--")) post = :dec;
+    pre.case {
+        (:inc): ret = new ASTPrePostIncDec(loc1, (:pre, :inc), ret);
+        (:dec): ret = new ASTPrePostIncDec(loc1, (:pre, :dec), ret);
+        (:none): {}
+    }
+    post.case {
+        (:inc): ret = new ASTPrePostIncDec(loc1, (:post, :inc), ret);
+        (:dec): ret = new ASTPrePostIncDec(loc1, (:post, :dec), ret);
+        (:none): {}
+    }
+    return ret;
 }
 
 ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)

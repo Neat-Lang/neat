@@ -96,7 +96,7 @@ class Class : Type
 
     ClassMethod[] methods;
 
-    ClassMethod[] vtable_; // methods appearing in the classinfo struct
+    ClassMethod[] vtable; // methods appearing in the classinfo struct
 
     string vtableSymbol;
 
@@ -135,19 +135,18 @@ class Class : Type
 
     override Symbol accessMember(Loc loc, Context context, Expression baseExpr, string member)
     {
-        ClassMethod[] vtable = this.vtable;
         Expression asStructPtr = new PointerCast(
             new Pointer(this.dataStruct), baseExpr);
         size_t methodOffset = [first i for i, a in vtable where a.name == member else -1];
         if (methodOffset != -1)
         {
-            Reference classInfo = context.compiler.dereference(new PointerCast(
-                new Pointer(this.classInfoStruct),
-                new StructMemberReference(context.compiler.dereference(asStructPtr), 0)));
             if (this.final_) {
                 auto funcPtr = new FunctionReference(vtable[methodOffset]);
                 return new ClassMethodPtr(funcPtr, baseExpr, true);
             }
+            Reference classInfo = context.compiler.dereference(new PointerCast(
+                new Pointer(this.classInfoStruct),
+                new StructMemberReference(context.compiler.dereference(asStructPtr), 0)));
             mut Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
             auto funcPtr = funcPtrValue.type.instanceOf(FunctionPointer);
 
@@ -249,33 +248,28 @@ class Class : Type
     Struct classInfoStruct()
     {
         if (classInfoStructCache) {
-            assert(classInfoStructCache.members.length == vtable_.length);
+            assert(classInfoStructCache.members.length == vtable.length);
             return classInfoStructCache;
         }
 
         auto vtableMembers = [
             new StructMemberDeclaration(method.name, method.funcPtrType)
-            for method in vtable_];
+            for method in vtable];
 
         classInfoStructCache = new Struct("", vtableMembers, this.decl.loc, this.mangle);
         return classInfoStructCache;
-    }
-
-    ClassMethod[] vtable()
-    {
-        return [a for a in this.vtable_];
     }
 
     void genVtable(Context context)
     {
         if (this.vtableSymbol != "") return;
 
-        assert(this.vtable_.length == 0);
+        assert(this.vtable.length == 0);
 
         mut ClassMethod[] combinedMethods;
         if (this.superClass) {
             this.superClass.genVtable(context);
-            combinedMethods = this.superClass.vtable;
+            combinedMethods = [a for a in this.superClass.vtable];
         }
 
         this.genInstanceofMethod(context);
@@ -309,7 +303,7 @@ class Class : Type
                         "Abstract method '" ~ method.name ~ "' not overridden in non-abstract class " ~ this.name);
             }
         }
-        this.vtable_ = combinedMethods;
+        this.vtable = combinedMethods;
         this.vtableSymbol = this.mangledName ~ "_vtable";
     }
 
@@ -318,14 +312,14 @@ class Class : Type
         if (generator.mod.declared(vtableSymbol))
             return;
 
-        generator.mod.declareSymbolList(vtableSymbol, vtable_.length);
+        generator.mod.declareSymbolList(vtableSymbol, vtable.length);
     }
 
     void define(Generator generator)
     {
         auto methods = [
             ({ method.declare(generator); method.mangle; })
-            for method in vtable_];
+            for method in vtable];
 
         generator.mod.defineSymbolList(vtableSymbol, methods);
     }

@@ -1,0 +1,205 @@
+module cx.vectors;
+
+macro import cx.macros.listcomprehension;
+
+import backend.base;
+import cx.base;
+import cx.expr;
+import cx.hash;
+import cx.parser_base;
+import helpers;
+
+class ASTVectorType : ASTSymbol
+{
+    Loc loc;
+
+    ASTSymbol elementType;
+
+    int count;
+
+    this(this.loc, this.elementType, this.count) { }
+
+    override Symbol compile(Context context)
+    {
+        return new VectorType(beType(this.loc, this.elementType.compile(context)), count);
+    }
+}
+
+class VectorMember : Expression
+{
+    Expression base;
+
+    int index;
+
+    VectorType vectorType;
+
+    this(this.base, this.index)
+    {
+        this.vectorType = this.base.type.instanceOf(VectorType);
+        assert(!!vectorType);
+        this.type = this.vectorType.elementType;
+    }
+
+    override int emit(Generator output)
+    {
+        return output.fun.field(vectorType.emit(output.platform), base.emit(output), index);
+    }
+
+    override ExprInfo info() { return base.info; }
+
+    override void hash(Hash hash)
+    {
+        hash.adds("VectorMember");
+        base.hash(hash);
+        hash.addl(index);
+    }
+}
+
+class VectorMemberReference : Reference
+{
+    Reference base;
+
+    int index;
+
+    VectorType vectorType;
+
+    this(this.base, this.index)
+    {
+        this.vectorType = this.base.type.instanceOf(VectorType);
+        assert(!!vectorType);
+        this.type = this.vectorType.elementType;
+    }
+
+    override int emit(Generator output)
+    {
+        return output.fun.load(this.type.emit(output.platform), this.emitLocation(output));
+    }
+
+    override int emitLocation(Generator output)
+    {
+        int reg = this.base.emitLocation(output);
+
+        return output.fun.fieldOffset(this.base.type.emit(output.platform), reg, this.index);
+    }
+
+    override ExprInfo info() { return base.info; }
+
+    override void hash(Hash hash)
+    {
+        hash.adds("VectorMember");
+        base.hash(hash);
+        hash.addl(index);
+    }
+}
+
+class VectorType : Type
+{
+    Type elementType;
+
+    int length;
+
+    this(this.elementType, this.length) { }
+
+    override BackendType emit(Platform platform) {
+        // TODO BackendVectorType
+        // TODO [element for 0 .. length]
+        BackendType elementType = this.elementType.emit(platform);
+        mut BackendType[] members;
+        for (int i <- 0 .. length) members ~= elementType;
+        return new BackendStructType(members);
+    }
+
+    override bool same(Type other) {
+        // TODO
+        // return other.instanceOf(VectorType)?.(element.same(this.element) && length == this.length);
+        if (auto vt = other.instanceOf(VectorType))
+            return elementType.same(vt.elementType) && length == vt.length;
+        return false;
+    }
+
+    override string repr() {
+        return "Vector(" ~ elementType.repr ~ ", " ~ itoa(length) ~ ")";
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("Vector");
+        elementType.hash(hash);
+        hash.addl(length);
+    }
+
+    override Symbol accessMember(Loc loc, Context context, Expression base, string field)
+    {
+        // TODO part of type? third parameter?
+        Expression do_(Expression base) {
+            string coords1 = "uv", coords2 = "xyzw", coords3 = "rgba";
+            mut Expression[] members;
+            int indexIn(char ch, string str) {
+                return [first cast(int) i for i, ch2 in str where ch == ch2 else -1];
+            }
+            for (char ch <- field) {
+                if (ch.indexIn(coords1) != -1)
+                    members ~= new VectorMember(base, ch.indexIn(coords1));
+                else if (ch.indexIn(coords2) != -1)
+                    members ~= new VectorMember(base, ch.indexIn(coords2));
+                else if (ch.indexIn(coords3) != -1)
+                    members ~= new VectorMember(base, ch.indexIn(coords3));
+                else return null;
+            }
+            if (members.length == 1)
+                return members[0];
+            return (new VectorType(elementType, cast(int) members.length)).call(context, loc, members);
+        }
+        return context.compiler.exprWithTemporaryExpr(base, &do_);
+    }
+
+    override Expression binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
+    {
+        auto lhsVectorType = lhs.type.instanceOf(VectorType);
+        auto rhsVectorType = rhs.type.instanceOf(VectorType);
+        if (lhsVectorType && rhsVectorType) {
+            loc.assert2s(lhsVectorType.length == rhsVectorType.length, "vectors have different size");
+        }
+        loc.assert2s(!!lhsVectorType, "lhs must be vector (TODO)");
+        Expression getRight(int index) {
+            if (rhsVectorType) return new VectorMember(rhs, index);
+            return rhs;
+        }
+        if (op == "==" || op == ">" || op == "<" || op == ">=" || op == "<=") {
+            mut Expression andList;
+            for (int i <- 0 .. lhsVectorType.length) {
+                auto leftMember = new VectorMember(lhs, i);
+                auto rightMember = getRight(i);
+                auto test = context.compiler.binaryOp(op, context, leftMember, rightMember, loc);
+                if (!andList) andList = test;
+                else andList = new BoolAnd(andList, test);
+            }
+            return andList;
+        }
+        mut Expression[] members;
+        for (int i <- 0 .. lhsVectorType.length) {
+            auto leftMember = new VectorMember(lhs, i);
+            auto rightMember = getRight(i);
+            members ~= new BinaryOp(op, leftMember, rightMember, loc);
+        }
+        return call(context, loc, members);
+    }
+
+    override Expression call(Context context, Loc loc, Expression[] args)
+    {
+        loc.assert2s(args.length == this.length, "invalid number of args for vector constructor");
+        assert(args.length == this.length);
+
+        // TODO a better way to generically construct types backed by BackendStructType
+        auto result = new PairedTemporary(this, true);
+        mut Statement initialize = new UninitializeTemporaryStatement(result);
+        for (int i <- 0 .. args.length) {
+            auto arg = expectImplicitConvertTo(context, args[i], elementType, loc);
+            auto field = new VectorMemberReference(result, i);
+            auto stmt = context.compiler.assignStatement(field, arg);
+
+            initialize = context.compiler.sequence(initialize, stmt);
+        }
+        return context.compiler.statementExpression(initialize, result);
+    }
+}
+

@@ -1419,6 +1419,23 @@ class ASTReference : ASTSymbol
     }
 }
 
+class ASTSizeOf : ASTSymbol
+{
+    ASTSymbol target;
+
+    this(this.target) { }
+
+    override Symbol compile(Context context)
+    {
+        auto target = target.compile(context);
+        if (auto expr = target.instanceOf(Expression))
+            return new SizeOf(expr.type);
+        if (auto type = target.instanceOf(Type))
+            return new SizeOf(type);
+        assert(false);
+    }
+}
+
 class SizeOf : Expression
 {
     Type targetType;
@@ -1456,7 +1473,7 @@ ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
         assert(!!next);
         return new ASTReference(next, loc);
     }
-    if (acceptIdentifier(parser, "new"))
+    if (parser.acceptIdentifier("new"))
     {
         ASTSymbol type = parser.parseType(lexicalContext);
         if (!type) {
@@ -1470,7 +1487,23 @@ ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
 
         return new ASTNewExpression(type, args, loc);
     }
-    if (acceptIdentifier(parser, "cast"))
+    if (parser.acceptIdentifier("sizeof"))
+    {
+        parser.expect("(");
+        parser.begin;
+        mut auto sym = lexicalContext.compiler.parseType(parser, lexicalContext);
+        if (!sym || !parser.accept(")")) {
+            parser.revert;
+            parser.begin;
+            sym = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+            if (!sym) parser.fail("expression expected");
+            parser.expect(")");
+        }
+        parser.commit;
+
+        return new ASTSizeOf(sym);
+    }
+    if (parser.acceptIdentifier("cast"))
     {
         parser.expect("(");
         ASTSymbol target = parser.parseType(lexicalContext);
@@ -1482,25 +1515,25 @@ ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
 
         return new ASTCastExpr(target, value, loc);
     }
-    if (auto tuple = parseTupleExpression(parser, lexicalContext))
+    if (auto tuple = parser.parseTupleExpression(lexicalContext))
     {
         return tuple;
     }
     if (parser.accept("!"))
     {
-        ASTSymbol next = parseExpressionLeaf(parser, lexicalContext);
+        ASTSymbol next = parser.parseExpressionLeaf(lexicalContext);
 
         assert(!!next);
         return new ASTNegation(next, loc);
     }
     if (parser.acceptButNot("-", "--"))
     {
-        ASTSymbol next = parseExpressionLeaf(parser, lexicalContext);
+        ASTSymbol next = parser.parseExpressionLeaf(lexicalContext);
 
         loc.assert2s(!!next, "expression expected for negation");
         return new ASTBinaryOp("-", new ASTIntLiteral(0, loc), next, loc);
     }
-    if (ASTSymbol expr = parseExpressionIncDec(parser, lexicalContext))
+    if (ASTSymbol expr = parser.parseExpressionIncDec(lexicalContext))
         return parseProperties(parser, lexicalContext, expr);
     return null;
 }
@@ -1756,8 +1789,8 @@ ASTSymbol parseExpressionIncDec(Parser parser, LexicalContext lexicalContext)
         (:none): {}
     }
     post.case {
-        (:inc): ret = new ASTPrePostIncDec(loc1, (:post, :inc), ret);
-        (:dec): ret = new ASTPrePostIncDec(loc1, (:post, :dec), ret);
+        (:inc): ret = new ASTPrePostIncDec(loc2, (:post, :inc), ret);
+        (:dec): ret = new ASTPrePostIncDec(loc2, (:post, :dec), ret);
         (:none): {}
     }
     return ret;

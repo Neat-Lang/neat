@@ -8,210 +8,261 @@ import c_header("GL/glext.h", "-include GL/gl.h -DGL_GLEXT_PROTOTYPES");
 import c_header("GLFW/glfw3.h");
 import c_header("SOIL.h");
 import std.math;
+import std.math.matrix;
+import std.math.vector;
 import std.string : toStringz;
 
-alias vec2f = Vector(float, 2);
-alias vec3f = Vector(float, 3);
-alias vec4f = Vector(float, 4);
-
 struct Vertex {
-    vec2f pos;
+    vec3f pos;
+    vec3f color;
     vec2f texCoord;
 }
 
 Vertex[] vertices() {
-    return [
-        Vertex(vec2f(-0.6, -0.4), vec2f(1, 0)),
-        Vertex(vec2f( 0.6, -0.4), vec2f(0, 0)),
-        Vertex(vec2f( 0,    0.6), vec2f(0, 1))];
+    mut Vertex[] ret;
+    float h(int x, int y) {
+        if (x >= 4 && x <= 6 && y >= 4 && y <= 6) return 0.3;
+        return 0;
+    }
+    for (mut int y = 0; y < 10; y += 1) {
+        for (mut int x = 0; x < 10; x += 1) {
+            auto base = vec3f(x - 5, y - 5, 0);
+            auto a = base + vec3f(0, 0, h(x+0, y+0));
+            auto b = base + vec3f(0, 1, h(x+0, y+1));
+            auto c = base + vec3f(1, 1, h(x+1, y+1));
+            auto d = base + vec3f(1, 0, h(x+1, y+0));
+            auto n = (c - a).cross(d - b);
+            auto l = vec3f(0.4, 1, 0.2).normal;
+            auto angle = max(0.6, angle(n, vec3f(0, 0, 0) - l));
+            // vec3f col = vec3f(0.6, 0.5, 0.4);
+            vec3f col = vec3f(1, 1, 1) * angle;
+            ret ~= Vertex(a, col, vec2f(0, 0));
+            ret ~= Vertex(b, col, vec2f(0, 1));
+            ret ~= Vertex(c, col, vec2f(1, 1));
+            ret ~= Vertex(d, col, vec2f(1, 0));
+        }
+    }
+    return ret;
 }
 
 string vertexShader() {
-    return "#version 110
+    return "#version 330
 uniform mat4 MVP;
-attribute vec2 vPos;
+attribute vec3 vPos;
+attribute vec3 vColor;
 attribute vec2 vTexPos;
-varying vec2 texCoord;
+out vec2 texCoord;
+flat out vec3 color;
 void main()
 {
-    gl_Position = MVP * vec4(vPos, 0.0, 1.0);
+    gl_Position = MVP * vec4(vPos, 1.0);
+    color = vColor;
     texCoord = vTexPos;
 };";
 }
 
 string fragmentShader() {
-    return "#version 110
-varying vec2 texCoord;
+    return "#version 330
+in vec2 texCoord;
+flat in vec3 color;
 uniform sampler2D tex;
 void main()
 {
-    gl_FragColor = texture2D(tex, texCoord);
+    gl_FragColor = texture2D(tex, texCoord) * vec4(color, 1);
 }";
 }
 
-/*
+class Shader {
+    (:vertex | :fragment) kind;
+
+    string source;
+
+    this(this.kind, this.source) { }
+
+    GLuint compile() {
+        auto shaderId = glCreateShader(
+            kind.case((:vertex): GL_VERTEX_SHADER, (:fragment): GL_FRAGMENT_SHADER));
+        char* shaderPtr = source.toStringz;
+        glShaderSource(shaderId, 1, &shaderPtr, null);
+        glCompileShader(shaderId);
+        free(shaderPtr);
+
+        int isCompiled;
+        glGetShaderiv(shaderId, GL_COMPILE_STATUS, &isCompiled);
+        if (!isCompiled) {
+            int maxLength = 0;
+            glGetShaderiv(shaderId, GL_INFO_LOG_LENGTH, &maxLength);
+
+            auto errorLog = new string(maxLength);
+            glGetShaderInfoLog(shaderId, maxLength, &maxLength, errorLog.ptr);
+
+            print(errorLog);
+            assert(false);
+        }
+        return shaderId;
+    }
+}
+
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
 {
-    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
-        glfwSetWindowShouldClose(window, GLFW_TRUE);
-}
-*/
+    auto window = cast(Window) glfwGetWindowUserPointer(window);
 
-// this is all super unoptimized
-struct mat4x4 {
-    vec4f row1, row2, row3, row4;
-    mat4x4 rotateZ(float by) {
-        return mul(mat4x4_rotationZ(by));
-    }
-    mat4x4 mul(mat4x4 other) {
-        float rowmul(int row, int col) {
-            auto mul = this.row(row) * other.row(col);
-            return mul.x + mul.y + mul.z + mul.w;
+    window.key(key, scancode, action, mods);
+}
+
+class Window
+{
+    GLFWwindow* handle;
+    bool[] keyPressed_;
+
+    float lastFrameTime;
+    float delay;
+
+    this() {
+        if (!glfwInit) return;
+
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+
+        this.handle = glfwCreateWindow(640, 480, "Simple example".toStringz, null, null);
+        if (!this.handle) {
+            glfwTerminate;
+            return;
         }
-        return mat4x4(
-            vec4f(rowmul(0, 0), rowmul(0, 1), rowmul(0, 2), rowmul(0, 3)),
-            vec4f(rowmul(1, 0), rowmul(1, 1), rowmul(1, 2), rowmul(1, 3)),
-            vec4f(rowmul(2, 0), rowmul(2, 1), rowmul(2, 2), rowmul(2, 3)),
-            vec4f(rowmul(3, 0), rowmul(3, 1), rowmul(3, 2), rowmul(3, 3)));
+        glfwSetWindowUserPointer(this.handle, this);
+        glfwSetKeyCallback(this.handle, &key_callback);
 
+        glfwMakeContextCurrent(this.handle);
+        glfwSwapInterval(1);
     }
-    vec4f row(int r) {
-        if (r == 0) return row1;
-        if (r == 1) return row2;
-        if (r == 2) return row3;
-        if (r == 3) return row4;
-        assert(false);
+
+    void key(int key, int scancode, int action, int mods) {
+        while (key >= keyPressed_.length) keyPressed_ ~= false;
+        if (action == GLFW_PRESS) keyPressed_[key] = true;
+        else if (action == GLFW_RELEASE) keyPressed_[key] = false;
     }
-    mat4x4 transpose() {
-        return mat4x4(
-            vec4f(row1.x, row2.x, row3.x, row4.x),
-            vec4f(row1.y, row2.y, row3.y, row4.y),
-            vec4f(row1.z, row2.z, row3.z, row4.z),
-            vec4f(row1.w, row2.w, row3.w, row4.w));
+
+    bool keyPressed(int key) {
+        if (key >= keyPressed_.length) return false;
+        return keyPressed_[key];
+    }
+
+    bool shouldClose() {
+        return glfwWindowShouldClose(this.handle);
+    }
+
+    (int width, int height) getFramebufferSize() {
+        int width, height;
+        glfwGetFramebufferSize(this.handle, &width, &height);
+        return (width, height);
+    }
+
+    void swap() {
+        glfwSwapBuffers(this.handle);
+        auto time = cast(float) glfwGetTime;
+        this.delay = time - this.lastFrameTime;
+        this.lastFrameTime = time;
+    }
+
+    void poll() {
+        glfwPollEvents;
+    }
+
+    void destroy() {
+        glfwDestroyWindow(this.handle);
+        glfwTerminate;
     }
 }
 
-// TODO static methods
-mat4x4 mat4x4_identity() {
-    return mat4x4(
-        vec4f(1, 0, 0, 0),
-        vec4f(0, 1, 0, 0),
-        vec4f(0, 0, 1, 0),
-        vec4f(0, 0, 0, 1));
-}
+class Program {
+    Shader vertexShader, fragmentShader;
 
-mat4x4 mat4x4_rotationZ(float angle) {
-    float cos = cos(angle), sin = sin(angle);
-    return mat4x4(
-        vec4f(cos, -sin, 0, 0),
-        vec4f(sin,  cos, 0, 0),
-        vec4f(  0,    0, 1, 0),
-        vec4f(  0,    0, 0, 1));
-}
+    GLuint handle;
 
-mat4x4 mat4x4_ortho(float left, float right, float bottom, float top, float near, float far) {
-    float dx = right - left, dy = top - bottom, dz = far - near;
-    float tx = -(right + left) / (right - left);
-    float ty = -(top + bottom) / (top - bottom);
-    float tz = -(far + near) / (far - near);
-    return mat4x4(
-        vec4f(2/dx,    0,    0, tx),
-        vec4f(   0, 2/dy,    0, ty),
-        vec4f(   0,    0, 2/dz, tz),
-        vec4f(   0,    0,    0,  1));
+    this(this.vertexShader, this.fragmentShader) {
+        this.handle = glCreateProgram;
+        handle.glAttachShader(this.vertexShader.compile);
+        handle.glAttachShader(this.fragmentShader.compile);
+        handle.glLinkProgram;
+    }
+
+    GLuint uniformLocation(string name) {
+        auto ptr = name.toStringz;
+        auto res = glGetUniformLocation(handle, ptr);
+        free(ptr);
+        return res;
+    }
+
+    GLuint attribLocation(string name) {
+        auto ptr = name.toStringz;
+        auto res = glGetAttribLocation(handle, ptr);
+        free(ptr);
+        return res;
+    }
 }
 
 void main() {
-    if (!glfwInit) return;
+    auto window = new Window;
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-
-    auto window = glfwCreateWindow(640, 480, "Simple example".toStringz, null, null);
-    if (!window) {
-        glfwTerminate;
-        return;
-    }
-
-    // glfwSetKeyCallback(window, key_callback);
-
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
+    glEnable(GL_DEPTH_TEST);
 
     GLuint vertex_buffer;
     glGenBuffers(1, &vertex_buffer);
     glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
-    auto vertices = vertices;
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices[0]) * vertices.length, cast(void*) vertices.ptr, GL_STATIC_DRAW);
 
-    auto vertex_shader = glCreateShader(GL_VERTEX_SHADER);
-    char* vertexShaderPtr = vertexShader.toStringz;
-    glShaderSource(vertex_shader, 1, &vertexShaderPtr, null);
-    glCompileShader(vertex_shader);
+    auto vertex_shader = new Shader(:vertex, vertexShader);
+    auto fragment_shader = new Shader(:fragment, fragmentShader);
+    auto program = new Program(vertex_shader, fragment_shader);
 
-    auto fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
-    char* fragmentShaderPtr = fragmentShader.toStringz;
-    glShaderSource(fragment_shader, 1, &fragmentShaderPtr, null);
-    glCompileShader(fragment_shader);
-    int isCompiled;
-    glGetShaderiv(fragment_shader, GL_COMPILE_STATUS, &isCompiled);
-    if (!isCompiled) {
-        int maxLength = 0;
-        glGetShaderiv(fragment_shader, GL_INFO_LOG_LENGTH, &maxLength);
-
-        auto errorLog = new string(maxLength);
-        glGetShaderInfoLog(fragment_shader, maxLength, &maxLength, errorLog.ptr);
-
-        print(errorLog);
-        return;
-    }
-
-    auto program = glCreateProgram;
-    glAttachShader(program, vertex_shader);
-    glAttachShader(program, fragment_shader);
-    glLinkProgram(program);
-
-    auto mvp_location = glGetUniformLocation(program, "MVP".toStringz);
-    auto vpos_location = glGetAttribLocation(program, "vPos".toStringz);
-    auto vtexpos_location = glGetAttribLocation(program, "vTexPos".toStringz);
+    auto mvp_location = program.uniformLocation("MVP");
+    auto vpos_location = program.attribLocation("vPos");
+    auto vcolor_location = program.attribLocation("vColor");
+    auto vtexpos_location = program.attribLocation("vTexPos");
 
     auto tex = SOIL_load_OGL_texture("some_grass_or_we.png".toStringz,
         SOIL_LOAD_AUTO, SOIL_CREATE_NEW_ID,
-        SOIL_FLAG_MIPMAPS | SOIL_FLAG_INVERT_Y | SOIL_FLAG_NTSC_SAFE_RGB | SOIL_FLAG_COMPRESS_TO_DXT);
+        SOIL_FLAG_MIPMAPS | SOIL_FLAG_INVERT_Y | SOIL_FLAG_COMPRESS_TO_DXT);
     assert(tex != 0);
 
     glEnableVertexAttribArray(vpos_location);
-    glVertexAttribPointer(vpos_location, 2, GL_FLOAT, false,
+    glVertexAttribPointer(vpos_location, 3, GL_FLOAT, false,
                           sizeof(Vertex), null);
+    glEnableVertexAttribArray(vcolor_location);
+    glVertexAttribPointer(vcolor_location, 3, GL_FLOAT, false,
+                          sizeof(Vertex), cast(void*) sizeof(vec3f));
     glEnableVertexAttribArray(vtexpos_location);
-    // TODO offsetof?
     glVertexAttribPointer(vtexpos_location, 2, GL_FLOAT, false,
-                          sizeof(Vertex), cast(void*) (sizeof(float) * 2));
+                          sizeof(Vertex), cast(void*) sizeof((vec3f, vec3f)));
 
-    while (!glfwWindowShouldClose(window)) {
-        int width, height;
-        glfwGetFramebufferSize(window, &width, &height);
-        auto ratio = width * 1.0 / height;
+    mut float rotate = 0;
+    mut vec3f base = vec3f(0, 0, 0);
+    while (!window.shouldClose) {
+        (int width, int height) size = window.getFramebufferSize;
+        auto ratio = size.width * 1.0 / size.height;
 
-        glViewport(0, 0, width, height);
-        glClear(GL_COLOR_BUFFER_BIT);
+        auto vertices = vertices;
+        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices[0]) * vertices.length, cast(void*) vertices.ptr, GL_STATIC_DRAW);
 
-        auto m = mat4x4_identity.rotateZ(cast(float) glfwGetTime);
-        auto p = mat4x4_ortho(-ratio, ratio, -1, 1, 1, -1);
+        glViewport(0, 0, size.width, size.height);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        auto m = mat4x4_identity.rotateX(1).rotateZ(rotate);
+        auto p = mat4x4_ortho(-ratio * 5, ratio * 5, -5, 5, 1, -1);
         auto mvp = p.mul(m);
 
-        glUseProgram(program);
+        glUseProgram(program.handle);
         glUniformMatrix4fv(mvp_location, 1, false, cast(GLfloat*) &mvp);
 
         glBindTexture(GL_TEXTURE_2D, tex);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_QUADS, 0, cast(int) vertices.length * 4);
 
-        glfwSwapBuffers(window);
-        glfwPollEvents;
+        window.swap;
+        window.poll;
+        if (window.keyPressed(GLFW_KEY_Q)) rotate += 1.4 * window.delay;
+        if (window.keyPressed(GLFW_KEY_E)) rotate -= 1.4 * window.delay;
     }
 
-    glfwDestroyWindow(window);
-
-    glfwTerminate;
+    // TODO destructor
+    window.destroy;
 }

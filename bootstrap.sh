@@ -295,16 +295,19 @@ function macro_transition {
 
     NEXT=compiler$(($(build/cx -print-generation) + 1))
 
+    mkdir build/backup
+    cp -R src/cx/macros/ build/backup/
     cp -R ../../build/src/ build/
     # use old macros for first round
     cp -R ../../build/src/cx/macros/ src/cx/
     build/cx -next-generation -Pcompiler:build/src -P$NEXT:src src/main.cx -o build/cx_1 $@
     # use new macros even for previous-generation imports
-    cp -R ../../src/cx/macros/ src/cx/
-    cp -R ../../src/cx/macros/ build/src/cx/
+    cp -R build/backup/macros/ src/cx/
+    cp -R build/backup/macros/ build/src/cx/
     build/cx_1 -Pcompiler:src src/main.cx -o build/cx_2 $@
     mv build/cx_2 build/cx
     rm -rf build/src
+    rm -rf build/backup
     cp -R src build/
 }
 # switch override `Type type()` to `Type type;` field in `Expression`.

@@ -367,7 +367,7 @@ class DelegateExpr : Expression
         // drop thisptr - implicit!
         assert(type.args.length >= 1);
         // TODO this smells.
-        this.type = new NestedFunctionPointer(type.ret, type.args[1 .. $]);
+        this.type = new NestedFunctionPointer(type.ret, [a.type for a in type.args[1 .. $]]);
     }
 
     override int emit(Generator output)
@@ -412,8 +412,9 @@ class DelegateFuncPtr : Expression
     this(this.dg) {
         auto nestfp = this.dg.type.instanceOf(NestedFunctionPointer);
         assert(!!nestfp);
-        auto argTypes = [once (new Pointer(new Void)).instanceOf(Type)] ~ nestfp.args;
-        this.type = new FunctionPointer(nestfp.ret, argTypes);
+        auto args = [Argument.fromType(once new Pointer(new Void))]
+            ~ [Argument.fromType(a) for a in nestfp.args];
+        this.type = new FunctionPointer(nestfp.ret, args);
     }
 
     override int emit(Generator output)
@@ -442,7 +443,7 @@ Expression call(Context context, Symbol target, mut Expression[] args, Loc loc, 
             if (args.length != funcptr.args.length - 1)
                 loc.fail("wrong number of arguments: expected " ~ ltoa(funcptr.args.length - 1)
                     ~ " but got " ~ ltoa(args.length));
-            args = [expectImplicitConvertTo(context, arg, funcptr.args[i+1], loc) for i, arg in args];
+            args = [expectImplicitConvertTo(context, arg, funcptr.args[i+1].type, loc) for i, arg in args];
         } else {
             loc.fail("function reference or funcptr expected? but is '" ~ method.funcPtr.type.repr ~ "'");
         }
@@ -473,7 +474,7 @@ Expression call(Context context, Symbol target, mut Expression[] args, Loc loc, 
     if (expr) funcptr = expr.type.instanceOf(FunctionPointer);
     if (expr && funcptr)
     {
-        args = [expectImplicitConvertTo(context, arg, funcptr.args[i], loc) for i, arg in args];
+        args = [expectImplicitConvertTo(context, arg, funcptr.args[i].type, loc) for i, arg in args];
         return new FuncPtrCall(expr, args, loc);
     }
     mut NestedFunctionPointer nestedfuncptr;
@@ -615,11 +616,19 @@ Expression callWithLifetime(Context context, mut Symbol target, mut Expression[]
     return new WrapExpression(pre, callResult, post);
 }
 
-/*
- * TODO
-(:unknown | int, int) getCallableArgs(Symbol callable) {
+(:unknown | Argument[]) callableArgs(Symbol symbol) {
+    if (auto fundecl = symbol.instanceOf(FunctionDeclaration))
+    {
+        return fundecl.args;
+    }
+    if (auto method = symbol.instanceOf(ClassMethodPtr)) {
+        if (auto funcptr = method.funcPtr.type.instanceOf(FunctionPointer)) {
+            return funcptr.args[1 .. $]; // skip "this"
+        }
+    }
+    // TODO get names for call()
+    return :unknown;
 }
-*/
 
 class ASTCall : ASTSymbol
 {
@@ -663,17 +672,20 @@ class ASTCall : ASTSymbol
         if (callMacroArgs.transformed) return callMacroArgs.transformed;
 
         auto target = this.target.compile(context);
-        if (auto fundecl = target.instanceOf(FunctionDeclaration))
-        {
-            this.loc.assert2s(fundecl.args.length == this.args.length, "unexpected number of arguments");
-            for (int i <- 0 .. fundecl.args.length) {
-                auto arg = fundecl.args[i];
-                if (this.args[i].name.length > 0) {
-                    this.loc.assert2s(
-                        this.args[i].name == arg.name,
-                        "expected parameter named '" ~ arg.name ~ "', but got '" ~ this.args[i].name ~ "'");
+        auto args = target.callableArgs;
+        args.case {
+            Argument[] args: {
+                this.loc.assert2s(args.length == this.args.length, "unexpected number of arguments");
+                for (int i <- 0 .. args.length) {
+                    auto arg = args[i];
+                    if (this.args[i].name.length > 0) {
+                        this.loc.assert2s(
+                            this.args[i].name == arg.name,
+                            "expected parameter named '" ~ arg.name ~ "', but got '" ~ this.args[i].name ~ "'");
+                    }
                 }
             }
+            (:unknown): { }
         }
 
         auto args = [beExpression3(context, arg.sym.compile(context), this.loc) for arg in this.args];

@@ -19,7 +19,7 @@ class Struct : Type
 
     StructMemberDeclaration[] members;
 
-    FunctionDeclaration[] methods;
+    StructMethod[] methods;
 
     Loc loc;
 
@@ -64,7 +64,7 @@ class Struct : Type
 
     override Symbol accessMember(Loc loc, Context context, Expression baseExpr, string member) {
         size_t memberOffset = [first i for i, a in this.members where a.name == member else -1];
-        if (memberOffset != -1) {
+        if (baseExpr && memberOffset != -1) {
             if (baseExpr.instanceOf(Reference)) {
                 return new StructMemberReference(baseExpr.instanceOf(Reference), memberOffset);
             }
@@ -73,9 +73,16 @@ class Struct : Type
         size_t methodOffset = [first i for i, a in this.methods where a.name == member else -1];
         if (methodOffset != -1)
         {
-            // TODO dereference-into-symbol so we can '&' it again
-            auto funcPtr = context.compiler.referenceFunction(this.methods[methodOffset]);
-            return new ClassMethodPtr(funcPtr, baseExpr, false);
+            auto method = this.methods[methodOffset];
+            if (method.static_) {
+                loc.assert2s(!baseExpr, "static method cannot be called on value");
+                return method;
+            } else {
+                // TODO dereference-into-symbol so we can '&' it again
+                auto funcPtr = context.compiler.referenceFunction(method);
+                loc.assert2s(!!baseExpr, "non-static method cannot be called on type");
+                return new ClassMethodPtr(funcPtr, baseExpr, false);
+            }
         }
         return null;
     }
@@ -275,6 +282,8 @@ struct ASTStructMethod
 {
     Loc loc;
 
+    bool static_;
+
     string name;
 
     ASTSymbol ret;
@@ -290,13 +299,20 @@ class StructNamespace : Namespace
 
     this(this.parent, this.struct_) { this.isContextScope = true; }
 
-    override Symbol lookup(string name, Context context, Expression thisPtr)
+    override Symbol lookup(string name, Context context, mut Expression thisPtr)
     {
-        auto thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr);
-
-        if (auto result = context.compiler.accessMemberWithLifetime(
-                context, thisPtr, name, Loc(null, ReLoc("", 0)), true))
-            return result;
+        // TODO early name check?
+        if (thisPtr) {
+            thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr);
+            if (auto result = context.compiler.accessMemberWithLifetime(
+                    context, thisPtr, name, Loc(null, ReLoc("", 0)), true))
+                return result;
+        } else {
+            // static lookup
+            if (auto result = context.compiler.accessMemberWithLifetime(
+                    context, this.struct_, name, Loc(null, ReLoc("", 0)), true))
+                return result;
+        }
 
         // TODO "outer"?
         if (!this.parent) return null;
@@ -308,20 +324,24 @@ class StructMethod : Function
 {
     Loc loc;
 
+    bool static_;
+
     string mangledName;
 
-    this(this.loc, Struct structType, Context context, this.name, this.ret, this.args, this.statement,
-         this.macroState)
+    this(this.loc, Struct structType, Namespace namespace, this.static_, this.name, this.ret, this.args,
+         this.statement, this.macroState)
     {
         // TODO super()
-        auto structNamespace = new StructNamespace(context.namespace, structType);
-        auto ptr = new Pointer(structType);
+        auto structNamespace = new StructNamespace(namespace, structType);
+        if (!this.static_) {
+            auto ptr = new Pointer(structType);
 
-        this.hasThisArg = true;
-        this.contextType = ptr;
+            this.hasThisArg = true;
+            this.contextType = ptr;
+        }
         this.parent = structNamespace;
         // TODO mangle types
-        this.mangledName = this.parent.mangle ~ "_" ~ ptr.target.instanceOf(Struct).name ~ "_" ~ this.name;
+        this.mangledName = this.parent.mangle ~ "_" ~ structType.name ~ "_" ~ this.name;
     }
 
     override string mangle()
@@ -355,7 +375,8 @@ class ASTStructDecl : ASTSymbol
         auto structScope = context.compiler.symbolAlias(context.namespace, struct_.name, struct_);
         auto structContext = context.withNamespace(structScope);
 
-        struct_.methods = new FunctionDeclaration[](this.methods.length);
+        struct_.methods = new StructMethod[](this.methods.length);
+        mut int k;
         for (int i <- 0 .. this.methods.length)
         {
             auto method = this.methods[i];
@@ -371,10 +392,11 @@ class ASTStructDecl : ASTSymbol
                 }
             }
 
-            struct_.methods[i] = new StructMethod(
+            struct_.methods[k++] = new StructMethod(
                 method.loc,
                 struct_,
-                context,
+                context.namespace,
+                method.static_,
                 method.name,
                 beType(this.loc, method.ret.compile(structContext)),
                 methodArgs,
@@ -404,8 +426,12 @@ ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
     parser.expect("{");
     while (!parser.accept("}"))
     {
+        mut bool static_ = false;
         mut ASTSymbol memberType;
         mut string memberName;
+        if (parser.accept("static")) {
+            static_ = true;
+        }
         if (parser.accept("this"))
         {
             memberType = new ASTBasicType("void", loc);
@@ -430,10 +456,11 @@ ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
                 memberName != "__dtor" || args.length == 0, "destructor cannot take parameters");
             ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext);
             methods ~= ASTStructMethod(
-                parser.loc, memberName, memberType, args, stmt);
+                parser.loc, static_, memberName, memberType, args, stmt);
         }
         else
         {
+            loc.assert2s(!static_, "no static fields");
             void addMember() {
                 parser.assert_(memberName != "__ctor", "constructor cannot be member");
                 parser.assert_(memberName != "__dtor", "destructor cannot be member");

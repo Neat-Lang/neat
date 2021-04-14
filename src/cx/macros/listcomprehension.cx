@@ -11,7 +11,7 @@ import package(compiler).helpers;
 
 class ASTListComprehension : ASTSymbol
 {
-    string iterationMode; // "", "any", "all", "first"
+    string iterationMode; // "", "any", "all", "first", "join", "count", "sum"
 
     ASTSymbol expr;
 
@@ -42,10 +42,27 @@ class ASTListComprehension : ASTSymbol
         loc.assert2s(!!sourceType.instanceOf(Array), "expected array for source of list comprehension");
 
         auto i = compiler.astIdentifier(iname, loc.reloc);
+
+        if (iterationMode == "count") {
+            loc.assert2s(!expr, "no expr for count");
+            mut auto test = compiler.$expr true;
+            if (where) test = compiler.$expr $where && $test;
+            return (compiler.$expr ({
+                auto __source = $source;
+                mut int __count = 0;
+                for (mut size_t $iname = 0; $i < __source.length; $i += 1) {
+                    auto $varname = __source[$i];
+                    if ($test) __count += 1;
+                }
+                __count;
+            })).compile(context);
+        }
+
         auto astType = compiler.$type typeof(({ auto $varname = $source[0]; size_t $iname = 0; $expr; }));
         auto type = astType.compile(context);
 
         if (type.instanceOf(Void)) {
+            loc.assert2s(iterationMode == "", "non-void expression expected");
             assert(!default_);
             if (where) {
                 return (compiler.$expr ({
@@ -129,6 +146,19 @@ class ASTListComprehension : ASTSymbol
                 if (!__found) __result = $default_;
                 __result;
             })).compile(context);
+        } else if (iterationMode == "sum") {
+            assert(!default_);
+            mut auto test = compiler.$expr true;
+            if (where) test = where;
+            return (compiler.$expr ({
+                auto __source = $source;
+                mut $astType __sum = 0;
+                for (mut size_t $iname = 0; $i < __source.length; $i += 1) {
+                    auto $varname = __source[$i];
+                    if ($test) { __sum += $expr; }
+                }
+                __sum;
+            })).compile(context);
         } else {
             assert(iterationMode == "");
             if (where) {
@@ -189,14 +219,24 @@ class ListComprehension : Macro
             auto loc = parser.loc;
             loc.assert2s(!!joinKey, "join key expected");
         }
-        auto expr = compiler.parseExpression(parser, lexicalContext);
-        if (!expr) {
-            parser.revert();
-            return null;
+        else if (acceptIdentifier(parser, "count")) {
+            iterationMode = "count";
         }
-        if (!acceptIdentifier(parser, "for")) {
-            parser.revert();
-            return null;
+        else if (acceptIdentifier(parser, "sum")) {
+            iterationMode = "sum";
+        }
+        mut ASTSymbol expr;
+        // count is expressionless
+        if (iterationMode != "count") {
+            expr = compiler.parseExpression(parser, lexicalContext);
+            if (!expr) {
+                parser.revert();
+                return null;
+            }
+            if (!acceptIdentifier(parser, "for")) {
+                parser.revert();
+                return null;
+            }
         }
         mut string iname;
         mut string varname = parseIdentifier(parser);

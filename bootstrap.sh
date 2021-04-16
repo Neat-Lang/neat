@@ -348,6 +348,8 @@ at_revision '119fca3f605d927330805b843672506dbe38988e' 'rebuild cx' 'build/cx'
 at_revision 'f705834e763c62d9750644244ad4c3fff8391894' 'rebuild cx' 'build/cx'
 # static struct methods
 at_revision '80ec1698086de9692b478283928f796ba08e5a15' 'rebuild cx' 'build/cx'
+# named arg on classes 1
+at_revision '9b4d35309e0fb0df0f14126b4410a59bd222ed79' 'macro_transition' 'build/cx'
 
 
 # unpack the last tagfile

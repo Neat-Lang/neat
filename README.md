@@ -11,6 +11,13 @@ cx is a compiler for a D1-like language with macros.
 
 # License
 
+Special case first:
+
+- `std.sha256` is excluded from the following section, being licensed BSD-3-Clause. Thank you Olivier Gay and
+Con Kolivas. Any copyright claims arising from my port are likewise BSD-3-Clause.
+
+---
+
 cx is licensed under the [GPLv3](./LICENSE).
 
 At this time, I strongly recommend only using cx for private (non-distributed) or GPL projects.

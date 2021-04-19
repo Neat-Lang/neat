@@ -356,6 +356,8 @@ at_revision 'c9b5bbcfffecf0d0d80e5fba45310f035b26abd0' 'rebuild cx' 'build/cx'
 at_revision 'cef5b8e69e71d93c6bcd52d9eb4c79913d35c532' 'rebuild cx' 'build/cx'
 # trivial ubyte
 at_revision '29aa4d3ced3dd41266a224ec93104cee8f1f8183' 'rebuild cx' 'build/cx'
+# unsigned shift right
+at_revision '24f70228d533366b2f6626fb757091512b469b15' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

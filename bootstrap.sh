@@ -351,9 +351,11 @@ at_revision '80ec1698086de9692b478283928f796ba08e5a15' 'rebuild cx' 'build/cx'
 # named arg on classes 1
 at_revision '9b4d35309e0fb0df0f14126b4410a59bd222ed79' 'macro_transition' 'build/cx'
 # __HERE__ reloc
-at_revision 'c9b5bbcfffecf0d0d80e5fba45310f035b26abd0' 'macro_transition' 'build/cx'
+at_revision 'c9b5bbcfffecf0d0d80e5fba45310f035b26abd0' 'rebuild cx' 'build/cx'
 # fix <<, >> impl
-at_revision 'cef5b8e69e71d93c6bcd52d9eb4c79913d35c532' 'macro_transition' 'build/cx'
+at_revision 'cef5b8e69e71d93c6bcd52d9eb4c79913d35c532' 'rebuild cx' 'build/cx'
+# trivial ubyte
+at_revision '29aa4d3ced3dd41266a224ec93104cee8f1f8183' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

@@ -298,12 +298,12 @@ ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
     return lexicalContext.compiler.astIdentifier(identifier, parser.loc.reloc);
 }
 
-ASTArgument[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
+ASTParameter[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
 {
-    mut ASTArgument[] args;
+    mut ASTParameter[] params;
     while (!parser.accept(")"))
     {
-        if (args.length) {
+        if (params.length) {
             if (!parser.accept(",")) {
                 parser.fail("',' or ')' expected");
             }
@@ -311,14 +311,14 @@ ASTArgument[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
         auto loc = parser.loc;
         mut bool mutable;
         if (parser.acceptIdentifier("mut")) mutable = true;
-        ASTSymbol argtype = parser.parseType(lexicalContext);
-        if (!argtype) {
+        ASTSymbol paramType = parser.parseType(lexicalContext);
+        if (!paramType) {
             parser.fail("type expected");
         }
-        string argname = parser.parseIdentifier;
-        args ~= ASTArgument(argname, mutable, argtype, loc);
+        string paramName = parser.parseIdentifier;
+        params ~= ASTParameter(paramName, mutable, paramType, loc);
     }
-    return args;
+    return params;
 }
 
 class FuncPtrCall : Expression
@@ -338,8 +338,8 @@ class FuncPtrCall : Expression
         FunctionPointer type = this.funcPtr.type.instanceOf(FunctionPointer);
 
         this.loc.assert2s4(
-            type.args.length == this.args.length,
-            "expected ", ltoa(type.args.length), " args, not ", ltoa(this.args.length));
+            type.params.length == this.args.length,
+            "expected ", ltoa(type.params.length), " args, not ", ltoa(this.args.length));
 
         int[] regs = new int[](this.args.length);
         for (int i <- 0 .. this.args.length)
@@ -371,9 +371,9 @@ class DelegateExpr : Expression
         FunctionPointer type = this.funcPtr.type.instanceOf(FunctionPointer);
 
         // drop thisptr - implicit!
-        assert(type.args.length >= 1);
+        assert(type.params.length >= 1);
         // TODO this smells.
-        this.type = new NestedFunctionPointer(type.ret, [a.type for a in type.args[1 .. $]]);
+        this.type = new NestedFunctionPointer(type.ret, [a.type for a in type.params[1 .. $]]);
     }
 
     override int emit(Generator output)
@@ -418,9 +418,9 @@ class DelegateFuncPtr : Expression
     this(this.dg) {
         auto nestfp = this.dg.type.instanceOf(NestedFunctionPointer);
         assert(!!nestfp);
-        auto args = [Argument.fromType(once new Pointer(new Void))]
-            ~ [Argument.fromType(a) for a in nestfp.args];
-        this.type = new FunctionPointer(nestfp.ret, args);
+        auto params = [Parameter.fromType(once new Pointer(new Void))]
+            ~ [Parameter.fromType(a) for a in nestfp.params];
+        this.type = new FunctionPointer(nestfp.ret, params);
     }
 
     override int emit(Generator output)
@@ -439,17 +439,17 @@ Expression call(Context context, Symbol target, mut Expression[] args, Loc loc, 
 {
     if (auto fundecl = target.instanceOf(FunctionDeclaration))
     {
-        args = [expectImplicitConvertTo(context, arg, fundecl.args[i].type, loc) for i, arg in args];
+        args = [expectImplicitConvertTo(context, arg, fundecl.params[i].type, loc) for i, arg in args];
         return new Call(fundecl, args, loc);
     }
     if (ClassMethodPtr method = target.instanceOf(ClassMethodPtr))
     {
         if (auto funcptr = method.funcPtr.type.instanceOf(FunctionPointer)) {
             // this ptr
-            if (args.length != funcptr.args.length - 1)
-                loc.fail("wrong number of arguments: expected " ~ ltoa(funcptr.args.length - 1)
+            if (args.length != funcptr.params.length - 1)
+                loc.fail("wrong number of arguments: expected " ~ ltoa(funcptr.params.length - 1)
                     ~ " but got " ~ ltoa(args.length));
-            args = [expectImplicitConvertTo(context, arg, funcptr.args[i+1].type, loc) for i, arg in args];
+            args = [expectImplicitConvertTo(context, arg, funcptr.params[i+1].type, loc) for i, arg in args];
         } else {
             loc.fail("function reference or funcptr expected? but is '" ~ method.funcPtr.type.repr ~ "'");
         }
@@ -480,14 +480,14 @@ Expression call(Context context, Symbol target, mut Expression[] args, Loc loc, 
     if (expr) funcptr = expr.type.instanceOf(FunctionPointer);
     if (expr && funcptr)
     {
-        args = [expectImplicitConvertTo(context, arg, funcptr.args[i].type, loc) for i, arg in args];
+        args = [expectImplicitConvertTo(context, arg, funcptr.params[i].type, loc) for i, arg in args];
         return new FuncPtrCall(expr, args, loc);
     }
     mut NestedFunctionPointer nestedfuncptr;
     if (expr) nestedfuncptr = expr.type.instanceOf(NestedFunctionPointer);
     if (expr && nestedfuncptr)
     {
-        args = [expectImplicitConvertTo(context, arg, nestedfuncptr.args[i], loc) for i, arg in args];
+        args = [expectImplicitConvertTo(context, arg, nestedfuncptr.params[i], loc) for i, arg in args];
         // TODO cache delegate
         auto funcPtr = new DelegateFuncPtr(expr);
         auto thisPtr = new DelegateDataPtr(expr);
@@ -622,14 +622,13 @@ Expression callWithLifetime(Context context, mut Symbol target, mut Expression[]
     return new WrapExpression(pre, callResult, post);
 }
 
-(:unknown | Argument[]) callableArgs(Symbol symbol) {
-    if (auto fundecl = symbol.instanceOf(FunctionDeclaration))
-    {
-        return fundecl.args;
+(:unknown | Parameter[]) callableParams(Symbol symbol) {
+    if (auto fundecl = symbol.instanceOf(FunctionDeclaration)) {
+        return fundecl.params;
     }
     if (auto method = symbol.instanceOf(ClassMethodPtr)) {
         if (auto funcptr = method.funcPtr.type.instanceOf(FunctionPointer)) {
-            return funcptr.args[1 .. $]; // skip "this"
+            return funcptr.params[1 .. $]; // skip "this"
         }
     }
     // TODO get names for call()
@@ -678,16 +677,16 @@ class ASTCall : ASTSymbol
         if (callMacroArgs.transformed) return callMacroArgs.transformed;
 
         auto target = this.target.compile(context);
-        auto args = target.callableArgs;
-        args.case {
-            Argument[] args: {
-                this.loc.assert2s(args.length == this.args.length, "unexpected number of arguments");
-                for (int i <- 0 .. args.length) {
-                    auto arg = args[i];
+        auto params = target.callableParams;
+        params.case {
+            Parameter[] params: {
+                this.loc.assert2s(params.length == this.args.length, "unexpected number of arguments");
+                for (int i <- 0 .. params.length) {
+                    auto param = params[i];
                     if (this.args[i].name.length > 0) {
                         this.loc.assert2s(
-                            this.args[i].name == arg.name,
-                            "expected parameter named '" ~ arg.name ~ "', but got '" ~ this.args[i].name ~ "'");
+                            this.args[i].name == param.name,
+                            "expected parameter named '" ~ param.name ~ "', but got '" ~ this.args[i].name ~ "'");
                     }
                 }
             }
@@ -2829,9 +2828,9 @@ ASTFunction parseFunction(Parser parser, LexicalContext lexicalContext)
         return null;
     }
     parser.commit;
-    ASTArgument[] args = parseIdentifierList(parser, lexicalContext);
+    ASTParameter[] params = parseIdentifierList(parser, lexicalContext);
     ASTStatement stmt = parseStatement(parser, lexicalContext);
-    return new ASTFunction(parser.loc, name, ret, args, false, stmt, lexicalContext.macroState);
+    return new ASTFunction(parser.loc, name, ret, params, false, stmt, lexicalContext.macroState);
 }
 
 class ModuleEntry
@@ -3114,25 +3113,27 @@ class ASTExtern
 
     ASTSymbol ret;
 
-    ASTArgument[] args;
+    ASTParameter[] params;
 
     Loc retLoc;
 
-    this(this.name, this.ret, this.args, this.retLoc) { }
+    this(this.name, this.ret, this.params, this.retLoc) { }
 
     FunctionDeclaration compile(Context context)
     {
-        auto args = [Argument(false, arg.name, false, beType(arg.loc, arg.type.compile(context))) for arg in this.args];
+        auto params = [
+            Parameter(false, param.name, false, beType(param.loc, param.type.compile(context)))
+            for param in this.params];
 
-        return new FunctionDeclaration(this.name, beType(this.retLoc, this.ret.compile(context)), args);
+        return new FunctionDeclaration(this.name, beType(this.retLoc, this.ret.compile(context)), params);
     }
 
     string repr() {
-        string reprArg(ASTArgument arg) {
-            if (arg.name.length == 0) return arg.type.repr;
-            return arg.type.repr ~ " " ~ arg.name;
+        string reprParam(ASTParameter param) {
+            if (param.name.length == 0) return param.type.repr;
+            return param.type.repr ~ " " ~ param.name;
         }
-        return "extern(C) " ~ ret.repr ~ " " ~ name ~ "(" ~ [join ", " reprArg(arg) for arg in args] ~ ")";
+        return "extern(C) " ~ ret.repr ~ " " ~ name ~ "(" ~ [join ", " reprParam(param) for param in params] ~ ")";
     }
 }
 
@@ -3148,9 +3149,9 @@ ASTExtern parseExtern(Parser parser, LexicalContext lexicalContext)
         string name = parser.parseIdentifier;
         if (!name.length) parser.fail("identifier expected");
         parser.expect("(");
-        ASTArgument[] args = parseIdentifierList(parser, lexicalContext);
+        ASTParameter[] params = parseIdentifierList(parser, lexicalContext);
         parser.expect(";");
-        return new ASTExtern(name, ret, args, retLoc);
+        return new ASTExtern(name, ret, params, retLoc);
     }
     return null;
 }

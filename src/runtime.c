@@ -429,6 +429,8 @@ void cxruntime_cache_clear()
     cxruntime_cache.length = 0;
 }
 
+int cxruntime_errno() { return errno; }
+
 void cxruntime_cache_set(int key, void *ptr, void(*free)(void*))
 {
     assert(ptr != NULL);

@@ -435,7 +435,10 @@ class DelegateFuncPtr : Expression
     override void hash(Hash hash) { hash.adds("DelegateFuncPtr"); this.dg.hash(hash); }
 }
 
-Expression call(Context context, Symbol target, mut Expression[] args, Loc loc, bool autoCall)
+/**
+ * "Plain" call without lifetime handling.
+ */
+Expression plainCall(Context context, Symbol target, mut Expression[] args, Loc loc, bool isImplCall)
 {
     if (auto fundecl = target.instanceOf(FunctionDeclaration))
     {
@@ -472,7 +475,7 @@ Expression call(Context context, Symbol target, mut Expression[] args, Loc loc, 
             return context.compiler.exprWithTemporary(method.thisValue, &doRef);
         }
     }
-    if (autoCall) return null;
+    if (isImplCall) return null;
     Expression expr = target.instanceOf(Expression);
     // TODO
     // auto funcptr = expr?.type.instanceOf(FunctionPointer);
@@ -496,6 +499,7 @@ Expression call(Context context, Symbol target, mut Expression[] args, Loc loc, 
         combinedArgs ~= args;
         return new FuncPtrCall(funcPtr, combinedArgs, loc);
     }
+    // TODO move into call()
     if (auto type_ = target.instanceOf(Type)) {
         auto ret = type_.call(context, loc, args);
         if (ret) return ret;
@@ -577,9 +581,24 @@ class WrapReference : Reference
     }
 }
 
-Expression callWithLifetime(Context context, mut Symbol target, mut Expression[] args, Loc loc, bool autoCall) {
-    // TODO
-    // assert(!target.instanceOf(Expression));
+Expression call(Context context, ASTSymbol astTarget, ASTArgument[] astArgs, Loc loc, bool autoCall) {
+    auto callMacroArgs = new CallMacroArgs(astTarget, [a.sym for a in astArgs], context, loc);
+    context.macroState.applyMacro(callMacroArgs);
+    if (callMacroArgs.transformed) return callMacroArgs.transformed;
+
+    mut auto target = astTarget.compile(context);
+
+    auto args = [
+        beExpression3(context, arg.sym.compile(context), loc)
+        for arg in astArgs];
+
+    auto params = target.callableParams;
+    params.case {
+        Parameter[] params: {
+            validateCall(params, [Argument(args[i], astArgs[i].name) for i, arg in args], loc);
+        }
+        (:unknown): { }
+    }
     mut Statement pre, post;
     Expression[] args_ = new Expression[](args.length);
     for (int i <- 0 .. args.length) {
@@ -597,7 +616,7 @@ Expression callWithLifetime(Context context, mut Symbol target, mut Expression[]
         }
         args_[i] = arg;
     }
-    args = args_;
+    auto args = args_;
     ClassMethodPtr method = target.instanceOf(ClassMethodPtr);
     if (method && method.thisValue.info.ownership == Ownership.gifted) { // foo().bar()
         mut Statement setRef;
@@ -617,11 +636,12 @@ Expression callWithLifetime(Context context, mut Symbol target, mut Expression[]
             doRef(tempThis);
         }
     }
-    auto callResult = call(context, target, args, loc, autoCall);
+    auto callResult = plainCall(context, target, args, loc, autoCall);
     if (!callResult) return null;
     return new WrapExpression(pre, callResult, post);
 }
 
+// TODO inline into our caller
 (:unknown | Parameter[]) callableParams(Symbol symbol) {
     if (auto fundecl = symbol.instanceOf(FunctionDeclaration)) {
         return fundecl.params;
@@ -631,19 +651,38 @@ Expression callWithLifetime(Context context, mut Symbol target, mut Expression[]
             return funcptr.params[1 .. $]; // skip "this"
         }
     }
+    if (auto type = symbol.instanceOf(Type))
+    {
+        // TODO what did I want to do here ... ?
+        // maybe passing named args to type?
+    }
     // TODO get names for call()
     return :unknown;
+}
+
+void validateCall(Parameter[] params, Argument[] args, Loc loc)
+{
+    loc.assert2s(params.length == args.length, "unexpected number of arguments");
+    for (int i <- 0 .. params.length) {
+        auto param = params[i];
+        if (args[i].name.length > 0) {
+            // TODO args.loc
+            loc.assert2s(
+                args[i].name == param.name,
+                "expected parameter named '" ~ param.name ~ "', but got '" ~ args[i].name ~ "'");
+        }
+    }
 }
 
 class ASTCall : ASTSymbol
 {
     ASTSymbol target;
 
-    (ASTSymbol sym, string name)[] args;
+    ASTArgument[] args;
 
     Loc loc;
 
-    this(this.target, (ASTSymbol, string)[] args, this.loc) { this.args = args; }
+    this(this.target, this.args, this.loc) { }
 
     override Expression compile(Context context)
     {
@@ -665,37 +704,14 @@ class ASTCall : ASTSymbol
                     if (callable) {
                         // rewrite foo.bar(baz) to bar(foo, baz)
                         auto target = new ASTIdentifier(astMemberAccess.member, false, astMemberAccess.loc);
-                        auto args = [(astMemberAccess.base, "")] ~ this.args;
+                        auto args = [ASTArgument(astMemberAccess.base, "")] ~ this.args;
                         return (new ASTCall(target, args, this.loc)).compile(context);
                     }
                 }
             }
         }
 
-        auto callMacroArgs = new CallMacroArgs(this.target, [a.sym for a in this.args], context, this.loc);
-        context.macroState.applyMacro(callMacroArgs);
-        if (callMacroArgs.transformed) return callMacroArgs.transformed;
-
-        auto target = this.target.compile(context);
-        auto params = target.callableParams;
-        params.case {
-            Parameter[] params: {
-                this.loc.assert2s(params.length == this.args.length, "unexpected number of arguments");
-                for (int i <- 0 .. params.length) {
-                    auto param = params[i];
-                    if (this.args[i].name.length > 0) {
-                        this.loc.assert2s(
-                            this.args[i].name == param.name,
-                            "expected parameter named '" ~ param.name ~ "', but got '" ~ this.args[i].name ~ "'");
-                    }
-                }
-            }
-            (:unknown): { }
-        }
-
-        auto args = [beExpression3(context, arg.sym.compile(context), this.loc) for arg in this.args];
-
-        return callWithLifetime(context, target, args, this.loc, false);
+        return call(context, this.target, this.args, this.loc, false);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -728,7 +744,7 @@ ASTCall parseCall(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
         parser.revert;
         return null;
     }
-    mut (ASTSymbol sym, string name)[] args;
+    mut ASTArgument[] args;
     while (!parser.accept(")"))
     {
         if (args.length > 0)
@@ -744,7 +760,7 @@ ASTCall parseCall(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
             parser.commit;
         } else parser.revert;
         ASTSymbol arg = parser.parseExpression(lexicalContext);
-        args ~= (arg, name);
+        args ~= ASTArgument(arg, name);
     }
     parser.commit;
     return new ASTCall(base, args, parser.loc);
@@ -957,7 +973,7 @@ class ASTMember : ASTMemberBase
                 if (callable) {
                     auto target = new ASTIdentifier(this.member, false, this.loc);
                     // bar(foo)
-                    auto args = [(this.base, "")];
+                    auto args = [ASTArgument(this.base, "")];
                     return (new ASTCall(target, args, this.loc)).compile(context);
                 }
             }

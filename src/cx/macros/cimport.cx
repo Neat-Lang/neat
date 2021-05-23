@@ -76,13 +76,8 @@ class CImportMacro : Macro
             cparserHelper.mod.entries ~= symbol.case(ASTExtern a: a, ASTSymbol sym: new ASTSymbolAlias(name, sym));
         }
 
-        void eatline() {
-            auto pos = cparser.text.find("\n");
-            if (pos == -1) cparser.drop(cparser.text.length);
-            else cparser.drop(pos + 1);
-        }
         void eatAttribute() {
-            if (cparser.accept("__attribute__")) {
+            while (cparser.accept("__attribute__")) {
                 cparser.accept("("); cparser.accept("(");
                 mut int parenlevel = 2;
                 while (parenlevel) {
@@ -107,15 +102,15 @@ class CImportMacro : Macro
             }
             if (cparser.accept("#define ")) {
                 auto identifier = cparser.parseIdentifier;
-                if (cparser.accept("(")) { eatline; continue; }
+                if (cparser.accept("(")) { cparser.eatline; continue; }
                 auto loc = cparser.loc;
                 auto num = cparserHelper.parseCNumber;
                 if (cparser.accept(",")) { // comma expression?!
-                    eatline;
+                    cparser.eatline;
                     continue;
                 }
                 num.case {
-                    (:failure): { eatline; continue; }
+                    (:failure): { cparser.eatline; continue; }
                     (:success, int i): add(identifier, new ASTIntLiteral(i, loc));
                 }
                 cparser.assert_(cparser.text.startsWith("\n"), "unknown text");
@@ -123,6 +118,7 @@ class CImportMacro : Macro
                 continue;
             }
             if (cparser.accept("enum")) {
+                cparser.parseIdentifier;
                 cparser.expect("{");
                 while (true) {
                     auto name = cparser.parseIdentifier;
@@ -139,20 +135,34 @@ class CImportMacro : Macro
             }
             if (cparser.accept("typedef")) {
                 auto type = cparserHelper.parseType;
-                if (!type) { eatline; continue; }
+                if (!type) { cparser.eatline; continue; }
                 auto decl = cparserHelper.parseTypedDecl(type);
-                if (!decl.type) { eatline; continue; }
-                if (!cparser.accept(";")) { eatline; continue; }
+                if (!decl.type) { cparser.eatline; continue; }
+                if (!cparser.accept(";")) { cparser.eatline; continue; }
                 add(decl.name, decl.type);
                 continue;
             }
+            // match struct foo { }; as "foo"
+            if (cparser.accept("struct")) {
+                import package(compiler).cx.struct_ : ASTStructDecl;
+
+                auto type = cparserHelper.parseStructType;
+                if (!type) { cparser.eatline; continue; }
+                add(type.instanceOf(ASTStructDecl).name, type);
+                continue;
+            }
             if (cparser.accept("#")) {
-                eatline;
+                cparser.eatline;
                 continue;
             }
             cparser.accept("extern");
             eatAttribute;
             {
+                bool closeFunction() {
+                    if (!cparser.accept(")")) return false;
+                    eatAttribute;
+                    return cparser.accept(";");
+                }
                 auto loc = cparser.loc;
                 cparser.begin;
                 auto retBase = cparserHelper.parseType;
@@ -162,7 +172,7 @@ class CImportMacro : Macro
                         mut ASTParameter[] params;
                         mut bool success;
                         while (true) {
-                            if (cparser.accept(")") && cparser.accept(";")) {
+                            if (closeFunction) {
                                 cparser.commit;
                                 if (params.length == 1) {
                                     auto first = params[0].type.instanceOf(ASTBasicType);
@@ -190,11 +200,17 @@ class CImportMacro : Macro
                 cparser.revert;
             }
             // cparser.assert_(false, "here?");
-            eatline;
+            cparser.eatline;
         }
 
         return cparserHelper.mod;
     }
+}
+
+void eatline(Parser parser) {
+    auto pos = parser.text.find("\n");
+    if (pos == -1) parser.drop(parser.text.length);
+    else parser.drop(pos + 1);
 }
 
 class CLong : ASTSymbol
@@ -257,7 +273,9 @@ class CParserHelper {
         if (ident.length > 0) {
             if (auto definedSym = this.mod.getSymbolAlias(ident)) return definedSym;
             if (auto definedSym = this.sysmod.getSymbolAlias(ident)) return definedSym;
+            // print("No such ident " ~ ident);
         }
+        return null;
     }
 
     (ASTSymbol type, string name) parseTypedDecl(ASTSymbol baseType) {
@@ -268,6 +286,8 @@ class CParserHelper {
             if (parser.accept("*") || parser.accept("[]")) {
                 current = new ASTPointer(current, parser.loc);
                 parser.accept("const");
+                parser.accept("restrict");
+                parser.accept("__restrict");
                 continue;
             }
             // function pointer
@@ -292,6 +312,7 @@ class CParserHelper {
         }
         // TODO polysemous null
         ASTSymbol nullSymbol;
+        // name can be empty!
         auto name = parser.parseIdentifier;
         auto loc = parser.loc;
         while (parser.accept("[")) {
@@ -314,13 +335,20 @@ class CParserHelper {
             if (parser.acceptIdentifier("void")) { commit; return new ASTBasicType("void", loc); }
             if (parser.acceptIdentifier("float")) { commit; return new ASTBasicType("float", loc); }
             if (parser.acceptIdentifier("double")) { commit; return new ASTBasicType("double", loc); }
-            bool signed = parser.acceptIdentifier("signed");
-            bool unsigned = parser.acceptIdentifier("unsigned");
-            bool long_ = parser.acceptIdentifier("long");
-            bool longlong = long_ && parser.acceptIdentifier("long");
-            bool short_ = parser.acceptIdentifier("short");
-            bool char_ = parser.acceptIdentifier("char");
-            bool int_ = parser.acceptIdentifier("int");
+            mut bool signed, unsigned, long_, longlong, short_, char_, int_;
+            while (true) {
+                if (parser.acceptIdentifier("signed")) { signed = true; continue; }
+                if (parser.acceptIdentifier("unsigned")) { unsigned = true; continue; }
+                if (parser.acceptIdentifier("long")) {
+                    long_ = true;
+                    if (parser.acceptIdentifier("long")) longlong = true;
+                    continue;
+                }
+                if (parser.acceptIdentifier("short")) { short_ = true; continue; }
+                if (parser.acceptIdentifier("char")) { char_ = true; continue; }
+                if (parser.acceptIdentifier("int")) { int_ = true; continue; }
+                break;
+            }
             if (longlong) { commit; return new ASTBasicType("long", loc); }
             if (long_) { commit; return new CLong; }
             if (short_) { commit; return new ASTBasicType("short", loc); }
@@ -338,8 +366,11 @@ class CParserHelper {
         auto name = parser.parseIdentifier;
         mut (string name, ASTSymbol)[] members;
         auto emptyStruct = new ASTStructDecl(name, [], [], null, loc); // opaque
-        if (!parser.accept("{"))
+        if (!parser.accept("{")) {
+            if (auto definedSym = this.mod.getSymbolAlias(name)) return definedSym;
+            if (auto definedSym = this.sysmod.getSymbolAlias(name)) return definedSym;
             return emptyStruct;
+        }
         void scanToClosingBracket() {
             mut int bracketDepth = 1;
             // TODO factor out with () skipping
@@ -357,6 +388,8 @@ class CParserHelper {
         }
         while (!parser.accept("}")) {
             parser.begin;
+            // #defines inside structs happen occasionally
+            if (parser.accept("#define ")) { parser.eatline; parser.commit; continue; }
             auto baseType = parseType;
             if (!baseType) { parser.revert; scanToClosingBracket; return emptyStruct; }
             mut auto memberDecl = parseTypedDecl(baseType);

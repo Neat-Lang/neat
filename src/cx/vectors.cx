@@ -147,7 +147,7 @@ class VectorType : Type
             }
             if (members.length == 1)
                 return members[0];
-            return (new VectorType(elementType, cast(int) members.length)).call(context, loc, members);
+            return (new VectorType(elementType, cast(int) members.length)).mkVector(context, loc, members);
         }
         return context.compiler.exprWithTemporaryExpr(base, &do_);
     }
@@ -160,60 +160,84 @@ class VectorType : Type
             loc.assert2s(lhsVectorType.length == rhsVectorType.length, "vectors have different size");
         }
         loc.assert2s(!!lhsVectorType, "lhs must be vector (TODO)");
-        Expression getRight(int index) {
-            if (rhsVectorType) return new VectorMember(rhs, index);
-            return rhs;
-        }
         if (op == "==" || op == ">" || op == "<" || op == ">=" || op == "<=") {
+            Expression getRight1(int index) {
+                if (rhsVectorType) return new VectorMember(rhs, index);
+                return rhs;
+            }
             mut Expression andList;
             for (int i <- 0 .. lhsVectorType.length) {
                 auto leftMember = new VectorMember(lhs, i);
-                auto rightMember = getRight(i);
+                auto rightMember = getRight1(i);
                 auto test = context.compiler.binaryOp(op, context, leftMember, rightMember, loc);
                 if (!andList) andList = test;
                 else andList = new BoolAnd(andList, test);
             }
             return andList;
         }
-        mut Expression[] members;
-        for (int i <- 0 .. lhsVectorType.length) {
-            auto leftMember = new VectorMember(lhs, i);
-            auto rightMember = getRight(i);
-            members ~= new BinaryOp(op, leftMember, rightMember, loc);
+        Expression do1(Expression lhs) {
+            Expression do2(Expression rhs) {
+                Expression getRight2(int index) {
+                    if (rhsVectorType) return new VectorMember(rhs, index);
+                    return rhs;
+                }
+                mut Expression[] members;
+                for (int i <- 0 .. lhsVectorType.length) {
+                    auto leftMember = new VectorMember(lhs, i);
+                    auto rightMember = getRight2(i);
+                    members ~= new BinaryOp(op, leftMember, rightMember, loc);
+                }
+                return mkVector(context, loc, members);
+            }
+            return context.compiler.exprWithTemporaryExpr(rhs, &do2);
         }
-        return call(context, loc, members);
+        return context.compiler.exprWithTemporaryExpr(lhs, &do1);
     }
 
-    override Expression call(Context context, Loc loc, Expression[] args)
+    override Expression call(Context context, Loc loc, ASTArgument[] args)
     {
         loc.assert2s(args.length == this.length || args.length == 1, "invalid number of args for vector constructor");
 
+        // TODO arg name validation
+        auto args = [
+            beExpression3(context, arg.sym.compile(context), loc)
+            for arg in args];
+
         // TODO a better way to generically construct types backed by BackendStructType
+        if (args.length == 1) {
+            auto result = new PairedTemporary(this, true);
+            mut Statement initialize = new UninitializeTemporaryStatement(result);
+            Expression do1(Expression arg) {
+                Expression do2(Expression arg) {
+                    auto arg = expectImplicitConvertTo(context, arg, elementType, loc);
+                    for (int i <- 0 .. this.length) {
+                        auto field = new VectorMemberReference(result, i);
+                        auto stmt = context.compiler.assignStatement(field, arg);
+
+                        initialize = context.compiler.sequence(initialize, stmt);
+                    }
+                    return context.compiler.statementExpression(initialize, result);
+                }
+                return context.compiler.consume(context, arg, &do2);
+            }
+            return context.compiler.exprWithTemporaryExpr(args[0], &do1);
+        } else {
+            return mkVector(context, loc, args);
+        }
+    }
+
+    // consumes "args"
+    Expression mkVector(Context context, Loc loc, Expression[] args) {
         auto result = new PairedTemporary(this, true);
         mut Statement initialize = new UninitializeTemporaryStatement(result);
-        if (args.length == 1) {
-            Expression do_(Expression arg) {
-                for (int i <- 0 .. this.length) {
-                    auto field = new VectorMemberReference(result, i);
-                    auto stmt = context.compiler.assignStatement(field, arg);
+        for (int i <- 0 .. this.length) {
+            auto arg = expectImplicitConvertTo(context, args[i], elementType, loc);
+            auto field = new VectorMemberReference(result, i);
+            auto stmt = context.compiler.move(context, field, arg);
 
-                    initialize = context.compiler.sequence(initialize, stmt);
-                }
-                return context.compiler.statementExpression(initialize, result);
-            }
-            auto arg = expectImplicitConvertTo(context, args[0], elementType, loc);
-
-            return context.compiler.exprWithTemporaryExpr(arg, &do_);
-        } else {
-            for (int i <- 0 .. this.length) {
-                auto arg = expectImplicitConvertTo(context, args[i], elementType, loc);
-                auto field = new VectorMemberReference(result, i);
-                auto stmt = context.compiler.assignStatement(field, arg);
-
-                initialize = context.compiler.sequence(initialize, stmt);
-            }
-            return context.compiler.statementExpression(initialize, result);
+            initialize = context.compiler.sequence(initialize, stmt);
         }
+        return context.compiler.statementExpression(initialize, result);
     }
 }
 

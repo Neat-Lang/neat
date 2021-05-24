@@ -362,6 +362,8 @@ at_revision '24f70228d533366b2f6626fb757091512b469b15' 'rebuild cx' 'build/cx'
 at_revision '96bcb2def5743ec3f0792c5cb6d92b7be490def1' 'rebuild cx' 'build/cx'
 # rename Argument to Parameter
 at_revision 'a7bc4cdf1e0a7ed7a8adf78bd389c9a2e025ce9e' 'macro_transition' 'build/cx'
+# move call to plainCall, callWithLifetime to call
+at_revision 'f62ae18850737d210d8e083135abaf4ab7b66b8f' 'macro_transition' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

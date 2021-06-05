@@ -133,32 +133,19 @@ class Class : Type
 
     override Symbol accessMember(Loc loc, Context context, Expression baseExpr, string member)
     {
-        Expression asStructPtr = new PointerCast(
-            new Pointer(this.dataStruct), baseExpr);
         size_t methodOffset = [first i for i, a in vtable where a.name == member else -1];
         if (methodOffset != -1)
         {
-            if (this.final_) {
-                auto funcPtr = new FunctionReference(vtable[methodOffset]);
-                return new ClassMethodPtr(funcPtr, baseExpr, true);
-            }
-            Reference classInfo = context.compiler.dereference(new PointerCast(
-                new Pointer(this.classInfoStruct),
-                new StructMemberReference(context.compiler.dereference(asStructPtr), 0)));
-            mut Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
-            auto funcPtr = funcPtrValue.type.instanceOf(FunctionPointer);
-
-            auto funcPtrWithVoidpThis = new FunctionPointer(funcPtr.ret, [param for param in funcPtr.params]);
-            funcPtrWithVoidpThis.params[0] = Parameter.fromType(once new Pointer(new Void));
-            funcPtrValue = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
-
-            return new ClassMethodPtr(funcPtrValue, baseExpr, true);
+            return new ClassMethodSymbol(this, baseExpr, methodOffset);
         }
 
         auto members = this.allMembers(context);
         size_t memberOffset = [first i for i, a in members where a.name == member else -1];
+        Expression asStructPtr = new PointerCast(
+            new Pointer(this.dataStruct), baseExpr);
         if (memberOffset != -1)
             return new StructMemberReference(context.compiler.dereference(asStructPtr), memberOffset);
+        return null;
     }
 
     override Expression implicitConvertFrom(Expression from)
@@ -441,6 +428,35 @@ class Class : Type
                 }
             };
         return context.compiler.sequence(initTemp, stmt.compile(context).statement);
+    }
+}
+
+class ClassMethodSymbol : LateSymbol
+{
+    Class class_; // TODO does this cause a ref cycle? remove?
+
+    size_t methodOffset;
+
+    this(this.class_, this.baseExpr, this.methodOffset) {}
+
+    override Expression resolve(Context context, Expression baseExpr)
+    {
+        if (this.class_.final_) {
+            return new FunctionReference(this.class_.vtable[methodOffset]);
+        }
+        Expression asStructPtr = new PointerCast(
+            new Pointer(this.class_.dataStruct), baseExpr);
+        Reference classInfo = context.compiler.dereference(new PointerCast(
+            new Pointer(class_.classInfoStruct),
+            new StructMemberReference(context.compiler.dereference(asStructPtr), 0)));
+        mut Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
+        auto funcPtr = funcPtrValue.type.instanceOf(FunctionPointer);
+
+        auto funcPtrWithVoidpThis = new FunctionPointer(funcPtr.ret, [param for param in funcPtr.params]);
+        funcPtrWithVoidpThis.params[0] = Parameter.fromType(once new Pointer(new Void));
+        funcPtrValue = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
+
+        return funcPtrValue;
     }
 }
 

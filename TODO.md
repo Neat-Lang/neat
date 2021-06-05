@@ -1,0 +1,3 @@
+- validate parameter variance on inheritance
+- fold ClassMethodPtr into LateSymbol
+- endLifetime should not take or need to take a Reference!

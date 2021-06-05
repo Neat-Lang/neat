@@ -623,6 +623,32 @@ Expression call(Context context, ASTSymbol astTarget, ASTArgument[] astArgs, Loc
     }
     auto args = args_;
 
+    if (LateSymbol lateSym = target.instanceOf(LateSymbol)) {
+        // completely bypass plainCall with a FuncPtrCall
+        Expression do1(Expression baseExpr) {
+            auto funcPtr = lateSym.resolve(context, baseExpr);
+            mut Expression[] args = args;
+            if (auto funcptr = funcPtr.type.instanceOf(FunctionPointer)) {
+                validateCall(funcptr.params[1 .. $], astArgs, loc);
+                args = [expectImplicitConvertTo(context, arg, funcptr.params[i+1].type, loc) for i, arg in args];
+            } else {
+                loc.fail("function reference or funcptr expected? but is '" ~ funcPtr.type.repr ~ "'");
+            }
+            auto voidp = once new Pointer(new Void);
+            mut Expression[] combinedArgs;
+            combinedArgs ~= new PointerCast(voidp, baseExpr);
+            combinedArgs ~= args;
+            return new FuncPtrCall(funcPtr, combinedArgs, loc);
+        }
+        Expression do2(Expression baseExpr)
+        {
+            return context.compiler.exprWithTemporaryExpr(baseExpr, &do1);
+        }
+        auto fpCall = context.compiler.consume(context, lateSym.baseExpr, &do2);
+
+        return new WrapExpression(pre, fpCall, post);
+    }
+
     ClassMethodPtr method = target.instanceOf(ClassMethodPtr);
     if (method && method.thisValue.info.ownership == Ownership.gifted) { // foo().bar()
         mut Statement setRef;
@@ -1514,12 +1540,21 @@ ASTSymbol parseExpressionIncDec(Parser parser, LexicalContext lexicalContext)
 // a ReLoc representing the source location of the token
 ASTSymbol hereExpr(Loc loc, LexicalContext lexicalContext)
 {
+    // FIXME
+    auto c = lexicalContext.compiler;
+    return c.astCall(
+        c.astIdentifier("ReLoc", __HERE__), [
+            c.astStringLiteral(loc.reloc.filename, __HERE__),
+            c.astIntLiteral(cast(int) loc.reloc.offset, __HERE__),
+        ], __HERE__);
+    /*
     with (lexicalContext.compiler)
         return astCall(
             astIdentifier("ReLoc", __HERE__), [
                 astStringLiteral(loc.reloc.filename, __HERE__),
                 astIntLiteral(cast(int) loc.reloc.offset, __HERE__),
             ], __HERE__);
+    */
 }
 
 ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)

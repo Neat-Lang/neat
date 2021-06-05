@@ -17,20 +17,23 @@ struct S
 {
     string name;
     string* trace;
+    int generation;
     this(S s)
     {
         name = s.name;
         trace = s.trace;
+        generation = s.generation + 1;
         if (trace.length) *trace ~= " ";
-        *trace ~= "+" ~ name;
+        *trace ~= "+" ~ name ~ itoa(generation);
     }
     ~this()
     {
         // ~this may be called on a S.init
         if (!trace) return;
         if (trace.length) *trace ~= " ";
-        *trace ~= "-" ~ name;
+        *trace ~= "-" ~ name ~ itoa(generation);
     }
+    S self() { return *this; }
 }
 
 struct S2
@@ -61,16 +64,16 @@ void test_scope()
 {
     dbg("- scope");
     string trace;
-    { S s = S("S", &trace); }
-    assert(trace == "-S");
+    { S s = S("S", &trace, 0); }
+    assert(trace == "-S0");
 }
 
 void test_if()
 {
     dbg("- if");
     string trace;
-    if (true) S s = S("S", &trace);
-    assert(trace == "-S");
+    if (true) S s = S("S", &trace, 0);
+    assert(trace == "-S0");
 }
 
 void test_while()
@@ -79,25 +82,25 @@ void test_while()
     string trace;
     mut bool called;
     bool once() { if (!called) { called = true; return true; } return false; }
-    while (once) S s = S("S", &trace);
-    assert(trace == "-S");
+    while (once) S s = S("S", &trace, 0);
+    assert(trace == "-S0");
 }
 
 void test_nested()
 {
     dbg("- nested");
     string trace;
-    void nest() S s = S("S", &trace);
+    void nest() S s = S("S", &trace, 0);
     nest;
-    assert(trace == "-S");
+    assert(trace == "-S0");
 }
 
 void test_discard()
 {
     dbg("- discard");
     string trace;
-    S("S", &trace);
-    assert(trace == "-S");
+    S("S", &trace, 0);
+    assert(trace == "-S0");
 }
 
 void test_discard_variable()
@@ -105,10 +108,10 @@ void test_discard_variable()
     dbg("- discard var");
     string trace;
     {
-        S s = S("S", &trace);
+        S s = S("S", &trace, 0);
         s; // this does nothing, because it's a non-temporary expression
     }
-    assert(trace == "-S");
+    assert(trace == "-S0");
 }
 
 void test_discard_return1()
@@ -116,11 +119,11 @@ void test_discard_return1()
     dbg("- discard return 1");
     string trace;
     mut int calls;
-    S test() { calls += 1; return S("S", &trace); }
+    S test() { calls += 1; return S("S", &trace, 0); }
     {
         test;
     }
-    assert(trace == "-S");
+    assert(trace == "-S0");
 }
 
 void test_discard_return2()
@@ -128,11 +131,11 @@ void test_discard_return2()
     dbg("- discard return 2");
     string trace;
     mut int calls;
-    S test() { calls += 1; S s = S("S", &trace); return s; }
+    S test() { calls += 1; S s = S("S", &trace, 0); return s; }
     {
         S s = test;
     }
-    assert(trace == "+S -S -S");
+    assert(trace == "+S1 -S0 -S1");
 }
 
 void test_call1()
@@ -140,13 +143,13 @@ void test_call1()
     dbg("- call 1");
     string trace;
     {
-        auto s = S("S", &trace);
+        auto s = S("S", &trace, 0);
         void foo(S s) { }
         foo(s);
     }
     // the function call does not create a copy
     // because s exists in the surrounding lifetime.
-    assert(trace == "-S");
+    assert(trace == "-S0");
 }
 
 void test_call2()
@@ -155,11 +158,11 @@ void test_call2()
     string trace;
     {
         void foo(S s) { }
-        foo(S("S", &trace));
+        foo(S("S", &trace, 0));
     }
     // the function call still does not create a copy
     // S is cleaned up after the call,
-    assert(trace == "-S");
+    assert(trace == "-S0");
 }
 
 void test_array()
@@ -168,22 +171,22 @@ void test_array()
     {
         string trace;
         {
-            S[] array = [S("S", &trace)];
+            S[] array = [S("S", &trace, 0)];
             // temporary initializing a literal
             assert(trace == "");
         }
-        assert(trace == "-S");
+        assert(trace == "-S0");
     }
     {
         string trace;
         {
-            mut auto c = new C(S("S", &trace));
+            mut auto c = new C(S("S", &trace, 0));
             C[] array = [c];
-            assert(trace == "+S -S");
+            assert(trace == "+S1 -S0");
             c = null;
-            assert(trace == "+S -S");
+            assert(trace == "+S1 -S0");
         }
-        assert(trace == "+S -S -S");
+        assert(trace == "+S1 -S0 -S1");
     }
 }
 
@@ -204,17 +207,17 @@ void test_struct_field()
     {
         string trace;
         {
-            T t = T(S("S", &trace));
+            T t = T(S("S", &trace, 0));
             assert(trace == "");
         }
-        assert(trace == "-S");
+        assert(trace == "-S0");
     }
     string trace;
     {
-        S s = Pair(S("S1", &trace), S("S2", &trace)).s1;
-        assert(trace == "+S1 -S1 -S2");
+        S s = Pair(S("S", &trace, 0), S("T", &trace, 0)).s1;
+        assert(trace == "+S1 -S0 -T0");
     }
-    assert(trace == "+S1 -S1 -S2 -S1");
+    assert(trace == "+S1 -S0 -T0 -S1");
 }
 
 void test_reassignment()
@@ -223,19 +226,19 @@ void test_reassignment()
     {
         string trace;
         {
-            mut S s = S("S1", &trace);
-            s = S("S2", &trace);
-            assert(trace == "-S1");
+            mut S s = S("S", &trace, 0);
+            s = S("T", &trace, 0);
+            assert(trace == "-S0");
         }
-        assert(trace == "-S1 -S2");
+        assert(trace == "-S0 -T0");
     }
     {
         string trace;
         {
-            mut T t = T(S("S", &trace));
+            mut T t = T(S("S", &trace, 0));
             assert(trace == "");
             t = t;
-            assert(trace == "+S -S");
+            assert(trace == "+S1 -S0");
         }
     }
 }
@@ -244,13 +247,12 @@ void test_parameter_reassignment()
 {
     dbg("- parameter reassignment");
     {
-        // TODO
-        /*string trace;
-        void test(S s) {
-            s = S("S2", &trace);
+        string trace;
+        void test(mut S s) {
+            s = S("T", &trace, 0);
         }
-        test(S("S1", &trace));
-        assert(trace == "-S1 -S2");*/
+        test(S("S", &trace, 0));
+        assert(trace == "+S1 -S1 -T0 -S0");
     }
 }
 
@@ -261,6 +263,8 @@ class C : Object
     S value;
 
     this(this.value) { assert((cast(size_t*) this)[1] == 1); }
+
+    C self() { return this; }
 }
 
 class D
@@ -275,25 +279,25 @@ void test_class_field()
     {
         string trace;
         {
-            Object obj = new C(S("S", &trace));
+            Object obj = new C(S("S", &trace, 0));
             assert((cast(size_t*) obj)[1] == 1);
-            assert(trace == "+S -S");
+            assert(trace == "+S1 -S0");
         }
-        assert(trace == "+S -S -S");
+        assert(trace == "+S1 -S0 -S1");
     }
     {
         string trace;
         {
-            mut C c = new C(S("S", &trace));
+            mut C c = new C(S("S", &trace, 0));
             assert((cast(size_t*) c)[1] == 1);
-            assert(trace == "+S -S");
+            assert(trace == "+S1 -S0");
             Object obj = c.instanceOf(Object);
             // must take a reference cause obj is a root
             assert((cast(size_t*) obj)[1] == 2);
             c = null;
             assert((cast(size_t*) obj)[1] == 1);
         }
-        assert(trace == "+S -S -S");
+        assert(trace == "+S1 -S0 -S1");
     }
     {
         string trace;
@@ -302,51 +306,51 @@ void test_class_field()
             {
                 Object obj = arg.instanceOf(Object);
             }
-            C c = new C(S("S", &trace));
+            C c = new C(S("S", &trace, 0));
             recurse(c);
         }
-        assert(trace == "+S -S -S");
+        assert(trace == "+S1 -S0 -S1");
     }
     {
         string trace;
-        mut Object obj = (new C(S("S", &trace))).instanceOf(Object);
+        mut Object obj = (new C(S("S", &trace, 0))).instanceOf(Object);
         assert((cast(size_t*) obj)[1] == 1);
-        assert(trace == "+S -S");
+        assert(trace == "+S1 -S0");
         obj = null;
-        assert(trace == "+S -S -S");
+        assert(trace == "+S1 -S0 -S1");
     }
     {
         string trace;
         D nest() {
-            auto c = new C(S("S", &trace));
+            auto c = new C(S("S", &trace, 0));
             assert((cast(size_t*) c)[1] == 1);
 
             return new D(c);
         }
         mut D d = nest;
-        assert(trace == "+S -S");
+        assert(trace == "+S1 -S0");
         assert((cast(size_t*) d.c)[1] == 1);
         d = null;
-        assert(trace == "+S -S -S");
+        assert(trace == "+S1 -S0 -S1");
     }
     {
         string trace;
-        mut D d = new D(new C(S("S", &trace)));
+        mut D d = new D(new C(S("S", &trace, 0)));
         mut C c = d.instanceOf(D).c;
-        assert(trace == "+S -S");
+        assert(trace == "+S1 -S0");
         assert((cast(size_t*) d.c)[1] == 2);
         c = null;
-        assert(trace == "+S -S");
+        assert(trace == "+S1 -S0");
         d = null;
-        assert(trace == "+S -S -S");
+        assert(trace == "+S1 -S0 -S1");
     }
     {
         string trace;
         {
-            auto obj = cast(Object) new C(S("S", &trace));
-            assert(trace == "+S -S");
+            auto obj = cast(Object) new C(S("S", &trace, 0));
+            assert(trace == "+S1 -S0");
         }
-        assert(trace == "+S -S -S");
+        assert(trace == "+S1 -S0 -S1");
     }
 }
 
@@ -355,12 +359,12 @@ void test_either_member()
     dbg("- either member");
     string trace;
     {
-        (S | int) either = S("S", &trace);
+        (S | int) either = S("S", &trace, 0);
         auto either2 = either;
         // variable doesn't create a new ref cause either is already owned
         assert(trace == "");
     }
-    assert(trace == "-S");
+    assert(trace == "-S0");
 }
 
 void test_array_cat()
@@ -369,32 +373,32 @@ void test_array_cat()
     {
         string trace;
         {
-            S[] array = [S("S1", &trace)] ~ [S("S2", &trace)];
-            assert(trace == "+S1 +S2 -S2 -S1");
+            S[] array = [S("S", &trace, 0)] ~ [S("T", &trace, 0)];
+            assert(trace == "+S1 +T1 -T0 -S0");
         }
-        assert(trace == "+S1 +S2 -S2 -S1 -S1 -S2");
+        assert(trace == "+S1 +T1 -T0 -S0 -S1 -T1");
     }
     {
         string trace;
         {
             mut S[] array;
-            array ~= S("S1", &trace);
-            assert(trace == "+S1 -S1");
-            array ~= S("S2", &trace);
-            assert(trace == "+S1 -S1 +S1 +S2 -S2 -S1");
+            array ~= S("S", &trace, 0);
+            assert(trace == "+S1 -S0");
+            array ~= S("T", &trace, 0);
+            assert(trace == "+S1 -S0 +S2 +T1 -T0 -S1");
         }
-        assert(trace == "+S1 -S1 +S1 +S2 -S2 -S1 -S1 -S2");
+        assert(trace == "+S1 -S0 +S2 +T1 -T0 -S1 -S2 -T1");
     }
     {
         string trace;
         {
             mut C[] array;
-            array ~= new C(S("S1", &trace));
-            assert(trace == "+S1 -S1");
-            array ~= new C(S("S2", &trace));
-            assert(trace == "+S1 -S1 +S2 -S2");
+            array ~= new C(S("S", &trace, 0));
+            assert(trace == "+S1 -S0");
+            array ~= new C(S("T", &trace, 0));
+            assert(trace == "+S1 -S0 +T1 -T0");
         }
-        assert(trace == "+S1 -S1 +S2 -S2 -S1 -S2");
+        assert(trace == "+S1 -S0 +T1 -T0 -S1 -T1");
     }
     {
         string trace;
@@ -420,10 +424,10 @@ void test_statement_expr() {
     dbg("- statement expr");
     string trace;
     {
-        S s = ({ auto s = S("S", &trace); s; });
-        assert(trace == "+S -S");
+        S s = ({ auto s = S("S", &trace, 0); s; });
+        assert(trace == "+S1 -S0");
     }
-    assert(trace == "+S -S -S");
+    assert(trace == "+S1 -S0 -S1");
 }
 
 void test_break_cont() {
@@ -431,20 +435,20 @@ void test_break_cont() {
     {
         string trace;
         while (true) {
-            S s = S("S", &trace);
+            S s = S("S", &trace, 0);
             break;
         }
-        assert(trace == "-S");
+        assert(trace == "-S0");
     }
     {
         string trace;
         mut bool done;
         while (!done) {
-            S s = S("S", &trace);
+            S s = S("S", &trace, 0);
             done = true;
             continue;
         }
-        assert(trace == "-S");
+        assert(trace == "-S0");
     }
 }
 
@@ -452,63 +456,63 @@ void test_array_equals() {
     dbg("- array equals");
     {
         string trace;
-        if ([S("S1", &trace)] == [S("S2", &trace)]) { }
-        assert(trace == "-S2 -S1");
+        if ([S("S", &trace, 0)] == [S("T", &trace, 0)]) { }
+        assert(trace == "-T0 -S0");
     }
 }
 
 void test_struct_member() {
     dbg("- struct member");
     string trace;
-    T t() { return T(S("S", &trace)); }
+    T t() { return T(S("S", &trace, 0)); }
     auto s = t().s;
-    assert(trace == "+S -S");
+    assert(trace == "+S1 -S0");
 }
 
 void test_negation() {
     dbg("- negation");
     string trace;
-    assert(!!new C(S("S", &trace)));
-    assert(trace == "+S -S -S");
+    assert(!!new C(S("S", &trace, 0)));
+    assert(trace == "+S1 -S0 -S1");
 }
 
 void test_with() {
     dbg("- with");
     {
         string trace_;
-        with (S("S", &trace_))
+        with (S("S", &trace_, 0))
         {
             assert(trace_ == "");
         }
-        assert(trace_ == "-S");
+        assert(trace_ == "-S0");
     }
     {
         string trace_;
         {
-            S s = S("S", &trace_);
+            S s = S("S", &trace_, 0);
             with (s)
             {
                 assert(trace_ == "");
             }
         }
-        assert(trace_ == "-S");
+        assert(trace_ == "-S0");
     }
     {
         string trace_;
         void test()
         {
-            with (S("S", &trace_))
+            with (S("S", &trace_, 0))
             {
                 return;
             }
         }
         test;
-        assert(trace_ == "-S");
+        assert(trace_ == "-S0");
     }
     {
         string trace_;
         {
-            S s = S("S", &trace_);
+            S s = S("S", &trace_, 0);
             void test2(S s)
             {
                 with (s)
@@ -517,9 +521,9 @@ void test_with() {
                 }
             }
             test2(s);
-            assert(trace_ == "+S -S");
+            assert(trace_ == "+S1 -S1");
         }
-        assert(trace_ == "+S -S -S");
+        assert(trace_ == "+S1 -S1 -S0");
     }
 }
 
@@ -529,13 +533,50 @@ void test_tuple() {
         string trace;
         {
             (S, S) foo() {
-                auto ret = (S("S1", &trace), S("S2", &trace));
+                auto ret = (S("S", &trace, 0), S("T", &trace, 0));
                 return ret;
             }
             (S, S) tuple = foo;
-            assert(trace == "+S1 +S2 -S1 -S2");
+            assert(trace == "+S1 +T1 -S0 -T0");
         }
-        assert(trace == "+S1 +S2 -S1 -S2 -S1 -S2");
+        assert(trace == "+S1 +T1 -S0 -T0 -S1 -T1");
+    }
+}
+
+void test_chain() {
+    dbg("- chain methods");
+    {
+        string trace;
+        S s = S("S", &trace, 0).self().self();
+        assert(trace == "+S1 -S0 +S2 -S1");
+    }
+    {
+        string trace;
+        mut Object obj = (new C(S("S", &trace, 0))).self().self();
+        assert((cast(size_t*) obj)[1] == 1);
+        assert(trace == "+S1 -S0");
+        obj = null;
+        assert(trace == "+S1 -S0 -S1");
+    }
+}
+
+S copyS(S s) { return s; }
+C copyC(C c) { return c; }
+
+void test_ufcs_chain() {
+    dbg("- chain ufcs methods");
+    {
+        string trace;
+        S s = S("S", &trace, 0).copyS().copyS();
+        assert(trace == "+S1 -S0 +S2 -S1");
+    }
+    {
+        string trace;
+        mut Object obj = (new C(S("S", &trace, 0))).copyC().copyC();
+        assert((cast(size_t*) obj)[1] == 1);
+        assert(trace == "+S1 -S0");
+        obj = null;
+        assert(trace == "+S1 -S0 -S1");
     }
 }
 
@@ -554,7 +595,7 @@ void main()
     test_array;
     test_struct_field;
     test_reassignment;
-    // TODO test_parameter_reassignment;
+    test_parameter_reassignment;
     test_class_field;
     test_either_member;
     test_array_cat;
@@ -565,4 +606,6 @@ void main()
     test_tuple;
     test_negation;
     test_with;
+    test_chain;
+    test_ufcs_chain;
 }

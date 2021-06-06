@@ -670,7 +670,7 @@ class CompilerImpl : CompilerBase
             return dg(expr);
         }
         auto type = expr.type;
-        auto temp = new PairedTemporary(type, false);
+        auto temp = new PairedTemporary(type, Ownership.owned);
         auto assign = new InitializeTemporaryStatement(temp, expr);
         auto cleanup = type.endLifetime(context, temp);
         auto result = dg(temp);
@@ -682,7 +682,7 @@ class CompilerImpl : CompilerBase
     {
         auto type = expr.type;
         // "owned" by consumeTemporary()
-        auto temp = new PairedTemporary(type, false);
+        auto temp = new PairedTemporary(type, Ownership.owned);
         auto result = dg(temp);
         if (!result) return null;
 
@@ -711,20 +711,23 @@ class CompilerImpl : CompilerBase
     override Statement consumeTemporaryStmt(Context context, Expression expr, Statement delegate(Reference) dg)
     {
         auto type = expr.type;
-        // "owned" by consumeTemporaryStmt()
-        auto temp = new PairedTemporary(type, false);
+        /**
+         * Gifted expr -> owned temporary (so cleanup on return)
+         * Everything else -> non-owned non-gifted temporary (so no cleanup on return or use)
+         */
+        mut Ownership tempOwnership;
+        if (expr.info.ownership == Ownership.gifted)
+            tempOwnership = Ownership.owned;
+        else
+            tempOwnership = Ownership.borrowed;
+
+        auto temp = new PairedTemporary(type, tempOwnership);
         auto result = dg(temp);
         if (!result) return null;
 
-        mut Statement assign = new InitializeTemporaryStatement(temp, expr);
-        if (expr.info.ownership == Ownership.borrowed) {
-            auto copyInto = type.copyInto(context, temp, expr);
-            if (copyInto) {
-                assign = sequence(new UninitializeTemporaryStatement(temp), copyInto);
-            }
-        }
+        Statement assign = new InitializeTemporaryStatement(temp, expr);
         mut Statement cleanup;
-        if (expr.info.ownership == Ownership.gifted || expr.info.ownership == Ownership.borrowed) {
+        if (expr.info.ownership == Ownership.gifted) {
             cleanup = type.endLifetime(context, temp);
         }
         return .sequence(.sequence(assign, result), cleanup);
@@ -823,7 +826,11 @@ class CompilerImpl : CompilerBase
 
     override Expression exprWithScratchspace(Type type, bool temporary, Statement delegate(Reference) callback)
     {
-        auto temp = new PairedTemporary(type, temporary);
+        mut Ownership tempOwnership;
+        if (temporary) tempOwnership = Ownership.gifted;
+        else tempOwnership = Ownership.owned;
+
+        auto temp = new PairedTemporary(type, tempOwnership);
         auto initialize = new UninitializeTemporaryStatement(temp);
         auto stmt = callback(temp);
         if (!stmt) return null;
@@ -832,7 +839,11 @@ class CompilerImpl : CompilerBase
 
     override Statement stmtWithTemporary(Expression value, Statement delegate(Reference) callback)
     {
-        auto temp = new PairedTemporary(value.type, value.info.ownership == Ownership.gifted);
+        mut Ownership tempOwnership;
+        if (value.info.ownership == Ownership.gifted) tempOwnership = Ownership.gifted;
+        else tempOwnership = Ownership.owned;
+
+        auto temp = new PairedTemporary(value.type, tempOwnership);
         auto start = new InitializeTemporaryStatement(temp, value);
         auto stmt = callback(temp);
         if (!stmt) return null;
@@ -844,7 +855,11 @@ class CompilerImpl : CompilerBase
         // TODO: the way gifted works here is almost certainly wrong,
         // cause the Reference can be read multiple times - that's
         // what it's for.
-        auto temp = new PairedTemporary(value.type, value.info.ownership == Ownership.gifted);
+        mut Ownership tempOwnership;
+        if (value.info.ownership == Ownership.gifted) tempOwnership = Ownership.gifted;
+        else tempOwnership = Ownership.owned;
+
+        auto temp = new PairedTemporary(value.type, tempOwnership);
         auto start = new InitializeTemporaryStatement(temp, value);
         auto expr = callback(temp);
         if (!expr) return null;

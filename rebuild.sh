@@ -8,8 +8,8 @@ then
 else
     set -euxo pipefail
 fi
-#FLAGS="-O"
-FLAGS=""
+FLAGS="-O"
+#FLAGS=""
 
 if [ \! -z ${FAST+x} ]
 then

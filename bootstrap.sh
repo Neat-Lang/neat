@@ -364,6 +364,8 @@ at_revision '96bcb2def5743ec3f0792c5cb6d92b7be490def1' 'rebuild cx' 'build/cx'
 at_revision 'a7bc4cdf1e0a7ed7a8adf78bd389c9a2e025ce9e' 'macro_transition' 'build/cx'
 # move call to plainCall, callWithLifetime to call
 at_revision 'f62ae18850737d210d8e083135abaf4ab7b66b8f' 'macro_transition' 'build/cx'
+# CallMacroArgs takes ASTArgument
+at_revision '519ef7a947efe865833d3b6a6a7e4618f81bef75' 'macro_transition' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

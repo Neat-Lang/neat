@@ -80,6 +80,7 @@ string compress(string symbol) {
 struct BackgroundCompilation
 {
     Hash hash;
+    string srcFile;
     string objFile;
     int pid;
 }
@@ -87,7 +88,7 @@ struct BackgroundCompilation
 // how many levels of cache are we even on rn
 class ObjectCache
 {
-    (string earlyHash, Hash resultHash, string objFile, int pid)[] entries;
+    (string earlyHash, Hash resultHash, string srcFile, string objFile, int pid)[] entries;
 
     int[] donePids;
 
@@ -97,14 +98,14 @@ class ObjectCache
         return [any a.earlyHash == earlyHash for a in entries];
     }
 
-    void add(string earlyHash, Hash resultHash, string objFile, int pid) {
-        this.entries ~= (earlyHash, resultHash, objFile, pid);
+    void add(string earlyHash, Hash resultHash, string srcFile, string objFile, int pid) {
+        this.entries ~= (earlyHash, resultHash, srcFile, objFile, pid);
     }
 
     BackgroundCompilation get(string earlyHash) {
         typeof(entries[0]) nothing;
         auto entry = [first a for a in entries where a.earlyHash == earlyHash else nothing];
-        return BackgroundCompilation(entry.resultHash, entry.objFile, entry.pid);
+        return BackgroundCompilation(entry.resultHash, entry.srcFile, entry.objFile, entry.pid);
     }
 
     void waitpid(int pid) {
@@ -171,10 +172,18 @@ BackgroundCompilation emitModule(CompilerBase compiler, ObjectCache cache, Backe
         objFile = ".obj/" ~ hash.text ~ ".bc";
     }
 
-    if (caching && exists(objFile)) {
+    mut string srcFile;
+    if (backendModuleLLVM) {
+        srcFile = ".obj/" ~ compress(removeSlashes(moduleMangle)) ~ ".ll";
+    } else {
+        assert(!!backendModuleC);
+        srcFile = ".obj/" ~ compress(removeSlashes(moduleMangle)) ~ ".c";
+    }
+
+    if (caching && exists(objFile) && exists(srcFile)) {
         // preexisting object
-        cache.add(earlyHash, hash, objFile, 0);
-        return BackgroundCompilation(hash, objFile, 0);
+        cache.add(earlyHash, hash, srcFile, objFile, 0);
+        return BackgroundCompilation(hash, srcFile, objFile, 0);
     }
 
     auto generator = new Generator(platform, backendModule);
@@ -183,7 +192,6 @@ BackgroundCompilation emitModule(CompilerBase compiler, ObjectCache cache, Backe
 
     mut int pid;
     if (backendModuleLLVM) {
-        string srcFile = ".obj/" ~ compress(removeSlashes(moduleMangle)) ~ ".ll";
         {
             auto llText = backendModuleLLVM.output.text;
             write(srcFile, llText);
@@ -191,15 +199,14 @@ BackgroundCompilation emitModule(CompilerBase compiler, ObjectCache cache, Backe
         pid = build(srcFile, objFile);
     } else {
         assert(!!backendModuleC);
-        string srcFile = ".obj/" ~ compress(removeSlashes(moduleMangle)) ~ ".c";
         {
             auto csrc = backendModuleC.output.text;
             write(srcFile, csrc);
         }
         pid = build(srcFile, objFile);
     }
-    cache.add(earlyHash, hash, objFile, pid);
-    return BackgroundCompilation(hash, objFile, pid);
+    cache.add(earlyHash, hash, srcFile, objFile, pid);
+    return BackgroundCompilation(hash, srcFile, objFile, pid);
 }
 
 class ParserHelperImpl : ParserHelper
@@ -279,7 +286,7 @@ class ParserHelperImpl : ParserHelper
         }
         else if (backend.instanceOf(CBackend)) {
             soname = ".obj/macro_" ~ name ~ "_" ~ libHash.text ~ ".so";
-            mut string flags = " -shared -g src/runtime.c";
+            mut string flags = " -shared -g";
             if (platform.nativeWordType.instanceOf(BackendIntType)) flags ~= " -m32";
             cmd = baseCmd ~ flags ~ objFiles ~ " -o " ~ soname;
         }
@@ -1071,6 +1078,7 @@ class Options
     bool optimize;
     bool caching;
     bool x86_32, macro_x86_32;
+    string intermediateListFile;
     Backend backend, macroBackend;
     int generation;
     string umlFile;
@@ -1139,6 +1147,12 @@ class Options
             } else if (arg == "-uml") {
                 assert(i + 1 < args.length);
                 this.umlFile = args[i + 1];
+                i += 1;
+            } else if (arg == "-dump-intermediates") {
+                // Dump list of intermediate sources into a file.
+                // Used for C release generation.
+                assert(i + 1 < args.length);
+                this.intermediateListFile = args[i + 1];
                 i += 1;
             } else {
                 remArgs ~= arg;
@@ -1248,12 +1262,14 @@ void main(mut string[] args)
     binHash.addl(options.generation);
 
     mut string fileArgs;
+    mut string[] intermediates;
     mut int[] pids;
     while (remainingModules.length > 0) {
         for (auto remainingModule <- remainingModules) {
             auto compilation = emitModule(compilerImpl, objectCache, options.backend, platform, remainingModule,
                 options.optimize, options.x86_32, options.caching, false);
             fileArgs ~= " " ~ compilation.objFile;
+            intermediates ~= compilation.srcFile;
             with (compilation.hash.state) binHash.apply(add, mult);
             if (compilation.pid != 0) pids ~= compilation.pid;
         }
@@ -1275,12 +1291,6 @@ void main(mut string[] args)
         compilerImpl.stats.instanceOf(UmlClassGraph).writeTo(options.umlFile);
     }
 
-    if (options.dontLink) {
-        compilerImpl.clear;
-        clearOnceCache;
-        return;
-    }
-
     string binHashOutput = ".obj/hash_" ~ binHash.text ~ ".c";
     with (binHash.state) {
         write(binHashOutput,
@@ -1289,6 +1299,18 @@ long long int compiler_hash_mult() { return " ~ ltoa(mult) ~ "LL; }
 "       );
     }
     fileArgs ~= " " ~ binHashOutput;
+    intermediates ~= binHashOutput;
+
+    if (options.intermediateListFile != "") {
+        options.intermediateListFile.write(intermediates.join("\n") ~ "\n");
+    }
+
+    if (options.dontLink) {
+        compilerImpl.clear;
+        clearOnceCache;
+        return;
+    }
+
     // int pid = getpid;
     // cxruntime_system("cat /proc/" ~ itoa(pid) ~ "/status");
     string flags = baseFlags ~ " -rdynamic";

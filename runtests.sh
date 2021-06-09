@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-CX=build/cx
+CX=${CX:-build/cx}
 CXFLAGS="-Pcompiler:build/src"
 CXFLAGS="${CXFLAGS} -Prunnable:test/runnable:compiler"
 CXFLAGS="${CXFLAGS} -Pfail_compilation:test/fail_compilation:compiler"

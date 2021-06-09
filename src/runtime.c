@@ -185,6 +185,7 @@ bool cxruntime_waitpid(int pid) {
 
 // No idea why this is necessary.
 __attribute__((optnone))
+__attribute__((optimize(0)))
 bool cxruntime_symbol_defined_in_main(struct String symbol) {
     // even if a DL is loaded with RTLD_GLOBAL, main symbols are special.
     // so we want to avoid redefining symbols that are in the main program.

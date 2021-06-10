@@ -1,6 +1,8 @@
 #include <dlfcn.h>
 #include <errno.h>
+#ifdef __GLIBC__
 #include <execinfo.h>
+#endif
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -355,6 +357,7 @@ void debug() { }
 
 void print_backtrace()
 {
+#ifdef __GLIBC__
     void *array[20];
     int size = backtrace(array, 20);
     char **strings = backtrace_symbols(array, size);
@@ -364,6 +367,7 @@ void print_backtrace()
         printf("  %i: %s\n", i, strings[i]);
     }
     free(strings);
+#endif
 }
 
 void cxruntime_refcount_violation(struct String s, long long int *ptr)

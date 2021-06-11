@@ -214,7 +214,11 @@ void *cxruntime_alloc(size_t size) {
     return calloc(1, size);
 }
 
-void _main(struct StringArray args);
+extern void _run_unittests();
+
+#ifndef CX_NO_MAIN
+extern void _main(struct StringArray args);
+#endif
 
 int main(int argc, char **argv) {
     struct StringArray args = (struct StringArray) {
@@ -224,7 +228,10 @@ int main(int argc, char **argv) {
     for (int i = 0; i < argc; i++) {
         args.ptr[i] = (struct String) { strlen(argv[i]), argv[i] };
     }
+    _run_unittests();
+#ifndef CX_NO_MAIN
     _main(args);
+#endif
     free(args.ptr);
     return 0;
 }

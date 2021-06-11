@@ -22,6 +22,7 @@ import cx.statements;
 import cx.struct_;
 import cx.tuples;
 import cx.types;
+import cx.unittest_;
 import cx.vectors;
 import cx.with_;
 import helpers;
@@ -2875,7 +2876,7 @@ class ASTModule : ASTModuleBase
     ASTModule parent;
 
     (ASTImport | ASTSymbol | ASTExtern | ASTFunction
-        | ASTSymbolAlias | ASTTemplateDecl
+        | ASTSymbolAlias | ASTTemplateDecl | ASTUnitTest
     )[] entries;
 
     this(this.loc, this.name, this.pak, this.macroState, this.parent) { }
@@ -2892,6 +2893,7 @@ class ASTModule : ASTModuleBase
                 ASTImport: {}
                 ASTExtern: {}
                 ASTFunction: {}
+                ASTUnitTest: {}
                 ASTSymbol: {}
                 ASTTemplateDecl: {}
                 ASTSymbolAlias alias_: {
@@ -2930,7 +2932,7 @@ struct ResolvingModuleEntry
 
     Symbol resolution;
 
-    (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl | Nothing) symbol;
+    (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest | Nothing) symbol;
 }
 
 class Resolver
@@ -2939,7 +2941,7 @@ class Resolver
 
     this() { }
 
-    void add(string name, (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl) astSymbol)
+    void add(string name, (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) astSymbol)
     {
         this.entries ~= ResolvingModuleEntry(name, null, astSymbol);
     }
@@ -2967,7 +2969,8 @@ class Resolver
         if (!this.entries[i].resolution) {
             this.entries[i].resolution = this.entries[i].symbol.case(
                 // TODO compile function statement immediately too
-                ASTFunction fun:  fun.compile(context),
+                ASTFunction fun: fun.compile(context),
+                ASTUnitTest ut: ut.compile(context),
                 ASTClassDecl decl: decl.compile(context),
                 ASTStructDecl decl: decl.compile(context),
                 ASTAliasDecl decl: decl.target.compile(context),
@@ -3012,7 +3015,7 @@ class Module : ModuleBase
         this.hash = poly_hash_whole_string(mangledName);
     }
 
-    void add(string name, (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl) symbol)
+    void add(string name, (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) symbol)
     {
         this.resolver.add(name, symbol);
     }
@@ -3617,6 +3620,10 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             module_.entries ~= fun;
             continue;
         }
+        if (ASTUnitTest ut = parseUnitTest(parser, lexicalContext)) {
+            module_.entries ~= ut;
+            continue;
+        }
 
         parser.fail("couldn't parse function or struct");
     }
@@ -3693,6 +3700,8 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultModule
                 module_.register(extern_.name, extern_.compile(context));
             ASTFunction function_:
                 module_.add(function_.name, function_);
+            ASTUnitTest ut:
+                module_.add("", ut);
             ASTSymbolAlias symbolAlias:
                 module_.register(symbolAlias.name, symbolAlias.symbol.compile(context));
             ASTTemplateDecl astTemplateDecl:

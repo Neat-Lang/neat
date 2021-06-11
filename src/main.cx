@@ -17,6 +17,7 @@ import cx.statements;
 import cx.struct_;
 import cx.stuff;
 import cx.types;
+import cx.unittest_;
 import helpers;
 import std.file : realpath;
 
@@ -117,8 +118,13 @@ class ObjectCache
     }
 }
 
+class CompilationVisitor
+{
+    void visit(FinishedSymbol sym) {}
+}
+
 BackgroundCompilation emitModule(CompilerBase compiler, ObjectCache cache, Backend backend, Platform platform,
-    Module module_, bool opt, bool m32, bool caching, bool forMacro)
+    Module module_, CompilationVisitor[] visitors, bool opt, bool m32, bool caching, bool forMacro)
 {
     auto backendModule = backend.createModule(platform, module_.loc.toBackendLoc, forMacro);
     auto backendModuleLLVM = backendModule.instanceOf(LLVMBackendModule);
@@ -147,7 +153,6 @@ BackgroundCompilation emitModule(CompilerBase compiler, ObjectCache cache, Backe
         return pid;
     }
 
-    // TODO add compiler checksum (generation number?)
     if (backendModuleLLVM) hash.adds("LLVM");
     else hash.adds("gcc");
     if (m32) hash.adds("m32");
@@ -166,6 +171,7 @@ BackgroundCompilation emitModule(CompilerBase compiler, ObjectCache cache, Backe
 
     auto symbols = module_.compile(compiler, platform);
     [symbol.hash(hash) for symbol in symbols];
+    [[visitor.visit(symbol) for symbol in symbols] for visitor in visitors];
 
     mut string objFile = ".obj/" ~ hash.text ~ ".o";
     if (backendModuleLLVM && opt) {
@@ -207,6 +213,20 @@ BackgroundCompilation emitModule(CompilerBase compiler, ObjectCache cache, Backe
     }
     cache.add(earlyHash, hash, srcFile, objFile, pid);
     return BackgroundCompilation(hash, srcFile, objFile, pid);
+}
+
+class UnittestVisitor : CompilationVisitor
+{
+    this() { }
+
+    string[] symbols;
+
+    override void visit(FinishedSymbol sym) {
+        if (auto uf = sym.instanceOf(CompiledUnittestFunction))
+        {
+            symbols ~= uf.fun.mangle;
+        }
+    }
 }
 
 class ParserHelperImpl : ParserHelper
@@ -256,7 +276,7 @@ class ParserHelperImpl : ParserHelper
         while (remainingModules.length > 0) {
             for (auto remainingModule <- remainingModules) {
                 auto compilation = emitModule(
-                    compiler, cache, backend, platform, remainingModule, false, x86_32, caching, true);
+                    compiler, cache, backend, platform, remainingModule, [], false, x86_32, caching, true);
                 objFiles ~= " " ~ compilation.objFile;
                 pids ~= compilation.pid;
                 with (compilation.hash.state) libHash.apply(add, mult);
@@ -1082,6 +1102,7 @@ class Options
     Backend backend, macroBackend;
     int generation;
     string umlFile;
+    bool unittest_;
     PlatformFlags platformFlags, macroPlatformFlags;
     // for cx.macros.cimport
     string[] cFlags;
@@ -1148,6 +1169,8 @@ class Options
                 assert(i + 1 < args.length);
                 this.umlFile = args[i + 1];
                 i += 1;
+            } else if (arg == "-unittest") {
+                this.unittest_ = true;
             } else if (arg == "-dump-intermediates") {
                 // Dump list of intermediate sources into a file.
                 // Used for C release generation.
@@ -1251,6 +1274,13 @@ void main(mut string[] args)
     if (options.backend.instanceOf(LLVMBackend) && options.optimize)
         baseFlags ~= " -flto";
 
+    mut CompilationVisitor[] compilationVisitors;
+    UnittestVisitor unittestVisitor = new UnittestVisitor;
+
+    if (options.unittest_) {
+        compilationVisitors ~= unittestVisitor;
+    }
+
     auto allModules = new ModuleSet(0);
     void add(Module mod) {
         allModules.add(mod);
@@ -1267,7 +1297,7 @@ void main(mut string[] args)
     while (remainingModules.length > 0) {
         for (auto remainingModule <- remainingModules) {
             auto compilation = emitModule(compilerImpl, objectCache, options.backend, platform, remainingModule,
-                options.optimize, options.x86_32, options.caching, false);
+                compilationVisitors, options.optimize, options.x86_32, options.caching, false);
             fileArgs ~= " " ~ compilation.objFile;
             intermediates ~= compilation.srcFile;
             with (compilation.hash.state) binHash.apply(add, mult);
@@ -1310,6 +1340,22 @@ long long int compiler_hash_mult() { return " ~ ltoa(mult) ~ "LL; }
         clearOnceCache;
         return;
     }
+
+    string unittestCode() {
+        mut string ret;
+        for (auto symbol <- unittestVisitor.symbols) {
+            ret ~= "extern void " ~ symbol ~ "();\n";
+        }
+        ret ~= "void _run_unittests() {\n";
+        for (auto symbol <- unittestVisitor.symbols) {
+            ret ~= "  " ~ symbol ~ "();\n";
+        }
+        ret ~= "}\n";
+        return ret;
+    }
+
+    ".obj/_run_unittests.c".write(unittestCode);
+    fileArgs ~= " .obj/_run_unittests.c";
 
     // int pid = getpid;
     // cxruntime_system("cat /proc/" ~ itoa(pid) ~ "/status");

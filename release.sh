@@ -15,7 +15,8 @@ cp -R src/ $TARGET
 cp $(cat build/intermediates.txt) $TARGET/intermediate/
 cat > $TARGET/build.sh <<EOT
 #!/usr/bin/env bash
-gcc -fpic -rdynamic intermediate/* src/runtime.c -o cx -ldl
+\$CFLAGS="\${CFLAGS} -Ofast -fno-strict-aliasing"
+gcc -fpic -rdynamic intermediate/* src/runtime.c -o cx -ldl \$CFLAGS
 EOT
 chmod +x $TARGET/build.sh
 cat > $TARGET/cx.ini <<EOT

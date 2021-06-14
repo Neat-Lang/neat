@@ -349,7 +349,7 @@ at_revision 'f705834e763c62d9750644244ad4c3fff8391894' 'rebuild cx' 'build/cx'
 # static struct methods
 at_revision '80ec1698086de9692b478283928f796ba08e5a15' 'rebuild cx' 'build/cx'
 # named arg on classes 1
-at_revision '9b4d35309e0fb0df0f14126b4410a59bd222ed79' 'macro_transition' 'build/cx'
+at_revision '4ac33cfc1a042e3fff7e6eaf468b3c58a0c24491' 'macro_transition' 'build/cx'
 # __HERE__ reloc
 at_revision 'c9b5bbcfffecf0d0d80e5fba45310f035b26abd0' 'rebuild cx' 'build/cx'
 # fix <<, >> impl
@@ -368,6 +368,8 @@ at_revision 'f62ae18850737d210d8e083135abaf4ab7b66b8f' 'macro_transition' 'build
 at_revision '519ef7a947efe865833d3b6a6a7e4618f81bef75' 'macro_transition' 'build/cx'
 # unittest {}
 at_revision '9d196c27e9230554192811cf0cc6d317bf610e38' 'rebuild cx' 'build/cx'
+# fix empty array literal, allow assert macro in std
+at_revision '40971abeb6efa53e2fe6618927b2ea7572927d02' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

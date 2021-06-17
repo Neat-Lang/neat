@@ -370,6 +370,8 @@ at_revision '519ef7a947efe865833d3b6a6a7e4618f81bef75' 'macro_transition' 'build
 at_revision '9d196c27e9230554192811cf0cc6d317bf610e38' 'rebuild cx' 'build/cx'
 # fix empty array literal, allow assert macro in std
 at_revision '40971abeb6efa53e2fe6618927b2ea7572927d02' 'rebuild cx' 'build/cx'
+# quote ASTEitherDecl, ASTSymbolIdentifier, ASTEitherCaseStmt, ASTEitherCaseExpr
+at_revision '68ba0902ebab759e4f251307ed93acbab6211a45' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

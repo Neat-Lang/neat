@@ -1117,28 +1117,37 @@ class ASTReference : ASTSymbol
 
     override Expression compile(Context context)
     {
+        auto base = this.base.compile(context);
         // &function
-        if (ASTIdentifier ident = this.base.instanceOf(ASTIdentifier)) {
-            auto frame = once new ReferenceExpression(new StackFrame(new Void));
-            if (Symbol target = context.namespace.lookup(ident.name, context, frame)) {
-                if (Function fun = target.instanceOf(Function))
-                    return new FunctionReference(fun);
-                if (auto nestfn = target.instanceOf(ClassMethodPtr)) {
-                    Expression doExpr(Expression thisPtr) {
-                        return new DelegateExpr(nestfn.funcPtr, thisPtr);
-                    }
-                    Expression doRef(Reference thisValue) {
-                        return doExpr(context.compiler.reference(thisValue));
-                    }
-                    if (nestfn.valueIsPtr) {
-                        return context.compiler.exprWithTemporaryExpr(nestfn.thisValue, &doExpr);
-                    } else {
-                        return context.compiler.exprWithTemporary(nestfn.thisValue, &doRef);
-                    }
-                }
+        if (Function fun = base.instanceOf(Function))
+            return new FunctionReference(fun);
+        if (LateSymbol lateSym = base.instanceOf(LateSymbol)) {
+            Expression do1(Expression baseExpr) {
+                auto funcPtr = lateSym.resolve(context, baseExpr);
+                auto voidp = once new Pointer(new Void);
+                auto contextPtr = new PointerCast(voidp, baseExpr);
+                return new DelegateExpr(funcPtr, contextPtr);
+            }
+            Expression do2(Expression baseExpr)
+            {
+                return context.compiler.exprWithTemporaryExpr(baseExpr, &do1);
+            }
+            return context.compiler.consume(context, lateSym.baseExpr, &do2);
+        }
+        if (auto nestfn = base.instanceOf(ClassMethodPtr)) {
+            Expression doExpr(Expression thisPtr) {
+                return new DelegateExpr(nestfn.funcPtr, thisPtr);
+            }
+            Expression doRef(Reference thisValue) {
+                return doExpr(context.compiler.reference(thisValue));
+            }
+            if (nestfn.valueIsPtr) {
+                return context.compiler.exprWithTemporaryExpr(nestfn.thisValue, &doExpr);
+            } else {
+                return context.compiler.exprWithTemporary(nestfn.thisValue, &doRef);
             }
         }
-        Expression baseExpression = beExpression2(this.base.compile(context), this.loc);
+        Expression baseExpression = beExpression2(base, this.loc);
 
         loc.assert2s(!!baseExpression.instanceOf(Reference), "&expr: expr not a reference");
 

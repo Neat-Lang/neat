@@ -776,6 +776,7 @@ class ASTIndexAccess : ASTSymbol
             return new TupleMemberExpr(this.loc, base, indexExpr.value);
         }
 
+        bool saveIndexValue = base.info.ownership == Ownership.gifted;
         Expression do_(Reference base)
         {
             mut Expression indexExpr;
@@ -799,9 +800,19 @@ class ASTIndexAccess : ASTSymbol
             indexExpr = expectImplicitConvertTo(context, indexExpr, context.nativeWordType, this.loc);
 
             assert(indexExpr.type.same(context.nativeWordType));
-            return new Dereference(new PointerOffset(ptrBase, indexExpr));
+            auto deref = new Dereference(new PointerOffset(ptrBase, indexExpr));
+            if (saveIndexValue)
+            {
+                // This is a very silly idiom.
+                auto temp = new PairedTemporary(deref.type, Ownership.gifted);
+                auto init = new UninitializeTemporaryStatement(temp);
+                mut auto copyDeref = deref.type.copyInto(context, temp, deref);
+                if (!copyDeref) copyDeref = new AssignStatement(temp, deref);
+                return context.compiler.wrap(sequence(init, copyDeref), temp, null);
+            }
+            return deref;
         }
-        return context.compiler.consumeTemporary(context, true, false, base, &do_);
+        return context.compiler.consumeTemporary(context, allowRefReturn=!saveIndexValue, mayUnwind=false, base, &do_);
     }
 
     override ASTSymbol quote(Quoter quoter) {

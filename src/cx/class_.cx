@@ -350,7 +350,7 @@ class Class : Type
         mut bool override_ = false;
         if (this.superClass) override_ = true;
         this.methods ~= new ClassMethod(
-            this, Loc(context.compiler.files, __HERE__), override_, false /* abstract */, "__instanceof",
+            this, this.decl.loc, override_, false /* abstract */, "__instanceof",
             this, [Parameter(false, "targetClassinfo", false, once new Pointer(new Void))], stmt, new MacroState);
     }
 
@@ -369,7 +369,7 @@ class Class : Type
         mut bool override_ = false;
         if (this.superClass) override_ = true;
         this.methods ~= new ClassMethod(
-            this, Loc(context.compiler.files, __HERE__), override_, false /* abstract */, "__destroy",
+            this, this.decl.loc, override_, false /* abstract */, "__destroy",
             once new Void, [], stmt, new MacroState);
     }
 
@@ -818,11 +818,11 @@ class ASTNewExpression : ASTSymbol
 {
     ASTSymbol type;
 
-    ASTSymbol[] args;
+    ASTArgument[] astArgs;
 
     Loc loc;
 
-    this(this.type, this.args, this.loc) { }
+    this(this.type, this.astArgs, this.loc) { }
 
     override Symbol compile(Context context)
     {
@@ -838,27 +838,31 @@ class ASTNewExpression : ASTSymbol
                 auto ctor = context.compiler.accessMember(
                     context, new IgnoreLifetimeExpr(classptr), "__ctor", this.loc, false);
                 auto astCtor = new ASTSymbolHelper(ctor);
-                auto astArgs = [ASTArgument(arg, "") for arg in this.args];
                 auto ctorCall = context.compiler.exprStatement(
-                    context.compiler.call(context, astCtor, astArgs, this.loc, false));
+                    context.compiler.call(context, astCtor, this.astArgs, this.loc, false));
 
                 return context.compiler.statementExpression(ctorCall, classptr);
             }
             return context.compiler.exprWithTemporaryExpr(classptr, &do_);
         }
         if (Array arrayType = type.instanceOf(Array)) {
-            this.loc.assert2s(this.args.length == 1, "expected one argument to loc");
+            this.loc.assert2s(this.astArgs.length == 1, "expected one argument to loc");
 
             Type sizeT = context.nativeWordType;
             auto length = expectImplicitConvertTo(
-                context, beExpression3(context, this.args[0].compile(context), this.loc), sizeT, this.loc);
+                context, beExpression3(context, this.astArgs[0].sym.compile(context), this.loc), sizeT, this.loc);
             return new ArrayAllocation(arrayType.elementType, length);
         }
         this.loc.assert2s2(false, "don't know how to allocate ", type.repr);
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        auto quotedArgs = [arg.quote(quoter) for arg in this.args];
+        auto quotedArgs = [
+            quoter.compiler.astCall(
+                quoter.compiler.astIdentifier("ASTArgument", loc.reloc), [
+                    arg.sym.quote(quoter),
+                    quoter.compiler.astStringLiteral(arg.name, loc.reloc)], loc.reloc)
+            for arg in this.astArgs];
         return quoter.compilerCall("astNewExpression", [
             this.type.quote(quoter),
             quoter.compiler.astArrayLiteral(quotedArgs, loc.reloc)], loc.reloc);

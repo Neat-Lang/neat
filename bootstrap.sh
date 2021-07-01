@@ -372,6 +372,8 @@ at_revision '9d196c27e9230554192811cf0cc6d317bf610e38' 'rebuild cx' 'build/cx'
 at_revision '40971abeb6efa53e2fe6618927b2ea7572927d02' 'rebuild cx' 'build/cx'
 # quote ASTEitherDecl, ASTSymbolIdentifier, ASTEitherCaseStmt, ASTEitherCaseExpr
 at_revision '68ba0902ebab759e4f251307ed93acbab6211a45' 'rebuild cx' 'build/cx'
+# name=value for new calls
+at_revision '23f10d32c39779ff77fbdab218e19ce5b40aa553' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

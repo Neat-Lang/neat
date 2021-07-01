@@ -136,7 +136,7 @@ class Class : Type
         size_t methodOffset = [first i for i, a in vtable where a.name == member else -1];
         if (methodOffset != -1)
         {
-            return new ClassMethodSymbol(this, baseExpr, methodOffset);
+            return new ClassMethodSymbol(this, baseExpr, methodOffset, staticLookup=false);
         }
 
         auto members = this.allMembers(context);
@@ -482,11 +482,15 @@ class ClassMethodSymbol : LateSymbol
 
     size_t methodOffset;
 
-    this(this.class_, this.baseExpr, this.methodOffset) {}
+    // We somehow selected a method of a specific class. Bypass vtable lookup.
+    // For instance, used for super methods.
+    bool staticLookup;
+
+    this(this.class_, this.baseExpr, this.methodOffset, this.staticLookup) {}
 
     override Expression resolve(Context context, Expression baseExpr)
     {
-        if (this.class_.final_) {
+        if (this.class_.final_ || this.staticLookup) {
             return new FunctionReference(this.class_.vtable[methodOffset]);
         }
         Expression asStructPtr = new PointerCast(
@@ -867,4 +871,47 @@ class ASTNewExpression : ASTSymbol
             this.type.quote(quoter),
             quoter.compiler.astArrayLiteral(quotedArgs, loc.reloc)], loc.reloc);
     }
+}
+
+class Super : Symbol
+{
+    Class class_;
+
+    this(this.class_) { }
+
+    Symbol lookup(Context context, string name, Loc loc) {
+        auto superClass = this.class_.superClass;
+        auto methodOffset = [first i for i, a in superClass.vtable where a.name == name else -1];
+        loc.assert2s3(methodOffset != -1, "Method '", name, "' not found in super class!");
+        // TODO lookup() that handles the stackframe thing
+        auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
+        auto baseExpr = context.namespace.lookup("this", context, stackframe).instanceOf(Expression);
+        return new ClassMethodSymbol(superClass, baseExpr, methodOffset, staticLookup=true);
+    }
+}
+
+/**
+ * The 'super' keyword. Only supports the syntax `super.foo` to select a superclass method statically.
+ */
+class ASTSuper : ASTSymbol
+{
+    ReLoc reloc;
+
+    this(this.reloc) { }
+
+    override Symbol compile(Context context) {
+        auto loc = Loc(context.compiler.files, this.reloc);
+        auto classNs = findParent!ClassNamespace(context.namespace);
+        loc.assert2s(!!classNs, "'super' may only appear in class");
+        loc.assert2s(!!classNs.class_.superClass, "'super' may only appear in class that has parent class");
+        return new Super(classNs.class_);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        ASTArgument[] noArgs; // hax: [] can't convert to an Either of two arrays
+        return quoter.compiler.astNewExpression(
+            quoter.compiler.astIdentifier("ASTSuper", __HERE__), noArgs, __HERE__);
+    }
+
+    override string repr() { return "super"; }
 }

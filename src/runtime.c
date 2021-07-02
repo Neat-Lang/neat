@@ -97,62 +97,6 @@ struct String cxruntime_ptr_id(void* ptr) {
 }
 int cxruntime_toInt(float f) { return (int) f; }
 
-int cxruntime_linenr(struct String haystack, struct String needle, int* linep, int* columnp) {
-    if (needle.ptr < haystack.ptr || needle.ptr > haystack.ptr + haystack.length)
-        return false;
-    size_t lineStart = 0, lineEnd = 0, lineNr = 0;
-    while (lineStart <= haystack.length)
-    {
-        while (lineEnd < haystack.length && haystack.ptr[lineEnd] != '\n') lineEnd++;
-        if (lineEnd < haystack.length && haystack.ptr[lineEnd] == '\n') lineEnd++;
-        struct String line = { lineEnd - lineStart, haystack.ptr + lineStart };
-
-        if (needle.ptr >= line.ptr && needle.ptr <= line.ptr + line.length)
-        {
-            *linep = (int) lineNr;
-            *columnp = (int) (needle.ptr - line.ptr - 1);
-            return true;
-        }
-        lineNr++;
-        lineStart = lineEnd;
-    }
-    fprintf(stderr, "internal error determining line number for '%.*s'\n", (int) needle.length, needle.ptr);
-    abort();
-}
-// TODO remove
-int cxruntime_file_exists(struct String file) {
-    char *fn = toStringz(file);
-    int ret = access(fn, F_OK) != -1;
-    free(fn);
-    return ret;
-}
-// TODO remove
-struct String cxruntime_file_read(struct String file) {
-    // thanks,
-    // https://stackoverflow.com/questions/14002954/c-programming-how-to-read-the-whole-file-contents-into-a-buffer
-    char *fn = toStringz(file);
-    FILE *f = fopen(fn, "rb");
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);  /* same as rewind(f); */
-
-    char *buffer = malloc(fsize);
-    fread(buffer, 1, fsize, f);
-    fclose(f);
-    free(fn);
-
-    return (struct String) { fsize, buffer };
-}
-
-// TODO remove
-void cxruntime_file_write(struct String file, struct String content) {
-    char *fn = toStringz(file);
-    FILE *f = fopen(fn, "wb");
-    fwrite(content.ptr, 1, content.length, f);
-    fclose(f);
-    free(fn);
-}
-
 FILE* cxruntime_stdout() {
     return stdout;
 }

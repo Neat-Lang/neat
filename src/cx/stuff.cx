@@ -15,7 +15,6 @@ import cx.enums;
 import cx.expr;
 import cx.function_;
 import cx.hash;
-import cx.linenr;
 import cx.parser;
 import cx.parser_base;
 import cx.statements;
@@ -138,10 +137,10 @@ ASTSymbol parseTupleType(Parser parser, LexicalContext lexicalContext)
         assert(members.length > 0);
 
         if (members.length == 1 && members[0].name == "") {
-            declEntries ~= ASTEitherDeclEntry(members[0].loc.reloc, members[0].sym);
+            declEntries ~= ASTEitherDeclEntry(members[0].loc, members[0].sym);
         } else {
             declEntries ~= ASTEitherDeclEntry(
-                members[0].loc.reloc,
+                members[0].loc,
                 new ASTTupleType(loc, [(a.name, a.sym) for a in members]));
         }
         members = [];
@@ -239,7 +238,7 @@ ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
         return null;
     }
 
-    Loc loc = Loc(lexicalContext.compiler.files, __HERE__);
+    auto loc = __HERE__;
     if (identifier == "long")
     {
         parser.commit;
@@ -283,7 +282,7 @@ ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
     }
 
     parser.commit;
-    return lexicalContext.compiler.astIdentifier(identifier, parser.loc.reloc);
+    return lexicalContext.compiler.astIdentifier(identifier, parser.loc);
 }
 
 ASTParameter[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
@@ -705,8 +704,8 @@ class ASTCall : ASTSymbol
         auto args = [arg.sym.quote(quoter) for arg in this.args];
         return quoter.compilerCall("astCall", [
             this.target.quote(quoter),
-            quoter.compiler.astArrayLiteral(args, this.loc.reloc)
-        ], this.loc.reloc);
+            quoter.compiler.astArrayLiteral(args, this.loc)
+        ], this.loc);
     }
 }
 
@@ -809,7 +808,7 @@ class ASTIndexAccess : ASTSymbol
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astIndex", [base.quote(quoter), index.quote(quoter)], loc.reloc);
+        return quoter.compilerCall("astIndex", [base.quote(quoter), index.quote(quoter)], loc);
     }
 }
 
@@ -850,7 +849,7 @@ class ASTArraySlice : ASTSymbol
         return quoter.compilerCall("astArraySlice", [
             this.array.quote(quoter),
             this.lower.quote(quoter),
-            this.upper.quote(quoter)], loc.reloc);
+            this.upper.quote(quoter)], loc);
     }
 }
 
@@ -983,7 +982,7 @@ class ASTMember : ASTMemberBase
     override ASTSymbol quote(Quoter quoter) {
         return quoter.compilerCall("astMember", [
             this.base.quote(quoter),
-            quoter.compiler.astStringLiteral(this.member, loc.reloc)], loc.reloc);
+            quoter.compiler.astStringLiteral(this.member, loc)], loc);
     }
 }
 
@@ -1078,7 +1077,7 @@ class ASTDereference : ASTSymbol
 
     override ASTSymbol quote(Quoter quoter) {
         return quoter.compilerCall(
-            "astDereference", [this.base.quote(quoter)], loc.reloc);
+            "astDereference", [this.base.quote(quoter)], loc);
     }
 }
 
@@ -1164,7 +1163,7 @@ class ASTReference : ASTSymbol
 
     override ASTSymbol quote(Quoter quoter) {
         return quoter.compilerCall(
-            "astReference", [this.base.quote(quoter)], loc.reloc);
+            "astReference", [this.base.quote(quoter)], loc);
     }
 }
 
@@ -1432,14 +1431,15 @@ ASTSymbol parseExpressionIncDec(Parser parser, LexicalContext lexicalContext)
     return ret;
 }
 
-// a ReLoc representing the source location of the token
+// the AST of a Loc literal recreating the passed loc.
 ASTSymbol hereExpr(Loc loc, LexicalContext lexicalContext)
 {
     with (lexicalContext.compiler)
         return astCall(
-            astIdentifier("ReLoc", __HERE__), [
-                astStringLiteral(loc.reloc.filename, __HERE__),
-                astIntLiteral(cast(int) loc.reloc.offset, __HERE__),
+            astIdentifier("Loc", __HERE__), [
+                astStringLiteral(loc.filename, __HERE__),
+                astIntLiteral(loc.row, __HERE__),
+                astIntLiteral(loc.column, __HERE__),
             ], __HERE__);
 }
 
@@ -1454,8 +1454,9 @@ ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
         if (ASTSymbol destroy_ = parseDestroy(parser, lexicalContext))
             return destroy_;
     }
-    auto loc = parser.loc;
     parser.begin;
+    parser.strip;
+    auto loc = parser.loc;
     if (parser.accept(".")) {
         // .name is module level
         string name = parser.parseIdentifier;
@@ -1469,8 +1470,8 @@ ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
     if (name.length)
     {
         if (name == "__HERE__") return hereExpr(loc, lexicalContext);
-        if (name == "$") return new ASTArrayLength(loc.reloc);
-        if (name == "super") return new ASTSuper(loc.reloc);
+        if (name == "$") return new ASTArrayLength(loc);
+        if (name == "super") return new ASTSuper(loc);
         return new ASTIdentifier(name, false, loc);
     }
     {
@@ -1767,7 +1768,7 @@ class ASTReturnStatement : ASTStatement
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astReturn", [value.quote(quoter)], loc.reloc);
+        return quoter.compilerCall("astReturn", [value.quote(quoter)], loc);
     }
 }
 
@@ -1782,7 +1783,7 @@ class ASTVoidExpression : ASTSymbol
 
     override ASTSymbol quote(Quoter quoter) {
         ASTSymbol[] args;
-        return quoter.compilerCall("astVoidLiteral", args, loc.reloc);
+        return quoter.compilerCall("astVoidLiteral", args, loc);
     }
 }
 
@@ -1926,12 +1927,12 @@ class ASTIfStatement : ASTStatement
             return quoter.compilerCall("astIf", [
                 test.case(ASTSymbol symbol: symbol.quote(quoter), ASTVarDeclStatement stmt: stmt.quote(quoter)),
                 then.quote(quoter),
-                quoter.compiler.astIdentifier("null", loc.reloc)], loc.reloc);
+                quoter.compiler.astIdentifier("null", loc)], loc);
         }
         return quoter.compilerCall("astIf", [
             test.case(ASTSymbol symbol: symbol.quote(quoter), ASTVarDeclStatement stmt: stmt.quote(quoter)),
             then.quote(quoter),
-            else_.quote(quoter)], loc.reloc);
+            else_.quote(quoter)], loc);
     }
 }
 
@@ -1969,13 +1970,13 @@ ASTStatement parseBreakCont(Parser parser, LexicalContext lexicalContext)
     {
         parser.expect(";");
         parser.commit;
-        return new ASTBreakStatement(loc.reloc);
+        return new ASTBreakStatement(loc);
     }
     if (identifier == "continue")
     {
         parser.expect(";");
         parser.commit;
-        return new ASTContinueStatement(loc.reloc);
+        return new ASTContinueStatement(loc);
     }
     parser.revert;
     return null;
@@ -2008,7 +2009,7 @@ class ASTScopeStatement : ASTStatement
     override ASTSymbol quote(Quoter quoter) {
         auto statements = [statement.quote(quoter) for statement in this.statements];
         return quoter.compilerCall(
-            "astScope", [quoter.compiler.astArrayLiteral(statements, this.loc.reloc)], this.loc.reloc);
+            "astScope", [quoter.compiler.astArrayLiteral(statements, this.loc)], this.loc);
     }
 }
 
@@ -2040,7 +2041,7 @@ class ASTSequenceStatement : ASTStatement
     override ASTSymbol quote(Quoter quoter) {
         auto statements = [arg.quote(quoter) for arg in this.statements];
         return quoter.compilerCall(
-            "astSequence", [quoter.compiler.astArrayLiteral(statements, this.loc.reloc)], this.loc.reloc);
+            "astSequence", [quoter.compiler.astArrayLiteral(statements, this.loc)], this.loc);
     }
 }
 
@@ -2173,28 +2174,28 @@ class ASTVarDeclStatement : ASTStatement
         // auto $foo = 5;
         // -> compiler.astDeclareVar(foo, compiler.astIntLiteral(5))
         if (this.name[0 .. 1] == "$") {
-            varName = quoter.compiler.astIdentifier(this.name[1 .. $], this.loc.reloc);
+            varName = quoter.compiler.astIdentifier(this.name[1 .. $], this.loc);
         } else {
-            varName = quoter.compiler.astStringLiteral(this.name, this.loc.reloc);
+            varName = quoter.compiler.astStringLiteral(this.name, this.loc);
         }
         if (this.infer) {
             return quoter.compilerCall("astDeclareVar", [
                 varName,
-                quoter.compiler.astBoolLiteral(this.mutable, this.loc.reloc),
-                this.initial.quote(quoter)], this.loc.reloc);
+                quoter.compiler.astBoolLiteral(this.mutable, this.loc),
+                this.initial.quote(quoter)], this.loc);
         }
         if (this.initial) {
             return quoter.compilerCall("astDeclareTypedVar", [
                 varName,
-                quoter.compiler.astBoolLiteral(this.mutable, this.loc.reloc),
+                quoter.compiler.astBoolLiteral(this.mutable, this.loc),
                 this.type.quote(quoter),
-                this.initial.quote(quoter)], this.loc.reloc);
+                this.initial.quote(quoter)], this.loc);
         }
         return quoter.compilerCall("astDeclareTypedVar", [
             varName,
-            quoter.compiler.astBoolLiteral(this.mutable, this.loc.reloc),
+            quoter.compiler.astBoolLiteral(this.mutable, this.loc),
             this.type.quote(quoter),
-            quoter.compiler.astIdentifier("null", this.loc.reloc)], this.loc.reloc);
+            quoter.compiler.astIdentifier("null", this.loc)], this.loc);
     }
 }
 
@@ -2398,9 +2399,9 @@ class ASTStatementExpression : ASTSymbol
 
     ASTSymbol expr;
 
-    ReLoc reloc;
+    Loc loc;
 
-    this(this.statements, this.expr, this.reloc) {
+    this(this.statements, this.expr, this.loc) {
         for (auto statement <- this.statements)
             assert(!!statement);
         assert(!!expr);
@@ -2408,7 +2409,6 @@ class ASTStatementExpression : ASTSymbol
 
     override Expression compile(Context context) {
         mut Context context = context;
-        auto loc = Loc(context.compiler.files, reloc);
         auto baseNamespace = context.namespace;
         auto statements = new Statement[](this.statements.length);
         for (int i <- 0 .. this.statements.length) {
@@ -2443,9 +2443,9 @@ class ASTStatementExpression : ASTSymbol
         for (int i <- 0 .. this.statements.length)
             quotedStatements[i] = this.statements[i].quote(quoter);
         return quoter.compilerCall("astStatementExpression", [
-            quoter.compiler.astArrayLiteral(quotedStatements, reloc),
+            quoter.compiler.astArrayLiteral(quotedStatements, loc),
             this.expr.quote(quoter)
-        ], reloc);
+        ], loc);
     }
 }
 
@@ -2462,7 +2462,7 @@ ASTStatementExpression parseStatementExpr(Parser parser, LexicalContext lexicalC
     if (statements.length == 0) parser.fail("expected at least one statement");
 
     if (auto exprStmt = statements[$ - 1].instanceOf(ASTExprStatement))
-        return new ASTStatementExpression(statements[0 .. $ - 1], exprStmt.value, loc.reloc);
+        return new ASTStatementExpression(statements[0 .. $ - 1], exprStmt.value, loc);
 
     parser.fail("last statement in statement expression must be an expression");
 }
@@ -2503,7 +2503,7 @@ class ASTForLoop : ASTStatement
             declareLoopVar.quote(quoter),
             condition.quote(quoter),
             step.quote(quoter),
-            body_.quote(quoter)], loc.reloc);
+            body_.quote(quoter)], loc);
     }
 }
 
@@ -2542,7 +2542,7 @@ class ASTStatementStatement : ASTStatement
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        return quoter.compiler.astIdentifier(variable, loc.reloc);
+        return quoter.compiler.astIdentifier(variable, loc);
     }
 }
 
@@ -2590,7 +2590,7 @@ ASTStatement parseExtFor(Parser parser, LexicalContext lexicalContext)
         auto body_ = parseStatement(parser, lexicalContext);
         parser.commit;
 
-        auto loopvar = compiler.astIdentifier(identifier, identifierLoc.reloc);
+        auto loopvar = compiler.astIdentifier(identifier, identifierLoc);
         if (auto_)
             return compiler.$stmt {
                 for (mut auto $identifier = $lower; $loopvar < $upper; $loopvar += 1) {
@@ -2636,7 +2636,7 @@ class ASTDestroy : ASTSymbol
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astDestroy", [target.quote(quoter)], loc.reloc);
+        return quoter.compilerCall("astDestroy", [target.quote(quoter)], loc);
     }
 }
 
@@ -3604,8 +3604,11 @@ ASTModule getModule(CompilerBase compiler, mut string filename, mut Package pak,
     assert(!!pak);
     if (ASTModule mod = config.astCache.find(path)) return mod;
 
-    string code = compiler.files.findFile(path);
-    Parser parser = new Parser(path, code, compiler.files);
+    string code = read(path);
+    // do not count references on the file source - it will end
+    // up with lots of small inc/decs to fragments that we never free anyway
+    (cast(size_t*) &code)[2] = 0;
+    Parser parser = new Parser(path, code);
 
     auto locAtModule = parser.loc;
     parser.expect("module");

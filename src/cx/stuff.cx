@@ -685,7 +685,7 @@ class ASTCall : ASTSymbol
                 auto member = accessMember(context, base, astMemberAccess.member, astMemberAccess.loc, true);
                 if (!member) {
                     auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
-                    auto callable = context.namespace.lookup(astMemberAccess.member, context, stackframe);
+                    auto callable = context.namespace.lookup(astMemberAccess.member, context, this.loc, stackframe);
                     // if `foo` has no `bar` but there is a `bar` symbol:
                     if (callable) {
                         // rewrite foo.bar(baz) to bar(foo, baz)
@@ -961,7 +961,7 @@ class ASTMember : ASTMemberBase
             auto member = accessMember(context, base, this.member, this.loc, true);
             if (!member) {
                 auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
-                auto callable = context.namespace.lookup(this.member, context, stackframe);
+                auto callable = context.namespace.lookup(this.member, context, this.loc, stackframe);
                 // if `foo` has no `bar` but there is a `bar` symbol:
                 if (callable) {
                     auto target = new ASTIdentifier(this.member, false, this.loc);
@@ -1830,10 +1830,10 @@ class SymbolAlias : Namespace
 
     this(this.parent, this.name, this.value) { this.isContextScope = parent.isContextScope; }
 
-    override Symbol lookup(string name, Context context, Expression frame)
+    override Symbol lookup(string name, Context context, Loc loc, Expression frame)
     {
         if (this.name == name) return value;
-        if (this.parent) return this.parent.lookup(name, context, frame);
+        if (this.parent) return this.parent.lookup(name, context, loc, frame);
         return null;
     }
 }
@@ -1845,7 +1845,7 @@ class NestedFunctionDeclaration : Namespace
     // TODO collision check
     this(this.parent, this.nestedFunction) { this.isContextScope = true; }
 
-    override Symbol lookup(string name, Context context, Expression frame)
+    override Symbol lookup(string name, Context context, Loc loc, Expression frame)
     {
         if (this.nestedFunction.name == name)
         {
@@ -1853,7 +1853,7 @@ class NestedFunctionDeclaration : Namespace
 
             return new ClassMethodPtr(new FunctionReference(this.nestedFunction), framePtr, true);
         }
-        if (this.parent) return this.parent.lookup(name, context, frame);
+        if (this.parent) return this.parent.lookup(name, context, loc, frame);
         return null;
     }
 }
@@ -1904,7 +1904,7 @@ class ASTIfStatement : ASTStatement
                 // TODO lookup() that handles the stackframe thing
                 auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
                 test = beExpression3(context,
-                    testSucceedsContext.namespace.lookup(vardecl.name, context, stackframe),
+                    testSucceedsContext.namespace.lookup(vardecl.name, context, this.loc, stackframe),
                     this.loc);
             }
         }
@@ -2827,15 +2827,15 @@ class Resolver
         entries[hit].resolution = symbol;
     }
 
-    Symbol lookup(Context context, string name)
+    Symbol lookup(Context context, Loc loc, string name)
     {
         int hit = cast(int) [first i for i, a in this.entries where a.name == name else -1];
         if (hit == -1) return null;
-        resolve(context, hit);
+        resolve(context, loc, hit);
         return this.entries[hit].resolution;
     }
 
-    void resolve(Context context, int i)
+    void resolve(Context context, Loc loc, int i)
     {
         if (!this.entries[i].resolution) {
             this.entries[i].resolution = this.entries[i].symbol.case(
@@ -2852,7 +2852,7 @@ class Resolver
     void resolveAll(Context context)
     {
         for (int i <- 0 .. this.entries.length) {
-            resolve(context, i);
+            resolve(context, __HERE__, i);
         }
         for (int i <- 0 .. this.entries.length) {
             if (auto class_ = this.entries[i].resolution.instanceOf(Class)) {
@@ -2966,27 +2966,27 @@ class Module : ModuleBase
         [symbol.emit(generator) for symbol in symbols];
     }
 
-    Symbol lookupPublic(Context context, string name)
+    Symbol lookupPublic(Context context, Loc loc, string name)
     {
         // not counting imports (non-transitive)
-        return this.resolver.lookup(context, name);
+        return this.resolver.lookup(context, loc, name);
     }
 
-    override Symbol lookup(string name, Context context, Expression frame)
+    override Symbol lookup(string name, Context context, Loc loc, Expression frame)
     {
         if (!!frame) { print("error: lookup with frame propagated to Module"); assert(false); }
 
-        if (Symbol public_ = this.lookupPublic(context, name)) return public_;
+        if (Symbol public_ = this.lookupPublic(context, loc, name)) return public_;
         for (auto import_ <- this.imports) {
             if (!import_.visible) continue;
             auto importMod = import_.mod;
             assert(!!importMod);
             if (!import_.symbols.length || [any a == name for a in import_.symbols]) {
-                if (Symbol entry = importMod.lookupPublic(context, name)) return entry;
+                if (Symbol entry = importMod.lookupPublic(context, loc, name)) return entry;
             }
         }
         if (this.parent)
-            return this.parent.lookup(name, context, frame);
+            return this.parent.lookup(name, context, loc, frame);
         return null;
     }
 }
@@ -3112,13 +3112,13 @@ class ImportNamespace : Namespace
         this.isContextScope = this.parent.isContextScope;
     }
 
-    override Symbol lookup(string name, Context context, Expression frame) {
+    override Symbol lookup(string name, Context context, Loc loc, Expression frame) {
         if (!symbols.length || [any symbol == name for symbol in symbols]) {
-            if (auto ret = module_.lookupPublic(context, name)) {
+            if (auto ret = module_.lookupPublic(context, loc, name)) {
                 return ret;
             }
         }
-        return this.parent.lookup(name, context, frame);
+        return this.parent.lookup(name, context, loc, frame);
     }
 }
 
@@ -3285,9 +3285,9 @@ class TemplateInstantiationNamespace : Namespace
 
     this(this.parent, this.parameterName, this.parameterType) { this.isContextScope = false; }
 
-    override Symbol lookup(string name, Context context, Expression frame) {
+    override Symbol lookup(string name, Context context, Loc loc, Expression frame) {
         if (name == parameterName) return parameterType;
-        return parent.lookup(name, context, frame);
+        return parent.lookup(name, context, loc, frame);
     }
 
     override string mangle() {

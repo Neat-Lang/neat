@@ -376,6 +376,8 @@ at_revision '68ba0902ebab759e4f251307ed93acbab6211a45' 'rebuild cx' 'build/cx'
 at_revision '23f10d32c39779ff77fbdab218e19ce5b40aa553' 'rebuild cx' 'build/cx'
 # transition Loc/ReLoc -> Loc with row/column directly
 at_revision '5a9e0b194c2a5fa394c3ae4338b7e36b48e549e8' 'macro_transition' 'build/cx'
+# add Loc parameter to lookup()
+at_revision '38ba877af6c2313437595bb54c3f2c729922d930' 'macro_transition' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

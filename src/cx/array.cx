@@ -32,11 +32,18 @@ import helpers;
  */
 class Array : Type
 {
-    Type elementType;
+    (Type | PendingSymbol) pendingElementType;
 
     BackendType backendType;
 
-    this(this.elementType) { assert(!!this.elementType); }
+    this(this.pendingElementType) {}
+
+    Type elementType() {
+        return this.pendingElementType.case(
+            Type t: t,
+            PendingSymbol s: beType(__HERE__, s.resolve)
+        );
+    }
 
     override BackendType emit(Platform platform)
     {
@@ -44,7 +51,8 @@ class Array : Type
         {
             BackendType[] types = new BackendType[](3);
             types[0] = platform.nativeWordType;
-            types[1] = new BackendPointerType(this.elementType.emit(platform));
+            // No Element type here; there would be an infinite recursion with self-referential types like JSONValue.
+            types[1] = platform.voidp;
             types[2] = platform.voidp;
             this.backendType = new BackendStructType(types);
         }
@@ -128,7 +136,12 @@ class ASTArray : ASTSymbol
 
     override Type compile(Context context)
     {
-        return new Array(beType(this.loc, this.elementType.compile(context)));
+        auto sym = this.elementType.compile(context);
+        if (auto pending = sym.instanceOf(PendingSymbol))
+        {
+            return new Array(pending);
+        }
+        return new Array(beType(this.loc, sym));
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -159,9 +172,11 @@ class ArrayLength : Expression
     override void hash(Hash hash) { hash.adds("ArrayLength"); this.arrayValue.hash(hash); }
 }
 
-int getArrayPtr(Generator output, Type arrayType, int arrayReg)
+int getArrayPtr(Generator output, Array arrayType, int arrayReg)
 {
-    return output.fun.field(arrayType.emit(output.platform), arrayReg, 1);
+    return output.fun.bitcast(
+        output.fun.field(arrayType.emit(output.platform), arrayReg, 1),
+        new BackendPointerType(arrayType.elementType.emit(output.platform)));
 }
 
 class ArrayPointer : Expression
@@ -178,7 +193,7 @@ class ArrayPointer : Expression
     {
         int arrayReg = this.arrayValue.emit(output);
 
-        return getArrayPtr(output, this.arrayValue.type, arrayReg);
+        return getArrayPtr(output, this.arrayValue.type.instanceOf(Array), arrayReg);
     }
 
     override ExprInfo info() { return ExprInfo(false, Ownership.global); }
@@ -214,8 +229,13 @@ class ArrayBase : Expression
 int makeArray(Generator output, Type elementType, int lenReg, int ptrReg, int baseReg)
 {
     BackendType structType = (new Array(elementType)).emit(output.platform);
+    auto voidp = output.platform.voidp;
 
-    return output.fun.structLiteral(structType, [lenReg, ptrReg, baseReg]);
+    return output.fun.structLiteral(structType, [
+        lenReg,
+        output.fun.bitcast(ptrReg, voidp),
+        baseReg
+    ]);
 }
 
 // TODO use this as a basis for all array-allocating expressions

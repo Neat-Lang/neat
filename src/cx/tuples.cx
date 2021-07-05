@@ -274,6 +274,31 @@ class TupleType : Type
     }
 }
 
+/**
+ * Tuple with pending member type
+ */
+class PendingTuple : PendingSymbol
+{
+    Loc loc;
+
+    (string name, (PendingSymbol | Type) sym)[] members;
+
+    this(this.loc, this.members) { }
+
+    override Symbol resolve() {
+        mut (string name, Type)[] result;
+        for (int i <- 0 .. members.length) {
+            string name = members[i].name;
+            auto sym = members[i].sym;
+            result ~= (name, sym.case(
+                Type t: t,
+                PendingSymbol s: beType(this.loc, s.resolve)
+            ));
+        }
+        return new TupleType(result);
+    }
+}
+
 class ASTTupleType : ASTSymbol
 {
     Loc loc;
@@ -282,10 +307,21 @@ class ASTTupleType : ASTSymbol
 
     this(this.loc, this.members) { }
 
-    override Type compile(Context context) {
+    override Symbol compile(Context context) {
+        Symbol[] syms = [member.type.compile(context) for member in this.members];
+        if ([any s.instanceOf(PendingSymbol) for s in syms]) {
+            mut (string name, (PendingSymbol | Type) sym)[] result;
+            for (int i <- 0 .. this.members.length) {
+                if (auto ps = syms[i].instanceOf(PendingSymbol))
+                    result ~= (members[i].name, ps);
+                else
+                    result ~= (members[i].name, beType(this.loc, syms[i]));
+            }
+            return new PendingTuple(this.loc, result);
+        }
         return new TupleType([
-            (member.name, beType(this.loc, member.type.compile(context)))
-            for member in this.members]);
+            (member.name, beType(this.loc, syms[i]))
+            for i, member in this.members]);
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTTupleType'!"); assert(false); }

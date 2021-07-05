@@ -2797,9 +2797,30 @@ string mangleModuleName(string name, Package pak)
 
 struct Nothing { }
 
+class NotYetResolvedSymbol : PendingSymbol
+{
+    Resolver resolver;
+
+    int index;
+
+    Loc loc;
+
+    this(this.resolver, this.index, this.loc) { }
+
+    override Symbol resolve() {
+        auto entry = resolver.entries[index];
+        if (!entry.resolution) {
+            loc.fail("Dependency cycle while resolving " ~ entry.name ~ ".");
+        }
+        return entry.resolution;
+    }
+}
+
 struct ResolvingModuleEntry
 {
     string name;
+
+    bool resolving;
 
     Symbol resolution;
 
@@ -2814,14 +2835,14 @@ class Resolver
 
     void add(string name, (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) astSymbol)
     {
-        this.entries ~= ResolvingModuleEntry(name, null, astSymbol);
+        this.entries ~= ResolvingModuleEntry(name, false, null, astSymbol);
     }
 
     void register(string name, Symbol symbol)
     {
         int hit = cast(int) [first i for i, a in this.entries where a.name == name else -1];
         if (hit == -1) {
-            entries ~= ResolvingModuleEntry(name, symbol, Nothing());
+            entries ~= ResolvingModuleEntry(name, false, symbol, Nothing());
             return;
         }
         entries[hit].resolution = symbol;
@@ -2831,6 +2852,9 @@ class Resolver
     {
         int hit = cast(int) [first i for i, a in this.entries where a.name == name else -1];
         if (hit == -1) return null;
+        if (this.entries[hit].resolving) {
+            return new NotYetResolvedSymbol(this, hit, loc);
+        }
         resolve(context, loc, hit);
         return this.entries[hit].resolution;
     }
@@ -2838,6 +2862,11 @@ class Resolver
     void resolve(Context context, Loc loc, int i)
     {
         if (!this.entries[i].resolution) {
+            if (this.entries[i].resolving)
+            {
+                loc.fail("Dependency cycle while resolving " ~ this.entries[i].name ~ ".");
+            }
+            this.entries[i].resolving = true;
             this.entries[i].resolution = this.entries[i].symbol.case(
                 // TODO compile function statement immediately too
                 ASTFunction fun: fun.compile(context),
@@ -2846,6 +2875,7 @@ class Resolver
                 ASTStructDecl decl: decl.compile(context),
                 ASTAliasDecl decl: decl.target.compile(context),
                 Nothing _: ({ assert(false); cast(Symbol) null; }));
+            this.entries[i].resolving = false;
         }
     }
 
@@ -2922,11 +2952,11 @@ class Module : ModuleBase
         this.resolver.resolveAll(context);
     }
 
-    void walkModules(void delegate(Module) cb)
+    void walkModules(bool delegate(Module) cb)
     {
-        cb(this);
         if (this.parentModule)
             this.parentModule.walkModules(cb);
+        if (!cb(this)) return;
         [import_.mod.walkModules(cb) for import_ in imports];
     }
 

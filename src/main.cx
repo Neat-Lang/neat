@@ -123,10 +123,9 @@ class CompilationVisitor
     void visit(FinishedSymbol sym) {}
 }
 
-BackgroundCompilation emitModule(CompilerBase compiler, ObjectCache cache, Backend backend, Platform platform,
-    Module module_, CompilationVisitor[] visitors, bool opt, bool m32, bool caching, bool forMacro)
+BackgroundCompilation emitModule(Module module_, CompilationVisitor[] visitors, BuildSettings settings)
 {
-    auto backendModule = backend.createModule(platform, module_.loc.toBackendLoc, forMacro);
+    auto backendModule = settings.backend.createModule(settings.platform, module_.loc.toBackendLoc, settings.forMacro);
     auto backendModuleLLVM = backendModule.instanceOf(LLVMBackendModule);
     auto backendModuleC = backendModule.instanceOf(CBackendModule);
     auto hash = new Hash;
@@ -139,13 +138,13 @@ BackgroundCompilation emitModule(CompilerBase compiler, ObjectCache cache, Backe
         mut string exec;
         mut string[] args;
         if (backendModuleLLVM) {
-            if (opt) { exec = "sh"; args = [".obj/llvmBuildOpt.sh", src, obj]; }
+            if (settings.optimize) { exec = "sh"; args = [".obj/llvmBuildOpt.sh", src, obj]; }
             else { exec = "sh"; args = [".obj/llvmBuild.sh", src, obj]; }
-            assert(!m32);
+            assert(!settings.x86_32);
         } else {
-            if (opt) { exec = "gcc"; args = ["-c", "-fpic", "-O3", src, "-o", obj]; }
+            if (settings.optimize) { exec = "gcc"; args = ["-c", "-fpic", "-O3", src, "-o", obj]; }
             else { exec = "gcc"; args = ["-c", "-fpic", src, "-o", obj]; }
-            if (m32) args ~= "-m32";
+            if (settings.x86_32) args ~= "-m32";
         }
         string cmd = exec ~ " " ~ args.join(" ");
         int pid = cxruntime_execbg(exec, args);
@@ -155,26 +154,26 @@ BackgroundCompilation emitModule(CompilerBase compiler, ObjectCache cache, Backe
 
     if (backendModuleLLVM) hash.adds("LLVM");
     else hash.adds("gcc");
-    if (m32) hash.adds("m32");
-    if (opt) hash.adds("opt");
+    if (settings.x86_32) hash.adds("m32");
+    if (settings.optimize) hash.adds("opt");
     // Macros and binaries must not share objects!
     // Macros have special magic to avoid dlopen issues.
-    if (forMacro) hash.adds("macro");
+    if (settings.forMacro) hash.adds("macro");
 
     string moduleMangle = module_.mangle;
     hash.adds(moduleMangle);
 
     string earlyHash = hash.text;
-    if (cache.has(earlyHash)) {
-        return cache.get(earlyHash);
+    if (settings.objectCache.has(earlyHash)) {
+        return settings.objectCache.get(earlyHash);
     }
 
-    auto symbols = module_.compile(compiler, platform);
+    auto symbols = module_.compile(settings.compiler, settings.platform);
     [symbol.hash(hash) for symbol in symbols];
     [[visitor.visit(symbol) for symbol in symbols] for visitor in visitors];
 
     mut string objFile = ".obj/" ~ hash.text ~ ".o";
-    if (backendModuleLLVM && opt) {
+    if (backendModuleLLVM && settings.optimize) {
         objFile = ".obj/" ~ hash.text ~ ".bc";
     }
 
@@ -186,13 +185,13 @@ BackgroundCompilation emitModule(CompilerBase compiler, ObjectCache cache, Backe
         srcFile = ".obj/" ~ compress(removeSlashes(moduleMangle)) ~ ".c";
     }
 
-    if (caching && exists(objFile) && exists(srcFile)) {
+    if (settings.caching && exists(objFile) && exists(srcFile)) {
         // preexisting object
-        cache.add(earlyHash, hash, srcFile, objFile, 0);
+        settings.objectCache.add(earlyHash, hash, srcFile, objFile, 0);
         return BackgroundCompilation(hash, srcFile, objFile, 0);
     }
 
-    auto generator = new Generator(platform, backendModule);
+    auto generator = new Generator(settings.platform, backendModule);
     module_.emit(generator, symbols);
     backendModule.done;
 
@@ -211,7 +210,7 @@ BackgroundCompilation emitModule(CompilerBase compiler, ObjectCache cache, Backe
         }
         pid = build(srcFile, objFile);
     }
-    cache.add(earlyHash, hash, srcFile, objFile, pid);
+    settings.objectCache.add(earlyHash, hash, srcFile, objFile, pid);
     return BackgroundCompilation(hash, srcFile, objFile, pid);
 }
 
@@ -229,11 +228,11 @@ class UnittestVisitor : CompilationVisitor
     }
 }
 
-class ParserHelperImpl : ParserHelper
+class BuildSettings
 {
     CompilerBase compiler;
 
-    ObjectCache cache;
+    ObjectCache objectCache;
 
     Backend backend;
 
@@ -241,79 +240,101 @@ class ParserHelperImpl : ParserHelper
 
     bool caching;
 
+    bool optimize;
+
+    bool forMacro;
+
     PlatformFlags platformFlags;
 
-    this(this.compiler, this.cache, this.backend, this.x86_32, this.caching, this.platformFlags) { }
-
-    // TODO why do we need 'config'?
-    override void proxyCall(ASTModule astModule, string function_, MacroState macroState, ModuleParserConfig config)
-    {
-        print("# stageM");
+    Platform platform() {
         mut BackendType macroWordType;
         if (x86_32) macroWordType = new BackendIntType;
         else macroWordType = new BackendLongType;
-        auto platform = new Platform(macroWordType, platformFlags);
+        return new Platform(macroWordType, platformFlags);
+    }
 
-        // throwaway compilation (TODO cache?)
-        auto context = makeContext(compiler, platform, null, astModule.macroState);
-        Module module_ = compileModule(context, astModule, true);
+    this(this.compiler, this.objectCache, this.backend, this.x86_32, this.caching, this.platformFlags, this.optimize, this.forMacro) { }
+}
+
+(string[] objFiles, string[] intermediateFiles, Module module_, Hash hash) buildAstModule(
+    ASTModule astModule, BuildSettings settings, CompilationVisitor[] visitors)
+{
+    auto context = makeContext(settings.compiler, settings.platform, null, astModule.macroState);
+    Module module_ = compileModule(context, astModule, addDefaultImports=true);
+
+    mut string[] objFiles;
+    mut string[] intermediateFiles;
+    mut int[] pids;
+
+    auto allModules = new ModuleSet(0);
+    bool add(Module mod) { return allModules.add(mod); }
+    module_.walkModules(&add);
+
+    auto hash = new Hash;
+    hash.addl(__GENERATION__);
+    mut auto remainingModules = allModules.array;
+    while (remainingModules.length > 0) {
+        for (auto remainingModule <- remainingModules) {
+            auto compilation = emitModule(remainingModule, visitors, settings);
+            objFiles ~= compilation.objFile;
+            intermediateFiles ~= compilation.srcFile;
+            with (compilation.hash.state) hash.apply(add, mult);
+            if (compilation.pid != 0) pids ~= compilation.pid;
+        }
+        auto remainingSet = new ModuleSet(0);
+        auto currentSet = new ModuleSet(0); // loop breaker
+        // TODO add()
+        bool add2(Module mod) {
+            if (allModules.add(mod)) {
+                remainingSet.add(mod);
+            }
+            return currentSet.add(mod);
+        }
+        module_.walkModules(&add2);
+        remainingModules = remainingSet.array;
+    }
+
+    [settings.objectCache.waitpid(pid) for pid in pids];
+
+    return (objFiles, intermediateFiles, module_, hash);
+}
+
+class ParserHelperImpl : ParserHelper
+{
+    BuildSettings settings;
+
+    this(this.settings) { }
+
+    override void proxyCall(ASTModule astModule, string function_, MacroState macroState)
+    {
+        print("# stageM");
+        auto result = buildAstModule(astModule, this.settings, []);
+        string objFiles = [join "" " " ~ a for a in result.objFiles];
 
         mut string baseCmd;
-        if (backend.instanceOf(LLVMBackend)) baseCmd = "clang -Wno-unused-command-line-argument -fpic";
-        else if (backend.instanceOf(CBackend)) baseCmd = "gcc -fpic";
+        if (settings.backend.instanceOf(LLVMBackend)) baseCmd = "clang -Wno-unused-command-line-argument -fpic";
+        else if (settings.backend.instanceOf(CBackend)) baseCmd = "gcc -fpic";
         else assert(false);
-        if (x86_32) baseCmd ~= " -m32";
+        if (settings.x86_32) baseCmd ~= " -m32";
 
-        auto libHash = new Hash;
-        mut string objFiles;
-        mut int[] pids;
-
-        auto allModules = new ModuleSet(0);
-        bool add(Module mod) { return allModules.add(mod); }
-        module_.walkModules(&add);
-
-        mut auto remainingModules = allModules.array;
-        while (remainingModules.length > 0) {
-            for (auto remainingModule <- remainingModules) {
-                auto compilation = emitModule(
-                    compiler, cache, backend, platform, remainingModule, [], false, x86_32, caching, true);
-                objFiles ~= " " ~ compilation.objFile;
-                pids ~= compilation.pid;
-                with (compilation.hash.state) libHash.apply(add, mult);
-            }
-            auto remainingSet = new ModuleSet(0);
-            auto currentSet = new ModuleSet(0); // loop breaker
-            // TODO add()
-            bool add2(Module mod) {
-                if (allModules.add(mod)) {
-                    remainingSet.add(mod);
-                }
-                return currentSet.add(mod);
-            }
-            module_.walkModules(&add2);
-            remainingModules = remainingSet.array;
-        }
-
-        [cache.waitpid(pid) for pid in pids];
-
-        auto simpleContext = makeContext(compiler, platform, null, null);
-        auto fun = module_.lookup(function_, simpleContext, __HERE__, null).instanceOf(Function);
+        auto simpleContext = makeContext(settings.compiler, settings.platform, null, null);
+        auto fun = result.module_.lookup(function_, simpleContext, __HERE__, null).instanceOf(Function);
         string name = fun.mangle;
         mut string soname;
         mut string cmd;
-        if (backend.instanceOf(LLVMBackend)) {
-            soname = ".obj/macro_" ~ name ~ "_" ~ libHash.text ~ ".so";
+        if (settings.backend.instanceOf(LLVMBackend)) {
+            soname = ".obj/macro_" ~ name ~ "_" ~ result.hash.text ~ ".so";
             cmd = baseCmd ~ " -shared" ~ objFiles ~ " -o " ~ soname;
         }
-        else if (backend.instanceOf(CBackend)) {
-            soname = ".obj/macro_" ~ name ~ "_" ~ libHash.text ~ ".so";
+        else if (settings.backend.instanceOf(CBackend)) {
+            soname = ".obj/macro_" ~ name ~ "_" ~ result.hash.text ~ ".so";
             mut string flags = " -shared -g";
-            if (platform.nativeWordType.instanceOf(BackendIntType)) flags ~= " -m32";
+            if (settings.x86_32) flags ~= " -m32";
             cmd = baseCmd ~ flags ~ objFiles ~ " -o " ~ soname;
         }
         else assert(false);
 
-        if (!caching || !exists(soname)) {
+        if (!settings.caching || !exists(soname)) {
             print("$ " ~ cmd);
             cxruntime_system(cmd);
         }
@@ -1234,10 +1255,6 @@ void main(mut string[] args)
     createBuilderScripts;
 
     auto builtins = new ASTModule(__HERE__, "", new Package("builtins", ""), new MacroState, null);
-    mut BackendType nativeWordType;
-    if (options.x86_32) nativeWordType = new BackendIntType;
-    else nativeWordType = new BackendLongType;
-    auto platform = new Platform(nativeWordType, options.platformFlags);
 
     builtins.addSymbolAlias("string", new FixedSymbolAlias(new Array(new Character)));
     builtins.addSymbolAlias("bool", new FixedSymbolAlias(new Integer));
@@ -1248,28 +1265,24 @@ void main(mut string[] args)
     builtins.addSymbolAlias("__GENERATION__", new FixedSymbolAlias(new IntLiteral(options.generation)));
 
     auto defaultImports = new ASTModule[](0) ~ builtins;
-    auto compilerImpl = new CompilerImpl(defaultImports, options.cFlags);
+    auto compiler = new CompilerImpl(defaultImports, options.cFlags);
     auto astCache = new ASTModuleCache;
     auto objectCache = new ObjectCache;
     auto modParseConfig = new ModuleParserConfig(packages, defaultImports, astCache);
-    auto helper = new ParserHelperImpl(
-        compilerImpl, objectCache, options.macroBackend,
-        options.macro_x86_32, options.caching, options.macroPlatformFlags);
+    auto settings = new BuildSettings(compiler, objectCache, options.backend,
+        x86_32=options.x86_32, caching=options.caching, platformFlags=options.platformFlags,
+        optimize=options.optimize, forMacro=false);
+    auto macroSettings = new BuildSettings(compiler, objectCache, options.macroBackend,
+        x86_32=options.macro_x86_32, caching=options.caching, platformFlags=options.macroPlatformFlags,
+        optimize=false, forMacro=true);
+    auto helper = new ParserHelperImpl(macroSettings);
 
     Module compile(ASTModule astMod, bool addDefaultImports) {
-        auto context = makeContext(compilerImpl, platform, null, astMod.macroState);
+        auto context = makeContext(compiler, settings.platform, null, astMod.macroState);
         return compileModule(context, astMod, addDefaultImports);
     }
-    compilerImpl.compile = &compile;
-    auto astToplevel = getModule(compilerImpl, args[0], null, false, helper, modParseConfig, __HERE__);
-    auto toplevel = compile(astToplevel, true);
-
-    mut string baseFlags;
-    if (options.optimize) baseFlags ~= " -Ofast";
-    if (options.x86_32) baseFlags ~= " -m32";
-
-    if (options.backend.instanceOf(LLVMBackend) && options.optimize)
-        baseFlags ~= " -flto";
+    compiler.compile = &compile;
+    auto astModule = getModule(compiler, args[0], null, false, helper, modParseConfig, __HERE__);
 
     mut CompilationVisitor[] compilationVisitors;
     UnittestVisitor unittestVisitor = new UnittestVisitor;
@@ -1278,55 +1291,24 @@ void main(mut string[] args)
         compilationVisitors ~= unittestVisitor;
     }
 
-    auto allModules = new ModuleSet(0);
-    bool add(Module mod) {
-        return allModules.add(mod);
-    }
-    toplevel.walkModules(&add);
-    auto binHash = new Hash;
-    mut auto remainingModules = allModules.array;
-
-    binHash.addl(options.generation);
-
-    mut string fileArgs;
-    mut string[] intermediates;
-    mut int[] pids;
-    while (remainingModules.length > 0) {
-        for (auto remainingModule <- remainingModules) {
-            auto compilation = emitModule(compilerImpl, objectCache, options.backend, platform, remainingModule,
-                compilationVisitors, options.optimize, options.x86_32, options.caching, false);
-            fileArgs ~= " " ~ compilation.objFile;
-            intermediates ~= compilation.srcFile;
-            with (compilation.hash.state) binHash.apply(add, mult);
-            if (compilation.pid != 0) pids ~= compilation.pid;
-        }
-        auto remainingSet = new ModuleSet(0);
-        auto currentSet = new ModuleSet(0); // loop breaker
-        // TODO add()
-        bool add2(Module mod) {
-            if (allModules.add(mod)) {
-                remainingSet.add(mod);
-            }
-            return currentSet.add(mod);
-        }
-        toplevel.walkModules(&add2);
-        remainingModules = remainingSet.array;
-    }
-
-    [objectCache.waitpid(pid) for pid in pids];
+    auto result = buildAstModule(
+        astModule, settings, compilationVisitors);
+    mut string fileArgs = [join "" " " ~ a for a in result.objFiles];
+    string[] intermediateFiles = result.intermediateFiles;
 
     if (options.umlFile != "") {
-        compilerImpl.stats.instanceOf(UmlClassGraph).writeTo(options.umlFile);
+        compiler.stats.instanceOf(UmlClassGraph).writeTo(options.umlFile);
     }
 
-    string binHashOutput = ".obj/hash_" ~ binHash.text ~ ".c";
-    with (binHash.state) {
+    string binHashOutput = ".obj/hash_" ~ result.hash.text ~ ".c";
+    with (result.hash.state) {
         write(binHashOutput,
 "long long int compiler_hash_add() { return " ~ ltoa(add) ~ "LL; }
 long long int compiler_hash_mult() { return " ~ ltoa(mult) ~ "LL; }
 "       );
     }
     fileArgs ~= " " ~ binHashOutput;
+    mut auto intermediates = result.intermediateFiles;
     intermediates ~= binHashOutput;
 
     string unittestCode() {
@@ -1353,25 +1335,32 @@ long long int compiler_hash_mult() { return " ~ ltoa(mult) ~ "LL; }
     }
 
     if (options.dontLink) {
-        compilerImpl.clear;
+        compiler.clear;
         clearOnceCache;
         return;
     }
+
+    mut string baseFlags;
+    if (options.optimize) baseFlags ~= " -Ofast";
+    if (options.x86_32) baseFlags ~= " -m32";
+
+    if (options.backend.instanceOf(LLVMBackend) && options.optimize)
+        baseFlags ~= " -flto";
 
     // int pid = getpid;
     // cxruntime_system("cat /proc/" ~ itoa(pid) ~ "/status");
     mut string flags = baseFlags ~ " -rdynamic";
     mut string linkerFlags = " -ldl";
     for (auto linkerArg <- options.linkerArgs) linkerFlags ~= " " ~ linkerArg;
-    mut string compiler = "clang -Wno-unused-command-line-argument -Wno-unknown-attributes -fpic";
-    if (options.backend.instanceOf(CBackend)) compiler = "gcc";
+    mut string compilerCmd = "clang -Wno-unused-command-line-argument -Wno-unknown-attributes -fpic";
+    if (options.backend.instanceOf(CBackend)) compilerCmd = "gcc";
     if (options.noMain)
         flags ~= " -DCX_NO_MAIN";
     string runtime = execPath ~ "/src/runtime.c";
-    string cmd = compiler ~ flags ~ fileArgs ~ " " ~ runtime ~ " -o " ~ options.output ~ linkerFlags;
+    string cmd = compilerCmd ~ flags ~ fileArgs ~ " " ~ runtime ~ " -o " ~ options.output ~ linkerFlags;
     print("$ " ~ cmd);
     cxruntime_system(cmd);
-    compilerImpl.clear;
+    compiler.clear;
     clearOnceCache;
 }
 

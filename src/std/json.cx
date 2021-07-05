@@ -3,20 +3,70 @@ module std.json;
 macro import cx.macros.assert;
 macro import cx.macros.listcomprehension;
 
+import package(compiler).cx.parser;
+import package(compiler).cx.parser_base;
+
 import std.string;
 
 struct JSONValue
 {
-    (bool | float | string | JSONValue[] | (string key, JSONValue value)[]) value;
+    (:false | :true | int | string | JSONValue[] | (string key, JSONValue value)[]) value;
+
+    static JSONValue parse(string str) {
+        auto parser = new Parser("", str);
+        auto ret = jsonParseImpl(parser);
+        if (!parser.eof) parser.fail("text after json");
+        return ret;
+    }
+}
+
+unittest
+{
+    auto value = JSONValue([("Hello", JSONValue("World"))]);
+    assert(value.str == "{\"Hello\": \"World\"}");
+    assert(JSONValue.parse("{\"Hello\": \"World\"}").str == "{\"Hello\": \"World\"}");
+    // TODO
+    // auto value = JSONValue({ "Hello": "World" });
+}
+
+JSONValue jsonParseImpl(Parser parser) {
+    if (parser.accept("\"")) {
+        return JSONValue(parseStringLiteral(parser));
+    }
+    parser.parseNumber.case {
+        (:failure): {}
+        int value: return JSONValue(value);
+    }
+    if (parser.accept("[")) {
+        mut JSONValue[] entries;
+        if (!parser.accept("]")) while (true) {
+            entries ~= jsonParseImpl(parser);
+            if (parser.accept("]")) break;
+            parser.expect(",");
+        }
+        return JSONValue(entries);
+    }
+    if (parser.accept("{")) {
+        mut (string key, JSONValue val)[] entries;
+        if (!parser.accept("}")) while (true) {
+            parser.expect("\"");
+            auto key = parseStringLiteral(parser);
+            parser.expect(":");
+            auto value = jsonParseImpl(parser);
+            entries ~= (key, value);
+            if (parser.accept("}")) break;
+            parser.expect(",");
+        }
+        return JSONValue(entries);
+    }
+    parser.fail("unexpected input");
 }
 
 string str(JSONValue jv) {
     jv.value.case {
-        bool b: {
-            if (b) return "true";
-            else return "false";
-        }
-        float f: return ftoa(f);
+        (:false): return "false";
+        (:true): return "true";
+        int i: return itoa(i);
         string s: return quote(s);
         JSONValue[] array:
             return "[" ~ [join ", " v.str for v in array] ~ "]";
@@ -34,10 +84,74 @@ string quote(string s) {
     return "\"" ~ quoted ~ "\"";
 }
 
-unittest
+(:failure | int) parseNumber(Parser parser)
 {
-    auto value = JSONValue([("Hello", JSONValue("World"))]);
-    assert(value.str == "{\"Hello\": \"World\"}");
-    // TODO
-    // auto value = json({ "Hello": "World" });
+    parser.begin;
+    mut bool negative = parser.accept("-");
+    if (parser.accept("-"))
+        negative = true;
+    parser.strip;
+    if (parser.eof || !isDigit(parser.text[0]))
+    {
+        parser.revert;
+        return :failure;
+    }
+    mut string number;
+    while (!parser.eof && isDigit(parser.text[0]))
+    {
+        number ~= parser.text[0];
+        parser.drop(1);
+    }
+    parser.commit;
+    mut int i = atoi(number);
+    if (negative) i = -i;
+    return i;
+}
+
+string parseStringLiteral(Parser parser)
+{
+    mut int matchLen;
+    auto loc = parser.loc;
+    string start = parser.text;
+    while (parser.text[0 .. 1] != "\"") {
+        if (parser.text.length == 0) {
+            parser.fail("expected end of string, got end of file");
+        }
+        if (parser.text[0 .. 1] == "\\") {
+            matchLen = matchLen + 1;
+            parser.drop(1);
+        }
+        matchLen = matchLen + 1;
+        parser.drop(1);
+    }
+    string str = start[0 .. matchLen];
+    if (!parser.accept("\"")) {
+        parser.fail("this should never happen");
+    }
+
+    return replaceEscapes(str);
+}
+
+string replaceEscapes(string text) {
+    mut string result;
+    mut int i;
+    while (i < text.length) {
+        string ch = text[i .. i + 1];
+        i += 1;
+        if (ch == "\\") {
+            string ctl = text[i .. i + 1];
+            i += 1;
+            if (ctl == "\"") {
+                result ~= "\"";
+            } else if (ctl == "\\") {
+                result ~= "\\";
+            } else {
+                print("Unknown control sequence \\" ~ ctl);
+                assert(false);
+            }
+        } else {
+            result ~= ch;
+        }
+    }
+    return result;
 }

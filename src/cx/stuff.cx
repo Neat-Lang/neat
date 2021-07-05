@@ -2746,11 +2746,15 @@ class ASTModule : ASTModuleBase
     // because we hit a macro declaration
     ASTModule parent;
 
+    int depth; // count from parent = null
+
     (ASTImport | ASTSymbol | ASTExtern | ASTFunction
         | ASTSymbolAlias | ASTTemplateDecl | ASTUnitTest
     )[] entries;
 
-    this(this.loc, this.name, this.pak, this.macroState, this.parent) { }
+    this(this.loc, this.name, this.pak, this.macroState, this.parent) {
+        if (this.parent) this.depth = this.parent.depth + 1;
+    }
 
     void addSymbolAlias(string name, ASTSymbol symbol)
     {
@@ -2759,7 +2763,6 @@ class ASTModule : ASTModuleBase
 
     ASTSymbol getSymbolAlias(string name) {
         for (auto entry <- entries) {
-            mut ASTSymbol ret;
             entry.case {
                 ASTImport: {}
                 ASTExtern: {}
@@ -2768,17 +2771,15 @@ class ASTModule : ASTModuleBase
                 ASTSymbol: {}
                 ASTTemplateDecl: {}
                 ASTSymbolAlias alias_: {
-                    if (alias_.name == name) ret = alias_.symbol;
+                    if (alias_.name == name) return alias_.symbol;
                 }
             }
-            // TODO lifetime check return member from case
-            if (ret) return ret;
         }
         return null;
     }
 }
 
-string mangleModuleName(string name, Package pak)
+string mangleModuleName(string name, Package pak, int depth)
 {
     // TODO non-nullable by default
     assert(!!pak);
@@ -2792,7 +2793,10 @@ string mangleModuleName(string name, Package pak)
     if (pak.name == "compiler") patchedPakName = "compiler" ~ itoa(__GENERATION__);
     else patchedPakName = pak.name;
 
-    return patchedPakName ~ "_module_" ~ mangledName;
+    string combined = patchedPakName ~ "_module_" ~ mangledName;
+
+    if (depth) return combined ~ "_d" ~ itoa(depth);
+    return combined;
 }
 
 struct Nothing { }
@@ -3015,8 +3019,9 @@ class Module : ModuleBase
                 if (Symbol entry = importMod.lookupPublic(context, loc, name)) return entry;
             }
         }
-        if (this.parent)
-            return this.parent.lookup(name, context, loc, frame);
+        assert(!this.parent);
+        if (this.parentModule)
+            return this.parentModule.lookup(name, context, loc, frame);
         return null;
     }
 }
@@ -3246,7 +3251,7 @@ class ASTModuleCache
 }
 
 string astModuleKey(string base, ASTModule mod) {
-    return base ~ "_" ~ mod.pak.name ~ "_" ~ mod.name;
+    return base ~ "_" ~ mod.pak.name ~ "_" ~ mod.name ~ "_d" ~ itoa(mod.depth);
 }
 
 class ModuleParserConfig
@@ -3562,7 +3567,7 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultModule
         parent = compileModule(context, astModule.parent, addDefaultModules);
     }
 
-    string mangledName = mangleModuleName(astModule.name, astModule.pak);
+    string mangledName = mangleModuleName(astModule.name, astModule.pak, astModule.depth);
     Module module_ = new Module(astModule.loc, astModule.name, mangledName, parent);
     auto context = context.withNamespace(module_);
 

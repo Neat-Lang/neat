@@ -418,16 +418,16 @@ class ASTSizeT : ASTSymbol
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTSizeT'!"); assert(false); }
 }
 
-class UmlClassGraph : GlobalStats
+class UmlVisitor : CompilationVisitor
 {
     (string base, string child)[] inheritance;
 
     this() { }
 
-    override void observe(Type type) {
-        if (auto class_ = type.instanceOf(Class)) {
-            if (class_.superClass) {
-                auto pair = (class_.superClass.name, class_.name);
+    override void visit(FinishedSymbol sym) {
+        if (auto defClass = sym.instanceOf(DefineClass)) {
+            if (defClass.class_.superClass) {
+                auto pair = (defClass.class_.superClass.name, defClass.class_.name);
                 // TODO
                 // if (![any a == pair for a in this.inheritance])
                 if (![any a[0] == pair[0] && a[1] == pair[1] for a in this.inheritance])
@@ -630,6 +630,23 @@ void clearOnceCache() {
     cxruntime_cache_clear();
 }
 
+ASTModule builtinSymbols(Options options) {
+    auto builtins = new ASTModule(__HERE__, "", new Package("builtins", ""), new MacroState, null);
+
+    builtins.addSymbolAlias("string", new FixedSymbolAlias(new Array(new Character)));
+    // TODO dedi build type
+    builtins.addSymbolAlias("bool", new FixedSymbolAlias(new Integer));
+    builtins.addSymbolAlias("size_t", new ASTSizeT);
+    builtins.addSymbolAlias("true", new FixedSymbolAlias(new IntLiteral(1)));
+    builtins.addSymbolAlias("false", new FixedSymbolAlias(new IntLiteral(0)));
+    builtins.addSymbolAlias("null", new FixedSymbolAlias(new NullExpr(new Pointer(new Void))));
+    builtins.addSymbolAlias("__GENERATION__", new FixedSymbolAlias(new IntLiteral(options.generation)));
+    return builtins;
+}
+
+void buildBinary(Options options) {
+}
+
 void main(mut string[] args)
 {
     string executable = args[0];
@@ -641,6 +658,7 @@ void main(mut string[] args)
     options.parseConfig(execPath ~ "/cx.ini");
     args = options.parseArgs(args);
     Package[] packages = options.astPackages.resolvePackages(execPath);
+    auto mainFile = args[0];
 
     if (args.length != 1)
     {
@@ -652,18 +670,9 @@ void main(mut string[] args)
     cxruntime_system("mkdir -p .obj");
     createBuilderScripts;
 
-    auto builtins = new ASTModule(__HERE__, "", new Package("builtins", ""), new MacroState, null);
-
-    builtins.addSymbolAlias("string", new FixedSymbolAlias(new Array(new Character)));
-    builtins.addSymbolAlias("bool", new FixedSymbolAlias(new Integer));
-    builtins.addSymbolAlias("size_t", new ASTSizeT);
-    builtins.addSymbolAlias("true", new FixedSymbolAlias(new IntLiteral(1)));
-    builtins.addSymbolAlias("false", new FixedSymbolAlias(new IntLiteral(0)));
-    builtins.addSymbolAlias("null", new FixedSymbolAlias(new NullExpr(new Pointer(new Void))));
-    builtins.addSymbolAlias("__GENERATION__", new FixedSymbolAlias(new IntLiteral(options.generation)));
-
-    auto defaultImports = new ASTModule[](0) ~ builtins;
-    auto compiler = new CompilerImpl(defaultImports, options.cFlags, new UmlClassGraph);
+    auto builtins = builtinSymbols(options);
+    auto defaultImports = [builtins];
+    auto compiler = new CompilerImpl(defaultImports, options.cFlags);
     auto astCache = new ASTModuleCache;
     auto objectCache = new ObjectCache;
     auto modParseConfig = new ModuleParserConfig(packages, defaultImports, astCache);
@@ -680,22 +689,25 @@ void main(mut string[] args)
         return compileModule(context, astMod, addDefaultImports);
     }
     compiler.compile = &compile;
-    auto astModule = getModule(compiler, args[0], null, false, helper, modParseConfig, __HERE__);
+    auto astModule = getModule(compiler, mainFile, null, false, helper, modParseConfig, __HERE__);
 
     mut CompilationVisitor[] compilationVisitors;
-    UnittestVisitor unittestVisitor = new UnittestVisitor;
 
+    auto unittestVisitor = new UnittestVisitor;
     if (options.unittest_) {
         compilationVisitors ~= unittestVisitor;
     }
 
-    auto result = buildAstModule(
-        astModule, settings, compilationVisitors);
+    auto umlVisitor = new UmlVisitor;
+    if (options.umlFile != "") {
+        compilationVisitors ~= umlVisitor;
+    }
+    auto result = buildAstModule(astModule, settings, compilationVisitors);
     mut string fileArgs = [join "" " " ~ a for a in result.objFiles];
     string[] intermediateFiles = result.intermediateFiles;
 
     if (options.umlFile != "") {
-        compiler.stats.instanceOf(UmlClassGraph).writeTo(options.umlFile);
+        umlVisitor.writeTo(options.umlFile);
     }
 
     string binHashOutput = ".obj/hash_" ~ result.hash.text ~ ".c";

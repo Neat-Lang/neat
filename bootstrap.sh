@@ -378,6 +378,8 @@ at_revision '23f10d32c39779ff77fbdab218e19ce5b40aa553' 'rebuild cx' 'build/cx'
 at_revision '5a9e0b194c2a5fa394c3ae4338b7e36b48e549e8' 'macro_transition' 'build/cx'
 # add Loc parameter to lookup()
 at_revision '38ba877af6c2313437595bb54c3f2c729922d930' 'macro_transition' 'build/cx'
+# Reorg some stuff: for some reason, we crash without this.
+at_revision 'da674e882c5ab0529d5c183812b2b1b0bb08b6a2' 'rebuild cx' 'build/cx'
 
 # unpack the last tagfile
 unpack_tagfile

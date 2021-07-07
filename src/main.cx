@@ -18,6 +18,7 @@ import cx.types;
 import cx.unittest_;
 import helpers;
 import std.file : realpath;
+import std.json;
 
 extern(C) int getpid();
 extern(C) void cxruntime_system(string command);
@@ -644,38 +645,19 @@ ASTModule builtinSymbols(Options options) {
     return builtins;
 }
 
-void buildBinary(Options options) {
-}
-
-void main(mut string[] args)
-{
-    string executable = args[0];
-    args = args[1 .. $];
-    // string execPath = executable.realpath.dirname;
-    string execPath = "/proc/self/exe".realpath.dirname;
-    auto options = new Options;
-    // TODO make configurable somehow? commandline arg?
-    options.parseConfig(execPath ~ "/cx.ini");
-    args = options.parseArgs(args);
-    Package[] packages = options.astPackages.resolvePackages(execPath);
-    auto mainFile = args[0];
-
-    if (args.length != 1)
-    {
-        print("Usage: cx [-Pname:path[:dep1[,dep2]*]?]* FILE.cx");
-        return;
-    }
-    if (!options.output.length) options.output = removeExtension(args[0]);
-
+void buildBinary(Options options, string mainFile, string execPath, Package[] packages) {
+    /*print("packages:");
+    for (auto pkg <- packages) {
+        print("  '" ~ pkg.name ~ "' at " ~ pkg.path ~ ": deps " ~ [join ", " "'" ~ a.name ~ "'" for a in pkg.deps]);
+    }*/
     cxruntime_system("mkdir -p .obj");
     createBuilderScripts;
 
     auto builtins = builtinSymbols(options);
     auto defaultImports = [builtins];
     auto compiler = new CompilerImpl(defaultImports, options.cFlags);
-    auto astCache = new ASTModuleCache;
     auto objectCache = new ObjectCache;
-    auto modParseConfig = new ModuleParserConfig(packages, defaultImports, astCache);
+    auto modParseConfig = new ModuleParserConfig(packages, defaultImports, new ASTModuleCache);
     auto settings = new BuildSettings(compiler, objectCache, options.backend,
         x86_32=options.x86_32, caching=options.caching, platformFlags=options.platformFlags,
         optimize=options.optimize, forMacro=false);
@@ -683,8 +665,6 @@ void main(mut string[] args)
         x86_32=options.macro_x86_32, caching=options.caching, platformFlags=options.macroPlatformFlags,
         optimize=false, forMacro=true);
     auto helper = new ParserHelperImpl(macroSettings);
-    auto astModule = getModule(compiler, mainFile, null, false, helper, modParseConfig, __HERE__);
-
     mut CompilationVisitor[] compilationVisitors;
 
     auto unittestVisitor = new UnittestVisitor;
@@ -696,6 +676,8 @@ void main(mut string[] args)
     if (options.umlFile != "") {
         compilationVisitors ~= umlVisitor;
     }
+
+    auto astModule = getModule(compiler, mainFile, null, false, helper, modParseConfig, __HERE__);
     auto result = buildAstModule(astModule, settings, compilationVisitors);
     mut string fileArgs = [join "" " " ~ a for a in result.objFiles];
     string[] intermediateFiles = result.intermediateFiles;
@@ -766,6 +748,86 @@ long long int compiler_hash_mult() { return " ~ ltoa(mult) ~ "LL; }
     cxruntime_system(cmd);
     compiler.clear;
     clearOnceCache;
+}
+
+void main(mut string[] args)
+{
+    string executable = args[0];
+    args = args[1 .. $];
+    string execPath = "/proc/self/exe".realpath.dirname;
+    auto options = new Options;
+    // TODO make configurable somehow? commandline arg?
+    options.parseConfig(execPath ~ "/cx.ini");
+    args = options.parseArgs(args);
+
+    mut Package[] packages = options.astPackages.resolvePackages(execPath);
+
+    if (args.length != 1)
+    {
+        print("Usage: cx [-Pname:path[:dep1[,dep2]*]?]* FILE.cx");
+        return;
+    }
+
+    if (args[0] == "build") {
+        JSONValue pkgFile = JSONValue.parse("package.json".read);
+        if (!pkgFile.isObject) {
+            print("package.json: object expected");
+            exit(1);
+        }
+        auto mainFile = pkgFile.require("main").requireString;
+        mut string output = mainFile.removeExtension;
+        if (pkgFile.has("binary"))
+            output = pkgFile.require("binary").requireString;
+        if (pkgFile.has("source")) {
+            auto srcDir = pkgFile.require("source").requireString;
+            auto pkg = new Package(name="src", path=realpath(srcDir));
+            [pkg.addDependency(dep) for dep in packages];
+            packages ~= pkg;
+        }
+        options.output = output;
+        buildBinary(options, mainFile, execPath=execPath, packages);
+        return;
+    }
+
+    // Add "." default package for commandline builds
+    auto pkg = new Package(name="src", path=realpath("."));
+    [pkg.addDependency(dep) for dep in packages];
+    packages ~= pkg;
+
+    auto mainFile = args[0];
+
+    if (!options.output.length) options.output = removeExtension(args[0]);
+
+    buildBinary(options, mainFile, execPath=execPath, packages);
+}
+
+JSONValue require(JSONValue v, string key) {
+    void fail() { print("Expected '" ~ key ~ "', not " ~ v.str); exit(1); }
+    v.value.case {
+        (:false): fail;
+        (:true): fail;
+        int: fail;
+        string: fail;
+        JSONValue[]: fail;
+        (string key, JSONValue value)[] obj: {
+            for (auto entry <- obj)
+                if (entry.key == key) return entry.value;
+            print("Expected '" ~ key ~ "' in " ~ v.str);
+            exit(1);
+        }
+    }
+}
+
+string requireString(JSONValue v) {
+    void fail() { print("Expected string, not " ~ v.str); exit(1); }
+    v.value.case {
+        (:false): fail;
+        (:true): fail;
+        int: fail;
+        string s: return s;
+        JSONValue[]: fail;
+        (string key, JSONValue value)[]: fail;
+    }
 }
 
 void createBuilderScripts() {

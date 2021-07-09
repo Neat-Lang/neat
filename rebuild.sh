@@ -32,9 +32,6 @@ then
     cp -R src build/src
 fi
 
-# compiler now always looks inside the build dir
-cp src/runtime.c build/src/
-
 rm build/neat.ini || true
 
 I=1
@@ -51,6 +48,7 @@ then
 fi
 
 cp neat.ini build/
+cp src/runtime.c build/src/
 
 SUM=$(checksum build/neat_test$I)
 SUMNEXT=""

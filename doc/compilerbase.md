@@ -2,7 +2,7 @@
 
 ## Introduction
 
-In order to avoid circular compiler dependencies, `cx.base` contains a
+In order to avoid circular compiler dependencies, `neat.base` contains a
 `CompilerBase` class that is implemented in `main` and passed through
 to all compiler calls.
 

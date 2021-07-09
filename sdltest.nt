@@ -1,0 +1,141 @@
+module sdltest;
+
+import sdl;
+import std.string : itoa;
+
+extern(C) float logf(float);
+extern(C) float fabsf(float);
+extern(C) float expf(float);
+extern(C) void print(string);
+
+struct Complex {
+    float re;
+    float im;
+
+    float magn() {
+        float resq = re * re, imsq = im * im;
+        return resq + imsq;
+    }
+
+    Complex sqr() {
+        return Complex(re * re - im * im, 2 * re * im);
+    }
+
+    Complex add(Complex other) {
+        return Complex(re + other.re, im + other.im);
+    }
+
+    Complex sub(Complex other) {
+        return Complex(re - other.re, im - other.im);
+    }
+
+    Complex mul(float f) {
+        return Complex(re * f, im * f);
+    }
+
+    bool approxEqual(Complex other) {
+        return fabsf(re - other.re) < 0.001 && fabsf(im - other.im) < 0.001;
+    }
+}
+
+int paint(int ix, int iy, float z) {
+    int r = 0; int g = 0; int b = 0;
+    int AA = 1;
+    for (int sy = 0; sy < AA; sy += 1) {
+        for (int sx = 0; sx < AA; sx += 1) {
+            float cx = (ix + sx * 1.0 / AA) / 640.0; cx = cx * 4 - 2;
+            float cy = (iy + sy * 1.0 / AA) / 480.0; cy = cy * 4 - 2;
+            auto c = Complex(cx, cy);
+            auto target = Complex(-0.743643887035763, 0.13182590421259918);
+            auto d = c.sub(target);
+            d = d.mul(expf(-z));
+            c = target.add(d);
+            // cardioid test, see
+            // https://en.wikipedia.org/wiki/Plotting_algorithms_for_the_Mandelbrot_set#Advanced_plotting_algorithms
+            {
+                auto test = c.sub(Complex(0.25, 0));
+                auto q = test.magn();
+                if (q*(q+test.re) <= c.im * c.im / 4) continue;
+            }
+            {
+                auto test = c.add(Complex(1, 0));
+                if (test.magn() <= 1/16.0) continue;
+            }
+            auto z = Complex(0, 0);
+            auto periodCheck = z;
+            int period = 0;
+            for (int i = 0; i < 500; i += 1) {
+                float magn = z.magn();
+                if (magn > 40) {
+                    float log_zn = logf(magn) / 2;
+                    float nu = logf(log_zn / logf(2)) / logf(2);
+                    float fi = i + 1 - nu;
+                    r += cast(int) (fi * 20) & 0xff;
+                    g += cast(int) (fi * 15) & 0xff;
+                    b += cast(int) (fi * 10) & 0xff;
+                    break;
+                }
+                z = z.sqr();
+                z = z.add(c);
+                if (z.approxEqual(periodCheck)) break;
+                period += 1;
+                if (period > 20) { period = 0; periodCheck = z; }
+            }
+        }
+    }
+    return (r * (65536 / (AA * AA))) & 0xff0000 + (g * (256 / (AA * AA))) & 0xff00 + (b / (AA * AA));
+}
+
+alias SDL_QUIT = 256;
+
+void main() {
+    void* window;
+    int width = 640;
+    int height = 480;
+    int SDL_INIT_VIDEO = 32;
+    int SDL_WINDOWPOS_UNDEFINED = 536805376;
+    int SDL_WINDOW_SHOWN = 4;
+
+    // Initialize SDL systems
+    if(SDL_Init( SDL_INIT_VIDEO ) < 0) {
+        print("SDL could not initialize!");
+    }
+    else {
+        //Create a window
+        window = SDL_CreateWindow("Hello World".ptr,
+                                    SDL_WINDOWPOS_UNDEFINED,
+                                    SDL_WINDOWPOS_UNDEFINED,
+                                    width, height,
+                                    SDL_WINDOW_SHOWN);
+        if(!window) {
+            print("Window could not be created!");
+        }
+    }
+
+    // Poll for events and wait till user closes window
+    bool quit = false;
+    SDL_Event currentEvent;
+    float z = 1;
+    while(!quit) {
+        while(SDL_PollEvent(&currentEvent) != 0) {
+            if(currentEvent.type == SDL_QUIT) {
+                quit = true;
+            }
+        }
+
+        auto screenSurface = SDL_GetWindowSurface(window);
+        for (int y = 0; y < height; y += 1) {
+            for (int x = 0; x < width; x += 1) {
+                int rgb = paint(x, y, z);
+                auto rect = SDL_Rect(x, y, 1, 1);
+                SDL_FillRect(screenSurface, &rect, rgb);
+            }
+        }
+        SDL_UpdateWindowSurface(window);
+
+        z += 0.01;
+    }
+
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+}

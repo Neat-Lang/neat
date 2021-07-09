@@ -39,7 +39,7 @@ void assert(int test) {
         exit(1);
     }
 }
-int cxruntime_ptr_test(void* ptr) { return !!ptr; }
+int neat_runtime_ptr_test(void* ptr) { return !!ptr; }
 int _arraycmp(void* a, void* b, size_t la, size_t lb, size_t sz) {
     if (la != lb) return 0;
     return memcmp(a, b, la * sz) == 0;
@@ -50,58 +50,58 @@ char* toStringz(struct String str) {
     buffer[str.length] = 0;
     return buffer;
 }
-int cxruntime_atoi(struct String str) {
+int neat_runtime_atoi(struct String str) {
     char *temp = toStringz(str);
     int res = atoi(temp);
     free(temp);
     // printf("atoi(%.*s) = %i\n", str.length, str.ptr, res);
     return res;
 }
-float cxruntime_atof(struct String str) {
+float neat_runtime_atof(struct String str) {
     char *temp = toStringz(str);
     float res = atof(temp);
     free(temp);
     // printf("atof(%.*s) = %f\n", str.length, str.ptr, res);
     return res;
 }
-struct String cxruntime_itoa(int i) {
+struct String neat_runtime_itoa(int i) {
     int len = snprintf(NULL, 0, "%i", i);
     struct String res = string_alloc(len + 1);
     res.length = snprintf(res.ptr, res.length, "%i", i);
     return res;
 }
-struct String cxruntime_ltoa(long long l) {
+struct String neat_runtime_ltoa(long long l) {
     int len = snprintf(NULL, 0, "%lld", l);
     struct String res = string_alloc(len + 1);
     res.length = snprintf(res.ptr, res.length, "%lld", l);
     return res;
 }
-struct String cxruntime_ftoa(float f) {
+struct String neat_runtime_ftoa(float f) {
     int len = snprintf(NULL, 0, "%f", f);
     struct String res = string_alloc(len + 1);
     res.length = snprintf(res.ptr, res.length, "%f", f);
     return res;
 }
-struct String cxruntime_ftoa_hex(float f) {
+struct String neat_runtime_ftoa_hex(float f) {
     double d = f;
     int len = snprintf(NULL, 0, "%llx", *(long long int*) &d);
     struct String res = string_alloc(len + 1);
     res.length = snprintf(res.ptr, res.length, "%llx", *(long long int*) &d);
     return res;
 }
-struct String cxruntime_ptr_id(void* ptr) {
+struct String neat_runtime_ptr_id(void* ptr) {
     int len = snprintf(NULL, 0, "%p", ptr);
     struct String res = string_alloc(len + 1);
     res.length = snprintf(res.ptr, res.length, "%p", ptr);
     return res;
 }
-int cxruntime_toInt(float f) { return (int) f; }
+int neat_runtime_toInt(float f) { return (int) f; }
 
-FILE* cxruntime_stdout() {
+FILE* neat_runtime_stdout() {
     return stdout;
 }
 
-void cxruntime_system(struct String command) {
+void neat_runtime_system(struct String command) {
     char *cmd = toStringz(command);
     int ret = system(cmd);
     if (ret != 0) fprintf(stderr, "command failed with %i\n", ret);
@@ -109,7 +109,7 @@ void cxruntime_system(struct String command) {
     free(cmd);
 }
 
-int cxruntime_execbg(struct String command, struct StringArray arguments) {
+int neat_runtime_execbg(struct String command, struct StringArray arguments) {
     int ret = fork();
     if (ret != 0) return ret;
     char *cmd = toStringz(command);
@@ -122,7 +122,7 @@ int cxruntime_execbg(struct String command, struct StringArray arguments) {
     return execvp(cmd, args);
 }
 
-bool cxruntime_waitpid(int pid) {
+bool neat_runtime_waitpid(int pid) {
     int wstatus;
     int ret = waitpid(pid, &wstatus, 0);
     if (ret == -1) fprintf(stderr, "waitpid() failed: %s\n", strerror(errno));
@@ -132,7 +132,7 @@ bool cxruntime_waitpid(int pid) {
 // No idea why this is necessary.
 __attribute__((optnone))
 __attribute__((optimize(0)))
-bool cxruntime_symbol_defined_in_main(struct String symbol) {
+bool neat_runtime_symbol_defined_in_main(struct String symbol) {
     // even if a DL is loaded with RTLD_GLOBAL, main symbols are special.
     // so we want to avoid redefining symbols that are in the main program.
     void *main = dlopen(NULL, RTLD_LAZY);
@@ -143,7 +143,7 @@ bool cxruntime_symbol_defined_in_main(struct String symbol) {
     return sym ? true : false;
 }
 
-void cxruntime_dlcall(struct String dlfile, struct String fun, void* arg) {
+void neat_runtime_dlcall(struct String dlfile, struct String fun, void* arg) {
     void *handle = dlopen(toStringz(dlfile), RTLD_LAZY | RTLD_GLOBAL);
     if (!handle) fprintf(stderr, "can't open %.*s - %s\n", (int) dlfile.length, dlfile.ptr, dlerror());
     assert(!!handle);
@@ -154,13 +154,13 @@ void cxruntime_dlcall(struct String dlfile, struct String fun, void* arg) {
     ((void(*)(void*)) sym)(arg);
 }
 
-void *cxruntime_alloc(size_t size) {
+void *neat_runtime_alloc(size_t size) {
     return calloc(1, size);
 }
 
 extern void _run_unittests();
 
-#ifndef CX_NO_MAIN
+#ifndef NEAT_NO_MAIN
 extern void _main(struct StringArray args);
 #endif
 
@@ -173,7 +173,7 @@ int main(int argc, char **argv) {
         args.ptr[i] = (struct String) { strlen(argv[i]), argv[i] };
     }
     _run_unittests();
-#ifndef CX_NO_MAIN
+#ifndef NEAT_NO_MAIN
     _main(args);
 #endif
     free(args.ptr);
@@ -321,26 +321,26 @@ void print_backtrace()
 #endif
 }
 
-void cxruntime_refcount_violation(struct String s, long long int *ptr)
+void neat_runtime_refcount_violation(struct String s, long long int *ptr)
 {
     printf("<%.*s: refcount logic violated: %lld at %p\n", (int) s.length, s.ptr, *ptr, ptr);
     print_backtrace();
 }
 
-void cxruntime_refcount_inc(struct String s, long long int *ptr)
+void neat_runtime_refcount_inc(struct String s, long long int *ptr)
 {
     long long int result = __atomic_add_fetch(ptr, 1, __ATOMIC_RELEASE);
     if (result <= 1) {
-        cxruntime_refcount_violation(s, ptr);
+        neat_runtime_refcount_violation(s, ptr);
     }
 }
 
-int cxruntime_refcount_dec(struct String s, long long int *ptr)
+int neat_runtime_refcount_dec(struct String s, long long int *ptr)
 {
     long long int result = __atomic_sub_fetch(ptr, 1, __ATOMIC_ACQUIRE);
     if (result <= -1)
     {
-        cxruntime_refcount_violation(s, ptr);
+        neat_runtime_refcount_violation(s, ptr);
     }
 
     return result == 0;
@@ -358,44 +358,44 @@ struct Cache
     struct CacheEntry *entries;
 };
 
-__thread struct Cache cxruntime_cache = {0};
+__thread struct Cache neat_runtime_cache = {0};
 
-int cxruntime_cache_isset(int key)
+int neat_runtime_cache_isset(int key)
 {
-    if (key >= cxruntime_cache.length)
+    if (key >= neat_runtime_cache.length)
         return false;
-    return cxruntime_cache.entries[key].ptr != NULL;
+    return neat_runtime_cache.entries[key].ptr != NULL;
 }
 
-void *cxruntime_cache_get(int key)
+void *neat_runtime_cache_get(int key)
 {
-    return cxruntime_cache.entries[key].ptr;
+    return neat_runtime_cache.entries[key].ptr;
 }
 
-void cxruntime_cache_clear()
+void neat_runtime_cache_clear()
 {
-    for (int i = 0; i < cxruntime_cache.length; i++) {
-        struct CacheEntry entry = cxruntime_cache.entries[i];
+    for (int i = 0; i < neat_runtime_cache.length; i++) {
+        struct CacheEntry entry = neat_runtime_cache.entries[i];
         if (entry.ptr != NULL) {
             entry.free(entry.ptr);
         }
     }
-    free(cxruntime_cache.entries);
-    cxruntime_cache.entries = NULL;
-    cxruntime_cache.length = 0;
+    free(neat_runtime_cache.entries);
+    neat_runtime_cache.entries = NULL;
+    neat_runtime_cache.length = 0;
 }
 
-int cxruntime_errno() { return errno; }
+int neat_runtime_errno() { return errno; }
 
-void cxruntime_cache_set(int key, void *ptr, void(*free)(void*))
+void neat_runtime_cache_set(int key, void *ptr, void(*free)(void*))
 {
     assert(ptr != NULL);
-    if (key >= cxruntime_cache.length) {
-        size_t oldlen = cxruntime_cache.length;
+    if (key >= neat_runtime_cache.length) {
+        size_t oldlen = neat_runtime_cache.length;
         size_t newlen = key + 1;
-        cxruntime_cache.entries = realloc(cxruntime_cache.entries, sizeof(struct CacheEntry) * newlen);
-        memset(cxruntime_cache.entries + oldlen, 0, sizeof(struct CacheEntry) * (newlen - oldlen));
-        cxruntime_cache.length = newlen;
+        neat_runtime_cache.entries = realloc(neat_runtime_cache.entries, sizeof(struct CacheEntry) * newlen);
+        memset(neat_runtime_cache.entries + oldlen, 0, sizeof(struct CacheEntry) * (newlen - oldlen));
+        neat_runtime_cache.length = newlen;
     }
-    cxruntime_cache.entries[key] = (struct CacheEntry) { .ptr = ptr, .free = free };
+    neat_runtime_cache.entries[key] = (struct CacheEntry) { .ptr = ptr, .free = free };
 }

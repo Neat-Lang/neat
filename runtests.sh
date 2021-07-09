@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-CX=${CX:-build/cx}
-CXFLAGS="-Pcompiler:build/src"
-CXFLAGS="${CXFLAGS} -Prunnable:test/runnable:compiler"
-CXFLAGS="${CXFLAGS} -Pfail_compilation:test/fail_compilation:compiler"
+NEAT=${NEAT:-build/neat}
+NEATFLAGS="-Pcompiler:build/src"
+NEATFLAGS="${NEATFLAGS} -Prunnable:test/runnable:compiler"
+NEATFLAGS="${NEATFLAGS} -Pfail_compilation:test/fail_compilation:compiler"
 
-num_total=$(ls -q test/runnable/*.cx test/fail_compilation/*.cx |wc -l)
+num_total=$(ls -q test/runnable/*.nt test/fail_compilation/*.nt |wc -l)
 build_failed=0
 run_failed=0
 build_crashed=0
@@ -35,7 +35,7 @@ do
     fi
     echo "$file"...
     executable=build/"$file"
-    CMD="$CX $CXFLAGS \"$file\" -o \"$executable\""
+    CMD="$NEAT $NEATFLAGS \"$file\" -o \"$executable\""
     if ! eval $CMD 2>&1 |cat>build/out.txt
     then
         build_failed=$((build_failed+1))
@@ -45,7 +45,7 @@ do
     then
         run_failed=$((run_failed+1))
     fi
-done < <(ls -q test/runnable/*.cx)
+done < <(ls -q test/runnable/*.nt)
 
 # fail_compilation
 # tests should fail with an exit code, not a segfault
@@ -59,7 +59,7 @@ do
     fi
     echo "$file"...
     executable=build/"$file"
-    CMD="$CX $CXFLAGS \"$file\" -o \"$executable\""
+    CMD="$NEAT $NEATFLAGS \"$file\" -o \"$executable\""
     set +e
     eval $CMD 2>&1 |cat>build/out.txt
     EXIT=$?
@@ -75,7 +75,7 @@ do
         echo $CMD
         cat build/out.txt
     fi
-done < <(ls -q test/fail_compilation/*.cx)
+done < <(ls -q test/fail_compilation/*.nt)
 
 num_total=$((num_total - test_skipped))
 num_success=$((num_total - build_failed - run_failed - falsely_succeeded - build_crashed))

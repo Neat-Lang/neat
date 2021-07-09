@@ -1,0 +1,666 @@
+module lifetime;
+
+macro import neat.macros.assert;
+macro import neat.macros.listcomprehension;
+
+import std.string : itoa;
+
+extern(C) void print(string);
+
+void dbg(string text)
+{
+    print(text);
+}
+
+struct S
+{
+    string name;
+    string* trace;
+    int generation;
+    this(S s)
+    {
+        name = s.name;
+        trace = s.trace;
+        generation = s.generation + 1;
+        if (trace.length) *trace ~= " ";
+        *trace ~= "+" ~ name ~ itoa(generation);
+    }
+    ~this()
+    {
+        // ~this may be called on a S.init
+        if (!trace) return;
+        if (trace.length) *trace ~= " ";
+        *trace ~= "-" ~ name ~ itoa(generation);
+    }
+    S self() { return *this; }
+}
+
+struct S2
+{
+    string name;
+    string* trace;
+    int* balance;
+    this(S2 s2)
+    {
+        name = s2.name;
+        trace = s2.trace;
+        balance = s2.balance;
+        if (trace.length) *trace ~= " ";
+        *trace ~= "+" ~ name;
+        *balance += 1;
+    }
+    ~this()
+    {
+        // ~this may be called on a S2.init
+        if (!trace) return;
+        if (trace.length) *trace ~= " ";
+        *trace ~= "-" ~ name;
+        *balance -= 1;
+    }
+}
+
+void test_scope()
+{
+    dbg("- scope");
+    string trace;
+    { S s = S("S", &trace, 0); }
+    assert(trace == "-S0");
+}
+
+void test_if()
+{
+    dbg("- if");
+    string trace;
+    if (true) S s = S("S", &trace, 0);
+    assert(trace == "-S0");
+}
+
+void test_while()
+{
+    dbg("- while");
+    string trace;
+    mut bool called;
+    bool once() { if (!called) { called = true; return true; } return false; }
+    while (once) S s = S("S", &trace, 0);
+    assert(trace == "-S0");
+}
+
+void test_nested()
+{
+    dbg("- nested");
+    string trace;
+    void nest() S s = S("S", &trace, 0);
+    nest;
+    assert(trace == "-S0");
+}
+
+void test_discard()
+{
+    dbg("- discard");
+    string trace;
+    S("S", &trace, 0);
+    assert(trace == "-S0");
+}
+
+void test_discard_variable()
+{
+    dbg("- discard var");
+    string trace;
+    {
+        S s = S("S", &trace, 0);
+        s; // this does nothing, because it's a non-temporary expression
+    }
+    assert(trace == "-S0");
+}
+
+void test_discard_return1()
+{
+    dbg("- discard return 1");
+    string trace;
+    mut int calls;
+    S test() { calls += 1; return S("S", &trace, 0); }
+    {
+        test;
+    }
+    assert(trace == "-S0");
+}
+
+void test_discard_return2()
+{
+    dbg("- discard return 2");
+    string trace;
+    mut int calls;
+    S test() { calls += 1; S s = S("S", &trace, 0); return s; }
+    {
+        S s = test;
+    }
+    assert(trace == "+S1 -S0 -S1");
+}
+
+void test_call1()
+{
+    dbg("- call 1");
+    string trace;
+    {
+        auto s = S("S", &trace, 0);
+        void foo(S s) { }
+        foo(s);
+    }
+    // the function call does not create a copy
+    // because s exists in the surrounding lifetime.
+    assert(trace == "-S0");
+}
+
+void test_call2()
+{
+    dbg("- call 2");
+    string trace;
+    {
+        void foo(S s) { }
+        foo(S("S", &trace, 0));
+    }
+    // the function call still does not create a copy
+    // S is cleaned up after the call,
+    assert(trace == "-S0");
+}
+
+void test_array()
+{
+    dbg("- array");
+    {
+        string trace;
+        {
+            S[] array = [S("S", &trace, 0)];
+            // temporary initializing a literal
+            assert(trace == "");
+        }
+        assert(trace == "-S0");
+    }
+    {
+        string trace;
+        {
+            mut auto c = new C(S("S", &trace, 0));
+            C[] array = [c];
+            assert(trace == "+S1 -S0");
+            c = null;
+            assert(trace == "+S1 -S0");
+        }
+        assert(trace == "+S1 -S0 -S1");
+    }
+}
+
+struct T
+{
+    S s;
+}
+
+struct Pair
+{
+    S s1;
+    S s2;
+}
+
+void test_struct_field()
+{
+    dbg("- struct field");
+    {
+        string trace;
+        {
+            T t = T(S("S", &trace, 0));
+            assert(trace == "");
+        }
+        assert(trace == "-S0");
+    }
+    string trace;
+    {
+        S s = Pair(S("S", &trace, 0), S("T", &trace, 0)).s1;
+        assert(trace == "+S1 -S0 -T0");
+    }
+    assert(trace == "+S1 -S0 -T0 -S1");
+}
+
+void test_reassignment()
+{
+    dbg("- reassignment");
+    {
+        string trace;
+        {
+            mut S s = S("S", &trace, 0);
+            s = S("T", &trace, 0);
+            assert(trace == "-S0");
+        }
+        assert(trace == "-S0 -T0");
+    }
+    {
+        string trace;
+        {
+            mut T t = T(S("S", &trace, 0));
+            assert(trace == "");
+            t = t;
+            assert(trace == "+S1 -S0");
+        }
+    }
+}
+
+void test_parameter_reassignment()
+{
+    dbg("- parameter reassignment");
+    {
+        string trace;
+        void test(mut S s) {
+            s = S("T", &trace, 0);
+        }
+        test(S("S", &trace, 0));
+        assert(trace == "+S1 -S1 -T0 -S0");
+    }
+}
+
+class Object { }
+
+class C : Object
+{
+    S value;
+
+    this(this.value) { assert((cast(size_t*) this)[1] == 1); }
+
+    C self() { return this; }
+}
+
+class D
+{
+    C c;
+    this(C c) { this.c = c; }
+}
+
+void test_class_field()
+{
+    dbg("- class field");
+    {
+        string trace;
+        {
+            Object obj = new C(S("S", &trace, 0));
+            assert((cast(size_t*) obj)[1] == 1);
+            assert(trace == "+S1 -S0");
+        }
+        assert(trace == "+S1 -S0 -S1");
+    }
+    {
+        string trace;
+        {
+            mut C c = new C(S("S", &trace, 0));
+            assert((cast(size_t*) c)[1] == 1);
+            assert(trace == "+S1 -S0");
+            Object obj = c.instanceOf(Object);
+            // must take a reference cause obj is a root
+            assert((cast(size_t*) obj)[1] == 2);
+            c = null;
+            assert((cast(size_t*) obj)[1] == 1);
+        }
+        assert(trace == "+S1 -S0 -S1");
+    }
+    {
+        string trace;
+        {
+            void recurse(C arg)
+            {
+                Object obj = arg.instanceOf(Object);
+            }
+            C c = new C(S("S", &trace, 0));
+            recurse(c);
+        }
+        assert(trace == "+S1 -S0 -S1");
+    }
+    {
+        string trace;
+        mut Object obj = (new C(S("S", &trace, 0))).instanceOf(Object);
+        assert((cast(size_t*) obj)[1] == 1);
+        assert(trace == "+S1 -S0");
+        obj = null;
+        assert(trace == "+S1 -S0 -S1");
+    }
+    {
+        string trace;
+        D nest() {
+            auto c = new C(S("S", &trace, 0));
+            assert((cast(size_t*) c)[1] == 1);
+
+            return new D(c);
+        }
+        mut D d = nest;
+        assert(trace == "+S1 -S0");
+        assert((cast(size_t*) d.c)[1] == 1);
+        d = null;
+        assert(trace == "+S1 -S0 -S1");
+    }
+    {
+        string trace;
+        mut D d = new D(new C(S("S", &trace, 0)));
+        mut C c = d.instanceOf(D).c;
+        assert(trace == "+S1 -S0");
+        assert((cast(size_t*) d.c)[1] == 2);
+        c = null;
+        assert(trace == "+S1 -S0");
+        d = null;
+        assert(trace == "+S1 -S0 -S1");
+    }
+    {
+        string trace;
+        {
+            auto obj = cast(Object) new C(S("S", &trace, 0));
+            assert(trace == "+S1 -S0");
+        }
+        assert(trace == "+S1 -S0 -S1");
+    }
+}
+
+void test_either_member()
+{
+    dbg("- either member");
+    string trace;
+    {
+        (S | int) either = S("S", &trace, 0);
+        auto either2 = either;
+        // variable doesn't create a new ref cause either is already owned
+        assert(trace == "");
+    }
+    assert(trace == "-S0");
+}
+
+void test_array_cat()
+{
+    dbg("- array cat");
+    {
+        string trace;
+        {
+            S[] array = [S("S", &trace, 0)] ~ [S("T", &trace, 0)];
+            assert(trace == "+S1 +T1 -T0 -S0");
+        }
+        assert(trace == "+S1 +T1 -T0 -S0 -S1 -T1");
+    }
+    {
+        string trace;
+        {
+            mut S[] array;
+            array ~= S("S", &trace, 0);
+            assert(trace == "+S1 -S0");
+            array ~= S("T", &trace, 0);
+            assert(trace == "+S1 -S0 +S2 +T1 -T0 -S1");
+        }
+        assert(trace == "+S1 -S0 +S2 +T1 -T0 -S1 -S2 -T1");
+    }
+    {
+        string trace;
+        {
+            mut C[] array;
+            array ~= new C(S("S", &trace, 0));
+            assert(trace == "+S1 -S0");
+            array ~= new C(S("T", &trace, 0));
+            assert(trace == "+S1 -S0 +T1 -T0");
+        }
+        assert(trace == "+S1 -S0 +T1 -T0 -S1 -T1");
+    }
+    {
+        string trace;
+        int balance = 1;
+        {
+            auto sArray = [[S2("S", &trace, &balance)]];
+
+            S2[] foo(S2[][] array) {
+                mut S2[] ret;
+                ret ~= array[0];
+                return ret;
+            }
+
+            mut S2[] array;
+            for (int i <- 0 .. 10)
+                array ~= foo(sArray[0 .. $]);
+        }
+        assert(balance == 0);
+    }
+}
+
+void test_statement_expr() {
+    dbg("- statement expr");
+    string trace;
+    {
+        S s = ({ auto s = S("S", &trace, 0); s; });
+        assert(trace == "+S1 -S0");
+    }
+    assert(trace == "+S1 -S0 -S1");
+}
+
+void test_break_cont() {
+    dbg("- break/continue");
+    {
+        string trace;
+        while (true) {
+            S s = S("S", &trace, 0);
+            break;
+        }
+        assert(trace == "-S0");
+    }
+    {
+        string trace;
+        mut bool done;
+        while (!done) {
+            S s = S("S", &trace, 0);
+            done = true;
+            continue;
+        }
+        assert(trace == "-S0");
+    }
+}
+
+void test_array_equals() {
+    dbg("- array equals");
+    {
+        string trace;
+        if ([S("S", &trace, 0)] == [S("T", &trace, 0)]) { }
+        assert(trace == "-T0 -S0");
+    }
+}
+
+void test_struct_member() {
+    dbg("- struct member");
+    string trace;
+    T t() { return T(S("S", &trace, 0)); }
+    auto s = t().s;
+    assert(trace == "+S1 -S0");
+}
+
+void test_negation() {
+    dbg("- negation");
+    string trace;
+    assert(!!new C(S("S", &trace, 0)));
+    assert(trace == "+S1 -S0 -S1");
+}
+
+class U {
+    C c;
+
+    this(this.c) { }
+}
+
+void test_with() {
+    dbg("- with");
+    {
+        string trace_;
+        with (S("S", &trace_, 0))
+        {
+            assert(trace_ == "");
+        }
+        assert(trace_ == "-S0");
+    }
+    {
+        string trace_;
+        {
+            S s = S("S", &trace_, 0);
+            with (s)
+            {
+                assert(trace_ == "");
+            }
+        }
+        assert(trace_ == "-S0");
+    }
+    {
+        string trace_;
+        void test()
+        {
+            with (S("S", &trace_, 0))
+            {
+                assert(trace_ == "");
+                return;
+            }
+        }
+        test;
+        assert(trace_ == "-S0");
+    }
+    {
+        string trace_;
+        {
+            S s = S("S", &trace_, 0);
+            void test2(S s)
+            {
+                with (s)
+                {
+                    return;
+                }
+            }
+            test2(s);
+            assert(trace_ == "");
+        }
+        assert(trace_ == "-S0");
+    }
+    {
+        string trace_;
+        void test3(U u) {
+            with (u.c) {
+                return;
+            }
+        }
+        auto u = new U(new C(S("S", &trace_, 0)));
+        test3(u);
+        assert((cast(size_t*) u.c)[1] == 1);
+        assert(trace_ == "+S1 -S0");
+    }
+}
+
+void test_tuple() {
+    dbg("- tuple");
+    {
+        string trace;
+        {
+            (S, S) foo() {
+                auto ret = (S("S", &trace, 0), S("T", &trace, 0));
+                return ret;
+            }
+            (S, S) tuple = foo;
+            assert(trace == "+S1 +T1 -S0 -T0");
+        }
+        assert(trace == "+S1 +T1 -S0 -T0 -S1 -T1");
+    }
+}
+
+void test_chain() {
+    dbg("- chain methods");
+    {
+        string trace;
+        S s = S("S", &trace, 0).self().self();
+        assert(trace == "+S1 -S0 +S2 -S1");
+    }
+    {
+        string trace;
+        mut Object obj = (new C(S("S", &trace, 0))).self().self();
+        assert((cast(size_t*) obj)[1] == 1);
+        assert(trace == "+S1 -S0");
+        obj = null;
+        assert(trace == "+S1 -S0 -S1");
+    }
+}
+
+S copyS(S s) { return s; }
+C copyC(C c) { return c; }
+
+void test_ufcs_chain() {
+    dbg("- chain ufcs methods");
+    {
+        string trace;
+        S s = S("S", &trace, 0).copyS().copyS();
+        assert(trace == "+S1 -S0 +S2 -S1");
+    }
+    {
+        string trace;
+        mut Object obj = (new C(S("S", &trace, 0))).copyC().copyC();
+        assert((cast(size_t*) obj)[1] == 1);
+        assert(trace == "+S1 -S0");
+        obj = null;
+        assert(trace == "+S1 -S0 -S1");
+    }
+}
+
+void test_index_temporary_array() {
+    dbg("- index on temporary array");
+    {
+        string trace;
+        S s = [S("S", &trace, 0)][0];
+        assert(trace == "+S1 -S0");
+    }
+}
+
+void test_either_case_return() {
+    {
+        void foo((S | void) s) {
+            s.case {
+                S s: return;
+                void _: return;
+            }
+        }
+        string trace;
+        S s = S("S", &trace, 0);
+        assert(trace == "");
+        foo(s);
+        assert(trace == "");
+    }
+    {
+        void bar((S | void) s) {
+            s.case(S s: ({ return; 0; }), void _: ({ return; 0; }));
+        }
+        string trace;
+        S s = S("S", &trace, 0);
+        assert(trace == "");
+        bar(s);
+        assert(trace == "");
+    }
+}
+
+void main()
+{
+    test_scope;
+    test_if;
+    test_while;
+    test_nested;
+    test_discard;
+    test_discard_variable;
+    test_discard_return1;
+    test_discard_return2;
+    test_call1;
+    test_call2;
+    test_array;
+    test_struct_field;
+    test_reassignment;
+    test_parameter_reassignment;
+    test_class_field;
+    test_either_member;
+    test_array_cat;
+    test_statement_expr;
+    test_break_cont;
+    test_array_equals;
+    test_struct_member;
+    test_tuple;
+    test_negation;
+    test_with;
+    test_chain;
+    test_ufcs_chain;
+    test_index_temporary_array;
+    test_either_case_return;
+}

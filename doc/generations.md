@@ -9,11 +9,11 @@ in the course of development. So we're looking at at least two build steps:
 - old compiler builds stage1 compiler with new source but old API
 - stage1 compiler builds stage2 compiler with new source and new API.
 
-Cx has several parts that make this process more manageable.
+Neat has several parts that make this process more manageable.
 
 ## Packages
 
-First, every module exists inside a package. So cx.base can exist both in
+First, every module exists inside a package. So neat.base can exist both in
 package "compiler" and package "stage1", allowing macros to reference the
 specific version for the API of the compiler currently running.
 

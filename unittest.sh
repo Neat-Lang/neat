@@ -5,7 +5,7 @@ FLAGS="-lm -lpthread"
 mkdir -p build
 (
     echo "module unittest;"
-    find src/std/ -name \*.cx |sed -e 's,/,.,g' -e 's/^src.\(.*\).cx$/import \1;/'
-) > build/unittest.cx
-cx -unittest -no-main $PACKAGES $FLAGS build/unittest.cx -o build/unittest
+    find src/std/ -name \*.nt |sed -e 's,/,.,g' -e 's/^src.\(.*\).nt$/import \1;/'
+) > build/unittest.nt
+neat -unittest -no-main $PACKAGES $FLAGS build/unittest.nt -o build/unittest
 build/unittest

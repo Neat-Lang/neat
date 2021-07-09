@@ -1,0 +1,524 @@
+module fflame;
+
+macro import neat.macros.assert;
+macro import neat.macros.cimport;
+macro import neat.macros.listcomprehension;
+
+import c_header("SDL2/SDL.h");
+import c_header("SDL2/SDL_image.h");
+import std.math;
+import std.string;
+import std.thread;
+
+extern(C) void* neat_runtime_stdout();
+extern(C) void print(string);
+extern(C) void srand(int seed);
+extern(C) int rand();
+extern(C) char* toStringz(string);
+extern(C) long atol(char* ptr);
+
+struct Point
+{
+    float x, y;
+    void weightAdd(Point p2, float weight) {
+        this.x += p2.x * weight;
+        this.y += p2.y * weight;
+    }
+}
+
+AffineTransform makeAffineTransform(float a, float b, float c, float d, float e, float f, int symmetry) {
+    mut AffineTransform res;
+    res.a = a; res.b = b; res.c = c; res.d = d; res.e = e; res.f = f;
+    res.symmetry = symmetry;
+    if (symmetry) {
+        res.syms = new float[](symmetry);
+        res.symc = new float[](symmetry);
+        for (int i <- 0 .. symmetry) {
+            float tau = 2 * 3.1415926538;
+            float angle = i * tau / symmetry;
+            res.syms[i] = sin(angle);
+            res.symc[i] = cos(angle);
+        }
+    }
+    return res;
+}
+
+float randvary(float v, float f) {
+    float interp;
+    if (rand() % 4 != 0) {
+        return v + sin(f * randf) * randf;
+    }
+    return v * (1 - f) + randnf * f;
+}
+
+struct AffineTransform
+{
+    float a, b, c, d, e, f;
+
+    int symmetry;
+
+    float[] syms, symc;
+
+    int ii;
+
+    Point apply(Point p) {
+        mut auto p = Point(a * p.x + b * p.y + c, d * p.x + e * p.y + f);
+        if (symmetry) {
+            int i = ii % symmetry;
+            ii += 1;
+            p = Point(p.x * symc[i] - p.y * syms[i], p.x * syms[i] + p.y * symc[i]);
+        }
+        return p;
+    }
+
+    void vary(float f) {
+        a = a.randvary(f);
+        b = b.randvary(f);
+        c = c.randvary(f);
+        d = d.randvary(f);
+        e = e.randvary(f);
+        this.f = this.f.randvary(f);
+    }
+}
+
+struct Function
+{
+    AffineTransform affine;
+
+    int variation;
+
+    Point apply(Point p) {
+        mut auto p = affine.apply(p);
+
+        float r2() { return p.x * p.x + p.y * p.y; }
+        float r() { return sqrt(r2); }
+        float angle() { return atan2(p.y, p.x); }
+        float pi = 3.1415926537;
+        int variation = variation;
+        if (variation == 0) {
+            return p;
+        } else if (variation == 1) {
+            return Point(sin(p.x), sin(p.y));
+        } else if (variation == 2) {
+            float f = 1/r2;
+            return Point(f * p.x, f * p.y);
+        } else if (variation == 3) {
+            float sr = sin(r2), cr = cos(r2);
+            return Point(p.x * sr - p.y * cr, p.x * cr + p.y * sr);
+        } else if (variation == 4) {
+            float dr = 1 / sqrt(r2);
+            return Point(dr * (p.x - p.y) * (p.x + p.y), dr * 2 * p.x * p.y);
+        } else if (variation == 5) {
+            return Point(angle / pi, r - 1);
+        } else if (variation == 6) {
+            float a = angle, r = r;
+            return Point(r * sin(a + r), r * cos(a - r));
+        } else if (variation == 7) {
+            float a = angle, r = r;
+            return Point(r * sin(a * r), -r * cos(a * r));
+        } else if (variation == 8) {
+            float f = angle / pi;
+            return Point(f * sin(pi * r), f * cos(pi * r));
+        } else if (variation == 9) {
+            float a = angle, r = r, dr = 1 / r;
+            return Point(dr * (cos(a) + sin(r)), dr * (sin(a) - cos(r)));
+        } else if (variation == 10) {
+            float a = angle, r = r;
+            return Point(sin(a) / r, r * cos(a));
+        } else if (variation == 11) {
+            float a = angle, r = r;
+            return Point(sin(a) * cos(r), cos(a) * sin(r));
+        } else if (variation == 12) {
+            float a = angle, r = r;
+            float p0 = sin(a + r), p1 = cos(a - r);
+            float p03 = p0 * p0 * p0, p13 = p1 * p1 * p1;
+            return Point(r * (p03 + p13), r * (p03 - p13));
+        } else if (variation == 13) {
+            float sqr = sqrt(r), a = angle;
+            // TODO what is this
+            float omik = 0;
+            return Point(sqr * cos(a / 2 + omik), sqr * sin(angle / 2 + omik));
+        } else if (variation == 14) {
+            if (p.x > 0) {
+                if (p.y > 0) return p;
+                else return Point(p.x, p.y / 2);
+            } else {
+                if (p.y > 0) return Point(2 * p.x, p.y);
+                else return Point(2 * p.x, p.y / 2);
+            }
+        }
+    }
+
+    void vary(float f) {
+        affine.vary(f);
+    }
+}
+
+struct MetaEntry
+{
+    float weight;
+
+    Function f;
+
+    void vary(float f) {
+        weight = weight.randvary(f);
+        this.f.vary(f);
+    }
+}
+
+struct Metafunction
+{
+    MetaEntry[] entries;
+
+    AffineTransform affine;
+
+    Color color;
+
+    Point apply(Point p) {
+        Point result;
+        for (int i <- 0 .. entries.length) {
+            result.weightAdd(entries[i].f.apply(p), entries[i].weight);
+        }
+        return affine.apply(result);
+    }
+
+    void vary(float f) {
+        [entry.vary(f) for entry in entries];
+        affine.vary(f);
+    }
+}
+
+class ChaosGame
+{
+    Metafunction[] functions;
+
+    Metafunction finalFunction;
+
+    int rstate;
+
+    this() { rstate = rand; }
+
+    void apply(RangeCache cache, long steps) {
+        mut Point p = Point(randf, randf);
+        mut Color color = Color(0, 0, 0);
+        for (long l <- 0..steps) {
+            // stolen from SO
+            rstate = (214013*rstate+2531011);
+            int randval = (rstate / 0x10000)&0x7FFF;
+
+            int index = cast(int)(randval % functions.length);
+            auto fun = functions[index];
+
+            p = functions[index].apply(p);
+            color = color.mix(fun.color, 0.5);
+
+            p = finalFunction.apply(p);
+            color = color.mix(finalFunction.color, 0.5);
+
+            cache.pset(p, color);
+        }
+    }
+
+    void vary(float f) {
+        [fun.vary(f) for fun in functions];
+        finalFunction.vary(f);
+    }
+}
+
+struct Color
+{
+    float r, g, b;
+
+    Color mix(Color other, float factor)
+    {
+        return Color(
+            r * (1 - factor) + other.r * factor,
+            g * (1 - factor) + other.g * factor,
+            b * (1 - factor) + other.b * factor);
+    }
+}
+
+struct WeightedColor
+{
+    float r, g, b, i;
+}
+
+class Buffer
+{
+    int width; int height;
+
+    long steps;
+
+    WeightedColor[] back;
+
+    this(this.width, this.height) {
+        this.back = new WeightedColor[](width * height);
+        for (int i <- 0 .. this.back.length)
+            this.back[i] = WeightedColor(0, 0, 0, 0);
+    }
+
+    void writePixel(int offset, Color color) {
+        auto ptr = &back[offset];
+        ptr.r += color.r;
+        ptr.g += color.g;
+        ptr.b += color.b;
+        ptr.i += 1;
+    }
+
+    void paint(void* surface) {
+        // float adjf = 1 / powf(cast(int) (steps / (width * height)), 0.25);
+        float adjf = 2.0 / cast(int) ((steps + width * height) / (width * height));
+        for (int y <- 0 .. height) {
+            for (int x <- 0 .. width) {
+                auto color = this.back[y * width + x];
+                float i = color.i * adjf;
+                float i = logf(i + 1.01) / (i + 0.01);
+                // float r = max(1 - color.r * i, 0);
+                // float g = max(1 - color.g * i, 0);
+                // float b = max(1 - color.b * i, 0);
+                float r = min(color.r * i * adjf, 1);
+                float g = min(color.g * i * adjf, 1);
+                float b = min(color.b * i * adjf, 1);
+                int rgb =
+                      (cast(int)(r * 0xff) & 0xff * 0x10000)
+                    + (cast(int)(g * 0xff) & 0xff * 0x100)
+                    + (cast(int)(b * 0xff) & 0xff * 0x1);
+                // TODO direct write
+                auto rect = SDL_Rect(x, y, 1, 1);
+                SDL_FillRect(surface, &rect, rgb);
+            }
+        }
+    }
+}
+
+float randf() {
+    return rand * 1.0 / 2147483647;
+}
+
+float randnf() {
+    return randf * 2.0 - 1.0;
+}
+
+AffineTransform randAffine() {
+    mut int symmetry = 0;
+    if (rand() % 10 == 0) {
+        symmetry = rand() % 5 + 2;
+    }
+    return makeAffineTransform(randnf, randnf, randnf, randnf, randnf, randnf, symmetry);
+}
+
+Function randFun() {
+    return Function(randAffine, rand % 15);
+}
+
+Metafunction randMetafun() {
+    mut MetaEntry[] entries;
+    mut float weightsum;
+    for (int i <- 0 .. rand() % 3 + 2) {
+        float weight = randf;
+        entries ~= MetaEntry(weight, randFun);
+        weightsum += weight;
+    }
+    for (int i <- 0 .. entries.length) {
+        entries[i].weight /= weightsum;
+    }
+    int r = rand();
+    return Metafunction(entries, randAffine, Color(randf, randf, randf));
+}
+
+class RenderGame : Task
+{
+    ChaosGame game;
+    RangeCache cache;
+    Buffer buffer;
+    long steps;
+
+    this(this.game, this.buffer, this.steps) {
+        this.cache = new RangeCache(buffer);
+    }
+
+    override void run() {
+        game.apply(cache, steps);
+        cache.flush;
+    }
+}
+
+struct CacheEntry
+{
+    Color color;
+    int offset;
+}
+
+class RangeCache
+{
+    Buffer buffer;
+
+    bool cache;
+
+    int width, height;
+    int sections;
+    int sectionLength;
+    int sectionCovers;
+    CacheEntry[] ranges;
+    int[] offsets;
+    float ratio;
+    float hwidth, hheight;
+
+    long steps;
+
+    this(this.buffer) {
+        this.width = buffer.width;
+        this.height = buffer.height;
+        this.ratio = height * 1.0 / width;
+        this.hwidth = width / 2;
+        this.hheight = height / 2;
+        // TODO how to balance
+        if (true || width * height < 4194304) {
+            return;
+        }
+        this.cache = true;
+        this.sectionCovers = 16384;
+        print("w " ~ itoa(width) ~ " h " ~ itoa(height) ~ " covers 16384?");
+        assert(width * height % sectionCovers == 0);
+        this.sections = width * height / sectionCovers;
+        this.offsets = new int[](sections);
+        this.ranges = new CacheEntry[](this.sections * 32);
+        // this.sectionLength = ranges.length / sections;
+        // print("range " ~ itoa(cast(int) this.ranges.length) ~ " over " ~ itoa(this.sections));
+        assert(this.ranges.length % this.sections == 0);
+        this.sectionLength = cast(int) (this.ranges.length / this.sections);
+    }
+
+    void pset(Point p, Color color) {
+        this.steps += 1;
+
+        int x = cast(int)((p.x * ratio + 1) * hwidth), y = cast(int)((p.y + 1) * hheight);
+        if (x < 0 || x >= width || y < 0 || y >= height) return;
+        int offset = y * width + x;
+
+        // Does this actually do anything ... ?
+        if (!this.cache) {
+            this.buffer.writePixel(offset, color);
+            return;
+        }
+
+        int section = offset / 16384; // TODO right shift
+        if (offsets[section] == sectionLength)
+        {
+            flushSection(section);
+        }
+        ranges[section * sectionLength + offsets[section]] = CacheEntry(color, offset);
+        offsets[section] += 1;
+    }
+    void flushSection(int section) {
+        for (int i <- 0 .. offsets[section]) {
+            auto entry = ranges[section * sectionLength + i];
+            buffer.writePixel(entry.offset, entry.color);
+        }
+        offsets[section] = 0;
+    }
+    void flush() {
+        buffer.steps += this.steps;
+        for (int i <- 0 .. this.sections) {
+            flushSection(i);
+        }
+    }
+}
+
+extern(C) void setbuf(void* stream, char* buf);
+
+void main(mut string[] args) {
+    string executable = args[0];
+    args = args[1 .. $];
+    mut int seed = 1;
+    mut long iters = 1000;
+    mut int width = 640, height = 480;
+    mut string output = "out.png";
+    mut bool htmlProgress;
+    mut float varyFactor = 0;
+    for (int i <- 0 .. args.length) {
+        auto arg = args[i];
+        if (arg == "-h" || arg == "--help") {
+            print("Usage: ./fflame
+    -e, --seed num        : main rng seed. Specifies the image.
+    -i, --iters n         : number of iterations before exiting
+    -s, --size wxh        : target image size
+    -o, --output file.png : png file to save to
+    -x, --html            : print progress as html/js progress bar
+    -v, --vary f          : randomize and interpolate (for animations)
+    -h, --help            : this screen");
+            return;
+        }
+        if (arg == "-e" || arg == "--seed") {
+            seed = args[i + 1].atoi;
+            i += 1;
+            continue;
+        }
+        if (arg == "-i" || arg == "--iters") {
+            iters = args[i + 1].toStringz.atol;
+            i += 1;
+            continue;
+        }
+        if (arg == "-s" || arg == "--size") {
+            string size = args[i + 1];
+            auto wh = size.split("x");
+            width = wh[0].atoi;
+            height = wh[1].atoi;
+            i += 1;
+            continue;
+        }
+        if (arg == "-x" || arg == "--html") {
+            htmlProgress = true;
+            continue;
+        }
+        if (arg == "-v" || arg == "--vary") {
+            varyFactor = args[i + 1].atof;
+            i += 1;
+            continue;
+        }
+        if (arg == "-o" || arg == "--output") {
+            output = args[i + 1];
+            i += 1;
+            continue;
+        }
+        print("Unknown argument " ~ arg);
+        assert(false);
+    }
+    mut int subtasks = 100;
+    if (width < 400 && height < 400) subtasks = 4;
+
+    auto pool = new ThreadPool(8);
+
+    srand(seed);
+    auto game = new ChaosGame;
+    for (int i <- 0 .. 1 + rand() % 5)
+        game.functions ~= randMetafun;
+    game.finalFunction = randMetafun;
+    game.vary(varyFactor);
+
+    Buffer buffer = new Buffer(width, height);
+
+    for (int j <- 0 .. subtasks) {
+        auto task = new RenderGame(game, buffer, iters / subtasks);
+        pool.addTask(task);
+    }
+
+    void printProgressBar(float progress) {
+        if (!htmlProgress) return;
+        int percent = cast(int) (progress * 100);
+        print("<script type=\"text/javascript\">$(\"#progress\").html(\""
+            ~ itoa(percent)
+            ~ "%\");</script>");
+    }
+    setbuf(neat_runtime_stdout(), null);
+    pool.waitComplete(&printProgressBar);
+    auto surface = SDL_CreateRGBSurface(0, width, height, 32, 0, 0, 0, 0);
+    buffer.paint(surface);
+    mut void* out_;
+    if (output == "-") {
+        out_ = SDL_RWFromFP(neat_runtime_stdout(), false);
+    } else {
+        out_ = SDL_RWFromFile(toStringz(output), toStringz("wb"));
+    }
+    IMG_SavePNG_RW(surface, out_, true);
+}

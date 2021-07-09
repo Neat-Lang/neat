@@ -1,6 +1,6 @@
-# cx
+# Neat
 
-cx is a compiler for a D1-like language with macros.
+Neat is a compiler for NeatLang, a D1-like language with macros.
 
 # Documentation
 

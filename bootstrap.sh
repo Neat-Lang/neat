@@ -298,7 +298,8 @@ at_revision '9ce663e39be09838e6a8ca397ff0909cc61e55ed' 'rebuild cx' 'build/cx'
 function macro_transition {
     mkdir build
     language="cx"
-    if [ -e "../../build/neat" ]; then language="neat"; fi
+    ext="cx"
+    if [ -e "../../build/neat" ]; then language="neat"; ext="nt"; fi
     cp ../../build/$language build/$language
 
     NEXT=compiler$(($(build/$language -print-generation) + 1))
@@ -308,11 +309,11 @@ function macro_transition {
     cp -R ../../build/src/ build/
     # use old macros for first round
     cp -R ../../build/src/$language/macros/ src/$language/
-    build/$language -next-generation -Pcompiler:build/src -P$NEXT:src src/main.$language -o build/$language_1 $@
+    build/$language -next-generation -Pcompiler:build/src -P$NEXT:src src/main.$ext -o build/${language}_1 $@
     # use new macros even for previous-generation imports
     cp -R build/backup/macros/ src/$language/
     cp -R build/backup/macros/ build/src/$language/
-    build/$language_1 -Pcompiler:src src/main.$language -o build/$language_2 $@
+    build/$language_1 -Pcompiler:src src/main.$ext -o build/$language_2 $@
     mv build/$language_2 build/$language
     rm -rf build/src
     rm -rf build/backup
@@ -388,8 +389,26 @@ at_revision '5a9e0b194c2a5fa394c3ae4338b7e36b48e549e8' 'macro_transition' 'build
 at_revision '38ba877af6c2313437595bb54c3f2c729922d930' 'macro_transition' 'build/cx'
 # Reorg some stuff: for some reason, we crash without this.
 at_revision 'da674e882c5ab0529d5c183812b2b1b0bb08b6a2' 'rebuild cx' 'build/cx'
+function lang_transition_1 {
+    FAST=1 rebuild neat
+    ls build
+    rm build/cx
+    # this is not clean lol
+    rm ../../build/cx ../../build/cx.ini
+    echo "-syspackage compiler:src" > build/neat.ini
+}
+function lang_transition_2 {
+    mkdir build
+    cp ../../build/neat build/neat
+    cp -R ../../build/src build
+    cp -R src/neat/ build/src/
+    sed -i -e 's/-O//' rebuild.sh
+    bash rebuild.sh
+}
 # rename cx to NeatLang
-FAST=1 at_revision '3bb29dbac77de3b27dc15b28730f07c415cbb628' 'rebuild neat' 'build/neat'
+at_revision '3bb29dbac77de3b27dc15b28730f07c415cbb628' 'lang_transition_1' 'build/neat'
+# rename cx to NeatLang, part 2
+at_revision 'e658d57ba621e761a8f6d92a1d78b398ebcce2bd' 'lang_transition_2' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

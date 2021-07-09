@@ -28,6 +28,8 @@ function at_revision {
     output=$3
     archive=".bootcache/"$(echo "$1 $2" |sed -e 's/[^a-zA-Z0-9]/_/g')".tar.xz"
     tagfile="build/archive"
+    language="cx"
+    if [ "$output" == "neat" ]; then language="neat"; fi
 
     if [ -f "$archive" ]
     then
@@ -47,14 +49,14 @@ function at_revision {
     git submodule -q update --init
     $build
     cd ../..
-    cp build/$rev/$output build/cx
+    cp build/$rev/$output build/$language
     # bleeeh this should not be here, this is not generic, but meh
     if [ -d build/$rev/build/src ]; then
         rm -rf build/src
         cp -R build/$rev/build/src build/
     fi
-    if [ -f build/$rev/build/cx.ini ]; then
-        cp build/$rev/build/cx.ini build/
+    if [ -f build/$rev/build/$language.ini ]; then
+        cp build/$rev/build/$language.ini build/
     fi
     rm -rf build/$rev
 
@@ -62,7 +64,7 @@ function at_revision {
     echo "- saving bootstrap archive $archive"
     tar cf "$archive" build
 
-    echo "=== build/cx from $rev ==="
+    echo "=== build/$language from $rev ==="
     echo
 }
 function dbootstrap {
@@ -72,7 +74,11 @@ function dbootstrap {
 }
 function rebuild {
     mkdir build
-    cp ../../build/cx build/$1
+    if [ -e "../../build/cx" ]; then
+        cp ../../build/cx build/cx
+    else
+        cp ../../build/neat build/neat
+    fi
     # also not generic, see above
     if [ -d ../../build/src ]; then
         cp -R ../../build/src build
@@ -385,4 +391,4 @@ at_revision 'da674e882c5ab0529d5c183812b2b1b0bb08b6a2' 'rebuild cx' 'build/cx'
 unpack_tagfile
 
 bash rebuild.sh
-echo "=== build/cx from master ==="
+echo "=== build/neat from master ==="

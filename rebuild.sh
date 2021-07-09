@@ -35,30 +35,30 @@ fi
 # compiler now always looks inside the build dir
 cp src/runtime.c build/src/
 
-rm build/cx.ini || true
+rm build/neat.ini || true
 
 I=1
 NEXT=compiler$(($(build/cx -print-generation) + 1))
-build/cx $FLAGS -next-generation -P$NEXT:src -Pcompiler:build/src src/main.cx -o build/cx_test$I
+build/cx $FLAGS -next-generation -P$NEXT:src -Pcompiler:build/src src/main.cx -o build/neat_test$I
 
 if [ \! -z ${FAST+x} ]
 then
-    mv build/cx_test$I build/cx
+    mv build/neat_test$I build/neat
     # store compiler source next to compiler
     rm -rf build/src
     cp -R src build/
     exit
 fi
 
-cp cx.ini build/
+cp neat.ini build/
 
-SUM=$(checksum build/cx_test$I)
+SUM=$(checksum build/neat_test$I)
 SUMNEXT=""
 while true
 do
     K=$((I+1))
-    build/cx_test$I $FLAGS -Pcompiler:src src/main.cx -o build/cx_test$K
-    SUMNEXT=$(checksum build/cx_test$K)
+    build/neat_test$I $FLAGS -Pcompiler:src src/main.cx -o build/neat_test$K
+    SUMNEXT=$(checksum build/neat_test$K)
     if [ "$SUM" == "$SUMNEXT" ]; then break; fi
     SUM="$SUMNEXT"
     if [ "${K+x}" == "${STAGE+x}" ]
@@ -68,8 +68,8 @@ do
     fi
     I=$K
 done
-mv build/cx_test$I build/cx
-rm build/cx_test*
+mv build/neat_test$I build/neat
+rm build/neat_test*
 # store compiler source next to compiler
 rm -rf build/src
 cp -R src build/

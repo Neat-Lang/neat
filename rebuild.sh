@@ -38,8 +38,8 @@ cp src/runtime.c build/src/
 rm build/neat.ini || true
 
 I=1
-NEXT=compiler$(($(build/cx -print-generation) + 1))
-build/cx $FLAGS -next-generation -P$NEXT:src -Pcompiler:build/src src/main.cx -o build/neat_test$I
+NEXT=compiler$(($(build/neat -print-generation) + 1))
+build/neat $FLAGS -next-generation -P$NEXT:src -Pcompiler:build/src src/main.nt -o build/neat_test$I
 
 if [ \! -z ${FAST+x} ]
 then
@@ -57,7 +57,7 @@ SUMNEXT=""
 while true
 do
     K=$((I+1))
-    build/neat_test$I $FLAGS -Pcompiler:src src/main.cx -o build/neat_test$K
+    build/neat_test$I $FLAGS -Pcompiler:src src/main.nt -o build/neat_test$K
     SUMNEXT=$(checksum build/neat_test$K)
     if [ "$SUM" == "$SUMNEXT" ]; then break; fi
     SUM="$SUMNEXT"

@@ -29,7 +29,7 @@ function at_revision {
     archive=".bootcache/"$(echo "$1 $2" |sed -e 's/[^a-zA-Z0-9]/_/g')".tar.xz"
     tagfile="build/archive"
     language="cx"
-    if [ "$output" == "neat" ]; then language="neat"; fi
+    if [ "$output" == "build/neat" ]; then language="neat"; fi
 
     if [ -f "$archive" ]
     then
@@ -297,21 +297,23 @@ at_revision '9ce663e39be09838e6a8ca397ff0909cc61e55ed' 'rebuild cx' 'build/cx'
 # used when the contents of macros have to change between compiler versions, but there's no change in functionality
 function macro_transition {
     mkdir build
-    cp ../../build/cx build/cx
+    language="cx"
+    if [ -e "../../build/neat" ]; then language="neat"; fi
+    cp ../../build/$language build/$language
 
-    NEXT=compiler$(($(build/cx -print-generation) + 1))
+    NEXT=compiler$(($(build/$language -print-generation) + 1))
 
     mkdir build/backup
-    cp -R src/cx/macros/ build/backup/
+    cp -R src/$language/macros/ build/backup/
     cp -R ../../build/src/ build/
     # use old macros for first round
-    cp -R ../../build/src/cx/macros/ src/cx/
-    build/cx -next-generation -Pcompiler:build/src -P$NEXT:src src/main.cx -o build/cx_1 $@
+    cp -R ../../build/src/$language/macros/ src/$language/
+    build/$language -next-generation -Pcompiler:build/src -P$NEXT:src src/main.$language -o build/$language_1 $@
     # use new macros even for previous-generation imports
-    cp -R build/backup/macros/ src/cx/
-    cp -R build/backup/macros/ build/src/cx/
-    build/cx_1 -Pcompiler:src src/main.cx -o build/cx_2 $@
-    mv build/cx_2 build/cx
+    cp -R build/backup/macros/ src/$language/
+    cp -R build/backup/macros/ build/src/$language/
+    build/$language_1 -Pcompiler:src src/main.$language -o build/$language_2 $@
+    mv build/$language_2 build/$language
     rm -rf build/src
     rm -rf build/backup
     cp -R src build/
@@ -386,6 +388,8 @@ at_revision '5a9e0b194c2a5fa394c3ae4338b7e36b48e549e8' 'macro_transition' 'build
 at_revision '38ba877af6c2313437595bb54c3f2c729922d930' 'macro_transition' 'build/cx'
 # Reorg some stuff: for some reason, we crash without this.
 at_revision 'da674e882c5ab0529d5c183812b2b1b0bb08b6a2' 'rebuild cx' 'build/cx'
+# rename cx to NeatLang
+FAST=1 at_revision '3bb29dbac77de3b27dc15b28730f07c415cbb628' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

@@ -405,10 +405,39 @@ function lang_transition_2 {
     sed -i -e 's/-O//' rebuild.sh
     bash rebuild.sh
 }
+function lang_transition_3 {
+    mkdir build
+    cp ../../build/neat build/neat
+    cp -R ../../build/src build
+    cp -R src/neat/ build/src/
+    sed -i -e 's/-O//' rebuild.sh
+    # use new runtime.c
+    cp src/runtime.c build/src/runtime.c
+    # proxy some old function names to the new ones
+    cat <<EOT >>build/src/runtime.c
+int cxruntime_refcount_dec(struct String s, long long int *ptr) { return neat_runtime_refcount_dec(s, ptr); }
+void cxruntime_refcount_inc(struct String s, long long int *ptr) { return neat_runtime_refcount_inc(s, ptr); }
+void *cxruntime_alloc(size_t size) { return neat_runtime_alloc(size); }
+void *cxruntime_cache_get(int key) { return neat_runtime_cache_get(key); }
+void cxruntime_cache_set(int key, void *ptr, void(*free)(void*)) { return neat_runtime_cache_set(key, ptr, free); }
+int cxruntime_cache_isset(int key) { return neat_runtime_cache_isset(key); }
+int cxruntime_atoi(struct String str) { return neat_runtime_atoi(str); }
+float cxruntime_atof(struct String str) { return neat_runtime_atof(str); }
+struct String cxruntime_itoa(int i) { return neat_runtime_itoa(i); }
+struct String cxruntime_ftoa(float f) { return neat_runtime_ftoa(f); }
+struct String cxruntime_ltoa(long long l) { return neat_runtime_ltoa(l); }
+struct String cxruntime_ftoa_hex(float f) { return neat_runtime_ftoa_hex(f); }
+struct String cxruntime_ptr_id(void* ptr) { return neat_runtime_ptr_id(ptr); }
+bool cxruntime_symbol_defined_in_main(struct String symbol) { return neat_runtime_symbol_defined_in_main(symbol); }
+EOT
+    bash rebuild.sh
+}
 # rename cx to NeatLang
 at_revision '3bb29dbac77de3b27dc15b28730f07c415cbb628' 'lang_transition_1' 'build/neat'
 # rename cx to NeatLang, part 2
 at_revision 'e658d57ba621e761a8f6d92a1d78b398ebcce2bd' 'lang_transition_2' 'build/neat'
+# rename cx to NeatLang, part 3
+at_revision 'f9ef0cb5a2ea906edc125252cd7c8217836df3ae' 'lang_transition_3' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

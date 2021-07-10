@@ -1,0 +1,387 @@
+module neat.packages;
+
+macro import neat.macros.assert;
+macro import neat.macros.listcomprehension;
+
+import helpers;
+import neat.base;
+import neat.parser_base;
+import std.file;
+import std.json;
+import std.string;
+
+struct Version {
+    int major, minor, patch;
+
+    /// "semantically compatible"
+    static bool compatible(Version requested, Version given) {
+        if (given.major != requested.major)
+            return false;
+        if (given.minor < requested.minor)
+            return false;
+        if (given.minor > requested.minor)
+            return true;
+        return given.patch >= requested.patch;
+    }
+    bool greater(Version other) {
+        if (major > other.major) return true;
+        if (major < other.major) return false;
+        if (minor > other.minor) return true;
+        if (minor < other.minor) return false;
+        return patch > other.patch;
+    }
+    bool equal(Version other) {
+        return major == other.major &&
+            minor == other.minor &&
+            patch == other.patch;
+    }
+    bool lesser(Version other) {
+        return !greater(other) && !equal(other);
+    }
+    static Version parse(string semver) {
+        assert(semver != "");
+        auto parts = semver.split(".");
+        bool isDigit(char ch) { return ch >= "0"[0] && ch <= "9"[0]; }
+        bool digits(string part) { return [all isDigit(c) for c in part]; }
+        assert(parts.length >= 1 && parts.length <= 3);
+        assert([all part.digits for part in parts]);
+        auto nums = [part.atoi for part in parts];
+        if (parts.length == 3)
+            return Version(major=nums[0], minor=nums[1], patch=nums[2]);
+        else if (parts.length == 2)
+            return Version(major=nums[0], minor=nums[1], patch=0);
+        else
+            return Version(major=nums[0], minor=0, patch=0);
+    }
+    string str() {
+        return itoa(major) ~ "." ~ itoa(minor) ~ "." ~ itoa(patch);
+    }
+}
+
+struct Requirement {
+    (
+        (:greaterEqual, Version version_) |
+        (:greater, Version version_) |
+        (:equal, Version version_) |
+        (:lesserEqual, Version version_) |
+        (:lesser, Version version_) |
+        (:semverCompatible, Version version_) |
+        :any
+    ) value;
+
+    bool fulfilled(Version provided) {
+        value.case {
+            (:greaterEqual, Version req):
+                return provided.greater(req) || provided.equal(req);
+            (:greater, Version req):
+                return provided.greater(req);
+            (:equal, Version req):
+                return provided.equal(req);
+            (:lesserEqual, Version req):
+                return provided.lesser(req) || provided.equal(req);
+            (:lesser, Version req):
+                return provided.lesser(req);
+            (:semverCompatible, Version req):
+                return Version.compatible(requested=req, given=provided);
+            (:any):
+                return true;
+        }
+    }
+
+    static Requirement parse(string req) {
+        if (req == "*") return Requirement(:any);
+        if (req.startsWith(">="))
+            return Requirement((:greaterEqual, Version.parse(req[2 .. $])));
+        if (req.startsWith("<="))
+            return Requirement((:lesserEqual, Version.parse(req[2 .. $])));
+        if (req.startsWith(">"))
+            return Requirement((:greater, Version.parse(req[1 .. $])));
+        if (req.startsWith("<"))
+            return Requirement((:lesser, Version.parse(req[1 .. $])));
+        if (req.startsWith("^"))
+            return Requirement((:semverCompatible, Version.parse(req[1 .. $])));
+        if (req.startsWith("="))
+            return Requirement((:equal, Version.parse(req[1 .. $])));
+        print("Cannot parse requirement: '" ~ req ~ "'");
+        assert(false);
+    }
+}
+
+string cleanupSource(string source) {
+    import std.string : replace;
+
+    return source.replace(":", "_").replace("/", "_").replace(" ", "_");
+}
+
+string repoPath(string source) {
+    import std.process : getEnv;
+
+    return getEnv("HOME") ~ "/.neat/git/" ~ cleanupSource(source) ~ "/repo";
+}
+
+string checkoutPath(string source, Version version_) {
+    import std.process : getEnv;
+
+    return getEnv("HOME") ~ "/.neat/git/" ~ cleanupSource(source) ~ "/v" ~ version_.str;
+}
+
+void refresh(string source) {
+    import std.process : system;
+    void system_v(string s) { print("$ " ~ s); system(s); }
+
+    string repoPath = source.repoPath;
+    if (repoPath.exists) {
+        system_v("git -C " ~ repoPath ~ " pull");
+    } else {
+        system_v("mkdir -p " ~ repoPath);
+        system_v("git clone " ~ source ~ " " ~ repoPath);
+    }
+}
+
+Version[] getPackageVersions(string source) {
+    import std.process : readback;
+
+    refresh(source);
+    // TODO
+    // auto tags = readback("git -C " ~ source.repoPath ~ " tag -l").split("\n").[a for a where a != ""]
+    auto tagstrs = [a for a in readback("git -C " ~ source.repoPath ~ " tag -l").split("\n") where a != ""];
+    bool isVerTag(string s) {
+        if (!s.startsWith("v")) return false;
+        auto parts = s[1 .. $].split(".");
+        if (parts.length != 3) return false;
+        bool isDigit(char ch) { return ch >= "0"[0] && ch <= "9"[0]; }
+        return [all [all ch.isDigit for ch in part] for part in parts];
+    }
+    return [Version.parse(ver[1 .. $]) for ver in tagstrs where ver.isVerTag];
+}
+
+string checkoutVer(string source, Version version_) {
+    import std.process : system;
+
+    auto checkoutPath = source.checkoutPath(version_);
+    if (!checkoutPath.exists) {
+        // TODO only do once
+        refresh(source);
+        string cloneFlags = "-q -c advice.detachedHead=false --depth 1";
+        system("mkdir -p " ~ checkoutPath);
+        system("git clone " ~ cloneFlags ~ " -b v" ~ version_.str ~ " " ~ source.repoPath ~ " " ~ checkoutPath);
+    }
+    return checkoutPath;
+}
+
+struct Dependency {
+    string name;
+    string source;
+    Requirement[] requirements;
+}
+
+class VersionProvider {
+    (string source, Version[] vers)[] cachedVersions;
+
+    this() { }
+
+    Version[] versions(string source) {
+        Version[] load() {
+            auto vers = getPackageVersions(source);
+            cachedVersions ~= (source, vers);
+            return vers;
+        }
+        return [first a.vers for a in cachedVersions where a.source == source else load];
+    }
+}
+
+// Corresponds to a package.json, type=library
+class PackageFile {
+    string srcDir;
+    Dependency[] deps;
+
+    this(this.srcDir, this.deps) { }
+}
+
+// type=binary
+class BinaryPackageFile : PackageFile {
+    string main;
+    string binary;
+    this(this.main, this.binary, this.srcDir, this.deps) { }
+}
+
+(PackageFile | :notFound) loadPkgFile(string path) {
+    string file = path ~ "/" ~ "package.json";
+    if (!file.exists) return :notFound;
+    JSONValue pkgFile = JSONValue.loadFile(file);
+    if (!pkgFile.isObject) {
+        print("package.json: object expected");
+        exit(1);
+    }
+    mut string srcDir = "";
+    if (pkgFile.has("source")) {
+        srcDir = pkgFile.require("source").requireString;
+    }
+    mut Dependency[] deps;
+    if (pkgFile.has("dependencies")) {
+        mut (string name, string source)[] sources;
+        if (pkgFile.has("sources")) {
+            for (auto name <- pkgFile.get("sources").keys) {
+                auto source = pkgFile.get("sources").get(name).requireString;
+                sources ~= (name, source);
+            }
+        }
+        for (auto name <- pkgFile.get("dependencies").keys) {
+            auto requirementStr = pkgFile.get("dependencies").get(name).requireString;
+            auto requirements = [Requirement.parse(part) for part in requirementStr.split(" ")];
+            // TODO bottom type
+            string missing() {
+                print(file ~ ": no source defined for dependency '" ~ name ~ "'");
+                assert(false);
+            }
+            auto source = [first a.source for a in sources where a.name == name else missing];
+            deps ~= Dependency(name=name, source=source, requirements=requirements);
+        }
+    }
+    if (pkgFile.require("type").requireString == "binary") {
+        auto mainFile = pkgFile.require("main").requireString;
+        mut string binary = mainFile.withoutExtension;
+        if (pkgFile.has("binary"))
+            binary = pkgFile.require("binary").requireString;
+        return new BinaryPackageFile(mainFile, binary, srcDir, deps);
+    }
+    return new PackageFile(srcDir, deps);
+}
+
+// Corresponds to a package-lock.json
+class PackageLock {
+    (string source, Version version_)[] packages;
+
+    this(this.packages) { }
+
+    bool has(string source) { return [any a.source == source for a in packages]; }
+    Version get(string source) {
+        Version notFound() { assert(false); }
+        return [first a.version_ for a in packages where a.source == source else notFound];
+    }
+
+    PackageLock withPkg(string source, Version version_) {
+        return new PackageLock(packages ~ (source, version_));
+    }
+}
+
+(PackageLock | :notFound) loadPkgLock(string path) {
+    string file = path ~ "/" ~ "package-lock.json";
+    if (!file.exists) return :notFound;
+    JSONValue pkgFile = JSONValue.loadFile(file);
+    if (!pkgFile.isObject) {
+        print("package-lock.json: object expected");
+        assert(false);
+    }
+    mut (string source, Version version_)[] packages;
+    for (auto key <- pkgFile.keys) {
+        auto verstr = pkgFile.require(key).requireString;
+        auto ver = Version.parse(verstr);
+        packages ~= (key, ver);
+    }
+    return new PackageLock(packages);
+}
+
+void writePkgLock(PackageLock pkgLock, string path) {
+    string file = path ~ "/" ~ "package-lock.json";
+    // TODO .init
+    mut JSONValue obj = JSONValue(new (string key, JSONValue value)[](0));
+    for (auto pair <- pkgLock.packages) {
+        obj.set(pair.source, JSONValue(pair.version_.str));
+    }
+    file.write(obj.str);
+}
+
+// Returns a Package for the name/path.
+((Package package_, PackageLock packageLock) | :mismatched) resolvePackageVersions(
+    string name, string path, Package[] defaultPkgs, Dependency[] allDeps,
+    mut PackageLock packageLock, VersionProvider provider)
+{
+    mut PackageFile pkgFile;
+    loadPkgFile(path).case {
+        PackageFile file: pkgFile = file;
+        (:notFound): {
+            print(path ~ "/package.json not found.");
+            exit(1);
+        }
+    }
+    mut Package[] deps = defaultPkgs;
+    auto combinedDeps = allDeps ~ pkgFile.deps;
+    // name, source, requirements
+    for (auto dep <- pkgFile.deps) {
+        if (packageLock.has(dep.source)) {
+            auto version_ = packageLock.get(dep.source);
+            // TODO assert version_ matches requirements still
+            auto depPath = checkoutVer(dep.source, version_);
+            auto result = resolvePackageVersions(dep.name, depPath, defaultPkgs, combinedDeps, packageLock, provider);
+            result.case {
+                (Package package_, PackageLock resultLock): {
+                    deps ~= package_;
+                    packageLock = resultLock; // might have added further locks in dependencies
+                }
+                (:mismatched): {
+                    // What the fuck happened here??
+                    return :mismatched;
+                }
+            }
+            continue;
+        }
+        // TODO only select newest patch versions
+        auto versions = provider.versions(dep.source);
+        bool allowed(Version version_) {
+            return [all [all req.fulfilled(version_) for req in globalDep.requirements]
+                for globalDep in combinedDeps where globalDep.source == dep.source];
+        }
+        auto allowedVersions = [ver for ver in versions where ver.allowed];
+        mut bool matched = false;
+        for (mut int i = cast(int) allowedVersions.length - 1; i >= 0; i -= 1) {
+            auto version_ = allowedVersions[i];
+            auto newLock = packageLock.withPkg(dep.source, version_);
+            auto depPath = checkoutVer(dep.source, version_);
+            auto result = resolvePackageVersions(dep.name, depPath, defaultPkgs, combinedDeps, newLock, provider);
+            result.case {
+                (Package package_, PackageLock resultLock): {
+                    deps ~= package_;
+                    packageLock = resultLock;
+                    matched = true;
+                    break;
+                }
+                (:mismatched): {
+                    continue;
+                }
+            }
+        }
+        if (!matched) return :mismatched;
+    }
+    auto srcDir = realpath(path ~ "/" ~ pkgFile.srcDir);
+    return (new Package(name, srcDir, deps), packageLock);
+}
+
+JSONValue require(JSONValue v, string key) {
+    void fail() { print("Expected '" ~ key ~ "', not " ~ v.str); exit(1); }
+    v.value.case {
+        (:false): fail;
+        (:true): fail;
+        int: fail;
+        string: fail;
+        JSONValue[]: fail;
+        (string key, JSONValue value)[] obj: {
+            for (auto entry <- obj)
+                if (entry.key == key) return entry.value;
+            print("Expected '" ~ key ~ "' in " ~ v.str);
+            exit(1);
+        }
+    }
+}
+
+string requireString(JSONValue v) {
+    void fail() { print("Expected string, not " ~ v.str); exit(1); }
+    v.value.case {
+        (:false): fail;
+        (:true): fail;
+        int: fail;
+        string s: return s;
+        JSONValue[]: fail;
+        (string key, JSONValue value)[]: fail;
+    }
+}

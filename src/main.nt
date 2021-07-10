@@ -13,6 +13,7 @@ import neat.compiler;
 import neat.expr;
 import neat.function_;
 import neat.hash;
+import neat.packages;
 import neat.parser_base;
 import neat.stuff;
 import neat.types;
@@ -27,13 +28,6 @@ extern(C) bool neat_runtime_waitpid(int pid);
 extern(C) int neat_runtime_execbg(string command, string[] arguments);
 extern(C) long compiler_hash_add();
 extern(C) long compiler_hash_mult();
-
-string removeExtension(string s) {
-    mut string shortened = s;
-    while (shortened.length > 0 && shortened[$ - 1 .. $] != ".")
-        shortened = shortened[0 .. $ - 1];
-    if (shortened.length) return shortened[0 .. $ - 1]; else return s;
-}
 
 string removeSlashes(string s) {
     mut string result;
@@ -384,7 +378,7 @@ string resolvePath(ASTPackage pak, string execPath) {
 }
 
 Package[] resolvePackages(ASTPackage[] astPackages, string execPath) {
-    Package[] result = [new Package(pkg.name, resolvePath(pkg, execPath)) for pkg in astPackages];
+    Package[] result = [new Package(pkg.name, resolvePath(pkg, execPath), []) for pkg in astPackages];
     for (int i <- 0 .. astPackages.length) {
         auto astPackage = astPackages[i];
         for (auto dep <- astPackage.deps) {
@@ -632,7 +626,7 @@ void clearOnceCache() {
 }
 
 ASTModule builtinSymbols(Options options) {
-    auto builtins = new ASTModule(__HERE__, "", new Package("builtins", ""), new MacroState, null);
+    auto builtins = new ASTModule(__HERE__, "", new Package("builtins", "", []), new MacroState, null);
 
     builtins.addSymbolAlias("string", new FixedSymbolAlias(new Array(new Character)));
     // TODO dedi build type
@@ -769,65 +763,50 @@ void main(mut string[] args)
     }
 
     if (args[0] == "build") {
-        JSONValue pkgFile = JSONValue.parse("package.json".read);
-        if (!pkgFile.isObject) {
-            print("package.json: object expected");
+        // TODO
+        /*auto pkgFile = loadPkgFile(".").handle((:notFound): {
+            print("package.json not found.");
             exit(1);
+        });*/
+        mut BinaryPackageFile pkgFile;
+        loadPkgFile(".").case {
+            PackageFile file: pkgFile = file.instanceOf(BinaryPackageFile);
+            (:notFound): {
+                print("package.json not found.");
+                exit(1);
+            }
         }
-        auto mainFile = pkgFile.require("main").requireString;
-        mut string output = mainFile.removeExtension;
-        if (pkgFile.has("binary"))
-            output = pkgFile.require("binary").requireString;
-        if (pkgFile.has("source")) {
-            auto srcDir = pkgFile.require("source").requireString;
-            auto pkg = new Package(name="src", path=realpath(srcDir));
-            [pkg.addDependency(dep) for dep in packages];
-            packages ~= pkg;
+        options.output = pkgFile.binary;
+        mut PackageLock packageLock = loadPkgLock(".").case(
+            PackageLock f: f,
+            (:notFound): new PackageLock([]));
+        // default commandline packages
+        auto ret = resolvePackageVersions("src", ".", packages, [], packageLock, new VersionProvider);
+        mut Package pkg;
+        ret.case {
+            (:mismatched): {
+                print("Package resolution failed. :-(");
+                exit(1);
+            }
+            (Package package_, PackageLock resultLock): {
+                packageLock = resultLock;
+                pkg = package_;
+            }
         }
-        options.output = output;
-        buildBinary(options, mainFile, execPath=execPath, packages);
+        writePkgLock(packageLock, ".");
+        packages ~= pkg;
+        buildBinary(options, pkgFile.main, execPath=execPath, packages);
         return;
     }
 
     // Add "." default package for commandline builds
-    auto pkg = new Package(name="src", path=realpath("."));
-    [pkg.addDependency(dep) for dep in packages];
-    packages ~= pkg;
+    packages ~= new Package(name="src", path=realpath("."), packages);
 
     auto mainFile = args[0];
 
-    if (!options.output.length) options.output = removeExtension(args[0]);
+    if (!options.output.length) options.output = args[0].withoutExtension;
 
     buildBinary(options, mainFile, execPath=execPath, packages);
-}
-
-JSONValue require(JSONValue v, string key) {
-    void fail() { print("Expected '" ~ key ~ "', not " ~ v.str); exit(1); }
-    v.value.case {
-        (:false): fail;
-        (:true): fail;
-        int: fail;
-        string: fail;
-        JSONValue[]: fail;
-        (string key, JSONValue value)[] obj: {
-            for (auto entry <- obj)
-                if (entry.key == key) return entry.value;
-            print("Expected '" ~ key ~ "' in " ~ v.str);
-            exit(1);
-        }
-    }
-}
-
-string requireString(JSONValue v) {
-    void fail() { print("Expected string, not " ~ v.str); exit(1); }
-    v.value.case {
-        (:false): fail;
-        (:true): fail;
-        int: fail;
-        string s: return s;
-        JSONValue[]: fail;
-        (string key, JSONValue value)[]: fail;
-    }
 }
 
 void createBuilderScripts() {

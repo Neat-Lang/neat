@@ -123,7 +123,10 @@ class CImportMacro : Macro
             }
             if (cparser.accept("enum")) {
                 cparser.parseIdentifier;
-                cparser.expect("{");
+                if (!cparser.accept("{")) {
+                    cparser.eatline;
+                    continue;
+                }
                 while (true) {
                     auto name = cparser.parseIdentifier;
                     if (!name.length) break;
@@ -286,6 +289,8 @@ class CParserHelper {
     (ASTSymbol type, string name) parseTypedDecl(ASTSymbol baseType) {
         mut auto current = baseType;
         assert(!!current);
+        // TODO polysemous null type
+        ASTSymbol nullSymbol;
         auto loc = parser.loc;
         while (true) {
             if (parser.accept("*") || parser.accept("[]")) {
@@ -300,12 +305,20 @@ class CParserHelper {
             parser.begin;
             if (parser.accept("(") && parser.accept("*")) {
                 auto name = parser.parseIdentifier;
-                parser.expect(")");
+                // I fucking hate C type syntax. No arrays of function pointers for you.
+                if (!parser.accept(")")) {
+                    parser.revert;
+                    return (nullSymbol, "");
+                }
                 parser.expect("(");
                 mut ASTSymbol[] params;
                 while (!parser.accept(")")) {
                     if (params.length) parser.expect(",");
                     auto argtype = parseType;
+                    if (!argtype) {
+                        parser.revert;
+                        return (nullSymbol, "");
+                    }
                     auto arg = parseTypedDecl(argtype);
                     params ~= arg.type;
                 }
@@ -315,12 +328,14 @@ class CParserHelper {
             parser.revert;
             break;
         }
-        // TODO polysemous null
-        ASTSymbol nullSymbol;
         // name can be empty!
         auto name = parser.parseIdentifier;
         auto loc = parser.loc;
         while (parser.accept("[")) {
+            if (parser.accept("]")) {
+                current = new ASTPointer(current, parser.loc);
+                continue;
+            }
             auto n = parseCNumber; auto num = n.case(
                 (:failure): return (nullSymbol, ""),
                 (:success, int i): i);

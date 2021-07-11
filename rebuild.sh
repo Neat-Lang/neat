@@ -44,6 +44,7 @@ then
     # store compiler source next to compiler
     rm -rf build/src
     cp -R src build/
+    cp neat.ini build
     exit
 fi
 

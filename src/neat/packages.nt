@@ -335,23 +335,27 @@ void writePkgLock(PackageLock pkgLock, string path) {
         auto allowedVersions = [ver for ver in versions where ver.allowed];
         mut bool matched = false;
         for (mut int i = cast(int) allowedVersions.length - 1; i >= 0; i -= 1) {
+            /**
+             * We pin the version to the allowed version, then we recurse *into our own resolve call*.
+             * This is to allow backtracking across dependencies.
+             * This works because the current code block is only entered if the dependency was not pinned.
+             */
             auto version_ = allowedVersions[i];
             auto newLock = packageLock.withPkg(dep.source, version_);
-            auto depPath = checkoutVer(dep.source, version_);
-            auto result = resolvePackageVersions(dep.name, depPath, defaultPkgs, combinedDeps, newLock, provider);
+            auto result = resolvePackageVersions(name, path, defaultPkgs, allDeps, newLock, provider);
             result.case {
                 (Package package_, PackageLock resultLock): {
-                    deps ~= package_;
-                    packageLock = resultLock;
-                    matched = true;
-                    break;
+                    return (package_, resultLock);
                 }
                 (:mismatched): {
                     continue;
                 }
             }
         }
-        if (!matched) return :mismatched;
+        /**
+         * If we got here, pinning the version of this dep to any version did not produce a valid resolution.
+         */
+        return :mismatched;
     }
     auto srcDir = realpath(path ~ "/" ~ pkgFile.srcDir);
     return (new Package(name, srcDir, deps), packageLock);

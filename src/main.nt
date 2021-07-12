@@ -56,7 +56,7 @@ string compress(string symbol) {
             string sample = symbol[i .. k];
             int pos = find(symbol[0 .. i], sample);
             if (pos != -1) {
-                string replace = "B" ~ ltoa(pos) ~ "N" ~ ltoa(k - i);
+                string replace = "B$(pos)N$(k - i)";
                 if (replace.length < sample.length)
                 {
                     result ~= replace;
@@ -141,7 +141,7 @@ BackgroundCompilation emitModule(Module module_, CompilationVisitor[] visitors, 
         }
         string cmd = exec ~ " " ~ args.join(" ");
         int pid = neat_runtime_execbg(exec, args);
-        print("\$ " ~ cmd ~ " [&" ~ itoa(pid) ~ "]");
+        print("\$ $cmd [&$pid]");
         return pid;
     }
 
@@ -165,17 +165,17 @@ BackgroundCompilation emitModule(Module module_, CompilationVisitor[] visitors, 
     [symbol.hash(hash) for symbol in symbols];
     [[visitor.visit(symbol) for symbol in symbols] for visitor in visitors];
 
-    mut string objFile = ".obj/" ~ hash.text ~ ".o";
+    mut string objFile = ".obj/$(hash.text).o";
     if (backendModuleLLVM && settings.optimize) {
-        objFile = ".obj/" ~ hash.text ~ ".bc";
+        objFile = ".obj/$(hash.text).bc";
     }
 
     mut string srcFile;
     if (backendModuleLLVM) {
-        srcFile = ".obj/" ~ compress(removeSlashes(moduleMangle)) ~ ".ll";
+        srcFile = ".obj/$(compress(removeSlashes(moduleMangle))).ll";
     } else {
         assert(!!backendModuleC);
-        srcFile = ".obj/" ~ compress(removeSlashes(moduleMangle)) ~ ".c";
+        srcFile = ".obj/$(compress(removeSlashes(moduleMangle))).c";
     }
 
     if (settings.caching && exists(objFile) && exists(srcFile)) {
@@ -316,19 +316,19 @@ class ParserHelperImpl : ParserHelper
         mut string soname;
         mut string cmd;
         if (settings.backend.instanceOf(LLVMBackend)) {
-            soname = ".obj/macro_" ~ name ~ "_" ~ result.hash.text ~ ".so";
-            cmd = baseCmd ~ " -shared" ~ objFiles ~ " -o " ~ soname;
+            soname = ".obj/macro_$(name)_$(result.hash.text).so";
+            cmd = "$baseCmd -shared $objFiles -o $soname";
         }
         else if (settings.backend.instanceOf(CBackend)) {
-            soname = ".obj/macro_" ~ name ~ "_" ~ result.hash.text ~ ".so";
+            soname = ".obj/macro_$(name)_$(result.hash.text).so";
             mut string flags = " -shared -g";
             if (settings.x86_32) flags ~= " -m32";
-            cmd = baseCmd ~ flags ~ objFiles ~ " -o " ~ soname;
+            cmd = "$baseCmd$flags$objFiles -o $soname";
         }
         else assert(false);
 
         if (!settings.caching || !exists(soname)) {
-            print("\$ " ~ cmd);
+            print("\$ $cmd");
             neat_runtime_system(cmd);
         }
         neat_runtime_dlcall(soname, name, macroState);
@@ -385,14 +385,14 @@ Package[] resolvePackages(ASTPackage[] astPackages, string execPath) {
             mut Package foundDep;
             for (auto resultPak <- result) {
                 if (resultPak.name == dep) {
-                    if (foundDep) print("Dependency '" ~ dep ~ "' of '" ~ astPackage.name ~ "' exists twice!");
+                    if (foundDep) print("Dependency '$dep' of '$(astPackage.name)' exists twice!");
                     assert(!foundDep);
                     foundDep = resultPak;
                     break;
                 }
             }
             if (!foundDep) {
-                print("Missing package dependency: " ~ dep);
+                print("Missing package dependency: $dep");
                 assert(false);
             }
             result[i].addDependency(foundDep);
@@ -433,9 +433,9 @@ class UmlVisitor : CompilationVisitor
 
     void writeTo(string filename) {
         mut string diagram = "Digraph G {\n";
-        void addl(string s) { diagram ~= "  " ~ s ~ "\n"; }
+        void addl(string s) { diagram ~= "  $s\n"; }
         for (auto pair <- inheritance) {
-            addl(pair.base ~ " -> " ~ pair.child ~ " [dir=back, arrowhead=empty];");
+            addl("$(pair.base) -> $(pair.child) [dir=back, arrowhead=empty];");
         }
         diagram ~= "}\n";
         write(filename, diagram);
@@ -599,7 +599,7 @@ class Options
     void addPackage(string pak, bool relative) {
         auto pak = parsePackage(pak, relative);
         if ([any a.name == pak.name for a in this.astPackages]) {
-            print("warn: package double-specified: " ~ pak.name ~ "; using newer definition");
+            print("warn: package double-specified: $(pak.name); using newer definition");
             this.astPackages = [a for a in this.astPackages where a.name != pak.name];
         }
         this.astPackages ~= pak;
@@ -680,11 +680,11 @@ void buildBinary(Options options, string mainFile, string execPath, Package[] pa
         umlVisitor.writeTo(options.umlFile);
     }
 
-    string binHashOutput = ".obj/hash_" ~ result.hash.text ~ ".c";
+    string binHashOutput = ".obj/hash_$(result.hash.text).c";
     with (result.hash.state) {
         write(binHashOutput,
-"long long int compiler_hash_add() { return " ~ ltoa(add) ~ "LL; }
-long long int compiler_hash_mult() { return " ~ ltoa(mult) ~ "LL; }
+"long long int compiler_hash_add() { return $(add)LL; }
+long long int compiler_hash_mult() { return $(mult)LL; }
 "       );
     }
     fileArgs ~= " " ~ binHashOutput;
@@ -694,11 +694,11 @@ long long int compiler_hash_mult() { return " ~ ltoa(mult) ~ "LL; }
     string unittestCode() {
         mut string ret;
         for (auto symbol <- unittestVisitor.symbols) {
-            ret ~= "extern void " ~ symbol ~ "();\n";
+            ret ~= "extern void $symbol();\n";
         }
         ret ~= "void _run_unittests() {\n";
         for (auto symbol <- unittestVisitor.symbols) {
-            ret ~= "  " ~ symbol ~ "();\n";
+            ret ~= "  $symbol();\n";
         }
         ret ~= "}\n";
         return ret;
@@ -737,8 +737,8 @@ long long int compiler_hash_mult() { return " ~ ltoa(mult) ~ "LL; }
     if (options.noMain)
         flags ~= " -DNEAT_NO_MAIN";
     string runtime = execPath ~ "/src/runtime.c";
-    string cmd = compilerCmd ~ flags ~ fileArgs ~ " " ~ runtime ~ " -o " ~ options.output ~ linkerFlags;
-    print("\$ " ~ cmd);
+    string cmd = "$compilerCmd$flags$fileArgs $runtime -o $(options.output)$linkerFlags";
+    print("\$ $cmd");
     neat_runtime_system(cmd);
     compiler.clear;
     clearOnceCache;
@@ -758,7 +758,8 @@ void main(mut string[] args)
 
     if (args.length != 1)
     {
-        print("Usage: " ~ executable ~ " [-Pname:path[:dep1[,dep2]*]?]* FILE.nt");
+        print("Usage: $executable [-Pname:path[:dep1[,dep2]*]?]* FILE.nt");
+        print("       $executable build");
         return;
     }
 

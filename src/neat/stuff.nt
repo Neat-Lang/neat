@@ -1286,10 +1286,66 @@ ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
     return null;
 }
 
-ASTStringLiteral parseStringLiteral(Parser parser, string endMarker)
+class ASTFormatString : ASTSymbol
+{
+    Loc loc;
+
+    ASTSymbol[] parts;
+
+    this(this.loc, this.parts) { }
+
+    override Symbol compile(Context context) {
+        mut auto context = context;
+        auto compiler = context.compiler;
+        mut ASTSymbol result = compiler.astStringLiteral("", __HERE__);
+        bool isString(Type type) {
+            if (auto array = type.instanceOf(Array))
+                return !!array.elementType.instanceOf(Character);
+            return false;
+        }
+        for (auto part <- parts) {
+            // TODO part.loc
+            auto sym = part.compile(context).beExpressionImplCall(context, loc);
+            ASTSymbol astSym = new ASTSymbolHelper(sym);
+            if (sym.type.isString) {
+                result = compiler.$expr $result ~ $astSym;
+            } else if (sym.type.instanceOf(Integer)) {
+                result = compiler.$expr $result ~ itoa($astSym);
+            } else if (sym.type.instanceOf(Float)) {
+                result = compiler.$expr $result ~ ftoa($astSym);
+            } else if (sym.type.instanceOf(Long)) {
+                result = compiler.$expr $result ~ ltoa($astSym);
+            } else if (sym.type.instanceOf(Struct) || sym.type.instanceOf(Class)) {
+                result = compiler.$expr $result ~ $astSym.toString;
+            } else {
+                this.loc.fail("Don't know how to format " ~ sym.type.repr);
+            }
+        }
+        auto itoaFun = new FunctionDeclaration(
+            "neat_runtime_itoa", new Array(new Character), [Parameter(false, "value", false, new Integer)]);
+        auto ftoaFun = new FunctionDeclaration(
+            "neat_runtime_ftoa", new Array(new Character), [Parameter(false, "value", false, new Float)]);
+        auto ltoaFun = new FunctionDeclaration(
+            "neat_runtime_ltoa", new Array(new Character), [Parameter(false, "value", false, new Long)]);
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "itoa", itoaFun));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "ftoa", ftoaFun));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "ltoa", ltoaFun));
+        return result.compile(context);
+    }
+}
+
+ASTSymbol parseStringLiteral(Parser parser, LexicalContext lexicalContext, string endMarker)
 {
     auto loc = parser.loc;
-    mut string result;
+    mut string current;
+    mut ASTSymbol[] parts;
+    void flush() {
+        if (current != "") parts ~= new ASTStringLiteral(current, loc);
+        current = "";
+    }
     while (parser.text.length < endMarker.length || parser.text[0 .. endMarker.length] != endMarker)
     {
         if (parser.text.length == 0) {
@@ -1301,19 +1357,19 @@ ASTStringLiteral parseStringLiteral(Parser parser, string endMarker)
             string ctl = parser.text[0 .. 1];
             parser.drop(1);
             if (ctl == "r") {
-                result ~= "\r";
-            } else if (ctl == "$") {
-                result ~= "$";
+                current ~= "\r";
+            } else if (ctl == "\$") {
+                current ~= "\$";
             } else if (ctl == "n") {
-                result ~= "\n";
+                current ~= "\n";
             } else if (ctl == "t") {
-                result ~= "\t";
+                current ~= "\t";
             } else if (ctl == "\"") {
-                result ~= "\"";
+                current ~= "\"";
             } else if (ctl == "\\") {
-                result ~= "\\";
+                current ~= "\\";
             } else if (ctl == "0") {
-                result ~= "\x00"; // TODO \0
+                current ~= "\x00"; // TODO \0
             } else if (ctl == "x") {
                 char ch1 = parser.text[0], ch2 = parser.text[1];
                 int decodeHex(char ch) {
@@ -1327,22 +1383,41 @@ ASTStringLiteral parseStringLiteral(Parser parser, string endMarker)
                     assert(false);
                 }
                 char ord = cast(char) (decodeHex(ch1) * 16 + decodeHex(ch2));
-                result ~= ord;
+                current ~= ord;
                 parser.drop(2);
             } else {
                 print("Unknown control sequence \\" ~ ctl);
                 assert(false);
             }
+        } else if (ch == "\$") {
+            flush;
+            if (parser.accept("(")) {
+                ASTSymbol expr = parser.parseExpression(lexicalContext);
+                loc.assert2s(!!expr, "Expression expected.");
+                parser.expect(")");
+                parts ~= expr;
+            } else {
+                auto varLoc = parser.loc;
+                auto var = parser.parseIdentifier;
+                loc.assert2s(var != "", "Identifier expected.");
+                parts ~= new ASTIdentifier(var, moduleLevel=false, varLoc);
+            }
         } else {
-            result ~= ch;
+            current ~= ch;
         }
     }
     if (!parser.accept(endMarker))
     {
         parser.fail("this should never happen");
     }
+    flush;
+    if (parts.length == 0) return new ASTStringLiteral("", loc);
+    if (parts.length == 1) {
+        if (auto literal = parts[0].instanceOf(ASTStringLiteral))
+            return literal;
+    }
 
-    return new ASTStringLiteral(result, loc);
+    return new ASTFormatString(loc, parts);
 }
 
 // i++, i--, ++i, --i
@@ -1450,7 +1525,7 @@ ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
     if (name.length)
     {
         if (name == "__HERE__") return hereExpr(loc, lexicalContext);
-        if (name == "$") return new ASTArrayLength(loc);
+        if (name == "\$") return new ASTArrayLength(loc);
         if (name == "super") return new ASTSuper(loc);
         return new ASTIdentifier(name, false, loc);
     }
@@ -1475,7 +1550,7 @@ ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
     }
     if (parser.accept("\""))
     {
-        return parseStringLiteral(parser, "\"");
+        return parseStringLiteral(parser, lexicalContext, "\"");
     }
     if (auto statementExpr = parseStatementExpr(parser, lexicalContext))
         return statementExpr;
@@ -2153,7 +2228,7 @@ class ASTVarDeclStatement : ASTStatement
         mut ASTSymbol varName;
         // auto $foo = 5;
         // -> compiler.astDeclareVar(foo, compiler.astIntLiteral(5))
-        if (this.name[0 .. 1] == "$") {
+        if (this.name[0 .. 1] == "\$") {
             varName = quoter.compiler.astIdentifier(this.name[1 .. $], this.loc);
         } else {
             varName = quoter.compiler.astStringLiteral(this.name, this.loc);
@@ -2518,7 +2593,7 @@ class ASTStatementStatement : ASTStatement
     this(this.loc, this.variable) { }
 
     override StatementCompileResult compile(Context context) {
-        this.loc.fail("$stmt used outside quasiquote");
+        this.loc.fail("\$stmt used outside quasiquote");
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -2532,7 +2607,7 @@ class ASTStatementStatement : ASTStatement
 ASTStatementStatement parseStatementStatement(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
-    if (!parser.accept("$stmt")) return null;
+    if (!parser.accept("\$stmt")) return null;
     auto variable = parser.parseIdentifier;
     if (!variable.length) parser.fail("ASTStatement variable expected");
     parser.expect(";");

@@ -438,6 +438,8 @@ at_revision '3bb29dbac77de3b27dc15b28730f07c415cbb628' 'lang_transition_1' 'buil
 at_revision 'e658d57ba621e761a8f6d92a1d78b398ebcce2bd' 'lang_transition_2' 'build/neat'
 # rename cx to NeatLang, part 3
 at_revision 'f9ef0cb5a2ea906edc125252cd7c8217836df3ae' 'lang_transition_3' 'build/neat'
+# format string prep: '$' is escapable
+at_revision 'ffab3ed0a6debabd56b042ec8d172ed43bc77917' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

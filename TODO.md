@@ -1,6 +1,8 @@
 blocking:
-- public, private
-- format strings
+- interfaces
+- generic namespaces
+- dedicated bool type
+- public, private?
 - ranges?
 
 pending:

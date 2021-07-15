@@ -1875,23 +1875,6 @@ ASTReturnStatement parseReturn(Parser parser, LexicalContext lexicalContext)
     return new ASTReturnStatement(expr, parser.loc);
 }
 
-// helper for binding values for stuff like compiler.$stmt
-class SymbolAlias : Namespace
-{
-    string name;
-
-    Symbol value;
-
-    this(this.parent, this.name, this.value) { this.isContextScope = parent.isContextScope; }
-
-    override Symbol lookup(string name, Context context, Loc loc, Expression frame)
-    {
-        if (this.name == name) return value;
-        if (this.parent) return this.parent.lookup(name, context, loc, frame);
-        return null;
-    }
-}
-
 class NestedFunctionDeclaration : Namespace
 {
     Function nestedFunction;
@@ -2375,7 +2358,7 @@ class ASTNestedFunctionDeclStatement : ASTStatement
 
         auto namespace = new NestedFunctionDeclaration(context.namespace, fun_);
 
-        module_.register("__$(ptrId(this))", fun_);
+        module_.track(fun_);
 
         return StatementCompileResult(
             new NoopStatement,
@@ -2738,6 +2721,9 @@ ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalContext) {
     if (auto aliasDecl = parseAliasDecl(parser, lexicalContext)) {
         return aliasDecl;
     }
+    if (ASTStructDecl structDecl = parseStructDecl(parser, lexicalContext)) {
+        return structDecl;
+    }
     return null;
 }
 
@@ -2832,7 +2818,7 @@ class ASTModule : ASTModuleBase
     int depth; // count from parent = null
 
     (ASTImport | ASTSymbol | ASTExtern | ASTFunction
-        | ASTAliasDecl | ASTTemplateDecl | ASTUnitTest
+        | ASTDeclaration | ASTTemplateDecl | ASTUnitTest
     )[] entries;
 
     this(this.loc, this.name, this.pak, this.macroState, this.parent) {
@@ -2852,10 +2838,12 @@ class ASTModule : ASTModuleBase
                 ASTFunction: {}
                 ASTUnitTest: {}
                 ASTSymbol: {}
-                ASTTemplateDecl: {}
-                ASTAliasDecl alias_: {
-                    if (alias_.name == name) return alias_.target;
+                ASTDeclaration decl: {
+                    if (auto alias_ = decl.instanceOf(ASTAliasDecl)) {
+                        if (alias_.name == name) return alias_.target;
+                    }
                 }
+                ASTTemplateDecl: {}
             }
         }
         return null;
@@ -2929,7 +2917,7 @@ class Resolver
     {
         int hit = cast(int) [first i for i, a in this.entries where a.name == name else -1];
         if (hit == -1) {
-            entries ~= ResolvingModuleEntry(name, false, symbol, Nothing());
+            entries ~= ResolvingModuleEntry(name, resolving=false, symbol, Nothing());
             return;
         }
         entries[hit].resolution = symbol;
@@ -2959,7 +2947,7 @@ class Resolver
                 ASTFunction fun: fun.compile(context),
                 ASTUnitTest ut: ut.compile(context),
                 ASTClassDecl decl: decl.compile(context),
-                ASTStructDecl decl: decl.compile(context),
+                ASTStructDecl decl: decl.compileToStruct(context),
                 ASTAliasDecl decl: decl.target.compile(context),
                 Nothing _: ({ assert(false); cast(Symbol) null; }));
             this.entries[i].resolving = false;
@@ -2970,11 +2958,6 @@ class Resolver
     {
         for (int i <- 0 .. this.entries.length) {
             resolve(context, __HERE__, i);
-        }
-        for (int i <- 0 .. this.entries.length) {
-            if (auto class_ = this.entries[i].resolution.instanceOf(Class)) {
-                class_.resolve(context);
-            }
         }
     }
 }
@@ -2995,6 +2978,11 @@ class Module : ModuleBase
 
     Resolver resolver;
 
+    Symbol[] anonymousEntries;
+
+    // filled in by compile()
+    FinishedSymbol[] finishedSymbols;
+
     size_t hash; // hash of mangled name
 
     this(this.loc, this.name, this.mangledName, this.parentModule) {
@@ -3006,6 +2994,11 @@ class Module : ModuleBase
     void add(string name, (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) symbol)
     {
         this.resolver.add(name, symbol);
+    }
+
+    override void track(Symbol symbol)
+    {
+        this.anonymousEntries ~= symbol;
     }
 
     void register(string name, Symbol symbol)
@@ -3034,11 +3027,6 @@ class Module : ModuleBase
 
     override string mangle() { return this.mangledName; }
 
-    void resolve(Context context)
-    {
-        this.resolver.resolveAll(context);
-    }
-
     void walkModules(bool delegate(Module) cb)
     {
         if (this.parentModule)
@@ -3047,40 +3035,64 @@ class Module : ModuleBase
         [import_.mod.walkModules(cb) for import_ in imports];
     }
 
-    FinishedSymbol[] compile(CompilerBase compiler, Platform platform)
+    void compile(Context context)
     {
-        mut FinishedSymbol[] symbols;
+        auto compiler = context.compiler, platform = context.platform;
 
-        // must be a regular for loop so we can add entries during iteration
-        for (mut int i = 0; i < this.resolver.entries.length; i += 1) {
-            // TODO just get rid of this all
-            ResolvingModuleEntry entry = this.resolver.entries[i];
-            if (Function fun = entry.resolution.instanceOf(Function))
+        this.resolver.resolveAll(context);
+
+        void walkSymbols(void delegate(Symbol) dg) {
+            for (auto entry <- this.resolver.entries) {
+                dg(entry.resolution);
+            }
+            // must be a regular for loop so we can add entries during iteration
+            for (mut int i = 0; i < this.anonymousEntries.length; i += 1) {
+                dg(anonymousEntries[i]);
+            }
+        }
+
+        void resolveClass(Symbol sym) {
+            if (auto class_ = sym.instanceOf(Class)) {
+                class_.resolve(context);
+            }
+        }
+
+        assert(finishedSymbols.length == 0);
+        void compileSymbol(Symbol symbol) {
+            if (Function fun = symbol.instanceOf(Function))
             {
-                symbols ~= fun.compile(compiler, platform);
+                finishedSymbols ~= fun.compile(compiler, platform);
             }
-            if (Class class_ = entry.resolution.instanceOf(Class)) {
-                symbols ~= new DefineClass(class_);
+            if (Class class_ = symbol.instanceOf(Class)) {
+                finishedSymbols ~= new DefineClass(class_);
                 // class_.define(generator);
-                symbols ~= [cast(FinishedSymbol) method.compile(compiler, platform) for method in class_.methods];
+                finishedSymbols ~= [cast(FinishedSymbol) method.compile(compiler, platform) for method in class_.methods];
             }
-            if (Struct struct_ = entry.resolution.instanceOf(Struct)) {
-                symbols ~= [
+            if (Struct struct_ = symbol.instanceOf(Struct)) {
+                finishedSymbols ~= [
                     cast(FinishedSymbol) method.instanceOf(StructMethod).compile(compiler, platform)
                     for method in struct_.methods];
             }
         }
-        return symbols;
+
+        /**
+         * TODO
+         * This is hacky as heck.
+         * It's written by just poking things until it works.
+         * Work out a saner way.
+         */
+        walkSymbols(&resolveClass);
+        walkSymbols(&compileSymbol);
     }
 
-    void emit(Generator generator, FinishedSymbol[] symbols)
+    void emit(Generator generator)
     {
         if (!generator.once(mangle))
             return;
 
         assert(!generator.fun);
 
-        [symbol.emit(generator) for symbol in symbols];
+        [symbol.emit(generator) for symbol in this.finishedSymbols];
     }
 
     Symbol lookupPublic(Context context, Loc loc, string name)
@@ -3425,9 +3437,19 @@ class TemplateDecl : Symbol
 
     this(this.name, this.templateScope, this.typeParameterName, this.content) { }
 
+    (Module mod, Symbol sym, Type type)[] instantiations;
+
     Symbol resolve(mut Context context, Loc loc, Type parameter)
     {
         auto contextModule = findParent!Module(context.namespace);
+
+        for (auto entry <- instantiations) {
+            if (entry.type.same(parameter)) {
+                contextModule.addModuleDependency(entry.mod);
+                return entry.sym;
+            }
+        }
+
         context = context.withNamespace(
             new TemplateInstantiationNamespace(templateScope, typeParameterName, parameter));
         auto content = this.content.case(
@@ -3441,16 +3463,17 @@ class TemplateDecl : Symbol
          * gets the same reused symbols.
          */
         Module module_ = new Module(loc, name, moduleMangle, null);
-        content.case {
-            Class class_:
-                module_.register("", class_);
-            Function fun:
-                module_.register("", fun);
-        }
-        module_.resolve(context);
-        contextModule.addModuleDependency(module_);
 
-        return content.case(Class class_: class_.instanceOf(Symbol), Function fun: fun.instanceOf(Symbol));
+        auto sym = content.case(Class class_: class_.instanceOf(Symbol), Function fun: fun.instanceOf(Symbol));
+        module_.track(sym);
+
+        instantiations ~= (module_, sym, parameter);
+
+        // after append, to break recursion loops
+        module_.compile(context);
+
+        contextModule.addModuleDependency(module_);
+        return sym;
     }
 }
 
@@ -3512,6 +3535,7 @@ class ASTAliasDecl : ASTDeclaration
 
     this(this.name, this.target) { }
 
+    // FIXME should return a Namespace?
     override Context compile(Context context) {
         auto target = this.target.compile(context);
         return context.withNamespace(new SymbolAlias(context.namespace, this.name, target));
@@ -3568,16 +3592,12 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             module_.entries ~= extern_;
             continue;
         }
-        if (ASTStructDecl strct = parseStructDecl(parser, lexicalContext)) {
-            module_.entries ~= strct;
+        if (ASTDeclaration decl = parseDeclaration(parser, lexicalContext)) {
+            module_.entries ~= decl;
             continue;
         }
         if (ASTEnumDecl enumDecl = parseEnumDecl(parser, lexicalContext)) {
             module_.entries ~= enumDecl;
-            continue;
-        }
-        if (ASTAliasDecl aliasDecl = parseAliasDecl(parser, lexicalContext)) {
-            module_.entries ~= aliasDecl;
             continue;
         }
         if (ASTModule submod = parseMacroContinuation(compiler, parser, helper, module_, config))
@@ -3647,13 +3667,20 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
 
                 module_.addImport(importedModule, import_.symbols);
             }
+            ASTDeclaration astDecl: {
+                if (auto structDecl = astDecl.instanceOf(ASTStructDecl)) {
+                    module_.add(structDecl.name, structDecl);
+                } else if (auto aliasDecl = astDecl.instanceOf(ASTAliasDecl)) {
+                    module_.register(aliasDecl.name, aliasDecl.target.compile(context));
+                } else {
+                    print(astDecl.repr);
+                    assert(false);
+                }
+            }
             ASTSymbol symbol: {
-                // TODO ASTSymbolDecl?
+                // TODO just handle all as ASTDeclaration
                 if (auto classDecl = symbol.instanceOf(ASTClassDecl)) {
                     module_.add(classDecl.name, classDecl);
-                }
-                else if (auto structDecl = symbol.instanceOf(ASTStructDecl)) {
-                    module_.add(structDecl.name, structDecl);
                 }
                 else if (auto enumDecl = symbol.instanceOf(ASTEnumDecl)) {
                     module_.register(enumDecl.name, enumDecl.compile(context));
@@ -3669,13 +3696,12 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
                 module_.add(function_.name, function_);
             ASTUnitTest ut:
                 module_.add("", ut);
-            ASTAliasDecl aliasDecl:
-                module_.register(aliasDecl.name, aliasDecl.target.compile(context));
             ASTTemplateDecl astTemplateDecl:
                 module_.register(astTemplateDecl.name, astTemplateDecl.compile(context));
         }
     }
-    module_.resolve(context);
+    module_.compile(context);
+
     context.compiler.addModule(moduleKey, module_);
     return module_;
 }

@@ -23,14 +23,10 @@ class ClassMethod : Function
     bool abstract_;
 
     this(Class classType, this.loc, this.override_, this.abstract_, this.name, this.ret, this.params,
-         this.statement, this.macroState)
+         this.statement, this.macroState, this.parent)
     {
-        // TODO super()
-        auto classNamespace = new ClassNamespace(classType.namespace, classType);
-
         this.hasThisArg = true;
         this.contextType = classType;
-        this.parent = classNamespace;
     }
 
     override string mangle()
@@ -347,9 +343,11 @@ class Class : Type
 
         mut bool override_ = false;
         if (this.superClass) override_ = true;
+        auto methodNamespace = new ClassNamespace(this.namespace, this);
         this.methods ~= new ClassMethod(
             this, this.decl.loc, override_, false /* abstract */, "__instanceof",
-            this, [Parameter(false, "targetClassinfo", false, once new Pointer(new Void))], stmt, new MacroState);
+            this, [Parameter(false, "targetClassinfo", false, once new Pointer(new Void))],
+            stmt, new MacroState, methodNamespace);
     }
 
     void genReleaseMethod(Context context)
@@ -366,9 +364,10 @@ class Class : Type
 
         mut bool override_ = false;
         if (this.superClass) override_ = true;
+        auto methodNamespace = new ClassNamespace(this.namespace, this);
         this.methods ~= new ClassMethod(
             this, this.decl.loc, override_, false /* abstract */, "__destroy",
-            once new Void, [], stmt, new MacroState);
+            once new Void, [], stmt, new MacroState, methodNamespace);
     }
 
     override bool same(Type other) {
@@ -543,16 +542,14 @@ class ASTClassDecl : ASTSymbol
 
     bool abstract_;
 
-    ASTClassDeclMember[] members;
-
-    ASTClassDeclMethod[] methods;
+    (ASTClassDeclMember | ASTClassDeclMethod | ASTDeclaration)[] members;
 
     MacroState macroState;
 
     Loc loc;
 
     this(this.name, this.superClass, this.final_, this.abstract_,
-         this.members, this.methods, this.macroState, this.loc) { }
+         this.members, this.macroState, this.loc) { }
 
     override Class compile(Context context)
     {
@@ -570,17 +567,34 @@ class ASTClassDecl : ASTSymbol
     void compile2(Context context, Class target)
     {
         auto classScope = context.compiler.symbolAlias(context.namespace, target.name, target);
-        Context classContext = context.withNamespace(classScope);
 
-        target.members = [
-            (member.name, beType(member.loc, member.type.compile(classContext)))
-            for member in this.members];
+        mut Context currentContext = context.withNamespace(classScope);
+        mut (string name, Type type)[] memberFields;
+        // Do those later; they need fields resolved for this.field assignments.
+        mut (ASTClassDeclMethod method, Context context)[] lateMemberMethods;
 
-        target.methods = new ClassMethod[](this.methods.length);
+        for (auto member <- this.members) {
+            member.case {
+                ASTClassDeclMember member: {
+                    memberFields ~= (member.name, beType(member.loc, member.type.compile(currentContext)));
+                }
+                ASTClassDeclMethod method: {
+                    lateMemberMethods ~= (method, currentContext);
+                }
+                ASTDeclaration astDecl: {
+                    currentContext = astDecl.compile(currentContext);
+                }
+            }
+        }
+
+        target.members = memberFields;
+
+        target.methods = new ClassMethod[](lateMemberMethods.length);
         target.initDataStruct(context);
-        for (int i <- 0 .. this.methods.length)
+        for (int i <- 0 .. lateMemberMethods.length)
         {
-            ASTClassDeclMethod method = this.methods[i];
+            ASTClassDeclMethod method = lateMemberMethods[i].method;
+            auto methodContext = lateMemberMethods[i].context;
 
             auto methodParams = new Parameter[](method.params.length);
             for (int k <- 0 .. method.params.length)
@@ -597,21 +611,24 @@ class ASTClassDecl : ASTSymbol
                     }
                     ASTParameter param:
                         methodParams[k] = Parameter(
-                            false, param.name, param.mutable, beType(param.loc, param.type.compile(classContext)));
+                            false, param.name, param.mutable, beType(param.loc, param.type.compile(methodContext)));
                 }
             }
 
+            auto methodNamespace = new ClassNamespace(currentContext.namespace, target);
             target.methods[i] = new ClassMethod(
                 target,
                 method.loc,
                 method.override_,
                 method.abstract_,
                 method.name,
-                beType(method.loc, method.ret.compile(classContext)),
+                beType(method.loc, method.ret.compile(methodContext)),
                 methodParams,
-                method.body_, this.macroState);
+                method.body_,
+                this.macroState,
+                methodNamespace);
         }
-        target.genVtable(context);
+        target.genVtable(currentContext);
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTClassDecl'!"); assert(false); }
@@ -648,8 +665,7 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
         superClass = parseIdentifier(parser);
         parser.assert_(superClass.length > 0, "expected super class identifier");
     }
-    mut ASTClassDeclMember[] members;
-    mut ASTClassDeclMethod[] methods;
+    mut (ASTClassDeclMember | ASTClassDeclMethod | ASTDeclaration)[] members;
     parser.expect("{");
     while (!parser.accept("}"))
     {
@@ -673,6 +689,11 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
             break;
         }
 
+        if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
+            members ~= decl;
+            continue;
+        }
+
         if (parser.accept("this"))
         {
             parser.assert_(!override_, "cannot override constructor");
@@ -690,7 +711,7 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
         {
             auto params = parseParamList(parser, lexicalContext);
             ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext);
-            methods ~= ASTClassDeclMethod(
+            members ~= ASTClassDeclMethod(
                 loc, override_, abstract_, memberName, retType, params, stmt);
         }
         else
@@ -712,7 +733,7 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
     }
     return new ASTClassDecl(
         name, superClass, classFinal, classAbstract,
-        members, methods, lexicalContext.macroState, loc);
+        members, lexicalContext.macroState, loc);
 }
 
 class ClassInfo : Expression

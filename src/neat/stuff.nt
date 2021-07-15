@@ -2708,6 +2708,36 @@ ASTSymbol parseDestroy(Parser parser, LexicalContext lexicalContext)
     return new ASTDestroy(target, loc);
 }
 
+// Glue between ASTDeclaration and ASTStatement.
+class ASTDeclarationStatement : ASTStatement
+{
+    ASTDeclaration decl;
+
+    this(this.decl) { }
+
+    override StatementCompileResult compile(Context context) {
+        return StatementCompileResult(
+            new NoopStatement,
+            this.decl.compile(context));
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        print("cannot quote 'ASTDeclarationStatement' yet!");
+        assert(false);
+    }
+}
+
+ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalContext) {
+    auto loc = parser.loc;
+    if (auto import_ = parseImportStatement(parser, lexicalContext)) {
+        loc.assert2s(!import_.isMacroImport, "can't import macro in function");
+        auto importedModule = lexicalContext.resolveImport(import_).instanceOf(ASTModule);
+
+        return new ASTImport(importedModule, import_.symbols);
+    }
+    return null;
+}
+
 ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
@@ -2725,12 +2755,8 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
         return stmt;
     if (ASTStatement stmt = parseScope(parser, lexicalContext))
         return stmt;
-    if (auto import_ = parseImportStatement(parser, lexicalContext)) {
-        loc.assert2s(!import_.isMacroImport, "can't import macro in function");
-        auto importedModule = lexicalContext.resolveImport(import_).instanceOf(ASTModule);
-
-        return new ASTImport(importedModule, import_.symbols);
-    }
+    if (auto decl = parseDeclaration(parser, lexicalContext))
+        return new ASTDeclarationStatement(decl);
     if (ASTStatement stmt = parseNestedFunctionDecl(parser, lexicalContext))
         return stmt;
     if (ASTStatement stmt = parseStatementStatement(parser, lexicalContext))
@@ -3213,7 +3239,7 @@ class ImportNamespace : Namespace
 }
 
 // Classes do double duty for both module-level and statement-level imports
-class ASTImport : ASTStatement
+class ASTImport : ASTDeclaration
 {
     ASTModule module_;
 
@@ -3221,20 +3247,17 @@ class ASTImport : ASTStatement
 
     this(this.module_, string[] symbols) { }
 
-    override StatementCompileResult compile(Context context) {
+    override Context compile(Context context) {
         auto module_ = compileModule(context, this.module_, true);
         auto namespace = new ImportNamespace(context.namespace, module_, this.symbols);
         auto contextModule = findParent!Module(context.namespace);
 
         contextModule.addModuleDependency(module_);
 
-        return StatementCompileResult(
-            new NoopStatement,
-            context.withNamespace(namespace));
-        assert(false);
+        return context.withNamespace(namespace);
     }
 
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTImport' yet!");assert(false); }
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTImport' yet!"); assert(false); }
 }
 
 ASTImportStatement parseImportStatement(Parser parser, LexicalContext lexicalContext)

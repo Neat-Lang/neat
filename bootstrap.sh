@@ -442,6 +442,8 @@ at_revision 'f9ef0cb5a2ea906edc125252cd7c8217836df3ae' 'lang_transition_3' 'buil
 at_revision 'ffab3ed0a6debabd56b042ec8d172ed43bc77917' 'rebuild neat' 'build/neat'
 # Implement format strings.
 at_revision 'e14ccdde5f8d7fe07fb3917666ccfa54a6641c6e' 'rebuild neat' 'build/neat'
+# bunch of stuff, that I don't want to keep driving rebuilds
+at_revision 'ea2c2b5741453e3cdb19aacce5069e98e3c19155' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

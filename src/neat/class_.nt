@@ -18,12 +18,14 @@ import neat.types;
 
 class ClassMethod : Function
 {
+    Protection protection;
+
     bool override_;
 
     bool abstract_;
 
-    this(Class classType, this.loc, this.override_, this.abstract_, this.name, this.ret, this.params,
-         this.statement, this.macroState, this.parent)
+    this(Class classType, this.loc, this.protection, this.override_, this.abstract_, this.name,
+         this.ret, this.params, this.statement, this.macroState, this.parent)
     {
         this.hasThisArg = true;
         this.contextType = classType;
@@ -86,7 +88,7 @@ class Class : Type
 
     Namespace namespace;
 
-    (string name, Type type)[] members;
+    (string name, Protection protection, Type type)[] members;
 
     ClassMethod[] methods;
 
@@ -127,9 +129,25 @@ class Class : Type
         return context.compiler.consume(context, value, &do_);
     }
 
-    override Symbol accessMember(Loc loc, Context context, Expression baseExpr, string member)
+    override Protection protectionAt(Namespace namespace)
     {
-        size_t methodOffset = [first i for i, a in vtable where a.name == member else -1];
+        auto provenanceClass = findParent!Class(namespace);
+        if (provenanceClass && same(provenanceClass)) return Protection.private_;
+        // TODO implement protected
+        return Protection.public_;
+    }
+
+    override Symbol accessMember(Loc loc, Context context, Expression baseExpr, string member, Protection protection)
+    {
+        bool allowed(Protection symbol) {
+            int rank(Protection p) {
+                if (p == Protection.public_) return 0;
+                if (p == Protection.protected_) return 1;
+                return 2;
+            }
+            return rank(symbol) <= rank(protection);
+        }
+        size_t methodOffset = [first i for i, a in vtable where a.name == member && allowed(a.protection) else -1];
         if (methodOffset != -1)
         {
             return new ClassMethodSymbol(this, baseExpr, methodOffset, staticLookup=false);
@@ -137,7 +155,7 @@ class Class : Type
 
         if (!baseExpr) return null;
         auto members = this.allMembers(context);
-        size_t memberOffset = [first i for i, a in members where a.name == member else -1];
+        size_t memberOffset = [first i for i, a in members where a.name == member && allowed(a.protection) else -1];
         Expression asStructPtr = new PointerCast(
             new Pointer(this.dataStruct), baseExpr);
         if (memberOffset != -1)
@@ -203,13 +221,13 @@ class Class : Type
         return platform.voidp;
     }
 
-    (string name, Type type)[] allMembers(Context context)
+    (string name, Protection protection, Type type)[] allMembers(Context context)
     {
         if (!this.superClass)
         {
             return [
-                ("__classinfo", once cast(Type) new Pointer(new Void)),
-                ("__refs", context.nativeWordType),
+                ("__classinfo", Protection.private_, once cast(Type) new Pointer(new Void)),
+                ("__refs", Protection.private_, context.nativeWordType),
             ] ~ this.members;
         }
         return this.superClass.allMembers(context) ~ this.members;
@@ -345,7 +363,7 @@ class Class : Type
         if (this.superClass) override_ = true;
         auto methodNamespace = new ClassNamespace(this.namespace, this);
         this.methods ~= new ClassMethod(
-            this, this.decl.loc, override_, false /* abstract */, "__instanceof",
+            this, this.decl.loc, Protection.public_, override_, abstract_=false, "__instanceof",
             this, [Parameter(false, "targetClassinfo", false, once new Pointer(new Void))],
             stmt, new MacroState, methodNamespace);
     }
@@ -366,7 +384,7 @@ class Class : Type
         if (this.superClass) override_ = true;
         auto methodNamespace = new ClassNamespace(this.namespace, this);
         this.methods ~= new ClassMethod(
-            this, this.decl.loc, override_, false /* abstract */, "__destroy",
+            this, this.decl.loc, Protection.public_, override_, abstract_=false, "__destroy",
             once new Void, [], stmt, new MacroState, methodNamespace);
     }
 
@@ -508,6 +526,8 @@ class ClassMethodSymbol : LateSymbol
 
 struct ASTClassDeclMember
 {
+    Protection protection;
+
     string name;
 
     ASTSymbol type;
@@ -518,6 +538,8 @@ struct ASTClassDeclMember
 struct ASTClassDeclMethod
 {
     Loc loc;
+
+    Protection protection;
 
     bool override_;
 
@@ -569,14 +591,15 @@ class ASTClassDecl : ASTSymbol
         auto classScope = context.compiler.symbolAlias(context.namespace, target.name, target);
 
         mut Context currentContext = context.withNamespace(classScope);
-        mut (string name, Type type)[] memberFields;
+        mut (string name, Protection protection, Type type)[] memberFields;
         // Do those later; they need fields resolved for this.field assignments.
         mut (ASTClassDeclMethod method, Context context)[] lateMemberMethods;
 
         for (auto member <- this.members) {
             member.case {
                 ASTClassDeclMember member: {
-                    memberFields ~= (member.name, beType(member.loc, member.type.compile(currentContext)));
+                    auto type = beType(member.loc, member.type.compile(currentContext));
+                    memberFields ~= (member.name, member.protection, type);
                 }
                 ASTClassDeclMethod method: {
                     lateMemberMethods ~= (method, currentContext);
@@ -619,6 +642,7 @@ class ASTClassDecl : ASTSymbol
             target.methods[i] = new ClassMethod(
                 target,
                 method.loc,
+                method.protection,
                 method.override_,
                 method.abstract_,
                 method.name,
@@ -677,6 +701,7 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
         mut string memberName;
         mut bool override_ = false;
         mut bool abstract_ = false;
+        mut Protection protection = Protection.public_;
         while (true) {
             if (acceptIdentifier(parser, "override")) {
                 override_ = true;
@@ -684,6 +709,20 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
             }
             if (acceptIdentifier(parser, "abstract")) {
                 abstract_ = true;
+                continue;
+            }
+            // FIXME only allow one
+            // FIXME parseProtection?
+            if (acceptIdentifier(parser, "public")) {
+                protection = Protection.public_;
+                continue;
+            }
+            if (acceptIdentifier(parser, "private")) {
+                protection = Protection.private_;
+                continue;
+            }
+            if (acceptIdentifier(parser, "protected")) {
+                protection = Protection.protected_;
                 continue;
             }
             break;
@@ -712,14 +751,14 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
             auto params = parseParamList(parser, lexicalContext);
             ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext);
             members ~= ASTClassDeclMethod(
-                loc, override_, abstract_, memberName, retType, params, stmt);
+                loc, protection, override_, abstract_, memberName, retType, params, stmt);
         }
         else
         {
             void addMember() {
                 parser.assert_(!override_, "cannot override class member");
                 parser.assert_(!abstract_, "cannot declare class member abstract");
-                members ~= ASTClassDeclMember(memberName, retType, loc);
+                members ~= ASTClassDeclMember(protection, memberName, retType, loc);
             }
             addMember;
             while (!parser.accept(";")) {

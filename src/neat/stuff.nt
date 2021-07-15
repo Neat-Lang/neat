@@ -2735,6 +2735,9 @@ ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalContext) {
 
         return new ASTImport(importedModule, import_.symbols);
     }
+    if (auto aliasDecl = parseAliasDecl(parser, lexicalContext)) {
+        return aliasDecl;
+    }
     return null;
 }
 
@@ -2829,16 +2832,16 @@ class ASTModule : ASTModuleBase
     int depth; // count from parent = null
 
     (ASTImport | ASTSymbol | ASTExtern | ASTFunction
-        | ASTSymbolAlias | ASTTemplateDecl | ASTUnitTest
+        | ASTAliasDecl | ASTTemplateDecl | ASTUnitTest
     )[] entries;
 
     this(this.loc, this.name, this.pak, this.macroState, this.parent) {
         if (this.parent) this.depth = this.parent.depth + 1;
     }
 
-    void addSymbolAlias(string name, ASTSymbol symbol)
+    void addAliasDecl(string name, ASTSymbol target)
     {
-        this.entries ~= new ASTSymbolAlias(name, symbol);
+        this.entries ~= new ASTAliasDecl(name, target);
     }
 
     ASTSymbol getSymbolAlias(string name) {
@@ -2850,8 +2853,8 @@ class ASTModule : ASTModuleBase
                 ASTUnitTest: {}
                 ASTSymbol: {}
                 ASTTemplateDecl: {}
-                ASTSymbolAlias alias_: {
-                    if (alias_.name == name) return alias_.symbol;
+                ASTAliasDecl alias_: {
+                    if (alias_.name == name) return alias_.target;
                 }
             }
         }
@@ -3501,28 +3504,7 @@ Package selectPackage(Package[] packages, string name, Loc loc)
     return result;
 }
 
-class FixedSymbolAlias : ASTSymbol
-{
-    Symbol symbol;
-
-    this(this.symbol) { }
-
-    override Symbol compile(Context context) { return this.symbol; }
-
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'FixedSymbolAlias'"); assert(false); }
-}
-
-// TODO remove
-class ASTSymbolAlias
-{
-    string name;
-
-    ASTSymbol symbol;
-
-    this(this.name, this.symbol) { }
-}
-
-class ASTAliasDecl : ASTSymbol
+class ASTAliasDecl : ASTDeclaration
 {
     string name;
 
@@ -3530,8 +3512,9 @@ class ASTAliasDecl : ASTSymbol
 
     this(this.name, this.target) { }
 
-    override Symbol compile(Context context) {
-        return this.target.compile(context);
+    override Context compile(Context context) {
+        auto target = this.target.compile(context);
+        return context.withNamespace(new SymbolAlias(context.namespace, this.name, target));
     }
 }
 
@@ -3686,8 +3669,8 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
                 module_.add(function_.name, function_);
             ASTUnitTest ut:
                 module_.add("", ut);
-            ASTSymbolAlias symbolAlias:
-                module_.register(symbolAlias.name, symbolAlias.symbol.compile(context));
+            ASTAliasDecl aliasDecl:
+                module_.register(aliasDecl.name, aliasDecl.target.compile(context));
             ASTTemplateDecl astTemplateDecl:
                 module_.register(astTemplateDecl.name, astTemplateDecl.compile(context));
         }

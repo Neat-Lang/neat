@@ -54,15 +54,36 @@ class Struct : Type
         return this.mangledName;
     }
 
-    override Symbol accessMember(Loc loc, Context context, Expression baseExpr, string member, Protection _) {
-        size_t memberOffset = [first i for i, a in this.members where a.name == member else -1];
+    override Protection protectionAt(Namespace namespace)
+    {
+        auto provenance = findParent!StructNamespace(namespace);
+        if (provenance && same(provenance.struct_)) return Protection.private_;
+        return Protection.public_;
+    }
+
+    override Symbol accessMember(Loc loc, Context context, Expression baseExpr, string member, Protection protection) {
+        bool allowed(Protection symbol) {
+            int rank(Protection p) {
+                if (p == Protection.public_) return 0;
+                return 1;
+            }
+            return rank(symbol) <= rank(protection);
+        }
+
+        size_t memberOffset = [
+            first i for i, a in this.members
+            where a.name == member && allowed(a.protection)
+            else -1];
         if (baseExpr && memberOffset != -1) {
             if (baseExpr.instanceOf(Reference)) {
                 return new StructMemberReference(baseExpr.instanceOf(Reference), memberOffset);
             }
             return new StructMember(baseExpr, memberOffset);
         }
-        size_t methodOffset = [first i for i, a in this.methods where a.name == member else -1];
+        size_t methodOffset = [
+            first i for i, a in this.methods
+            where a.name == member && allowed(a.protection)
+            else -1];
         if (methodOffset != -1)
         {
             auto method = this.methods[methodOffset];
@@ -326,6 +347,8 @@ struct ASTStructMethod
 
     bool static_;
 
+    Protection protection;
+
     string name;
 
     ASTSymbol ret;
@@ -365,12 +388,14 @@ class StructNamespace : Namespace
 
 class StructMethod : Function
 {
+    Protection protection;
+
     bool static_;
 
     string mangledName;
 
-    this(this.loc, Struct structType, Namespace namespace, this.static_, this.name, this.ret, this.params,
-         this.statement, this.macroState)
+    this(this.loc, Struct structType, Namespace namespace, this.static_, this.protection, this.name,
+         this.ret, this.params, this.statement, this.macroState)
     {
         // TODO super()
         auto structNamespace = new StructNamespace(namespace, structType);
@@ -395,7 +420,7 @@ class ASTStructDecl : ASTDeclaration
 {
     string name;
 
-    (string name, ASTSymbol type)[] members;
+    (string name, Protection protection, ASTSymbol type)[] members;
 
     ASTStructMethod[] methods;
 
@@ -420,7 +445,7 @@ class ASTStructDecl : ASTDeclaration
     Struct compileToStruct(Context context)
     {
         auto members = [
-            new StructMemberDeclaration(member.name, beType(this.loc, member.type.compile(context)))
+            new StructMemberDeclaration(member.name, member.protection, beType(this.loc, member.type.compile(context)))
             for member in this.members];
 
         auto struct_ = new Struct(this.name, members, this.loc, context.namespace.mangle);
@@ -450,6 +475,7 @@ class ASTStructDecl : ASTDeclaration
                 struct_,
                 context.namespace,
                 method.static_,
+                method.protection,
                 method.name,
                 beType(this.loc, method.ret.compile(structContext)),
                 methodParams,
@@ -474,7 +500,7 @@ ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
     }
     string name = parseIdentifier(parser);
     assert(!!name.length);
-    mut (string, ASTSymbol)[] members;
+    mut (string, Protection, ASTSymbol)[] members;
     mut ASTStructMethod[] methods;
     parser.expect("{");
     while (!parser.accept("}"))
@@ -482,8 +508,23 @@ ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
         mut bool static_ = false;
         mut ASTSymbol memberType;
         mut string memberName;
-        if (parser.accept("static")) {
-            static_ = true;
+        mut Protection protection = Protection.public_;
+        while (true) {
+            if (parser.accept("static")) {
+                static_ = true;
+                continue;
+            }
+            // FIXME only allow one
+            // FIXME parseProtection?
+            if (acceptIdentifier(parser, "public")) {
+                protection = Protection.public_;
+                continue;
+            }
+            if (acceptIdentifier(parser, "private")) {
+                protection = Protection.private_;
+                continue;
+            }
+            break;
         }
         if (parser.accept("this"))
         {
@@ -509,7 +550,7 @@ ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
                 memberName != "__dtor" || params.length == 0, "destructor cannot take parameters");
             ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext);
             methods ~= ASTStructMethod(
-                parser.loc, static_, memberName, memberType, params, stmt);
+                parser.loc, static_, protection, memberName, memberType, params, stmt);
         }
         else
         {
@@ -517,7 +558,7 @@ ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
             void addMember() {
                 parser.assert_(memberName != "__ctor", "constructor cannot be member");
                 parser.assert_(memberName != "__dtor", "destructor cannot be member");
-                members ~= (memberName, memberType);
+                members ~= (memberName, protection, memberType);
             }
             addMember;
             while (!parser.accept(";")) {

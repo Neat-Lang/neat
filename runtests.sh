@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 NEAT=${NEAT:-build/neat}
-NEATFLAGS="-Pcompiler:build/src"
-NEATFLAGS="${NEATFLAGS} -Prunnable:test/runnable:compiler"
-NEATFLAGS="${NEATFLAGS} -Pfail_compilation:test/fail_compilation:compiler"
+NEATFLAGS="-Pcompiler:build/src -Pimports:test/imports"
+NEATFLAGS="${NEATFLAGS} -Prunnable:test/runnable:compiler,imports"
+NEATFLAGS="${NEATFLAGS} -Pfail_compilation:test/fail_compilation:compiler,imports"
 
 num_total=$(ls -q test/runnable/*.nt test/fail_compilation/*.nt |wc -l)
 build_failed=0

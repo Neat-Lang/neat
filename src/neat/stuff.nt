@@ -2803,6 +2803,15 @@ class ModuleEntry
     this(this.name, this.value) { }
 }
 
+struct ASTModuleEntry
+{
+    Protection protection;
+
+    (ASTImport | ASTSymbol | ASTExtern | ASTFunction
+        | ASTDeclaration | ASTTemplateDecl | ASTUnitTest
+    ) symbol;
+}
+
 class ASTModule : ASTModuleBase
 {
     Loc loc;
@@ -2819,22 +2828,20 @@ class ASTModule : ASTModuleBase
 
     int depth; // count from parent = null
 
-    (ASTImport | ASTSymbol | ASTExtern | ASTFunction
-        | ASTDeclaration | ASTTemplateDecl | ASTUnitTest
-    )[] entries;
+    ASTModuleEntry[] entries;
 
     this(this.loc, this.name, this.pak, this.macroState, this.parent) {
         if (this.parent) this.depth = this.parent.depth + 1;
     }
 
-    void addAliasDecl(string name, ASTSymbol target)
+    void addAliasDecl(string name, Protection protection, ASTSymbol target)
     {
-        this.entries ~= new ASTAliasDecl(name, target);
+        this.entries ~= ASTModuleEntry(protection, new ASTAliasDecl(name, target));
     }
 
     ASTSymbol getSymbolAlias(string name) {
         for (auto entry <- entries) {
-            entry.case {
+            entry.symbol.case {
                 ASTImport: {}
                 ASTExtern: {}
                 ASTFunction: {}
@@ -2897,6 +2904,8 @@ struct ResolvingModuleEntry
 {
     string name;
 
+    Protection protection;
+
     bool resolving;
 
     Symbol resolution;
@@ -2910,24 +2919,33 @@ class Resolver
 
     this() { }
 
-    void add(string name, (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) astSymbol)
+    void add(
+        string name, Protection protection, (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) astSymbol)
     {
-        this.entries ~= ResolvingModuleEntry(name, false, null, astSymbol);
+        this.entries ~= ResolvingModuleEntry(name, protection, false, null, astSymbol);
     }
 
-    void register(string name, Symbol symbol)
+    void register(string name, Protection protection, Symbol symbol)
     {
         int hit = cast(int) [first i for i, a in this.entries where a.name == name else -1];
         if (hit == -1) {
-            entries ~= ResolvingModuleEntry(name, resolving=false, symbol, Nothing());
+            entries ~= ResolvingModuleEntry(name, protection, resolving=false, symbol, Nothing());
             return;
         }
         entries[hit].resolution = symbol;
     }
 
-    Symbol lookup(Context context, Loc loc, string name)
+    Symbol lookup(Context context, Loc loc, string name, Protection protection)
     {
-        int hit = cast(int) [first i for i, a in this.entries where a.name == name else -1];
+        bool allowed(Protection entry) {
+            if (protection == Protection.public_)
+                return entry == Protection.public_;
+            return true;
+        }
+        int hit = cast(int) [
+            first i for i, a in this.entries
+            where a.name == name && allowed(a.protection)
+            else -1];
         if (hit == -1) return null;
         if (this.entries[hit].resolving) {
             return new NotYetResolvedSymbol(this, hit, loc);
@@ -2993,9 +3011,11 @@ class Module : ModuleBase
         this.hash = poly_hash_whole_string(mangledName);
     }
 
-    void add(string name, (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) symbol)
+    void add(
+        string name, Protection protection,
+        (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) symbol)
     {
-        this.resolver.add(name, symbol);
+        this.resolver.add(name, protection, symbol);
     }
 
     override void track(Symbol symbol)
@@ -3003,9 +3023,9 @@ class Module : ModuleBase
         this.anonymousEntries ~= symbol;
     }
 
-    void register(string name, Symbol symbol)
+    void register(string name, Protection protection, Symbol symbol)
     {
-        this.resolver.register(name, symbol);
+        this.resolver.register(name, protection, symbol);
     }
 
     // bool visible: whether it affects lookups
@@ -3100,14 +3120,14 @@ class Module : ModuleBase
     Symbol lookupPublic(Context context, Loc loc, string name)
     {
         // not counting imports (non-transitive)
-        return this.resolver.lookup(context, loc, name);
+        return this.resolver.lookup(context, loc, name, Protection.public_);
     }
 
     override Symbol lookup(string name, Context context, Loc loc, Expression frame)
     {
         if (!!frame) { print("error: lookup with frame propagated to Module"); assert(false); }
 
-        if (Symbol public_ = this.lookupPublic(context, loc, name)) return public_;
+        if (Symbol symbol = this.resolver.lookup(context, loc, name, Protection.private_)) return symbol;
         for (auto import_ <- this.imports) {
             if (!import_.visible) continue;
             auto importMod = import_.mod;
@@ -3567,6 +3587,16 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
 
     while (!parser.eof)
     {
+        mut Protection protection = Protection.public_;
+        if (parser.accept("public")) {
+            protection = Protection.public_;
+        } else if (parser.accept("private")) {
+            protection = Protection.private_;
+        }
+        // Hack. :(
+        void add(typeof(({ ASTModuleEntry e; e; }).symbol) symbol) {
+            module_.entries ~= ASTModuleEntry(protection, symbol);
+        }
         if (auto import_ = parseImportStatement(parser, lexicalContext)) {
             auto importedModule = lexicalContext.resolveImport(import_).instanceOf(ASTModule);
             if (import_.isMacroImport)
@@ -3578,39 +3608,39 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             }
             else
             {
-                module_.entries ~= new ASTImport(importedModule, import_.symbols);
+                add(new ASTImport(importedModule, import_.symbols));
             }
             continue;
         }
         if (ASTClassDecl classDecl = parseClassDecl(parser, lexicalContext)) {
-            module_.entries ~= classDecl;
+            add(classDecl);
             continue;
         }
         if (ASTTemplateDecl templateDecl = parseTemplateDecl(parser, lexicalContext)) {
-            module_.entries ~= templateDecl;
+            add(templateDecl);
             continue;
         }
         if (ASTExtern extern_ = parseExtern(parser, lexicalContext)) {
-            module_.entries ~= extern_;
+            add(extern_);
             continue;
         }
         if (ASTDeclaration decl = parseDeclaration(parser, lexicalContext)) {
-            module_.entries ~= decl;
+            add(decl);
             continue;
         }
         if (ASTEnumDecl enumDecl = parseEnumDecl(parser, lexicalContext)) {
-            module_.entries ~= enumDecl;
+            add(enumDecl);
             continue;
         }
         if (ASTModule submod = parseMacroContinuation(compiler, parser, helper, module_, config))
             return submod;
         if (ASTFunction fun = parseFunction(parser, lexicalContext))
         {
-            module_.entries ~= fun;
+            add(fun);
             continue;
         }
         if (ASTUnitTest ut = parseUnitTest(parser, lexicalContext)) {
-            module_.entries ~= ut;
+            add(ut);
             continue;
         }
 
@@ -3662,7 +3692,7 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
     {
         // TODO lazily resolve members only once they're looked up
         // (allows compilation in any order)
-        entry.case {
+        entry.symbol.case {
             ASTImport import_:
             {
                 auto importedModule = compileModule(context, import_.module_, true);
@@ -3671,9 +3701,9 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
             }
             ASTDeclaration astDecl: {
                 if (auto structDecl = astDecl.instanceOf(ASTStructDecl)) {
-                    module_.add(structDecl.name, structDecl);
+                    module_.add(structDecl.name, entry.protection, structDecl);
                 } else if (auto aliasDecl = astDecl.instanceOf(ASTAliasDecl)) {
-                    module_.register(aliasDecl.name, aliasDecl.target.compile(context));
+                    module_.register(aliasDecl.name, entry.protection, aliasDecl.target.compile(context));
                 } else {
                     print(astDecl.repr);
                     assert(false);
@@ -3682,24 +3712,24 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
             ASTSymbol symbol: {
                 // TODO just handle all as ASTDeclaration
                 if (auto classDecl = symbol.instanceOf(ASTClassDecl)) {
-                    module_.add(classDecl.name, classDecl);
+                    module_.add(classDecl.name, entry.protection, classDecl);
                 }
                 else if (auto enumDecl = symbol.instanceOf(ASTEnumDecl)) {
-                    module_.register(enumDecl.name, enumDecl.compile(context));
+                    module_.register(enumDecl.name, entry.protection, enumDecl.compile(context));
                 }
                 else if (auto aliasDecl = symbol.instanceOf(ASTAliasDecl)) {
-                    module_.add(aliasDecl.name, aliasDecl);
+                    module_.add(aliasDecl.name, entry.protection, aliasDecl);
                 }
                 else assert(false);
             }
             ASTExtern extern_:
-                module_.register(extern_.name, extern_.compile(context));
+                module_.register(extern_.name, entry.protection, extern_.compile(context));
             ASTFunction function_:
-                module_.add(function_.name, function_);
+                module_.add(function_.name, entry.protection, function_);
             ASTUnitTest ut:
-                module_.add("", ut);
+                module_.add("", entry.protection, ut);
             ASTTemplateDecl astTemplateDecl:
-                module_.register(astTemplateDecl.name, astTemplateDecl.compile(context));
+                module_.register(astTemplateDecl.name, entry.protection, astTemplateDecl.compile(context));
         }
     }
     module_.compile(context);

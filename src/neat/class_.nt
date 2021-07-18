@@ -44,6 +44,26 @@ class ClassMethod : Function
     }
 }
 
+class IntfMethod : FunctionDeclaration
+{
+    this(Intf intfType, this.name, this.ret, this.params)
+    {
+        this.contextType = intfType;
+    }
+
+    override string mangle()
+    {
+        // TODO mangle types
+        return this.contextType.instanceOf(Intf).name ~ "_" ~ this.name;
+    }
+
+    Type funcPtrType()
+    {
+        auto params = [Parameter.fromType(this.contextType)] ~ this.params;
+        return new FunctionPointer(this.ret, params);
+    }
+}
+
 class ClassNamespace : Namespace
 {
     Class class_;
@@ -72,6 +92,7 @@ class ClassNamespace : Namespace
  *   - vtable ptr
  *   - reference count
  * - class data
+ * - interface pointers
  */
 class Class : Type
 {
@@ -83,6 +104,8 @@ class Class : Type
 
     Class superClass;
 
+    Intf[] superIntfs;
+
     // will resolve members and methods as required
     ASTClassDecl decl;
 
@@ -92,7 +115,7 @@ class Class : Type
 
     ClassMethod[] methods;
 
-    ClassMethod[] vtable; // methods appearing in the classinfo struct
+    (ClassMethod | (:baseOffset, size_t offs))[] vtable; // methods appearing in the classinfo struct
 
     string vtableSymbol;
 
@@ -100,9 +123,17 @@ class Class : Type
 
     PolyHashState mangledHash;
 
+    /**
+     * dataStruct takes the form:
+     * {
+     *   {super data}
+     *   {my own data}
+     *   {interface slots}
+     * }
+     */
     Struct dataStruct;
 
-    this(this.decl, this.superClass, this.namespace)
+    this(this.decl, this.superClass, this.superIntfs, this.namespace)
     {
         if (superClass && superClass.final_)
             decl.loc.fail("cannot subclass a final class");
@@ -147,20 +178,41 @@ class Class : Type
             }
             return rank(symbol) <= rank(protection);
         }
-        size_t methodOffset = [first i for i, a in vtable where a.name == member && allowed(a.protection) else -1];
+        bool test(typeof(this.vtable[0]) entry) {
+            return entry.case(
+                ClassMethod m: m.name == member && allowed(m.protection),
+                (:baseOffset, size_t offs): false);
+        }
+        size_t methodOffset = [first i for i, a in vtable where test(a) else -1];
         if (methodOffset != -1)
         {
             return new ClassMethodSymbol(this, baseExpr, methodOffset, staticLookup=false);
         }
 
         if (!baseExpr) return null;
-        auto members = this.allMembers(context);
-        size_t memberOffset = [first i for i, a in members where a.name == member && allowed(a.protection) else -1];
-        Expression asStructPtr = new PointerCast(
-            new Pointer(this.dataStruct), baseExpr);
-        if (memberOffset != -1)
-            return new StructMemberReference(context.compiler.dereference(asStructPtr), memberOffset);
-        return null;
+
+        // FIXME self-recursion in nested function
+        mut Symbol delegate(Class) recurse;
+        Symbol recurse_(Class self) {
+            size_t memberOffset = [first i for i, m in self.members where m.name == member && allowed(m.protection) else -1];
+            if (memberOffset != -1) {
+                Reference asStruct = context.compiler.dereference(
+                    new PointerCast(new Pointer(self.dataStruct), baseExpr));
+                // select "data" substruct
+                auto dataMember = new StructMemberReference(asStruct, 1);
+                // select member field
+                if (self.superClass)
+                    return new StructMemberReference(dataMember, memberOffset);
+                // skip classinfo and refs
+                return new StructMemberReference(dataMember, memberOffset + 2);
+            }
+            if (self.superClass) {
+                return recurse(self.superClass);
+            }
+            return null;
+        }
+        recurse = &recurse_;
+        return recurse(this);
     }
 
     override Expression implicitConvertFrom(Expression from)
@@ -221,98 +273,178 @@ class Class : Type
         return platform.voidp;
     }
 
-    (string name, Protection protection, Type type)[] allMembers(Context context)
-    {
-        if (!this.superClass)
-        {
-            return [
-                ("__classinfo", Protection.private_, once cast(Type) new Pointer(new Void)),
-                ("__refs", Protection.private_, context.nativeWordType),
-            ] ~ this.members;
-        }
-        return this.superClass.allMembers(context) ~ this.members;
-    }
-
     void initDataStruct(Context context)
     {
-        auto allMembers = this.allMembers(context);
-        auto structMembers = [
-            new StructMemberDeclaration(member.name, Protection.public_, member.type)
-            for member in allMembers];
+        mut StructMemberDeclaration[] structMembers;
+        if (this.superClass) {
+            this.superClass.initDataStruct(context);
+            structMembers ~= new StructMemberDeclaration(
+                "super", Protection.public_, this.superClass.dataStruct);
+        } else {
+            structMembers ~= new StructMemberDeclaration(
+                "super", Protection.public_, new Struct("nothing", [], this.decl.loc, this.mangle));
+        }
+
+        StructMemberDeclaration[] dataMembers() {
+            StructMemberDeclaration toMember(typeof(this.members[0]) entry) {
+                return new StructMemberDeclaration(entry.name, entry.protection, entry.type);
+            }
+            if (!this.superClass) {
+                return [
+                    new StructMemberDeclaration("__classinfo", Protection.private_, once new Pointer(new Void)),
+                    new StructMemberDeclaration("__refs", Protection.private_, context.nativeWordType),
+                ] ~ [a.toMember for a in this.members];
+            }
+            return [a.toMember for a in this.members];
+        }
+        structMembers ~= new StructMemberDeclaration(
+            "data", Protection.public_, new Struct("data", dataMembers, this.decl.loc, this.mangle));
+
+        StructMemberDeclaration[] intfSlots() {
+            int slots = [sum i.slots for i in this.superIntfs];
+            mut StructMemberDeclaration[] ret;
+            for (int i <- 0 .. slots)
+                ret ~= new StructMemberDeclaration(
+                    "__$(name)_islot$i", Protection.public_, once new Pointer(new Void));
+            return ret;
+        }
+        structMembers ~= new StructMemberDeclaration(
+            "islots", Protection.public_, new Struct("islots", intfSlots, this.decl.loc, this.mangle));
 
         this.dataStruct = new Struct("", structMembers, this.decl.loc, this.mangle);
     }
 
     Struct classInfoStructCache;
 
-    Struct classInfoStruct()
+    Struct classInfoStruct(Context context)
     {
         if (classInfoStructCache) {
             assert(classInfoStructCache.members.length == vtable.length);
             return classInfoStructCache;
         }
 
-        auto vtableMembers = [
-            new StructMemberDeclaration(method.name, Protection.public_, method.funcPtrType)
-            for method in vtable];
+        StructMemberDeclaration transform(typeof(vtable[0]) entry) {
+            auto sizeT = context.nativeWordType;
+            return entry.case(
+                ClassMethod method: new StructMemberDeclaration(method.name, Protection.public_, method.funcPtrType),
+                (:baseOffset, size_t offs): new StructMemberDeclaration("", Protection.public_, sizeT));
+        }
 
+        auto vtableMembers = [transform(entry) for entry in vtable];
         classInfoStructCache = new Struct("", vtableMembers, this.decl.loc, this.mangle);
         return classInfoStructCache;
     }
 
+    // FIXME: roll into vtable(), this.vtable => this.vtableCache
     void genVtable(Context context)
     {
         if (this.vtableSymbol != "") return;
 
         assert(this.vtable.length == 0);
 
-        mut ClassMethod[] combinedMethods;
-        if (this.superClass) {
-            this.superClass.genVtable(context);
-            combinedMethods = [a for a in this.superClass.vtable];
-        }
-
         // Ensure these two are added first.
         this.methods = [
             this.genInstanceofMethod(context),
             this.genReleaseMethod(context)] ~ this.methods;
 
+        mut (ClassMethod | IntfMethod | (:baseOffset, size_t offs))[] vtable;
+        if (this.superClass) {
+            this.superClass.genVtable(context);
+            for (auto a <- this.superClass.vtable)
+                vtable ~= a;
+            vtable[0] = this.methods[0];
+            vtable[1] = this.methods[1];
+        } else {
+            vtable ~= this.methods[0];
+            vtable ~= this.methods[1];
+        }
+        int wordSize = context.nativeWordType.emit(context.platform).size(context.platform);
+        // offset of intf slots in this class
+        mut size_t baseOffset = this.dataStruct.emit(context.platform).memberOffset(2, context.platform);
+        for (auto intf <- this.superIntfs) {
+            intf.genVtable;
+            for (auto entry <- intf.vtable) {
+                entry.case {
+                    IntfMethod method: vtable ~= method;
+                    (:baseOffset): { // one per slot
+                        vtable ~= (:baseOffset, baseOffset);
+                        baseOffset += wordSize;
+                    }
+                }
+            }
+        }
+
         for (ClassMethod method <- this.methods) {
             // TODO match types
             bool isCtor = method.name == "__ctor"; // workaround: no final yet, no proper masking yet
-            size_t index = [first i for i, a in combinedMethods where a.name == method.name else -1];
+            bool sameName(typeof(vtable[0]) entry) {
+                return entry.case(
+                    ClassMethod classMethod: classMethod.name == method.name,
+                    IntfMethod intfMethod: intfMethod.name == method.name,
+                    (:baseOffset, size_t offs): false);
+            }
+            /*
+            string repr(typeof(vtable[0]) entry) {
+                return entry.case(
+                    ClassMethod classMethod: "ClassMethod($(classMethod.name))",
+                    IntfMethod intfMethod: "IntfMethod($(intfMethod.name))",
+                    (:baseOffset, size_t offs): "baseOffset($offs)");
+            }
+            print("$(this.name): debug: vtable = " ~ [join ", " e.repr for e in vtable]);
+            */
+            size_t index = [first i for i, a in vtable where a.sameName else -1];
             if (index != -1)
             {
                 method.loc.assert2s(method.override_ || isCtor,
                     "Expected 'override' attribute for overriding method.");
                 if (!isCtor) { // ctor is always called static
                     // override
-                    validateOverride(combinedMethods[index], method);
+                    vtable[index].case {
+                        ClassMethod classMethod: validateOverride(classMethod, method);
+                        IntfMethod intfMethod: validateOverride(intfMethod, method);
+                        (:baseOffset, size_t offs): {}
+                    }
                 }
-                // print("a: $(this.name): combinedMethods[$index] = $(method.name)");
-                combinedMethods[index] = method;
+                // print("a: $(this.name): vtable[$index] = $(method.name)");
+                vtable[index] = method;
             }
             else
             {
                 method.loc.assert2s(!method.override_,
-                    "'override specified but method does not override a parent method.");
-                // print("b: $(this.name): combinedMethods[$(combinedMethods.length)] = $(method.name)");
-                combinedMethods ~= method;
+                    "'override' specified but method does not override a parent method.");
+                // print("b: $(this.name): vtable[$(vtable.length)] = $(method.name)");
+                vtable ~= method;
             }
         }
         if (!this.abstract_)
         {
-            for (auto method <- combinedMethods) {
-                if (method.abstract_)
-                    this.decl.loc.fail(
-                        "Abstract method '" ~ method.name ~ "' not overridden in non-abstract class " ~ this.name);
+            for (auto method <- vtable) {
+                method.case {
+                    ClassMethod method: {
+                        if (method.abstract_)
+                            this.decl.loc.fail(
+                                "Abstract method '$(method.name)' not overridden in non-abstract class $(this.name)");
+                    }
+                    IntfMethod method: {
+                        this.decl.loc.fail(
+                            "Interface method '$(method.name)' not overridden in non-abstract class $(this.name)");
+                    }
+                    (:baseOffset, size_t offs): { }
+                }
             }
         }
-        this.vtable = combinedMethods;
+        (ClassMethod | (:baseOffset, size_t)) filter(typeof(vtable[0]) entry) {
+            entry.case {
+                ClassMethod m: return m;
+                IntfMethod m: assert(false);
+                (:baseOffset, size_t) pair: return pair;
+            }
+        }
+        this.vtable = [filter(a) for a in vtable];
         this.vtableSymbol = this.mangledName ~ "_vtable";
     }
 
-    void validateOverride(ClassMethod parent, ClassMethod child)
+    void validateOverride(FunctionDeclaration parent, ClassMethod child)
     {
         child.loc.assert2s4(parent.params.length == child.params.length,
             "Override expected ", ltoa(parent.params.length), " arguments, not ", ltoa(child.params.length));
@@ -343,11 +475,18 @@ class Class : Type
 
     void define(Generator generator)
     {
-        auto methods = [
-            ({ method.declare(generator); method.mangle; })
-            for method in vtable];
+        (string | size_t) transform(typeof(vtable[0]) entry) {
+            entry.case {
+                ClassMethod method: {
+                    method.declare(generator);
+                    return method.mangle;
+                }
+                (:baseOffset, size_t offset): return offset;
+            }
+        }
+        auto backendVtable = [transform(entry) for entry in vtable];
 
-        generator.mod.defineSymbolList(vtableSymbol, methods);
+        generator.mod.defineSymbolList(vtableSymbol, backendVtable);
     }
 
     ClassMethod genInstanceofMethod(Context context)
@@ -357,38 +496,62 @@ class Class : Type
         while (current)
         {
             auto classinfo = new ASTSymbolHelper(new ClassInfo(current));
-            castStmts ~= context.compiler.$stmt if (targetClassinfo is $classinfo) return this;;
+            castStmts ~= context.compiler.$stmt if (targetClassinfo is $classinfo) {
+                // take a bonus reference because the return type isn't right
+                (cast(size_t*) this)[1] += 1;
+                return this;
+            };
+            // TODO allow recursion in nested fn
+            mut void delegate(Intf) recurse;
+            void recurse_(Intf intf) {
+                auto astIntf = new ASTSymbolHelper(intf);
+                auto intfClassinfo = new ASTSymbolHelper(new ClassInfo(intf));
+                castStmts ~= context.compiler.$stmt if (targetClassinfo is $intfClassinfo) {
+                    // take a bonus reference because the return type isn't right
+                    (cast(size_t*) this)[1] += 1;
+                    // implconv to interface
+                    $astIntf intf = this;
+                    return intf;
+                };
+                for (auto superIntf <- intf.superIntfs) {
+                    recurse(superIntf);
+                }
+            }
+            recurse = &recurse_;
+            for (auto superIntf <- current.superIntfs) {
+                recurse(superIntf);
+            }
             current = current.superClass;
         }
         castStmts ~= context.compiler.$stmt return null;;
         auto stmt = context.compiler.astSequence(castStmts, __HERE__);
 
-        mut bool override_ = false;
-        if (this.superClass) override_ = true;
         auto methodNamespace = new ClassNamespace(this.namespace, this);
         return new ClassMethod(
-            this, this.decl.loc, Protection.public_, override_, abstract_=false, "__instanceof",
-            this, [Parameter(false, "targetClassinfo", false, once new Pointer(new Void))],
+            this, __HERE__, Protection.public_, override_=true, abstract_=false, "__instanceof",
+            once new Pointer(new Void), [Parameter(false, "targetClassinfo", false, once new Pointer(new Void))],
             stmt, new MacroState, methodNamespace);
     }
 
     ClassMethod genReleaseMethod(Context context)
     {
         mut ASTStatement[] statements;
-        mut auto members = this.allMembers(context);
-        assert(members.length >= 2);
-        members = members[2 .. $]; // drop __classinfo and __refs
-        for (auto member <- members) {
-            auto name = context.compiler.astIdentifier(member.name, __HERE__);
-            statements ~= context.compiler.$stmt __destroy($name);;
+        // FIXME self-recursion in nested function
+        mut void delegate(Class) recurse;
+        void recurse_(Class self) {
+            if (self.superClass) recurse(self.superClass);
+            for (auto member <- self.members) {
+                auto name = context.compiler.astIdentifier(member.name, __HERE__);
+                statements ~= context.compiler.$stmt __destroy($name);;
+            }
         }
+        recurse = &recurse_;
+        recurse(this);
         auto stmt = context.compiler.astSequence(statements, __HERE__);
 
-        mut bool override_ = false;
-        if (this.superClass) override_ = true;
         auto methodNamespace = new ClassNamespace(this.namespace, this);
         return new ClassMethod(
-            this, this.decl.loc, Protection.public_, override_, abstract_=false, "__destroy",
+            this, __HERE__, Protection.public_, override_=true, abstract_=false, "__destroy",
             once new Void, [], stmt, new MacroState, methodNamespace);
     }
 
@@ -477,6 +640,329 @@ class Class : Type
     }
 }
 
+/**
+ * Interface layout:
+ * - vtable pointer
+ * Vtable layout:
+ * - EITHER OF
+ *   - class base offset
+ *   - primary super interface layout
+ * - secondary super interface layouts
+ * - own methods
+ */
+class Intf : Type
+{
+    string name;
+
+    Intf[] superIntfs;
+
+    // FIXME do we need this?
+    ASTIntfDecl decl;
+
+    Namespace namespace;
+
+    IntfMethod[] methods; // methods declared in this intf
+
+    (IntfMethod | :baseOffset)[] vtable; // layout of the classinfo subsection generated for this intf
+
+    // TODO eventually string name will go in here for .classinfo.name
+    string classInfoSymbol;
+
+    string mangledName;
+
+    PolyHashState mangledHash;
+
+    this(this.decl, this.superIntfs, this.namespace)
+    {
+        assert(!!decl);
+        this.name = decl.name;
+        this.mangledName = namespace.mangle ~ "_intf_" ~ this.name;
+        auto state = poly_hash_string("Intf" ~ this.mangledName);
+        this.mangledHash = PolyHashState(state.add, state.mult);
+    }
+
+    override string mangle() {
+        return this.mangledName;
+    }
+
+    override Expression truthy(Context context, Expression value, Loc loc)
+    {
+        Expression do_(Expression value) {
+            Type voidp = once new Pointer(new Void);
+
+            return .truthy(context, new PointerCast(voidp, value), loc);
+        }
+        return context.compiler.consume(context, value, &do_);
+    }
+
+    override Symbol accessMember(Loc loc, Context context, Expression baseExpr, string member, Protection _)
+    {
+        bool nameMatches(typeof(vtable[0]) entry) {
+            return entry.case(
+                IntfMethod m: m.name == member,
+                (:baseOffset): false);
+        }
+        size_t methodOffset = [first i for i, a in vtable where nameMatches(a) else -1];
+        if (methodOffset != -1)
+        {
+            return new IntfMethodSymbol(this, baseExpr, methodOffset);
+        }
+        return null;
+    }
+
+    public int slots() {
+        // FIXME self-recursion in nested function
+        mut int delegate(Intf) recurse;
+        int recurse_(Intf current) {
+            if (current.superIntfs.length == 0) return 1;
+            return [sum recurse(i) for i in current.superIntfs];
+        }
+        recurse = &recurse_;
+        return recurse(this);
+    }
+
+    // get slot pointer of target in our hierarchy
+    // if not found, return the number of bases traversed
+    private (Expression | int) getSlot(Intf target, Expression islotTablePtr, mut int base) {
+        // FIXME self-recursion in nested function
+        mut int delegate(Intf) recurse;
+        int recurse_(Intf current) {
+            if (current.same(target)) return base;
+            if (current.superIntfs.length == 0) {
+                base += 1;
+                return -1;
+            }
+            for (auto superIntf <- current.superIntfs) {
+                int ret = superIntf.recurse;
+                if (ret != -1) return ret;
+            }
+            return -1;
+        }
+        recurse = &recurse_;
+        int slot = recurse(this);
+        if (slot != -1) {
+            auto basePtr = new PointerCast(once new Pointer(new Pointer(new Void)), islotTablePtr);
+            return new PointerCast(target, new PointerOffset(basePtr, new IntLiteral(slot)));
+        }
+        return base;
+    }
+
+    override Expression implicitConvertFrom(Expression from)
+    {
+        // upcast
+        if (from.type.instanceOf(Class)) {
+            mut Class currentClass = from.type.instanceOf(Class);
+            while (currentClass) {
+                auto asStructRef = new Dereference(new PointerCast(
+                    new Pointer(currentClass.dataStruct), from));
+                auto islotTablePtr = new ReferenceExpression(new StructMemberReference(asStructRef, 2));
+
+                // Count up slot base over all interfaces.
+                mut int base = 0;
+                for (auto intf <- currentClass.superIntfs) {
+                    intf.getSlot(this, islotTablePtr, base).case {
+                        Expression expr: return expr;
+                        int newBase: base = newBase;
+                    }
+                }
+                currentClass = currentClass.superClass;
+            }
+            return null;
+        }
+        if (auto intf = from.type.instanceOf(Intf)) {
+            intf.getSlot(this, from, 0).case {
+                Expression expr: return expr;
+                int newBase: { }
+            }
+        }
+        // = null
+        if (from.instanceOf(NullExpr))
+        {
+            return new PointerCast(this, from);
+        }
+        return null;
+    }
+
+    override Expression implicitConvertTo(Context context, Expression from, Type to)
+    {
+        // (void*) class
+        auto voidp = once new Pointer(new Void);
+        if (to.same(voidp) && from.info.ownership != Ownership.gifted)
+        {
+            return new PointerCast(voidp, from);
+        }
+        return null;
+    }
+
+    void resolve(Context context)
+    {
+        // TODO compilation stage enum
+        if (this.classInfoSymbol != "") return;
+        this.decl.compile2(context, this);
+    }
+
+    override BackendType emit(Platform platform)
+    {
+        return platform.voidp;
+    }
+
+    Struct intfVtableStructCache;
+
+    Struct intfVtableStruct(Context context)
+    {
+        assert(this.classInfoSymbol != "");
+
+        if (intfVtableStructCache) {
+            assert(intfVtableStructCache.members.length == vtable.length);
+            return intfVtableStructCache;
+        }
+
+        auto sizeT = context.nativeWordType;
+        StructMemberDeclaration transform(typeof(vtable[0]) entry) {
+            return entry.case(
+                IntfMethod m: new StructMemberDeclaration(m.name, Protection.public_, m.funcPtrType),
+                (:baseOffset): new StructMemberDeclaration("basePtr", Protection.public_, sizeT));
+        }
+        auto vtableMembers = [transform(method) for method in vtable];
+
+        intfVtableStructCache = new Struct("", vtableMembers, this.decl.loc, this.mangle);
+        return intfVtableStructCache;
+    }
+
+    // FIXME: roll into vtable(), this.vtable => this.vtableCache
+    void genVtable()
+    {
+        if (this.classInfoSymbol != "") return;
+
+        assert(this.vtable.length == 0);
+
+        if (this.superIntfs.length == 0) {
+            this.vtable ~= :baseOffset;
+        } else {
+            for (auto superIntf <- this.superIntfs) {
+                superIntf.genVtable;
+                this.vtable ~= [a for a in superIntf.vtable]; // dup
+            }
+        }
+        for (auto method <- this.methods)
+            this.vtable ~= method;
+        /*
+        string repr(typeof(vtable[0]) entry) {
+            return entry.case(
+                IntfMethod intfMethod: "IntfMethod($(intfMethod.name))",
+                (:baseOffset): "baseOffset()");
+        }
+        print("$(this.name): debug: vtable = " ~ [join ", " e.repr for e in vtable]);
+        */
+        this.classInfoSymbol = this.mangledName ~ "_classinfo";
+    }
+
+    void declare(Generator generator)
+    {
+        if (generator.mod.declared(classInfoSymbol))
+            return;
+
+        generator.mod.declareSymbolList(classInfoSymbol, 0);
+    }
+
+    void define(Generator generator)
+    {
+        // placeholder to ensure a symbol with a unique id is emitted
+        mut (string | size_t)[] classinfo;
+        classinfo ~= cast(size_t) this;
+
+        generator.mod.defineSymbolList(classInfoSymbol, classinfo);
+    }
+
+    override bool same(Type other) {
+        Intf otherIntf = other.instanceOf(Intf);
+
+        return otherIntf && otherIntf.name == this.name; // TODO module
+    }
+
+    override string repr() { return this.name; }
+
+    override void hash(Hash hash) {
+        hash.apply(mangledHash.add, mangledHash.mult);
+    }
+
+    override Statement copyInto(Context context, Reference target, Expression source)
+    {
+        mut Context context = context;
+        Statement do_(Expression source) {
+            auto sizeT = context.nativeWordType;
+            auto refCountIncFun = once new FunctionDeclaration(
+                "neat_runtime_refcount_inc", new Void, [
+                    Parameter(false, "label", false, new Array(new Character)),
+                    Parameter(false, "ptr", false, new Pointer(new Void))]);
+
+            context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, "this", new IgnoreLifetimeExpr(source)));
+            context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, "size_t", sizeT));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "neat_runtime_refcount_inc", refCountIncFun));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "inc_name", new StringLiteral("inc " ~ this.name)));
+
+            auto incref = context.compiler.$stmt
+            if (!!this) {
+                auto baseOffset = **cast(size_t**) this;
+                auto object = &(cast(char*) this)[-baseOffset];
+                neat_runtime_refcount_inc(inc_name, &(cast(size_t*) object)[1]);
+            };
+            auto assign = context.compiler.assignStatement(target, source);
+            return context.compiler.sequence(incref.compile(context).statement, assign);
+        }
+        return context.compiler.stmtWithTemporaryExpr(source, &do_);
+    }
+
+    override Statement endLifetime(Context context, Reference reference)
+    {
+        mut Context context = context;
+        // disable lifetime management
+        // (otherwise we get an infinite cycle when the compiler
+        // tries to clean up 'this' after the __destroy() call by
+        // ending its lifetime (ad infinitum).
+        auto tempThis = new PairedTemporary(reference.type, Ownership.owned);
+        auto initTemp = new InitializeTemporaryStatement(tempThis, reference);
+
+        auto sizeT = context.nativeWordType;
+        context = context.withNamespace(
+            context.compiler.exprAlias(context.namespace, "this", tempThis));
+        context = context.withNamespace(
+            context.compiler.exprAlias(context.namespace, "size_t", sizeT));
+
+        // TODO do in __destroy() once we have function imports
+        auto freeFun = once new FunctionDeclaration(
+            "free", new Void, [Parameter(false, "ptr", false, new Pointer(new Void))]);
+        auto refCountDecFun = once new FunctionDeclaration(
+            "neat_runtime_refcount_dec", new Integer, [
+                Parameter(false, "label", false, new Array(new Character)),
+                Parameter(false, "ptr", false, new Pointer(new Void))]);
+
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "free", freeFun));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "neat_runtime_refcount_dec", refCountDecFun));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "dec_name", new StringLiteral("dec " ~ this.name)));
+        auto stmt = context.compiler.$stmt
+            if (!!this) {
+                auto baseOffset = **cast(size_t**) this;
+                auto object = &(cast(char*) this)[-baseOffset];
+                if (neat_runtime_refcount_dec(dec_name, &(cast(size_t*) object)[1]))
+                {
+                    // manually call __destroy method, second entry in the object vtable
+                    auto fn = (*cast(void function(void*)**) object)[1];
+                    fn(object);
+                    free(object);
+                }
+            };
+        return context.compiler.sequence(initTemp, stmt.compile(context).statement);
+    }
+}
+
 /// Checks that first is a Liskov-substitutable subtype of second (without implicit conversion).
 /// This is the sense in which two classes are substitutable in parameters or return types.
 bool isStrictSubtypeOf(Type first, Type second)
@@ -510,13 +996,14 @@ class ClassMethodSymbol : LateSymbol
     override Expression resolve(Context context, Expression baseExpr)
     {
         if (this.class_.final_ || this.staticLookup) {
-            return new FunctionReference(this.class_.vtable[methodOffset]);
+            this.class_.vtable[methodOffset].case {
+                ClassMethod method: return new FunctionReference(method);
+                (:baseOffset, size_t): assert(false);
+            }
         }
-        Expression asStructPtr = new PointerCast(
-            new Pointer(this.class_.dataStruct), baseExpr);
-        Reference classInfo = context.compiler.dereference(new PointerCast(
-            new Pointer(class_.classInfoStruct),
-            new StructMemberReference(context.compiler.dereference(asStructPtr), 0)));
+        Reference classInfo = context.compiler.dereference(context.compiler.dereference(new PointerCast(
+            new Pointer(new Pointer(class_.classInfoStruct(context))),
+            baseExpr)));
         mut Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
         auto funcPtr = funcPtrValue.type.instanceOf(FunctionPointer);
 
@@ -525,6 +1012,40 @@ class ClassMethodSymbol : LateSymbol
         funcPtrValue = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
 
         return funcPtrValue;
+    }
+}
+
+class IntfMethodSymbol : LateSymbol
+{
+    Intf intf; // TODO does this cause a ref cycle? remove?
+
+    // methodOffset includes base offsets.
+    size_t methodOffset;
+
+    this(this.intf, this.baseExpr, this.methodOffset) {}
+
+    override Expression resolve(Context context, Expression baseExpr)
+    {
+        Reference classInfo = context.compiler.dereference(context.compiler.dereference(new PointerCast(
+            new Pointer(new Pointer(intf.intfVtableStruct(context))),
+            baseExpr)));
+        mut Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
+        auto funcPtr = funcPtrValue.type.instanceOf(FunctionPointer);
+
+        auto funcPtrWithVoidpThis = new FunctionPointer(funcPtr.ret, [param for param in funcPtr.params]);
+        funcPtrWithVoidpThis.params[0] = Parameter.fromType(once new Pointer(new Void));
+        funcPtrValue = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
+
+        return funcPtrValue;
+    }
+
+    override Expression patchContext(Context context, Expression baseExpr) {
+        auto astBaseExpr = new ASTSymbolHelper(baseExpr);
+        auto astObjectPtr = context.compiler.$expr ({
+            auto baseOffset = **cast(size_t**) $astBaseExpr;
+            &(cast(char*) $astBaseExpr)[-baseOffset];
+        });
+        return astObjectPtr.compile(context).beExpression;
     }
 }
 
@@ -562,7 +1083,7 @@ class ASTClassDecl : ASTSymbol
 {
     string name;
 
-    string superClass;
+    string[] supers;
 
     bool final_;
 
@@ -574,20 +1095,29 @@ class ASTClassDecl : ASTSymbol
 
     Loc loc;
 
-    this(this.name, this.superClass, this.final_, this.abstract_,
+    this(this.name, this.supers, this.final_, this.abstract_,
          this.members, this.macroState, this.loc) { }
 
     override Class compile(Context context)
     {
         mut Class superClass = null;
-        if (this.superClass.length)
-        {
-            Symbol superClassObj = context.namespace.lookup(this.superClass, context, loc, null);
-            this.loc.assert2s(!!superClassObj, "super class not found: " ~ this.superClass);
-            superClass = superClassObj.instanceOf(Class);
-            assert(!!superClass);
+        mut Intf[] superIntfs = [];
+        for (int i <- 0 .. this.supers.length) {
+            auto super_ = this.supers[i];
+            Symbol superObj = context.namespace.lookup(super_, context, loc, null);
+            this.loc.assert2s(!!superObj, "super class/intf not found: $super_");
+            auto superClassTest = superObj.instanceOf(Class);
+            if (i == 0 && superClassTest) {
+                // first super may be a class
+                superClass = superClassTest;
+            } else {
+                // all others must be intfs
+                auto superIntf = superObj.instanceOf(Intf);
+                this.loc.assert2s(!!superIntf, "super interface is not an interface: $super_");
+                superIntfs ~= superIntf;
+            }
         }
-        return new Class(this, superClass, context.namespace);
+        return new Class(this, superClass, superIntfs, context.namespace);
     }
 
     void compile2(Context context, Class target)
@@ -630,11 +1160,19 @@ class ASTClassDecl : ASTSymbol
                 param.case {
                     ASTThisAssignment param:
                     {
-                        auto members = target.allMembers(context);
-                        size_t member = [first i for i, a in members where a.name == param.name else -1];
+                        // FIXME self-recursion in nested function
+                        mut Type delegate(Class) findType;
+                        Type findType_(Class self) {
+                            if (self.superClass)
+                                if (auto ret = findType(self.superClass))
+                                    return ret;
+                            return [first m.type for m in self.members where m.name == param.name else null];
+                        }
+                        findType = &findType_;
+                        auto type = findType(target);
                         // TODO specific loc
-                        method.loc.assert2s2(member != -1, "no such member: ", param.name);
-                        methodParams[k] = Parameter(true, param.name, false, members[member].type);
+                        method.loc.assert2s2(!!type, "no such member: ", param.name);
+                        methodParams[k] = Parameter(true, param.name, false, type);
                     }
                     ASTParameter param:
                         methodParams[k] = Parameter(
@@ -660,6 +1198,81 @@ class ASTClassDecl : ASTSymbol
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTClassDecl'!"); assert(false); }
+}
+
+struct ASTIntfDeclMethod
+{
+    Loc loc;
+
+    string name;
+
+    ASTSymbol ret;
+
+    ASTParameter[] params;
+}
+
+class ASTIntfDecl : ASTSymbol
+{
+    string name;
+
+    string[] superIntfs;
+
+    (ASTIntfDeclMethod | ASTDeclaration)[] members;
+
+    MacroState macroState;
+
+    Loc loc;
+
+    this(this.name, this.superIntfs, this.members, this.macroState, this.loc) { }
+
+    override Intf compile(Context context)
+    {
+        mut Intf[] superIntfs = [];
+        if (this.superIntfs.length > 0)
+        {
+            for (auto superIntf <- this.superIntfs) {
+                Symbol superIntfSym = context.namespace.lookup(superIntf, context, loc, null);
+                this.loc.assert2s(!!superIntfSym, "super interface not found: " ~ superIntf);
+                auto superIntf = superIntfSym.instanceOf(Intf);
+                assert(!!superIntf);
+                superIntfs ~= superIntf;
+            }
+        }
+        return new Intf(this, superIntfs, context.namespace);
+    }
+
+    void compile2(Context context, Intf target)
+    {
+        auto intfScope = context.compiler.symbolAlias(context.namespace, target.name, target);
+
+        mut Context currentContext = context.withNamespace(intfScope);
+
+        for (auto member <- this.members) {
+            member.case {
+                ASTIntfDeclMethod method: {
+                    auto methodParams = new Parameter[](method.params.length);
+                    for (int k <- 0 .. method.params.length) {
+                        auto param = method.params[k];
+                        methodParams[k] = Parameter(
+                            false, param.name, param.mutable, beType(param.loc, param.type.compile(currentContext)));
+                    }
+
+                    target.methods ~= new IntfMethod(
+                        target,
+                        method.name,
+                        beType(method.loc, method.ret.compile(currentContext)),
+                        methodParams);
+                }
+                ASTDeclaration astDecl: {
+                    currentContext = astDecl.compile(currentContext);
+                }
+            }
+        }
+
+        target.genVtable;
+    }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTIntfDecl'!"); assert(false); }
 }
 
 ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
@@ -688,11 +1301,17 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
     parser.commit;
 
     string name = parseIdentifier(parser);
-    mut string superClass;
+    mut string[] supers;
     if (parser.accept(":")) {
-        superClass = parseIdentifier(parser);
-        parser.assert_(superClass.length > 0, "expected super class identifier");
+        while (true) {
+            auto super_ = parseIdentifier(parser);
+            parser.assert_(super_.length > 0, "expected super class identifier");
+            supers ~= super_;
+            if (parser.accept(",")) continue;
+            break;
+        }
     }
+
     mut (ASTClassDeclMember | ASTClassDeclMethod | ASTDeclaration)[] members;
     parser.expect("{");
     while (!parser.accept("}"))
@@ -775,13 +1394,67 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
         }
     }
     return new ASTClassDecl(
-        name, superClass, classFinal, classAbstract,
+        name, supers, classFinal, classAbstract,
         members, lexicalContext.macroState, loc);
+}
+
+ASTIntfDecl parseIntfDecl(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin;
+    parser.strip;
+    auto loc = parser.loc;
+    if (!acceptIdentifier(parser, "interface"))
+    {
+        parser.revert;
+        return null;
+    }
+    parser.commit;
+
+    string name = parseIdentifier(parser);
+    mut string[] superIntfs;
+    if (parser.accept(":")) {
+        while (true) {
+            string superIntf = parseIdentifier(parser);
+            parser.assert_(superIntf.length > 0, "expected super identifier identifier");
+            superIntfs ~= superIntf;
+            if (parser.accept(",")) continue;
+            break;
+        }
+    }
+    mut (ASTIntfDeclMethod | ASTDeclaration)[] members;
+    parser.expect("{");
+    while (!parser.accept("}"))
+    {
+        parser.strip;
+
+        auto loc = parser.loc;
+
+        if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
+            members ~= decl;
+            continue;
+        }
+
+        ASTSymbol retType = lexicalContext.compiler.parseType(parser, lexicalContext);
+        parser.assert_(!!retType, "expected member type");
+        string memberName = parseIdentifier(parser);
+        parser.assert_(memberName.length > 0, "expected member name");
+        parser.expect("(");
+        auto params = parseParamList(parser, lexicalContext);
+        parser.expect(";");
+        parser.loc.assert2s(
+            [all a.case(ASTParameter: true, ASTThisAssignment: false) for a in params],
+            "no 'this.' in interface method");
+        // FIXME bottom
+        ASTParameter fail() { assert(false); }
+        auto astParameters = [a.case(ASTParameter p: p, ASTThisAssignment: fail) for a in params];
+        members ~= ASTIntfDeclMethod(loc, memberName, retType, astParameters);
+    }
+    return new ASTIntfDecl(name, superIntfs, members, lexicalContext.macroState, loc);
 }
 
 class ClassInfo : Expression
 {
-    Class classType;
+    (Class | Intf) classType;
 
     this(this.classType) {
         this.type = once new Pointer(new Void);
@@ -789,13 +1462,27 @@ class ClassInfo : Expression
 
     override int emit(Generator output)
     {
-        this.classType.declare(output);
-        return output.fun.symbolList(this.classType.vtableSymbol);
+        this.classType.case {
+            Class class_: {
+                class_.declare(output);
+                return output.fun.symbolList(class_.vtableSymbol);
+            }
+            Intf intf: {
+                intf.declare(output);
+                return output.fun.symbolList(intf.classInfoSymbol);
+            }
+        }
     }
 
     override ExprInfo info() { return ExprInfo(false, Ownership.owned); }
 
-    override void hash(Hash hash) { hash.adds("ClassInfo"); classType.hash(hash); }
+    override void hash(Hash hash) {
+        hash.adds("ClassInfo");
+        classType.case {
+            Class class_: class_.hash(hash);
+            Intf intf: intf.hash(hash);
+        }
+    }
 }
 
 class NewClassExpression : Expression
@@ -810,16 +1497,46 @@ class NewClassExpression : Expression
     {
         // oh boy!
         BackendType voidp = once (new Pointer(new Void)).emit(output.platform);
-        auto backendClassData = this.classType.dataStruct.emit(output.platform);
-        int classDataSize = backendClassData.size(output.platform);
+        BackendType sizeT = output.platform.nativeWordType;
+        auto basicClassStruct = new BackendStructType([voidp, sizeT]);
+
+        int classDataSize = this.classType.dataStruct.emit(output.platform).size(output.platform);
         int classInfoPtr = (new ClassInfo(classType)).emit(output);
         int classPtr = output.fun.call(
             voidp, "neat_runtime_alloc", [output.fun.wordLiteral(output.platform, classDataSize)]);
-        auto sizeT = output.platform.nativeWordType;
-        int classInfoTarget = output.fun.fieldOffset(backendClassData, classPtr, 0);
+
+        int classInfoTarget = output.fun.fieldOffset(basicClassStruct, classPtr, 0);
         output.fun.store(voidp, classInfoTarget, classInfoPtr);
-        int refCount = output.fun.fieldOffset(backendClassData, classPtr, 1);
+        int refCount = output.fun.fieldOffset(basicClassStruct, classPtr, 1);
         int one = output.fun.wordLiteral(output.platform, 1);
+        // write interface slot pointers
+        for (int i <- 0 .. classType.vtable.length) {
+            classType.vtable[i].case {
+                ClassMethod method: continue;
+                (:baseOffset, size_t offset): {
+                    // void*[] class_islot1;
+                    auto vtablePtrType = once new BackendPointerType(new BackendPointerType(new BackendVoidType));
+                    // &class_islot1
+                    auto interfaceSlot = output.fun.bitcast(
+                        output.fun.ptrOffset(
+                            once new BackendCharType,
+                            classPtr,
+                            output.fun.intLiteral(offset)),
+                        once new BackendPointerType(vtablePtrType));
+
+                    auto vtableOffset = output.fun.intLiteral(i);
+                    auto vtableOffsetPtr = output.fun.ptrOffset(
+                        once new BackendPointerType(new BackendVoidType),
+                        classInfoPtr,
+                        vtableOffset);
+
+                    output.fun.store(
+                        vtablePtrType,
+                        interfaceSlot,
+                        vtableOffsetPtr);
+                }
+            }
+        }
         output.fun.store(sizeT, refCount, one);
 
         return classPtr;
@@ -845,13 +1562,38 @@ class ASTInstanceOf : ASTSymbol
     {
         Expression base = beExpression3(context, this.base.compile(context), loc);
         auto type = base.type;
-        loc.assert2s(!!type.instanceOf(Class), "Base of instanceOf must be a class.");
+        loc.assert2s(
+            type.instanceOf(Class) || type.instanceOf(Intf),
+            "Base of instanceOf must be class or interface.");
         Expression do_(Expression base) {
-            Class target = target.compile(context).instanceOf(Class);
-            loc.assert2s(!!target, "Target of instanceOf must be class.");
+            auto targetSym = target.compile(context);
+            Class targetClass = targetSym.instanceOf(Class);
+            Intf targetIntf = targetSym.instanceOf(Intf);
+            Type target() {
+                if (targetClass) return targetClass;
+                else return targetIntf;
+            }
+            loc.assert2s(!!target, "Target of instanceOf must be class or interface.");
+            Expression classInfo() {
+                if (targetClass) return new ClassInfo(targetClass);
+                else return new ClassInfo(targetIntf);
+            }
+            ASTSymbol astTarget = new ASTSymbolHelper(target);
+            ASTSymbol astClassInfo = new ASTSymbolHelper(classInfo);
+
+            if (type.instanceOf(Intf)) {
+                auto astBase = new ASTSymbolHelper(base);
+                auto instanceOfExpr = context.compiler.$expr ({
+                    auto baseOffset = **cast(size_t**) $astBase;
+                    auto object = &(cast(char*) $astBase)[-baseOffset];
+                    // vtable 0 is always instanceof
+                    auto fn = (*cast($astTarget function(void*, void*)**) object)[0];
+                    fn(object, $astClassInfo);
+                });
+                return instanceOfExpr.compile(context).beExpression;
+            }
+
             Symbol instanceOf = context.compiler.accessMember(context, base, "__instanceof", loc, false);
-            Expression classInfo = new ClassInfo(target);
-            auto astClassInfo = new ASTSymbolHelper(classInfo);
             auto astInstanceOf = new ASTSymbolHelper(instanceOf);
             return new PointerCast(target,
                 context.compiler.call(context, astInstanceOf, [ASTArgument(astClassInfo, "")], loc, false));
@@ -940,7 +1682,12 @@ class Super : Symbol
 
     Symbol lookup(Context context, string name, Loc loc) {
         auto superClass = this.class_.superClass;
-        auto methodOffset = [first i for i, a in superClass.vtable where a.name == name else -1];
+        bool matches(typeof(class_.vtable[0]) entry) {
+            return entry.case(
+                ClassMethod m: m.name == name,
+                (:baseOffset, size_t): false);
+        }
+        auto methodOffset = [first i for i, a in superClass.vtable where matches(a) else -1];
         loc.assert2s3(methodOffset != -1, "Method '", name, "' not found in super class!");
         // TODO lookup() that handles the stackframe thing
         auto stackframe = once new ReferenceExpression(new StackFrame(new Void));

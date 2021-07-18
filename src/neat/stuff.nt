@@ -27,21 +27,45 @@ import neat.vectors;
 import neat.with_;
 
 // TODO clear all this up
-class DefineClass : FinishedSymbol
+class DefineClassIntf : FinishedSymbol
 {
-    Class class_;
+    (Class | Intf) obj;
 
-    this(this.class_) { }
+    this(this.obj) { }
 
     override void emit(Generator generator)
     {
-        class_.define(generator);
+        obj.case {
+            Class class_: class_.define(generator);
+            Intf intf: intf.define(generator);
+        }
     }
 
     override void hash(Hash hash)
     {
-        // only the actual vtable symbol, the methods are also hashed separately
-        [hash.adds(method.mangle) for method in class_.vtable];
+        this.obj.case {
+            Class class_: {
+                // FIXME nested function mangling
+                void mangle1(typeof(class_.vtable[0]) entry) {
+                    entry.case {
+                        ClassMethod method: hash.adds(method.mangle);
+                        (:baseOffset, size_t offs): hash.addl(offs);
+                    }
+                }
+                // only the actual vtable symbol, the methods are also hashed separately
+                [mangle1(method) for method in class_.vtable];
+            }
+            Intf intf: {
+                void mangle2(typeof(intf.vtable[0]) entry) {
+                    entry.case {
+                        IntfMethod method: hash.adds(method.mangle);
+                        (:baseOffset): hash.adds("baseOffset");
+                    }
+                }
+                // only the actual vtable symbol, the methods are also hashed separately
+                [mangle2(method) for method in intf.vtable];
+            }
+        }
     }
 }
 
@@ -622,7 +646,7 @@ Expression call(Context context, ASTSymbol astTarget, ASTArgument[] astArgs, Loc
             }
             auto voidp = once new Pointer(new Void);
             mut Expression[] combinedArgs;
-            combinedArgs ~= new PointerCast(voidp, baseExpr);
+            combinedArgs ~= lateSym.patchContext(context, new PointerCast(voidp, baseExpr));
             combinedArgs ~= args;
             return new FuncPtrCall(funcPtr, combinedArgs, loc);
         }
@@ -1082,39 +1106,6 @@ class ASTDereference : ASTSymbol
     }
 }
 
-class Dereference : Reference
-{
-    Expression base;
-
-    Pointer pointerType;
-
-    this(this.base)
-    {
-        this.pointerType = base.type.instanceOf(Pointer);
-        assert(!!this.pointerType);
-        this.type = this.pointerType.target;
-    }
-
-    override int emit(Generator output)
-    {
-        int reg = this.emitLocation(output);
-
-        return output.fun.load(this.type.emit(output.platform), reg);
-    }
-
-    override int emitLocation(Generator output)
-    {
-        return this.base.emit(output);
-    }
-
-    // avoid doing memory management until we figure out how to handle pointers.
-    // (or if we need to at all.)
-    // mutable for now, but rethink later
-    override ExprInfo info() { return ExprInfo(true, Ownership.owned); }
-
-    override void hash(Hash hash) { hash.adds("Dereference"); base.hash(hash); }
-}
-
 class ASTReference : ASTSymbol
 {
     ASTSymbol base;
@@ -1133,7 +1124,7 @@ class ASTReference : ASTSymbol
             Expression do1(Expression baseExpr) {
                 auto funcPtr = lateSym.resolve(context, baseExpr);
                 auto voidp = once new Pointer(new Void);
-                auto contextPtr = new PointerCast(voidp, baseExpr);
+                auto contextPtr = lateSym.patchContext(context, new PointerCast(voidp, baseExpr));
                 return new DelegateExpr(funcPtr, contextPtr);
             }
             Expression do2(Expression baseExpr)
@@ -2910,7 +2901,7 @@ struct ResolvingModuleEntry
 
     Symbol resolution;
 
-    (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest | Nothing) symbol;
+    (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest | Nothing) symbol;
 }
 
 class Resolver
@@ -2920,7 +2911,9 @@ class Resolver
     this() { }
 
     void add(
-        string name, Protection protection, (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) astSymbol)
+        string name,
+        Protection protection,
+        (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) astSymbol)
     {
         this.entries ~= ResolvingModuleEntry(name, protection, false, null, astSymbol);
     }
@@ -2967,6 +2960,7 @@ class Resolver
                 ASTFunction fun: fun.compile(context),
                 ASTUnitTest ut: ut.compile(context),
                 ASTClassDecl decl: decl.compile(context),
+                ASTIntfDecl decl: decl.compile(context),
                 ASTStructDecl decl: decl.compileToStruct(context),
                 ASTAliasDecl decl: decl.target.compile(context),
                 Nothing _: ({ assert(false); cast(Symbol) null; }));
@@ -3013,7 +3007,7 @@ class Module : ModuleBase
 
     void add(
         string name, Protection protection,
-        (ASTFunction | ASTClassDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) symbol)
+        (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) symbol)
     {
         this.resolver.add(name, protection, symbol);
     }
@@ -3073,9 +3067,12 @@ class Module : ModuleBase
             }
         }
 
-        void resolveClass(Symbol sym) {
+        void resolveClassIntf(Symbol sym) {
             if (auto class_ = sym.instanceOf(Class)) {
                 class_.resolve(context);
+            }
+            if (auto intf = sym.instanceOf(Intf)) {
+                intf.resolve(context);
             }
         }
 
@@ -3085,9 +3082,11 @@ class Module : ModuleBase
             {
                 finishedSymbols ~= fun.compile(compiler, platform);
             }
+            if (Intf intf = symbol.instanceOf(Intf)) {
+                finishedSymbols ~= new DefineClassIntf(intf);
+            }
             if (Class class_ = symbol.instanceOf(Class)) {
-                finishedSymbols ~= new DefineClass(class_);
-                // class_.define(generator);
+                finishedSymbols ~= new DefineClassIntf(class_);
                 finishedSymbols ~= [cast(FinishedSymbol) method.compile(compiler, platform) for method in class_.methods];
             }
             if (Struct struct_ = symbol.instanceOf(Struct)) {
@@ -3103,7 +3102,7 @@ class Module : ModuleBase
          * It's written by just poking things until it works.
          * Work out a saner way.
          */
-        walkSymbols(&resolveClass);
+        walkSymbols(&resolveClassIntf);
         walkSymbols(&compileSymbol);
     }
 
@@ -3616,6 +3615,10 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             add(classDecl);
             continue;
         }
+        if (ASTIntfDecl intfDecl = parseIntfDecl(parser, lexicalContext)) {
+            add(intfDecl);
+            continue;
+        }
         if (ASTTemplateDecl templateDecl = parseTemplateDecl(parser, lexicalContext)) {
             add(templateDecl);
             continue;
@@ -3713,6 +3716,9 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
                 // TODO just handle all as ASTDeclaration
                 if (auto classDecl = symbol.instanceOf(ASTClassDecl)) {
                     module_.add(classDecl.name, entry.protection, classDecl);
+                }
+                else if (auto intfDecl = symbol.instanceOf(ASTIntfDecl)) {
+                    module_.add(intfDecl.name, entry.protection, intfDecl);
                 }
                 else if (auto enumDecl = symbol.instanceOf(ASTEnumDecl)) {
                     module_.register(enumDecl.name, entry.protection, enumDecl.compile(context));

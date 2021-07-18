@@ -461,11 +461,12 @@ at_revision 'f9ef0cb5a2ea906edc125252cd7c8217836df3ae' 'lang_transition_3' 'buil
 at_revision 'ffab3ed0a6debabd56b042ec8d172ed43bc77917' 'rebuild neat' 'build/neat'
 # Implement format strings.
 at_revision 'e14ccdde5f8d7fe07fb3917666ccfa54a6641c6e' 'rebuild neat' 'build/neat'
-# private/public
-at_revision '28e026afb2d50ffe87ddce6475477c4324eb5312' 'rebuild neat' 'build/neat'
+# private/public, quoting ASTFunctionPointer
+at_revision '62881ff0a2337a0ea19d47177a377a7a715ea22a' 'rebuild neat' 'build/neat'
 # class vtable layout change, prep for interfaces
 at_revision '1e4827c2359a39936d1d1ddc5f93cb1995fc776b' 'rebuild neat' 'build/neat'
 at_revision '1e4827c2359a39936d1d1ddc5f93cb1995fc776b' 'transition new-vtable' 'build/neat'
+at_revision '4bb30a2763f232da7e78a47f321fe56e8d3d2172' 'detransition new-vtable' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

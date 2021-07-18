@@ -47,7 +47,9 @@ function at_revision {
     git clone -s ../.. .
     git checkout -q $rev
     git submodule -q update --init
+    set -x
     $build
+    set +x
     cd ../..
     cp build/$rev/$output build/$language
     # bleeeh this should not be here, this is not generic, but meh
@@ -117,12 +119,18 @@ function transition {
     TRANSITION="$1"
     shift
     mkdir build
-    cp ../../build/cx build/cx
+    COMPILER="neat"
+    EXT="nt"
+    if [ -f "../../build/cx" ]; then
+        COMPILER="cx"
+        EXT="cx"
+    fi
+    cp ../../build/$COMPILER build/$COMPILER
     cp -R ../../build/src build
-    build/cx -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_1 -transition=$TRANSITION $@
+    build/$COMPILER -Pcompiler:build/src -Pnext:src src/main.$EXT -o build/stage1 -transition=$TRANSITION $@
     rm -rf .obj
-    build/cx_1 -Pcompiler:src src/main.cx -o build/cx_2 -transition=$TRANSITION -macro-transition=$TRANSITION $@
-    mv build/cx_2 build/cx
+    build/stage1 -Pcompiler:src src/main.$EXT -o build/stage2 -transition=$TRANSITION -macro-transition=$TRANSITION $@
+    mv build/stage2 build/$COMPILER
     rm -rf build/src
     cp -R src build/
 }
@@ -131,13 +139,24 @@ function detransition {
     TRANSITION="$1"
     shift
     mkdir build
-    cp ../../build/cx build/cx
-    cp -R ../../build/src build
-    build/cx -Pcompiler:build/src -Pnext:src src/main.cx -o build/cx_1 \
+    if [ -f "../../build/cx" ]; then
+        COMPILER="cx"
+        EXT="cx"
+        cp -R ../../build/src build
+    else
+        COMPILER="neat"
+        EXT="nt"
+        # Uhhhhhh. It selects the wrong files for some reason.
+        # Something is fucky & broken. But it's 7am on a sunday and I cba.
+        # TODO condition this on the generation count once we fix it.
+        cp -R src build
+    fi
+    cp ../../build/$COMPILER build/$COMPILER
+    build/$COMPILER -Pcompiler:build/src -Pnext:src src/main.$EXT -o build/stage1 \
         -transition=$TRANSITION -macro-transition=$TRANSITION $@
     rm -rf .obj
-    build/cx_1 -Pcompiler:src src/main.cx -o build/cx_2 $@
-    mv build/cx_2 build/cx
+    build/stage1 -Pcompiler:src src/main.$EXT -o build/stage2 $@
+    mv build/stage2 build/$COMPILER
     rm -rf build/src
     cp -R src build/
 }
@@ -444,6 +463,9 @@ at_revision 'ffab3ed0a6debabd56b042ec8d172ed43bc77917' 'rebuild neat' 'build/nea
 at_revision 'e14ccdde5f8d7fe07fb3917666ccfa54a6641c6e' 'rebuild neat' 'build/neat'
 # private/public
 at_revision '28e026afb2d50ffe87ddce6475477c4324eb5312' 'rebuild neat' 'build/neat'
+# class vtable layout change, prep for interfaces
+at_revision '1e4827c2359a39936d1d1ddc5f93cb1995fc776b' 'rebuild neat' 'build/neat'
+at_revision '1e4827c2359a39936d1d1ddc5f93cb1995fc776b' 'transition new-vtable' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

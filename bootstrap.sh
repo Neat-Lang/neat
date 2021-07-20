@@ -75,11 +75,11 @@ function dbootstrap {
     build/stage1 -Isrc/stage2 main.cx -- -Isrc/stage2 src/stage2/main.cx -o build/stage2
 }
 function rebuild {
-    mkdir build
+    mkdir -p build
     if [ -e "../../build/cx" ]; then
-        cp ../../build/cx build/cx
+        cp ../../build/cx build/$1
     else
-        cp ../../build/neat build/neat
+        cp ../../build/neat build/$1
     fi
     # also not generic, see above
     if [ -d ../../build/src ]; then
@@ -332,8 +332,8 @@ function macro_transition {
     # use new macros even for previous-generation imports
     cp -R build/backup/macros/ src/$language/
     cp -R build/backup/macros/ build/src/$language/
-    build/$language_1 -Pcompiler:src src/main.$ext -o build/$language_2 $@
-    mv build/$language_2 build/$language
+    build/${language}_1 -Pcompiler:src src/main.$ext -o build/${language}_2 $@
+    mv build/${language}_2 build/$language
     rm -rf build/src
     rm -rf build/backup
     cp -R src build/
@@ -409,8 +409,9 @@ at_revision '38ba877af6c2313437595bb54c3f2c729922d930' 'macro_transition' 'build
 # Reorg some stuff: for some reason, we crash without this.
 at_revision 'da674e882c5ab0529d5c183812b2b1b0bb08b6a2' 'rebuild cx' 'build/cx'
 function lang_transition_1 {
+    mkdir -p build
+    cp ../../build/cx build/cx
     FAST=1 rebuild neat
-    ls build
     rm build/cx
     # this is not clean lol
     rm ../../build/cx ../../build/cx.ini

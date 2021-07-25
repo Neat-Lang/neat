@@ -1,9 +1,7 @@
 blocking:
-- interfaces
-- generic namespaces
 - dedicated bool type
-- public, private?
 - ranges?
+- interfaces
 
 pending:
 

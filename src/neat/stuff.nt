@@ -11,11 +11,13 @@ import helpers;
 import neat.array;
 import neat.base;
 import neat.class_;
+import neat.decl;
 import neat.either;
 import neat.enums;
 import neat.expr;
 import neat.function_;
 import neat.hash;
+import neat.hashmap;
 import neat.parser;
 import neat.parser_base;
 import neat.statements;
@@ -110,12 +112,25 @@ ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
         }
         parser.revert;
         parser.begin;
+        if (parser.accept("[")) {
+            if (parser.accept("]")) {
+                parser.commit;
+
+                current = new ASTArray(current, parser.loc);
+                continue;
+            }
+            // hashmap? might be assignment intro
+            auto keyType = parser.parseType(lexicalContext);
+            if (!keyType || !parser.accept("]")) {
+                parser.revert;
+                return null;
+            }
+            parser.commit;
+            current = new ASTHashMap(key=keyType, value=current, parser.loc);
+            continue;
+        }
         if (parser.accept("[") && parser.accept("]"))
         {
-            parser.commit;
-
-            current = new ASTArray(current, parser.loc);
-            continue;
         }
         parser.revert;
         // what about templates that don't contain types? instead of duplicating this,
@@ -591,6 +606,24 @@ Expression call(Context context, ASTSymbol astTarget, ASTArgument[] astArgs, Loc
     context.macroState.applyMacro(callMacroArgs);
     if (callMacroArgs.transformed) return callMacroArgs.transformed;
 
+    /// Direct implementation of `foo.bar(baz)`.
+    /// Reduces need for `LateSymbol`.
+    /// TODO handle index overload assignment similarly for `hashmap[key] = value`.
+    if (auto memberAccess = astTarget.instanceOf(ASTMemberBase)) {
+        auto base = memberAccess.base.compile(context);
+        if (auto type = base.instanceOf(Type)) {
+            auto protection = type.protectionAt(context.namespace);
+            auto ret = type.callMember(
+                context, null, memberAccess.member, astArgs, protection, memberAccess.loc);
+            if (ret) return ret;
+        } else if (auto baseExpr = base.isExpressionImplCall(context, loc)) {
+            auto protection = baseExpr.type.protectionAt(context.namespace);
+            auto ret = baseExpr.type.callMember(
+                context, baseExpr, memberAccess.member, astArgs, protection, memberAccess.loc);
+            if (ret) return ret;
+        }
+    }
+
     mut auto target = astTarget.compile(context);
 
     if (!autoCall || astArgs.length > 0) {
@@ -790,6 +823,11 @@ class ASTIndexAccess : ASTSymbol
             this.loc.assert2s(!!indexExpr, "int literal expected for tuple access");
             return new TupleMemberExpr(this.loc, base, indexExpr.value);
         }
+        // TODO
+        /*if (auto hashmap = type.instanceOf(HashMap)) {
+            auto indexExpr = beExpression3(context, this.index.compile(context), this.loc);
+            return hashmap.index(context, base, indexExpr);
+        }*/
 
         bool saveIndexValue = base.info.ownership == Ownership.gifted;
         Expression do_(Reference base)
@@ -804,12 +842,11 @@ class ASTIndexAccess : ASTSymbol
                 indexExpr = beExpression3(context, this.index.compile(context), this.loc);
                 // TODO bounds check
                 ptrBase = new ArrayPointer(array_.elementType, base);
-            } else {
-                if (!type.instanceOf(Pointer)) {
-                    this.loc.fail("index access requires pointer or array");
-                }
+            } else if (type.instanceOf(Pointer)) {
                 indexExpr = beExpression3(context, this.index.compile(context), this.loc);
                 ptrBase = base;
+            } else {
+                this.loc.fail("index access requires pointer, array or hashmap");
             }
 
             indexExpr = expectImplicitConvertTo(context, indexExpr, context.nativeWordType, this.loc);
@@ -2647,26 +2684,6 @@ ASTSymbol parseDestroy(Parser parser, LexicalContext lexicalContext)
     return new ASTDestroy(target, loc);
 }
 
-// Glue between ASTDeclaration and ASTStatement.
-class ASTDeclarationStatement : ASTStatement
-{
-    ASTDeclaration decl;
-
-    this(this.decl) { }
-
-    override StatementCompileResult compile(Context context) {
-        return StatementCompileResult(
-            new NoopStatement,
-            this.decl.compile(context));
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compiler.astNewExpression(
-            quoter.compiler.astIdentifier("ASTDeclarationStatement", __HERE__), [
-                this.decl.quote(quoter)], __HERE__);
-    }
-}
-
 ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalContext) {
     auto loc = parser.loc;
     if (auto import_ = parseImportStatement(parser, lexicalContext)) {
@@ -3509,42 +3526,6 @@ Package selectPackage(Package[] packages, string name, Loc loc)
     auto result = [first a for a in packages where a.name == name else null];
     loc.assert2s(!!result, "Undefined package: '$name'");
     return result;
-}
-
-class ASTAliasDecl : ASTDeclaration
-{
-    string name;
-
-    ASTSymbol target;
-
-    this(this.name, this.target) { }
-
-    // FIXME should return a Namespace?
-    override Context compile(Context context) {
-        auto target = this.target.compile(context);
-        return context.withNamespace(new SymbolAlias(context.namespace, this.name, target));
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        with (quoter.compiler) {
-            return astNewExpression(
-                astIdentifier("ASTAliasDecl", __HERE__), [
-                    astStringLiteral(this.name, __HERE__),
-                    this.target.quote(quoter)], __HERE__);
-        }
-    }
-}
-
-ASTAliasDecl parseAliasDecl(Parser parser, LexicalContext lexicalContext) {
-    if (!parser.accept("alias")) return null;
-    auto loc = parser.loc;
-    string name = parser.parseIdentifier;
-    loc.assert2s(name.length > 0, "alias name expected");
-    parser.expect("=");
-    mut ASTSymbol target = parseType(parser, lexicalContext);
-    if (!target) target = parseExpression(parser, lexicalContext);
-    parser.expect(";");
-    return new ASTAliasDecl(name, target);
 }
 
 ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule module_,

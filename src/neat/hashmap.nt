@@ -1,0 +1,162 @@
+module neat.hashmap;
+
+macro import neat.macros.assert;
+macro import neat.macros.once;
+macro import neat.macros.quasiquoting;
+
+import backend.base;
+import neat.array;
+import neat.base;
+import neat.decl;
+import neat.either;
+import neat.hash;
+import neat.parser_base;
+import neat.statements;
+import neat.struct_;
+import neat.tuples;
+import neat.types;
+
+/**
+ * Hashmaps are simpler than arrays: the hashmap value is just a pointer to the hashmap object.
+ *
+ * (This is because they cannot be sliced.)
+ *
+ * Hashmap objects have the following layout:
+ * {
+ *      size_t references;
+ *      size_t length; // number of occupied slots
+ *      size_t capacity; // number of total slots
+ * }
+ *
+ * It is then followed directly by the hashmap data, which consists of this type:
+ *
+ * (Key key, Value value | :empty | :gravestone)
+ */
+class HashMap : Type
+{
+    // FIXME pending
+    Type key, value;
+
+    this(this.key, this.value) { }
+
+    override BackendType emit(Platform platform)
+    {
+        return platform.voidp;
+    }
+
+    override bool same(Type other)
+    {
+        if (HashMap otherHashmap = other.instanceOf(HashMap))
+            return key.same(otherHashmap.key) && value.same(otherHashmap.value);
+        return false;
+    }
+
+    override string repr() { return "$(this.value.repr)[$(this.key.repr)]"; }
+
+    override string mangle() { return "hashmap_$(this.key.mangle)_to_$(this.value.mangle)"; }
+
+    override void hash(Hash hash) { hash.adds("hashmap"); this.key.hash(hash); this.value.hash(hash); }
+
+    override Statement copyInto(Context context, Reference target, Expression source)
+    {
+        auto compiler = context.compiler;
+
+        Statement assign(Expression source) {
+            mut auto context = context.withNamespace(context.compiler.exprAlias(context.namespace, "source", source));
+            auto refCountIncFun = once new FunctionDeclaration(
+                "neat_runtime_refcount_inc", new Void, [
+                    Parameter(false, "label", false, new Array(new Character)),
+                    Parameter(false, "ptr", false, new Pointer(new Void))]);
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "neat_runtime_refcount_inc", refCountIncFun));
+            // count up reference
+            auto stmt = compiler.$stmt if (cast(void*) source != null) {
+                neat_runtime_refcount_inc("hashmap acquire", cast(size_t*) source);
+            };
+            auto result = stmt.compile(context);
+            return compiler.sequenceStatement([
+                result.statement,
+                compiler.assignStatement(target, source)]);
+        }
+        return compiler.stmtWithTemporaryExpr(source, &assign);
+    }
+
+    override Statement endLifetime(Context context, Reference reference)
+    {
+        return context.compiler.exprStatement(releaseHashmap(context, reference));
+    }
+}
+
+private ASTSymbol wrap(Context context, HashMap hashmap, ASTSymbol value) {
+    auto key = new ASTSymbolHelper(hashmap.key), value = new ASTSymbolHelper(hashmap.value);
+    return context.compiler.$expr ({
+        0; // remove at your own risk
+        alias Key = $key;
+        alias Value = $value;
+        struct HashMapBase {
+            size_t references;
+            size_t length;
+            size_t capacity;
+        }
+        alias HashMapRow = (Key key, Value value | :empty | :gravestone);
+        $value;
+    });
+}
+
+
+public Expression releaseHashmap(Context context, Expression value) {
+    HashMap hashmap = value.type.instanceOf(HashMap);
+    assert(!!hashmap);
+    Parameter[] params = [Parameter(false, "value", false, hashmap)];
+
+    ASTStatement body_() {
+        auto expr = context.compiler.$expr ({
+            if (cast(void*) value == null) return;
+            if (!neat_runtime_refcount_dec("hashmap release", cast(size_t*) value))
+                return;
+            auto base = cast(HashMapBase*) value;
+            auto rows = cast(HashMapRow*) &base[1];
+            for (int i <- 0 .. base.capacity) {
+                rows[i].case {
+                    (:empty): continue;
+                    (:gravestone): continue;
+                    (Key key, Value value): {
+                        __destroy(key);
+                        __destroy(value);
+                    }
+                }
+                0; // Remove at your peril. (FIXME typed array literals or implcast array literals)
+            }
+            free(cast(void*) value);
+            0; // expr result value. TODO void literal
+        });
+        return new ASTExprStatement(wrap(context, hashmap, expr), __HERE__);
+    }
+
+    auto fn = context.compiler.createRuntimeFunction(context, "hashmap_release", new Void, params, &body_);
+
+    return context.compiler.mkCall(fn, [value], __HERE__);
+}
+
+class ASTHashMap : ASTSymbol
+{
+    ASTSymbol key, value;
+
+    Loc loc;
+
+    this(this.key, this.value, this.loc) { }
+
+    override Type compile(Context context) {
+        auto key = beType(this.loc, this.key.compile(context));
+        auto value = beType(this.loc, this.value.compile(context));
+        return new HashMap(key=key, value=value);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compiler.astNewExpression(
+            quoter.compiler.astIdentifier("ASTHashMap", __HERE__), [
+                this.key.quote(quoter),
+                this.value.quote(quoter),
+                quoter.quoteLoc(loc)], __HERE__);
+    }
+}

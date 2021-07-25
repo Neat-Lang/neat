@@ -358,6 +358,60 @@ struct ASTStructMethod
     ASTStatement body_;
 }
 
+// FIXME There has to be a better way than this.
+// TODO get homoiconicity somehow
+ASTSymbol quoteStructMethod(ASTStructMethod method, Quoter quoter) {
+    ASTSymbol transformParameter(ASTParameter param) {
+        with (quoter.compiler) {
+            return astCall(
+                astIdentifier("ASTParameter", __HERE__), [
+                    astStringLiteral(param.name, __HERE__),
+                    astBoolLiteral(param.mutable, __HERE__),
+                    param.type.quote(quoter),
+                    quoter.quoteLoc(param.loc)], __HERE__);
+        }
+    }
+    ASTSymbol transformThisAssignment(ASTThisAssignment assignment) {
+        with (quoter.compiler) {
+            return astCall(
+                astIdentifier("ASTThisAssignment", __HERE__), [
+                    astStringLiteral(assignment.name, __HERE__)], __HERE__);
+        }
+    }
+    ASTSymbol transformParam(typeof(method.params[0]) param) {
+        return param.case(
+            ASTParameter a: transformParameter(a),
+            ASTThisAssignment a: transformThisAssignment(a));
+    }
+    ASTSymbol[] params = [transformParam(a) for a in method.params];
+    with (quoter.compiler) {
+        return astCall(
+            astIdentifier("ASTStructMethod", __HERE__), [
+                quoter.quoteLoc(method.loc),
+                astBoolLiteral(method.static_, __HERE__),
+                method.protection.quoteProtection(quoter),
+                astStringLiteral(method.name, __HERE__),
+                method.ret.quote(quoter),
+                astArrayLiteral(params, __HERE__),
+                method.body_.quote(quoter)], __HERE__);
+    }
+}
+
+// TODO factor out into macro?
+ASTSymbol quoteProtection(Protection protection, Quoter quoter) {
+    with (quoter.compiler) {
+        if (protection == Protection.public_) {
+            return astMember(astIdentifier("Protection", __HERE__), "public_", __HERE__);
+        } else if (protection == Protection.private_) {
+            return astMember(astIdentifier("Protection", __HERE__), "private_", __HERE__);
+        } else if (protection == Protection.protected_) {
+            return astMember(astIdentifier("Protection", __HERE__), "protected_", __HERE__);
+        } else {
+            assert(false);
+        }
+    }
+}
+
 class StructNamespace : Namespace
 {
     Struct struct_;
@@ -424,11 +478,9 @@ class ASTStructDecl : ASTDeclaration
 
     ASTStructMethod[] methods;
 
-    MacroState macroState;
-
     Loc loc;
 
-    this(this.name, this.members, this.methods, this.macroState, this.loc) { }
+    this(this.name, this.members, this.methods, this.loc) { }
 
     override Context compile(Context context)
     {
@@ -479,12 +531,31 @@ class ASTStructDecl : ASTDeclaration
                 method.name,
                 beType(this.loc, method.ret.compile(structContext)),
                 methodParams,
-                method.body_, this.macroState);
+                method.body_, context.macroState);
         }
         return struct_;
     }
 
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTStructDecl'!"); assert(false); }
+    override ASTSymbol quote(Quoter quoter) {
+        ASTSymbol transformMember(typeof(members[0]) member) {
+            with (quoter.compiler) {
+                return astTupleLiteral([
+                    astStringLiteral(member.name, __HERE__),
+                    member.protection.quoteProtection(quoter),
+                    member.type.quote(quoter)], __HERE__);
+            }
+        }
+        ASTSymbol[] members = [transformMember(a) for a in this.members];
+        ASTSymbol[] methods = [a.quoteStructMethod(quoter) for a in this.methods];
+        with (quoter.compiler) {
+            return astNewExpression(
+                astIdentifier("ASTStructDecl", __HERE__), [
+                    astStringLiteral(this.name, __HERE__),
+                    astArrayLiteral(members, __HERE__),
+                    astArrayLiteral(methods, __HERE__),
+                    quoter.quoteLoc(this.loc)], __HERE__);
+        }
+    }
 
     override string repr() { return name; }
 }
@@ -571,5 +642,5 @@ ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
         }
     }
     parser.commit;
-    return new ASTStructDecl(name, members, methods, lexicalContext.macroState, loc);
+    return new ASTStructDecl(name, members, methods, loc);
 }

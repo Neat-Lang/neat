@@ -1,0 +1,72 @@
+module neat.formatstring;
+
+macro import neat.macros.listcomprehension;
+macro import neat.macros.quasiquoting;
+
+import neat.array;
+import neat.base;
+import neat.class_;
+import neat.expr;
+import neat.parser_base;
+import neat.struct_;
+import neat.types;
+
+class ASTFormatString : ASTSymbol
+{
+    Loc loc;
+
+    ASTSymbol[] parts;
+
+    this(this.loc, this.parts) { }
+
+    override Symbol compile(Context context) {
+        mut auto context = context;
+        auto compiler = context.compiler;
+        mut ASTSymbol result = compiler.astStringLiteral("", __HERE__);
+        bool isString(Type type) {
+            if (auto array = type.instanceOf(Array))
+                return !!array.elementType.instanceOf(Character);
+            return false;
+        }
+        for (auto part <- parts) {
+            // TODO part.loc
+            auto sym = part.compile(context).beExpressionImplCall(context, loc);
+            ASTSymbol astSym = new ASTSymbolHelper(sym);
+            if (sym.type.isString) {
+                result = compiler.$expr $result ~ $astSym;
+            } else if (sym.type.instanceOf(Integer)) {
+                result = compiler.$expr $result ~ itoa($astSym);
+            } else if (sym.type.instanceOf(Float)) {
+                result = compiler.$expr $result ~ ftoa($astSym);
+            } else if (sym.type.instanceOf(Long)) {
+                result = compiler.$expr $result ~ ltoa($astSym);
+            } else if (sym.type.instanceOf(Struct) || sym.type.instanceOf(Class)) {
+                result = compiler.$expr $result ~ $astSym.toString;
+            } else {
+                this.loc.fail("Don't know how to format $(sym.type.repr)");
+            }
+        }
+        auto itoaFun = new FunctionDeclaration(
+            "neat_runtime_itoa", new Array(new Character), [Parameter(false, "value", false, new Integer)]);
+        auto ftoaFun = new FunctionDeclaration(
+            "neat_runtime_ftoa", new Array(new Character), [Parameter(false, "value", false, new Float)]);
+        auto ltoaFun = new FunctionDeclaration(
+            "neat_runtime_ltoa", new Array(new Character), [Parameter(false, "value", false, new Long)]);
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "itoa", itoaFun));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "ftoa", ftoaFun));
+        context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "ltoa", ltoaFun));
+        return result.compile(context);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        auto parts = [a.quote(quoter) for a in this.parts];
+        return quoter.compiler.astNewExpression(
+            quoter.compiler.astIdentifier("ASTFormatString", __HERE__), [
+                quoter.quoteLoc(this.loc),
+                quoter.compiler.astArrayLiteral(parts, __HERE__)], __HERE__);
+    }
+}
+

@@ -815,28 +815,14 @@ class ASTIndexAccess : ASTSymbol
 
     override Expression compile(Context context)
     {
-        Expression base = beExpression3(context, this.base.compile(context), this.loc);
-        auto type = base.type;
-        // TODO refcounting
-        // TODO overload
-        if (type.instanceOf(TupleType))
-        {
-            auto indexExpr = beExpression3(context, this.index.compile(context), this.loc).instanceOf(IntLiteral);
-            this.loc.assert2s(!!indexExpr, "int literal expected for tuple access");
-            return new TupleMemberExpr(this.loc, base, indexExpr.value);
-        }
-        // TODO
-        /*if (auto hashmap = type.instanceOf(HashMap)) {
-            auto indexExpr = beExpression3(context, this.index.compile(context), this.loc);
-            return hashmap.index(context, base, indexExpr);
-        }*/
-
+        auto base = beExpression3(context, this.base.compile(context), this.loc);
         bool saveIndexValue = base.info.ownership == Ownership.gifted;
-        Expression do_(Reference base)
-        {
+
+        Expression do_(Reference base) {
             mut Expression indexExpr;
             mut Expression ptrBase;
 
+            auto type = base.type;
             if (Array array_ = type.instanceOf(Array)) {
                 auto context = context.withNamespace(
                     context.compiler.exprAlias(context.namespace, "__array", base));
@@ -848,7 +834,12 @@ class ASTIndexAccess : ASTSymbol
                 indexExpr = beExpression3(context, this.index.compile(context), this.loc);
                 ptrBase = base;
             } else {
-                this.loc.fail("index access requires pointer, array or hashmap");
+                indexExpr = beExpression3(context, this.index.compile(context), this.loc);
+                if (auto result = type.index(context, base, indexExpr, this.loc)) {
+                    return result;
+                } else {
+                    this.loc.fail("index access requires pointer, array or hashmap");
+                }
             }
 
             indexExpr = expectImplicitConvertTo(context, indexExpr, context.nativeWordType, this.loc);
@@ -2097,6 +2088,90 @@ ASTAssignStatement parseAssignment(Parser parser, LexicalContext lexicalContext)
         expr = new ASTBinaryOp(operator, lhs, expr, loc);
     }
     return new ASTAssignStatement(lhs, expr, parser.loc);
+}
+
+class ASTAssignStatement : ASTStatement
+{
+    ASTSymbol target;
+
+    ASTSymbol value;
+
+    Loc loc;
+
+    this(this.target, this.value, this.loc) {}
+
+    override StatementCompileResult compile(Context context)
+    {
+        mut Expression value = this.value.compile(context).beExpressionImplCall(context, this.loc);
+
+        // `a[b] = c` special handling
+        if (auto astIndex = target.instanceOf(ASTIndexAccess))
+        {
+            auto base = astIndex.base.compile(context).beExpressionImplCall(context, astIndex.loc);
+            auto index = astIndex.index.compile(context).beExpressionImplCall(context, astIndex.loc);
+            if (auto assignment = base.type.indexAssignment(context, base, index, value, this.loc))
+                return StatementCompileResult(assignment, context);
+        }
+
+        auto compiler = context.compiler;
+
+        Symbol target = this.target.compile(context);
+        Reference targetref = target.instanceOf(Reference);
+        this.loc.assert2s(!!targetref, "target of assignment must be a reference");
+        this.loc.assert2s(targetref.info.mutable, "target of assignment must be mutable");
+        // Broadly, this check is the reason that 'borrowed' exists.
+        // FIXME hasDestructor
+        bool hasDtor = !!targetref.type.endLifetime(context, targetref);
+        this.loc.assert2s(
+            targetref.info.ownership != Ownership.borrowed || !hasDtor,
+            "cannot reassign to borrowed value with destructor");
+        auto type = targetref.type;
+        value = expectImplicitConvertTo(context, value, type, this.loc);
+
+        /**
+         * Order is important here.
+         *
+         * 1. temporize the RHS. (NO copy ctor!)
+         * 2. temporize the old LHS.
+         * 3. overwrite the LHS with the temporized RHS. (copy here)
+         * 4. destroy the old LHS value.
+         *
+         * Why this order? Evaluating the RHS might change the LHS address
+         * (consider: *f() = *g() - in that case, g() is more likely to
+         * invalidate f() than the other way around).
+         * Also, the RHS may just *be* the LHS, as in "s = s;"
+         * Hence we need to temporize the RHS.
+         * The address of LHS is temporized so that the destructor call
+         * doesn't lead to a double evaluation.
+         * The old LHS value is rescued so that more complex versions of
+         * "s = s" don't leave the references in "s" abandoned between
+         * endLifetime and moveInto. In other words, since s_2 may depend on s_1,
+         * their lifetimes need to overlap.
+         *
+         * But man, what an ugly-ass dataflow...
+         */
+
+        Statement do1(Expression tmpValue) {
+            Statement do2(Expression tmpLhsPtr) {
+                auto tmpLhs = compiler.dereference(tmpLhsPtr);
+
+                Statement do3(Reference oldLhs) {
+                    auto reassign = compiler.move(context, tmpLhs, tmpValue);
+                    auto cleanup = oldLhs.type.endLifetime(context, oldLhs);
+
+                    return sequence(reassign, cleanup);
+                }
+                return compiler.stmtWithTemporary(tmpLhs, &do3);
+            }
+            return compiler.stmtWithTemporaryExpr(compiler.reference(targetref), &do2);
+        }
+        return StatementCompileResult(
+            compiler.stmtWithTemporaryExpr(value, &do1), context);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compilerCall("astAssign", [target.quote(quoter), value.quote(quoter)], loc);
+    }
 }
 
 ASTAssignStatement parseAssignStatement(Parser parser, LexicalContext lexicalContext)

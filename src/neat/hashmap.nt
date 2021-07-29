@@ -94,12 +94,8 @@ class HashMap : Type
             loc.assert2s(args.length == 2, "hashmap.set() expects key, value");
             auto key = args[0].sym.compile(context).beExpressionImplCall(context, loc);
             auto value = args[1].sym.compile(context).beExpressionImplCall(context, loc);
-            auto baseRef = base.instanceOf(Reference);
-            loc.assert2s(!!baseRef && baseRef.info.mutable, "target of hashmap assignment must be mutable");
-            Expression do1(Expression value) {
-                return setHashmap(context, this, baseRef, key, value);
-            }
-            return context.compiler.consume(context, value, &do1);
+            auto set = setHashmap(context, this, base, key, value, loc);
+            return context.compiler.statementExpression(set, context.compiler.voidLiteral);
         }
         if (base && field == "get") {
             // TODO args.loc
@@ -111,10 +107,7 @@ class HashMap : Type
             // TODO args.loc
             loc.assert2s(args.length == 1, "hashmap.resize() expects one parameter, new size");
             auto newsize = args[0].sym.compile(context).beExpressionImplCall(context, loc);
-            Expression do2(Expression base) {
-                return resizeHashmap(context, this, base, newsize);
-            }
-            return context.compiler.consume(context, base, &do2);
+            return resizeHashmap(context, this, base, newsize);
         }
         if (!base && field == "allocate") {
             // TODO args.loc
@@ -130,6 +123,15 @@ class HashMap : Type
             return hashFun(context, loc, this, key);
         }
         return null;
+    }
+
+    override Expression index(Context context, Expression base, Expression index, Loc loc) {
+        return getHashmap(context, this, base, index);
+    }
+
+    override Statement indexAssignment(Context context, Expression base, Expression index, Expression value, Loc loc)
+    {
+        return setHashmap(context, this, base, index, value, loc);
     }
 }
 
@@ -204,6 +206,13 @@ private Expression allocateHashmap(Context context, HashMap hashmap, Expression 
 }
 
 private Expression resizeHashmap(Context context, HashMap hashmap, Expression base, Expression newsize) {
+    Expression do_(Expression base) {
+        return plainResizeHashmap(context, hashmap, base, newsize);
+    }
+    return context.compiler.consume(context, base, &do_);
+}
+
+private Expression plainResizeHashmap(Context context, HashMap hashmap, Expression base, Expression newsize) {
     Parameter[] params = [
         Parameter(false, "base", false, hashmap),
         Parameter(false, "newsize", false, context.nativeWordType)];
@@ -235,7 +244,18 @@ private Expression resizeHashmap(Context context, HashMap hashmap, Expression ba
     return context.compiler.mkCall(fn, [base, newsize], __HERE__);
 }
 
-private Expression setHashmap(Context context, HashMap hashmap, Reference base, Expression key, Expression value) {
+private Statement setHashmap(
+    Context context, HashMap hashmap, Expression base, Expression key, Expression value, Loc loc)
+{
+    auto baseRef = base.instanceOf(Reference);
+    loc.assert2s(!!baseRef && baseRef.info.mutable, "target of hashmap assignment must be mutable");
+    Statement do_(Expression value) {
+        return plainSetHashmap(context, hashmap, baseRef, key, value);
+    }
+    return context.compiler.consumeStmt(context, value, &do_);
+}
+
+private Statement plainSetHashmap(Context context, HashMap hashmap, Reference base, Expression key, Expression value) {
     Parameter[] params = [
         Parameter(false, "base", false, hashmap),
         Parameter(false, "key", false, hashmap.key),
@@ -305,7 +325,7 @@ private Expression setHashmap(Context context, HashMap hashmap, Reference base, 
             context, "hashmap_set", hashmap, params, &body_);
 
         auto call = mkCall(fn, [base, key, value], __HERE__);
-        return statementExpression(stmtWithTemporaryExpr(call, &do_), voidLiteral);
+        return stmtWithTemporaryExpr(call, &do_);
     }
 }
 

@@ -1,6 +1,5 @@
 module neat.hashmap;
 
-macro import neat.macros.assert;
 macro import neat.macros.once;
 macro import neat.macros.quasiquoting;
 
@@ -9,6 +8,8 @@ import neat.array;
 import neat.base;
 import neat.decl;
 import neat.either;
+import neat.expr;
+import neat.formatstring;
 import neat.hash;
 import neat.parser_base;
 import neat.statements;
@@ -85,14 +86,59 @@ class HashMap : Type
     {
         return context.compiler.exprStatement(releaseHashmap(context, reference));
     }
+
+    override Expression callMember(Context context, Expression base, string field, ASTArgument[] args, Protection protection, Loc loc)
+    {
+        if (base && field == "set") {
+            // TODO args.loc
+            loc.assert2s(args.length == 2, "hashmap.set() expects key, value");
+            auto key = args[0].sym.compile(context).beExpressionImplCall(context, loc);
+            auto value = args[1].sym.compile(context).beExpressionImplCall(context, loc);
+            auto baseRef = base.instanceOf(Reference);
+            loc.assert2s(!!baseRef && baseRef.info.mutable, "target of hashmap assignment must be mutable");
+            Expression do1(Expression value) {
+                return setHashmap(context, this, baseRef, key, value);
+            }
+            return context.compiler.consume(context, value, &do1);
+        }
+        if (base && field == "get") {
+            // TODO args.loc
+            loc.assert2s(args.length == 1, "hashmap.get() expects one parameter, key");
+            auto key = args[0].sym.compile(context).beExpressionImplCall(context, loc);
+            return getHashmap(context, this, base, key);
+        }
+        if (base && field == "resize") {
+            // TODO args.loc
+            loc.assert2s(args.length == 1, "hashmap.resize() expects one parameter, new size");
+            auto newsize = args[0].sym.compile(context).beExpressionImplCall(context, loc);
+            Expression do2(Expression base) {
+                return resizeHashmap(context, this, base, newsize);
+            }
+            return context.compiler.consume(context, base, &do2);
+        }
+        if (!base && field == "allocate") {
+            // TODO args.loc
+            loc.assert2s(args.length == 1, "hashmap.allocate() expects one parameter, size");
+            auto size = args[0].sym.compile(context).beExpressionImplCall(context, loc);
+            auto sizeT = expectImplicitConvertTo(context, size, context.nativeWordType, loc);
+            return allocateHashmap(context, this, sizeT);
+        }
+        if (!base && field == "hash") {
+            // TODO args.loc
+            loc.assert2s(args.length == 1, "hashmap.hash() expects one parameter, key");
+            auto key = args[0].sym.compile(context).beExpressionImplCall(context, loc);
+            return hashFun(context, loc, this, key);
+        }
+        return null;
+    }
 }
 
 private ASTSymbol wrap(Context context, HashMap hashmap, ASTSymbol value) {
-    auto key = new ASTSymbolHelper(hashmap.key), value = new ASTSymbolHelper(hashmap.value);
+    auto keyType = new ASTSymbolHelper(hashmap.key), valueType = new ASTSymbolHelper(hashmap.value);
     return context.compiler.$expr ({
         0; // remove at your own risk
-        alias Key = $key;
-        alias Value = $value;
+        alias Key = $keyType;
+        alias Value = $valueType;
         struct HashMapBase {
             size_t references;
             size_t length;
@@ -103,10 +149,216 @@ private ASTSymbol wrap(Context context, HashMap hashmap, ASTSymbol value) {
     });
 }
 
+private Expression hashFun(Context context, Loc loc, HashMap hashmap, Expression key) {
+    Parameter[] params = [
+        Parameter(false, "key", false, key.type)];
+
+    ASTSymbol hashfn() {
+        if (key.type.same(once new Array(new Character))) {
+            return context.compiler.$expr ({
+                // fnv hash
+                mut int hash = 0x811c9dc5;
+                for (auto ch <- key) {
+                    hash ^= cast(int) ch;
+                    hash *= 0x01000193;
+                }
+                hash;
+            });
+        }
+        loc.assert2s(false, "TODO: hash() of $(key.type.repr)");
+    }
+    ASTStatement body_() {
+        return context.compiler.astReturn(wrap(context, hashmap, hashfn), __HERE__);
+    }
+
+    auto fn = context.compiler.createRuntimeFunction(
+        context, "hashmap_hash", context.nativeWordType, params, &body_);
+
+    return context.compiler.mkCall(fn, [key], __HERE__);
+}
+
+private Expression allocateHashmap(Context context, HashMap hashmap, Expression size) {
+    Parameter[] params = [
+        Parameter(false, "size", false, context.nativeWordType)];
+
+    ASTStatement body_() {
+        auto expr = context.compiler.$expr ({
+            auto bytesize = sizeof(HashMapBase) + sizeof(HashMapRow) * size;
+            auto ret = neat_runtime_alloc(bytesize);
+            auto base = cast(HashMapBase*) ret;
+            base.references = 1;
+            base.length = 0;
+            base.capacity = size;
+            auto rows = cast(HashMapRow*) &base[1];
+            for (auto i <- 0 .. size)
+                rows[i] = :empty;
+            cast(Value[Key]) base;
+        });
+        return context.compiler.astReturn(wrap(context, hashmap, expr), __HERE__);
+    }
+
+    auto fn = context.compiler.createRuntimeFunction(
+        context, "hashmap_allocate", hashmap, params, &body_);
+
+    return context.compiler.mkCall(fn, [size], __HERE__);
+}
+
+private Expression resizeHashmap(Context context, HashMap hashmap, Expression base, Expression newsize) {
+    Parameter[] params = [
+        Parameter(false, "base", false, hashmap),
+        Parameter(false, "newsize", false, context.nativeWordType)];
+
+    ASTStatement body_() {
+        auto expr = context.compiler.$expr ({
+            auto data = cast(HashMapBase*) base;
+            auto rows = cast(HashMapRow*) &data[1];
+            // FIXME
+            alias T = Value[Key];
+            mut auto newHashmap = T.allocate(newsize);
+            for (int i <- 0 .. data.capacity) {
+                0; // remove at your peril
+                rows[i].case {
+                    (:empty): continue;
+                    (:gravestone): continue;
+                    (Key key, Value value): newHashmap.set(key, value);
+                }
+            }
+            return newHashmap;
+            0; // expr result value. TODO void literal
+        });
+        return new ASTExprStatement(wrap(context, hashmap, expr), __HERE__);
+    }
+
+    auto fn = context.compiler.createRuntimeFunction(
+        context, "hashmap_resize", hashmap, params, &body_);
+
+    return context.compiler.mkCall(fn, [base, newsize], __HERE__);
+}
+
+private Expression setHashmap(Context context, HashMap hashmap, Reference base, Expression key, Expression value) {
+    Parameter[] params = [
+        Parameter(false, "base", false, hashmap),
+        Parameter(false, "key", false, hashmap.key),
+        Parameter(false, "value", false, hashmap.value)];
+
+    ASTStatement body_() {
+        auto expr = context.compiler.$expr ({
+            // FIXME
+            alias T = Value[Key];
+            auto hash = T.hash(key);
+            mut auto data = cast(HashMapBase*) base;
+            if (!data) {
+                auto newHashmap = T.allocate(4);
+                data = cast(HashMapBase*) newHashmap; // storing in a pointer
+            } else if (data.length + 1 >= data.capacity / 2) {
+                mut size_t newsize = data.capacity * 2;
+                if (newsize < 4) newsize = 4;
+                auto resized = base.resize(newsize);
+                __destroy(base);
+                data = cast(HashMapBase*) resized;
+            } else {
+                // we'll return data, so make a gift
+                data.references += 1;
+            }
+            auto rows = cast(HashMapRow*) &data[1];
+            for (int i <- 0 .. data.capacity) {
+                size_t index = (i + hash) % data.capacity; // FIXME wraparound test instead of %
+                rows[index].case {
+                    (:empty): {
+                        data.length += 1;
+                        rows[index] = (key, value);
+                        return cast(T) data;
+                    }
+                    (:gravestone): {
+                        data.length += 1;
+                        rows[index] = (key, value);
+                        return cast(T) data;
+                    }
+                    (Key existingKey, Value existingValue): {
+                        if (key == existingKey)
+                        {
+                            rows[index] = (key, value);
+                            return cast(T) data;
+                        }
+                        continue;
+                    }
+                }
+            }
+            mut int i = 0; i /= i;
+            // TODO
+            // assert(false); // No space even after resize.
+            0; // expr result value. TODO void literal
+        });
+        return new ASTExprStatement(wrap(context, hashmap, expr), __HERE__);
+    }
+
+    Statement do_(Expression callTemp) {
+        with (context.compiler) {
+            auto endLifetime = hashmap.endLifetime(context, base);
+            auto assign = assignStatement(base, callTemp);
+            return sequence(endLifetime, assign);
+        }
+    }
+
+    with (context.compiler) {
+        auto fn = createRuntimeFunction(
+            context, "hashmap_set", hashmap, params, &body_);
+
+        auto call = mkCall(fn, [base, key, value], __HERE__);
+        return statementExpression(stmtWithTemporaryExpr(call, &do_), voidLiteral);
+    }
+}
+
+private Expression getHashmap(Context context, HashMap hashmap, Expression base, Expression key) {
+    Parameter[] params = [
+        Parameter(false, "base", false, hashmap),
+        Parameter(false, "key", false, hashmap.key)];
+
+    ASTStatement body_() {
+        auto expr = context.compiler.$expr ({
+            // FIXME
+            alias T = Value[Key];
+            auto hash = T.hash(key);
+            mut auto data = cast(HashMapBase*) base;
+            if (!data) {
+                // FIXME extern(C) assert
+                // FIXME Maybe
+                mut int i; i /= i;
+            }
+            auto rows = cast(HashMapRow*) &data[1];
+            for (int i <- 0 .. data.capacity) {
+                // FIXME wraparound test instead of %
+                size_t index = (i + hash) % data.capacity;
+                rows[index].case {
+                    (:empty): {
+                        // FIXME assert
+                        mut int i; i /= i;
+                    }
+                    (:gravestone): {
+                        mut int i; i /= i;
+                    }
+                    (Key existingKey, Value existingValue): {
+                        if (key == existingKey) return existingValue;
+                    }
+                }
+            }
+            mut int i = 0; i /= i;
+            // TODO
+            // assert(false); // No space even after resize.
+            0; // expr result value. TODO void literal
+        });
+        return new ASTExprStatement(wrap(context, hashmap, expr), __HERE__);
+    }
+
+    auto fn = context.compiler.createRuntimeFunction(
+        context, "hashmap_get", hashmap.value, params, &body_);
+
+    return context.compiler.mkCall(fn, [base, key], __HERE__);
+}
 
 public Expression releaseHashmap(Context context, Expression value) {
     HashMap hashmap = value.type.instanceOf(HashMap);
-    assert(!!hashmap);
+    __HERE__.assert2s(!!hashmap, "hashmap expected");
     Parameter[] params = [Parameter(false, "value", false, hashmap)];
 
     ASTStatement body_() {

@@ -468,8 +468,11 @@ at_revision '62881ff0a2337a0ea19d47177a377a7a715ea22a' 'rebuild neat' 'build/nea
 at_revision '1e4827c2359a39936d1d1ddc5f93cb1995fc776b' 'rebuild neat' 'build/neat'
 at_revision '1e4827c2359a39936d1d1ddc5f93cb1995fc776b' 'transition new-vtable' 'build/neat'
 at_revision '4bb30a2763f232da7e78a47f321fe56e8d3d2172' 'detransition new-vtable' 'build/neat'
-# struct quoting, tuple type quoting
-at_revision '07d5b4a4f9a54a17210b9edbaf4db4c69d1cc47d' 'rebuild neat' 'build/neat'
+# struct quoting, tuple type quoting, sizeof quoting, tuple quoting, assert quoting
+at_revision '801e58b5527560ab771a702374eded61cbc036a7' 'rebuild neat' 'build/neat'
+# add basic hashmap type (no ops, intermediate step so we can quote K[V])
+# add xor operator, voidLiteral, format string quoting
+at_revision 'f34c7af30fedc1834459f605dd37f0608db61db4' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

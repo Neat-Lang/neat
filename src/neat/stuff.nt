@@ -1871,7 +1871,7 @@ Statement unwindScope(Context context, Namespace target, Statement body_)
 
 class ASTIfStatement : ASTStatement
 {
-    (ASTSymbol | ASTVarDeclStatement) test;
+    (ASTSymbol | ASTVarDeclStatement | ASTVarExtractDeclStatement) test;
 
     ASTStatement then;
 
@@ -1884,8 +1884,9 @@ class ASTIfStatement : ASTStatement
     override StatementCompileResult compile(Context context)
     {
         mut Statement prelude; // var decl statement
-        mut auto testSucceedsContext = context;
         mut Expression test;
+        mut Statement epilog; // either decl value assignment
+        mut auto testSucceedsContext = context;
         this.test.case {
             ASTSymbol symbol: {
                 test = beExpression3(context, symbol.compile(context), this.loc);
@@ -1900,6 +1901,37 @@ class ASTIfStatement : ASTStatement
                     testSucceedsContext.namespace.lookup(vardecl.name, context, this.loc, stackframe),
                     this.loc);
             }
+            ASTVarExtractDeclStatement extractdecl: {
+                // validate source is Either
+                // TODO extract interface
+                extractdecl.loc.assert2s(!extractdecl.auto_, "auto TODO");
+                auto source = extractdecl.source.compile(context).beExpressionImplCall(context, extractdecl.loc);
+                auto either = source.type.instanceOf(Either);
+                extractdecl.loc.assert2s(!!either, "source of <- decl must be sumtype, not $(source.type.repr)");
+                // FIXME check lifetime here
+                auto tempSource = new PairedTemporary(source.type, source.info.ownership);
+                auto initTemp = new InitializeTemporaryStatement(tempSource, source);
+                // check expected type
+                auto extracttype = beType(extractdecl.loc, extractdecl.type.compile(context));
+                mut int eithermember = -1;
+                for (int i <- 0 .. either.types.length) {
+                    if (either.types[i].same(extracttype)) {
+                        eithermember = i;
+                        break;
+                    }
+                }
+                extractdecl.loc.assert2s(eithermember != -1, "type $(extracttype.repr) not in sumtype $(either.repr)");
+                prelude = initTemp;
+                test = context.compiler.binaryOp(
+                    "==", context, new EitherType(tempSource), new IntLiteral(eithermember + 1), __HERE__);
+                // FIXME free function
+                auto actualVarDecl = new ASTVarDeclStatement(
+                    extractdecl.name, mutable=false, infer=false, type=new ASTSymbolHelper(extracttype),
+                    initial=new ASTSymbolHelper(new EitherMember(tempSource, eithermember)), extractdecl.loc);
+                auto pair = actualVarDecl.compile(context);
+                epilog = pair.statement;
+                testSucceedsContext = pair.context;
+            }
         }
         auto thenPair = this.then.compile(testSucceedsContext);
         Statement then = unwindScope(thenPair.context, context.namespace, thenPair.statement);
@@ -1910,7 +1942,7 @@ class ASTIfStatement : ASTStatement
         }
 
         auto test = truthy(context, test, this.loc);
-        auto ifStmt = new IfStatement(test, then, else_);
+        auto ifStmt = new IfStatement(test, sequence(epilog, then), else_);
 
         return StatementCompileResult(sequence(prelude, ifStmt), context);
     }
@@ -1918,12 +1950,18 @@ class ASTIfStatement : ASTStatement
     override ASTSymbol quote(Quoter quoter) {
         if (!else_) {
             return quoter.compilerCall("astIf", [
-                test.case(ASTSymbol symbol: symbol.quote(quoter), ASTVarDeclStatement stmt: stmt.quote(quoter)),
+                test.case(
+                    ASTSymbol symbol: symbol.quote(quoter),
+                    ASTVarDeclStatement stmt: stmt.quote(quoter),
+                    ASTVarExtractDeclStatement stmt: stmt.quote(quoter)),
                 then.quote(quoter),
                 quoter.compiler.astIdentifier("null", loc)], loc);
         }
         return quoter.compilerCall("astIf", [
-            test.case(ASTSymbol symbol: symbol.quote(quoter), ASTVarDeclStatement stmt: stmt.quote(quoter)),
+            test.case(
+                ASTSymbol symbol: symbol.quote(quoter),
+                ASTVarDeclStatement stmt: stmt.quote(quoter),
+                ASTVarExtractDeclStatement stmt: stmt.quote(quoter)),
             then.quote(quoter),
             else_.quote(quoter)], loc);
     }
@@ -1938,10 +1976,12 @@ ASTIfStatement parseIf(Parser parser, LexicalContext lexicalContext)
         parser.revert;
         return null;
     }
-    mut (ASTSymbol | ASTVarDeclStatement) test;
+    mut (ASTSymbol | ASTVarDeclStatement | ASTVarExtractDeclStatement) test;
     parser.expect("(");
-    if (auto vardecl = parseVarDecl(parser, lexicalContext, true))
+    if (auto vardecl = parseVarDecl(parser, lexicalContext, requireInitializer=true))
         test = vardecl;
+    else if (auto varextractdecl = parseVarExtractDecl(parser, lexicalContext))
+        test = varextractdecl;
     else test = parseExpression(parser, lexicalContext);
     parser.expect(")");
     ASTStatement thenStmt = parseStatement(parser, lexicalContext);
@@ -2280,12 +2320,13 @@ class ASTVarDeclStatement : ASTStatement
 }
 
 ASTVarDeclStatement parseVarInitialization(
-    Parser parser, LexicalContext lexicalContext, bool infer, bool mutable, ASTSymbol type, bool requireInitializer)
+    Parser parser, LexicalContext lexicalContext, bool infer, bool mutable,
+    ASTSymbol type, string operator, bool requireInitializer)
 {
     parser.begin;
     mut ASTSymbol initial;
     mut string name;
-    if (infer && parser.accept("="))
+    if (infer && parser.accept(operator))
     {
         initial = parseExpression(parser, lexicalContext);
         if (!initial) parser.fail("variable initializer expected");
@@ -2299,7 +2340,7 @@ ASTVarDeclStatement parseVarInitialization(
             return null;
         }
         if (infer) {
-            if (!parser.accept("="))
+            if (!parser.accept(operator))
             {
                 parser.revert;
                 return null;
@@ -2307,7 +2348,7 @@ ASTVarDeclStatement parseVarInitialization(
             initial = parseExpression(parser, lexicalContext);
             if (!initial) parser.fail("variable initializer expected");
         }
-        else if (parser.accept("=")) {
+        else if (parser.accept(operator)) {
             initial = parseExpression(parser, lexicalContext);
             if (!initial) parser.fail("variable initializer expected");
         }
@@ -2340,7 +2381,7 @@ ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext, b
             }
         }
     }
-    auto decl = parseVarInitialization(parser, lexicalContext, infer, mutable, type, requireInitializer);
+    auto decl = parseVarInitialization(parser, lexicalContext, infer, mutable, type, "=", requireInitializer);
     if (!decl) {
         parser.revert;
         return null;
@@ -2370,7 +2411,7 @@ ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
     mut ASTStatement[] decls;
     while (true) {
         if (decls.length) parser.expect(",");
-        ASTStatement decl = parseVarInitialization(parser, lexicalContext, infer, mutable, type, false);
+        ASTStatement decl = parseVarInitialization(parser, lexicalContext, infer, mutable, type, "=", false);
         if (!decl) {
             parser.assert_(decls.length == 0, "couldn't parse continuing variable declaration");
             parser.revert;
@@ -2381,6 +2422,68 @@ ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
     }
     parser.commit;
     return new ASTSequenceStatement(decls, loc);
+}
+
+/**
+ * auto a <- foo;
+ * int i <- find(...);
+ */
+class ASTVarExtractDeclStatement : ASTStatement
+{
+    string name;
+
+    bool auto_;
+
+    ASTSymbol type;
+
+    ASTSymbol source;
+
+    Loc loc;
+
+    this(this.name, this.auto_, this.type, this.source, this.loc)
+    {
+        assert(!!source);
+        assert(auto_ == !type);
+    }
+
+    override StatementCompileResult compile(Context context)
+    {
+        this.loc.assert2s(false, "TODO: free var extract decl");
+    }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTVarExtractDeclStatement'!"); assert(false); }
+}
+
+ASTVarExtractDeclStatement parseVarExtractDecl(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin;
+    mut bool infer = false;
+    mut bool mutable = false;
+    mut ASTSymbol type;
+    // TODO
+    // if (parser.acceptIdentifier("mut")) mutable = true;
+    if (acceptIdentifier(parser, "auto")) {
+        infer = true;
+    } else {
+        type = parser.parseType(lexicalContext);
+        if (!type)
+        {
+            if (mutable) infer = true;
+            else {
+                parser.revert;
+                return null;
+            }
+        }
+    }
+    auto decl = parseVarInitialization(parser, lexicalContext, infer, mutable, type, "<-", requireInitializer=true);
+    if (!decl) {
+        parser.revert;
+        return null;
+    }
+    parser.commit;
+    return new ASTVarExtractDeclStatement(
+        decl.name, auto_=decl.infer, type=decl.type,
+        source=decl.initial, loc=decl.loc);
 }
 
 class ASTNestedFunctionDeclStatement : ASTStatement
@@ -2595,7 +2698,7 @@ ASTForLoop parseFor(Parser parser, LexicalContext lexicalContext)
         return null;
     }
     parser.expect("(");
-    ASTVarDeclStatement varDecl = parseVarDecl(parser, lexicalContext, false);
+    ASTVarDeclStatement varDecl = parseVarDecl(parser, lexicalContext, requireInitializer=false);
     if (!varDecl) {
         parser.fail("loop declaration expected");
     }

@@ -473,6 +473,8 @@ at_revision '801e58b5527560ab771a702374eded61cbc036a7' 'rebuild neat' 'build/nea
 # add basic hashmap type (no ops, intermediate step so we can quote K[V])
 # add xor operator, voidLiteral, format string quoting
 at_revision 'f34c7af30fedc1834459f605dd37f0608db61db4' 'rebuild neat' 'build/neat'
+# hashmaps, prep work for Either 'fail' stage 1
+at_revision '0a4cd2dbec917923fe3c1c8735348b94dda63131' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

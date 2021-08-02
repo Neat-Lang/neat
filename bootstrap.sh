@@ -475,6 +475,8 @@ at_revision '801e58b5527560ab771a702374eded61cbc036a7' 'rebuild neat' 'build/nea
 at_revision 'f34c7af30fedc1834459f605dd37f0608db61db4' 'rebuild neat' 'build/neat'
 # hashmaps, prep work for Either 'fail' stage 1
 at_revision '0a4cd2dbec917923fe3c1c8735348b94dda63131' 'rebuild neat' 'build/neat'
+# Either 'fail' stage 2
+at_revision 'ca7c71bf59db657a7d8d5bd9bbcb5b546a0cab38' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

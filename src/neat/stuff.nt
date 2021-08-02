@@ -1874,6 +1874,60 @@ Statement unwindScope(Context context, Namespace target, Statement body_)
     return result;
 }
 
+(Expression test, Expression value) pickEither(
+    Context context, Either either, Expression source, Type extractType, Loc loc)
+{
+    if (auto extractEither = extractType.instanceOf(Either))
+        return pickEitherTuple(context, either, source, extractEither, loc);
+    int eithermember = [first cast(int) i for i, a in either.types where a.type.same(extractType) else -1];
+    loc.assert2s(eithermember != -1, "type $(extractType.repr) not in sumtype $(either.repr)");
+    auto test = context.compiler.binaryOp(
+        "==", context, new EitherType(source), new IntLiteral(eithermember + 1), __HERE__);
+    auto value = new EitherMember(source, eithermember);
+    return (test, value);
+}
+
+/**
+ * if the thing on the left of the pick operator is an either:
+ *
+ * - create a result temporary for it
+ * - create a temporary bool (false)
+ * - for each type in the either:
+ *   - build an iftree with the source either
+ *   - on success, init the result and set the bool to true
+ * - return (bool, result)
+ */
+(Expression test, Expression value) pickEitherTuple(
+    Context context, Either either, Expression source, Either extractEither, Loc loc)
+{
+    auto result = new PairedTemporary(extractEither, source.info.ownership);
+    auto init = new UninitializeTemporaryStatement(result);
+    auto resBool = new PairedTemporary(new Integer, Ownership.global);
+    auto init2 = new InitializeTemporaryStatement(resBool, new IntLiteral(0)); // false
+    auto sourceTypeId = new EitherType(source);
+    mut Statement iftree = null;
+    for (int i <- 0 .. extractEither.types.length)
+    {
+        auto extractType = extractEither.types[i].type;
+        int eithermember = [first cast(int) i for i, a in either.types where a.type.same(extractType) else -1];
+        loc.assert2s(eithermember != -1, "sumtype $(extractType.repr) not in source $(either.repr)");
+        auto cmpTypeId = new IntLiteral(eithermember + 1);
+        auto test = context.compiler.binaryOp("==", context, sourceTypeId, cmpTypeId, __HERE__);
+
+        auto extractValue = new EitherMember(source, eithermember);
+        auto repacked = new EitherExpr(extractEither, extractValue, i);
+        auto setStmt = new AssignStatement(result, repacked);
+        auto setBoolStmt = new AssignStatement(resBool, new IntLiteral(1)); // true
+
+        iftree = context.compiler.ifStatement(test, sequence(setStmt, setBoolStmt), iftree);
+    }
+    auto test = new StatementExpression(
+        sequence(sequence(init, init2), iftree),
+        resBool,
+        gifted=(source.info.ownership == Ownership.gifted));
+    return (test, result);
+}
+
 class ASTIfStatement : ASTStatement
 {
     (ASTSymbol | ASTVarDeclStatement | ASTVarExtractDeclStatement) test;
@@ -1918,21 +1972,14 @@ class ASTIfStatement : ASTStatement
                 auto initTemp = new InitializeTemporaryStatement(tempSource, source);
                 // check expected type
                 auto extracttype = beType(extractdecl.loc, extractdecl.type.compile(context));
-                mut int eithermember = -1;
-                for (int i <- 0 .. either.types.length) {
-                    if (either.types[i].type.same(extracttype)) {
-                        eithermember = i;
-                        break;
-                    }
-                }
-                extractdecl.loc.assert2s(eithermember != -1, "type $(extracttype.repr) not in sumtype $(either.repr)");
+
+                auto ret = pickEither(context, either, tempSource, extracttype, extractdecl.loc);
                 prelude = initTemp;
-                test = context.compiler.binaryOp(
-                    "==", context, new EitherType(tempSource), new IntLiteral(eithermember + 1), __HERE__);
-                // FIXME free function
+                test = ret.test;
+
                 auto actualVarDecl = new ASTVarDeclStatement(
                     extractdecl.name, mutable=false, infer=false, type=new ASTSymbolHelper(extracttype),
-                    initial=new ASTSymbolHelper(new EitherMember(tempSource, eithermember)), extractdecl.loc);
+                    initial=new ASTSymbolHelper(ret.value), extractdecl.loc);
                 auto pair = actualVarDecl.compile(context);
                 epilog = pair.statement;
                 testSucceedsContext = pair.context;

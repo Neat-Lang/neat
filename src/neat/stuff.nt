@@ -1928,6 +1928,14 @@ Statement unwindScope(Context context, Namespace target, Statement body_)
     return (test, result);
 }
 
+private Type typeWithoutFail(Either source)
+{
+    if ([count a in source.types where !a.fail] == 1) {
+        return [first a.type for a in source.types where !a.fail else null];
+    }
+    return new Either([a for a in source.types where !a.fail]);
+}
+
 class ASTIfStatement : ASTStatement
 {
     (ASTSymbol | ASTVarDeclStatement | ASTVarExtractDeclStatement) test;
@@ -1963,22 +1971,26 @@ class ASTIfStatement : ASTStatement
             ASTVarExtractDeclStatement extractdecl: {
                 // validate source is Either
                 // TODO extract interface
-                extractdecl.loc.assert2s(!extractdecl.auto_, "auto TODO");
                 auto source = extractdecl.source.compile(context).beExpressionImplCall(context, extractdecl.loc);
-                auto either = source.type.instanceOf(Either);
-                extractdecl.loc.assert2s(!!either, "source of <- decl must be sumtype, not $(source.type.repr)");
+                auto sourceType = source.type.instanceOf(Either);
+                extractdecl.loc.assert2s(!!sourceType, "source of <- decl must be sumtype, not $(source.type.repr)");
                 // FIXME check lifetime here
                 auto tempSource = new PairedTemporary(source.type, source.info.ownership);
                 auto initTemp = new InitializeTemporaryStatement(tempSource, source);
                 // check expected type
-                auto extracttype = beType(extractdecl.loc, extractdecl.type.compile(context));
+                mut Type extractType;
+                if (extractdecl.auto_) {
+                    extractType = typeWithoutFail(sourceType);
+                } else {
+                    extractType = beType(extractdecl.loc, extractdecl.type.compile(context));
+                }
 
-                auto ret = pickEither(context, either, tempSource, extracttype, extractdecl.loc);
+                auto ret = pickEither(context, sourceType, tempSource, extractType, extractdecl.loc);
                 prelude = initTemp;
                 test = ret.test;
 
                 auto actualVarDecl = new ASTVarDeclStatement(
-                    extractdecl.name, mutable=false, infer=false, type=new ASTSymbolHelper(extracttype),
+                    extractdecl.name, mutable=false, infer=false, type=new ASTSymbolHelper(extractType),
                     initial=new ASTSymbolHelper(ret.value), extractdecl.loc);
                 auto pair = actualVarDecl.compile(context);
                 epilog = pair.statement;

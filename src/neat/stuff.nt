@@ -2454,6 +2454,7 @@ ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext, b
     return decl;
 }
 
+// TODO merge with parseVarDecl
 ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
@@ -2475,13 +2476,15 @@ ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
     mut ASTStatement[] decls;
     while (true) {
         if (decls.length) parser.expect(",");
-        ASTStatement decl = parseVarInitialization(parser, lexicalContext, infer, mutable, type, "=", false);
-        if (!decl) {
+        if (auto decl = parseVarInitialization(parser, lexicalContext, infer, mutable, type, "=", false)) {
+            decls ~= decl;
+        } else if (auto decl2 = parseVarInitialization(parser, lexicalContext, infer, mutable, type, "<-", false)) {
+            decls ~= extractFromVarDecl(decl2);
+        } else {
             parser.assert_(decls.length == 0, "couldn't parse continuing variable declaration");
             parser.revert;
             return null;
         }
-        decls ~= decl;
         if (parser.accept(";")) break;
     }
     parser.commit;
@@ -2512,10 +2515,70 @@ class ASTVarExtractDeclStatement : ASTStatement
 
     override StatementCompileResult compile(Context context)
     {
-        this.loc.assert2s(false, "TODO: free var extract decl");
+        auto source = this.source.compile(context).beExpressionImplCall(context, this.loc);
+        Either sourceType = source.type.instanceOf(Either);
+        this.loc.assert2s(!!sourceType, "Source type for extract decl must be sumtype");
+
+        mut Type type;
+        if (this.type) type = beType(this.loc, this.type.compile(context));
+        else type = typeWithoutFail(sourceType);
+
+        bool inTargetType(Type source) {
+            if (auto either = type.instanceOf(Either))
+                return [any a.type.same(source) for a in either.types];
+            return type.same(source);
+        }
+
+        auto decl = new VariableDeclaration(
+            context.namespace, this.name, type, ExprInfo(mutable=false, Ownership.owned), false);
+        auto astType = new ASTSymbolHelper(type);
+
+        mut ASTEitherCaseExprCase[] cases;
+        for (int i <- 0 .. sourceType.types.length) {
+            auto sourceMemberType = sourceType.types[i].type;
+            bool return_ = !sourceMemberType.inTargetType;
+
+            mut ASTSymbol expr;
+            // separate statement so that the loc gets attributed to the source site
+            auto ret = context.compiler.astReturn(context.compiler.astIdentifier("a", this.loc), this.loc);
+            // TODO T.init
+            if (return_) expr = context.compiler.$expr ({ $stmt ret; $astType x; x; });
+            else expr = context.compiler.$expr cast($astType) a;
+
+            cases ~= ASTEitherCaseExprCase(
+                loc=this.loc,
+                type=new ASTSymbolHelper(sourceMemberType),
+                identifier="a",
+                return_=false,
+                expr=expr);
+        }
+
+        auto switch_ = new ASTEitherCaseExpr(this.loc, this.source, cases);
+        auto switchExpr = switch_.compile(context).beExpression;
+
+        return StatementCompileResult(
+            move(context, decl.accessDecl(context.compiler), switchExpr),
+            context.withNamespace(decl));
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTVarExtractDeclStatement'!"); assert(false); }
+
+    /*
+    FIXME: static in class
+    static ASTVarExtractDeclStatement fromVarDecl(ASTVarDeclStatement decl)
+    {
+        return new ASTVarExtractDeclStatement(
+            name=decl.name, auto_=decl.infer, type=decl.type,
+            source=decl.initial, loc=decl.loc);
+    }
+    */
+}
+
+ASTVarExtractDeclStatement extractFromVarDecl(ASTVarDeclStatement decl)
+{
+    return new ASTVarExtractDeclStatement(
+        name=decl.name, auto_=decl.infer, type=decl.type,
+        source=decl.initial, loc=decl.loc);
 }
 
 ASTVarExtractDeclStatement parseVarExtractDecl(Parser parser, LexicalContext lexicalContext)
@@ -2545,9 +2608,7 @@ ASTVarExtractDeclStatement parseVarExtractDecl(Parser parser, LexicalContext lex
         return null;
     }
     parser.commit;
-    return new ASTVarExtractDeclStatement(
-        decl.name, auto_=decl.infer, type=decl.type,
-        source=decl.initial, loc=decl.loc);
+    return extractFromVarDecl(decl);
 }
 
 class ASTNestedFunctionDeclStatement : ASTStatement

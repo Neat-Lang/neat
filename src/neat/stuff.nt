@@ -608,30 +608,32 @@ class WrapReference : Reference
 }
 
 Expression call(Context context, ASTSymbol astTarget, ASTArgument[] astArgs, Loc loc, bool autoCall) {
-    auto callMacroArgs = new CallMacroArgs(astTarget, astArgs, context, loc);
-    context.macroState.applyMacro(callMacroArgs);
-    if (callMacroArgs.transformed) return callMacroArgs.transformed;
+    if (!autoCall) {
+        auto callMacroArgs = new CallMacroArgs(astTarget, astArgs, context, loc);
+        context.macroState.applyMacro(callMacroArgs);
+        if (callMacroArgs.transformed) return callMacroArgs.transformed;
 
-    /// Direct implementation of `foo.bar(baz)`.
-    /// Reduces need for `LateSymbol`.
-    if (auto memberAccess = astTarget.instanceOf(ASTMemberBase)) {
-        auto base = memberAccess.base.compile(context);
-        if (auto type = base.instanceOf(Type)) {
-            auto protection = type.protectionAt(context.namespace);
-            auto ret = type.callMember(
-                context, null, memberAccess.member, astArgs, protection, memberAccess.loc);
-            if (ret) return ret;
-        } else if (auto baseExpr = base.isExpressionImplCall(context, loc)) {
-            auto protection = baseExpr.type.protectionAt(context.namespace);
-            auto ret = baseExpr.type.callMember(
-                context, baseExpr, memberAccess.member, astArgs, protection, memberAccess.loc);
-            if (ret) return ret;
+        /// Direct implementation of `foo.bar(baz)`.
+        /// Reduces need for `LateSymbol`.
+        if (auto memberAccess = astTarget.instanceOf(ASTMemberBase)) {
+            auto base = memberAccess.base.compile(context);
+            if (auto type = base.instanceOf(Type)) {
+                auto protection = type.protectionAt(context.namespace);
+                auto ret = type.callMember(
+                    context, null, memberAccess.member, astArgs, protection, memberAccess.loc);
+                if (ret) return ret;
+            } else if (auto baseExpr = base.isExpressionImplCall(context, loc)) {
+                auto protection = baseExpr.type.protectionAt(context.namespace);
+                auto ret = baseExpr.type.callMember(
+                    context, baseExpr, memberAccess.member, astArgs, protection, memberAccess.loc);
+                if (ret) return ret;
+            }
         }
     }
 
     mut auto target = astTarget.compile(context);
 
-    if (!autoCall || astArgs.length > 0) {
+    if (!autoCall) {
         if (auto type_ = target.instanceOf(Type)) {
             auto ret = type_.call(context, loc, astArgs);
             if (ret) return ret;
@@ -719,6 +721,16 @@ Expression call(Context context, ASTSymbol astTarget, ASTArgument[] astArgs, Loc
     auto callResult = plainCall(context, target, args, loc, autoCall);
     if (!callResult) return null;
     return new WrapExpression(pre, callResult, post);
+}
+
+/**
+ * The sort of thing that can be implicitly called.
+ * Shortcuts the call() logic to speed up `isExpressionImplCall`.
+ */
+bool previewCanCallImplicit(Symbol target) {
+    return target.instanceOf(FunctionDeclaration)
+        || target.instanceOf(ClassMethodPtr)
+        || target.instanceOf(LateSymbol);
 }
 
 class ASTCall : ASTSymbol
@@ -1293,7 +1305,7 @@ ASTSymbol parseStringLiteral(Parser parser, LexicalContext lexicalContext, strin
         parser.drop(1);
         if (ch == "\\") {
             string ctl = parser.text[0 .. 1];
-            parser.drop(1);
+            parser.dropOneCharNonNewline(1);
             if (ctl == "r") {
                 current ~= "\r";
             } else if (ctl == "\$") {

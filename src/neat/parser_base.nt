@@ -4,7 +4,7 @@ import backend.base;
 import helpers;
 
 /**
- * Advance row/column by the text `text`.
+ * Advance row/column by byte distance `distance`.
  */
 StackEntry advance(mut StackEntry entry, size_t distance) {
     mut auto skiptext = entry.text[0 .. distance];
@@ -12,6 +12,7 @@ StackEntry advance(mut StackEntry entry, size_t distance) {
 
     mut auto nl = skiptext.find("\n");
     if (nl == -1) {
+        // TODO unicode count
         entry.column += cast(int) distance;
         return entry;
     }
@@ -21,6 +22,7 @@ StackEntry advance(mut StackEntry entry, size_t distance) {
         nl = skiptext.find("\n");
     }
     // no more newlines found, remainder are columns
+    // TODO unicode count
     entry.column = cast(int) skiptext.length;
     return entry;
 }
@@ -30,11 +32,22 @@ struct StackEntry
     string text;
     int row, column;
     bool stripped;
+
+    /**
+     * Advance row/column by byte distance `distance`, known to represent one character that is not a \n.
+     */
+    void advanceOneCharNonNewline(size_t distance) {
+        text = text[distance .. $];
+        column += 1;
+        stripped = false;
+    }
 }
 
 final class Parser
 {
     StackEntry[] stack;
+
+    StackEntry current;
 
     int level;
 
@@ -44,20 +57,19 @@ final class Parser
 
     this(this.filename, this.fulltext)
     {
-        this.stack = new StackEntry[](1);
-        this.stack[0] = StackEntry(this.fulltext, row=0, column=0, stripped=false);
+        this.stack = new StackEntry[](0);
         this.level = 0;
+        this.current = StackEntry(this.fulltext, row=0, column=0, stripped=false);
         this.verify;
     }
 
     Loc loc() {
-        return Loc(this.filename, row=this.stack[this.level].row, column=this.stack[this.level].column);
+        return Loc(this.filename, row=this.current.row, column=this.current.column);
     }
 
     void verify()
     {
-        assert(this.stack.length > 0);
-        assert(this.level < this.stack.length && this.level >= 0);
+        assert(this.level <= this.stack.length && this.level >= 0);
         if (this.stack.length > 1024) {
             fail("parse stack overflow");
         }
@@ -65,62 +77,64 @@ final class Parser
 
     string text()
     {
-        if (this.stack.length == 0 || this.level >= this.stack.length)
-            assert(false);
-        return this.stack[this.level].text;
+        return this.current.text;
     }
 
     void begin()
     {
         this.verify;
-        if (this.level == this.stack.length - 1)
+        if (this.level == this.stack.length)
         {
             StackEntry[] newStack = new StackEntry[](this.stack.length * 2 + 1);
             for (int i <- 0 .. this.stack.length) newStack[i] = this.stack[i];
             this.stack = newStack;
         }
-        this.stack[this.level + 1] = this.stack[this.level];
-        this.level = this.level + 1;
+        this.stack[this.level] = this.current;
+        this.level += 1;
     }
 
     void commit()
     {
         assert(this.level > 0);
-        this.verify;
-        this.stack[this.level - 1] = this.stack[this.level];
-        this.level = this.level - 1;
-        this.verify;
+        this.level -= 1;
     }
 
     void revert()
     {
         this.verify;
-        this.level = this.level - 1;
+        this.level -= 1;
+        this.current = this.stack[this.level];
     }
 
     void drop(size_t length)
     {
-        this.stack[this.level] = this.stack[this.level].advance(length);
-        this.stack[this.level].stripped = false;
+        this.current = this.current.advance(length);
+        this.current.stripped = false;
+    }
+
+    void dropOneCharNonNewline(size_t length)
+    {
+        this.current.advanceOneCharNonNewline(length);
     }
 
     string peekUniChar()
     {
         auto text = this.text;
-        auto len = this.text.utf8NextLength;
-        return this.text[0 .. len];
+        auto len = text.utf8NextLength;
+        return text[0 .. len];
     }
 
     bool accept(string match)
     {
         this.begin;
         this.strip;
-        if (this.text.length < match.length)
+        auto text = this.text;
+        if (text.length < match.length)
         {
             this.revert;
             return false;
         }
-        if (this.text[0 .. match.length] == match)
+        if (text[0 .. match.length] == match)
         {
             this.drop(match.length);
             this.commit;
@@ -138,11 +152,20 @@ final class Parser
         }
     }
 
+    // checks that the text is at the hard end of the file,
+    // ie. no more text at all.
+    bool hard_eof()
+    {
+        return this.current.text.length == 0;
+    }
+
+    // checks that the parser is at the "soft" end of the file,
+    // ie. no more meaningful content; only comments and whitespace.
     bool eof()
     {
         this.begin;
         this.strip;
-        if (this.text.length == 0)
+        if (this.current.text.length == 0)
         {
             this.commit;
             return true;
@@ -153,7 +176,7 @@ final class Parser
 
     void strip()
     {
-        if (this.stack[this.level].stripped) return;
+        if (this.current.stripped) return;
 
         mut string text = this.text;
         while (true)
@@ -174,7 +197,7 @@ final class Parser
                 if (!startsWith(text, "/*"))
                 {
                     drop(this.text.length - text.length);
-                    this.stack[this.level].stripped = true;
+                    this.current.stripped = true;
                     return;
                 }
                 text = text["/*".length .. $];

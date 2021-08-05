@@ -102,7 +102,14 @@ class HashMap : Type
             loc.assert2s(args.length == 2, "hashmap.get() expects two parameters, key and default");
             auto key = args[0].sym.compile(context).beExpressionImplCall(context, loc);
             auto deflt = args[1].sym.compile(context).beExpressionImplCall(context, loc);
-            return getHashmapDefault(context, this, base, key, deflt);
+            return getHashmapDefault(context, loc, this, base, key, deflt, insert=false);
+        }
+        if (base && field == "require") {
+            // TODO args.loc
+            loc.assert2s(args.length == 2, "hashmap.require() expects two parameters, key and default");
+            auto key = args[0].sym.compile(context).beExpressionImplCall(context, loc);
+            auto deflt = args[1].sym.compile(context).beExpressionImplCall(context, loc);
+            return getHashmapDefault(context, loc, this, base, key, deflt, insert=true);
         }
         if (base && field == "has") {
             // TODO args.loc
@@ -136,8 +143,7 @@ class HashMap : Type
         return getHashmap(context, this, base, index);
     }
 
-    override Statement indexAssignment(Context context, Expression base, Expression index, Expression value, Loc loc)
-    {
+    override Statement indexAssignment(Context context, Expression base, Expression index, Expression value, Loc loc) {
         return setHashmap(context, this, base, index, value, loc);
     }
 }
@@ -162,6 +168,7 @@ private Expression hashFun(Context context, Loc loc, HashMap hashmap, Expression
     Parameter[] params = [
         Parameter(false, "key", false, key.type)];
 
+    // TODO proper unsigned types
     ASTSymbol hashfn() {
         if (key.type.same(once new Array(new Character))) {
             return context.compiler.$expr ({
@@ -171,6 +178,15 @@ private Expression hashFun(Context context, Loc loc, HashMap hashmap, Expression
                     hash ^= cast(int) ch;
                     hash *= 0x01000193;
                 }
+                if (hash < 0) hash = -hash;
+                hash;
+            });
+        }
+        if (key.type.same(once new Integer) || key.type.same(once new Long)) {
+            // knuth hash
+            return context.compiler.$expr ({
+                mut int hash = key * 2654435761;
+                if (hash < 0) hash = -hash;
                 hash;
             });
         }
@@ -256,10 +272,19 @@ private Statement setHashmap(
 {
     auto baseRef = base.instanceOf(Reference);
     loc.assert2s(!!baseRef && baseRef.info.mutable, "target of hashmap assignment must be mutable");
-    Statement do_(Expression value) {
-        return plainSetHashmap(context, hashmap, baseRef, key, value);
+    // we temporize value first thing, because evaluating value may change the addresss of the hashmap.
+    Statement do3(Expression value) {
+        // Then key, same reason.
+        Statement do2(Expression key) {
+            // mark value for consumption.
+            Statement do1(Expression value) {
+                return plainSetHashmap(context, hashmap, baseRef, key, value);
+            }
+            return context.compiler.consumeStmt(context, value, &do1);
+        }
+        return context.compiler.stmtWithTemporaryExpr(key, &do2);
     }
-    return context.compiler.consumeStmt(context, value, &do_);
+    return context.compiler.stmtWithTemporaryExpr(value, &do3);
 }
 
 private Statement plainSetHashmap(Context context, HashMap hashmap, Reference base, Expression key, Expression value) {
@@ -281,7 +306,6 @@ private Statement plainSetHashmap(Context context, HashMap hashmap, Reference ba
                 mut size_t newsize = data.capacity * 2;
                 if (newsize < 4) newsize = 4;
                 auto resized = base.resize(newsize);
-                __destroy(base);
                 data = cast(HashMapBase*) resized;
             } else {
                 // we'll return data, so make a gift
@@ -311,7 +335,7 @@ private Statement plainSetHashmap(Context context, HashMap hashmap, Reference ba
                     }
                 }
             }
-            mut int i = 0; i /= i;
+            int* ip = null; *ip = *ip;
             // TODO
             // assert(false); // No space even after resize.
             0; // expr result value. TODO void literal
@@ -350,7 +374,7 @@ private Expression getHashmap(Context context, HashMap hashmap, Expression base,
             if (!data) {
                 // FIXME extern(C) assert
                 // FIXME Maybe
-                mut int i; i /= i;
+                int* ip = null; *ip = *ip;
             }
             auto rows = cast(HashMapRow*) &data[1];
             for (int i <- 0 .. data.capacity) {
@@ -359,17 +383,17 @@ private Expression getHashmap(Context context, HashMap hashmap, Expression base,
                 rows[index].case {
                     (:empty): {
                         // FIXME assert
-                        mut int i; i /= i;
+                        int* ip = null; *ip = *ip;
                     }
                     (:gravestone): {
-                        mut int i; i /= i;
+                        int* ip = null; *ip = *ip;
                     }
                     (Key existingKey, Value existingValue): {
                         if (key == existingKey) return existingValue;
                     }
                 }
             }
-            mut int i = 0; i /= i;
+            int* ip = null; *ip = *ip;
             // TODO
             // assert(false); // No space even after resize.
             0; // expr result value. TODO void literal
@@ -407,7 +431,7 @@ private Expression hasKeyHashmap(Context context, HashMap hashmap, Expression ba
                     }
                 }
             }
-            mut int i = 0; i /= i;
+            int* ip = null; *ip = *ip;
             // TODO
             // assert(false); // hashmap was completely full, this should never happen
             0; // expr result value. TODO void literal
@@ -422,18 +446,28 @@ private Expression hasKeyHashmap(Context context, HashMap hashmap, Expression ba
 }
 
 public Expression getHashmapDefault(
-    Context context, HashMap hashmap, Expression base, Expression key, Expression deflt)
+    Context context, Loc loc, HashMap hashmap, Expression base, Expression key, Expression deflt, bool insert)
 {
     auto astValue = new ASTSymbolHelper(hashmap.value);
     auto astBase = new ASTSymbolHelper(base);
     auto astKey = new ASTSymbolHelper(key);
     auto astDeflt = new ASTSymbolHelper(deflt);
+    mut ASTStatement astElse = context.compiler.$stmt ret = $astDeflt;;
+    if (insert) {
+        auto baseRef = base.instanceOf(Reference);
+        loc.assert2s(!!baseRef && baseRef.info.mutable, "target of hashmap assignment must be mutable");
+        astElse = context.compiler.$stmt {
+            ret = $astDeflt;
+            $astBase[key] = ret;
+        };
+    }
+
     // FIXME single lookup
     auto expr = context.compiler.$expr ({
         mut $astValue ret;
-        auto key = $astKey, base = $astBase;
-        if (base.has(key)) ret = base[key];
-        else ret = $astDeflt;
+        auto key = $astKey;
+        if ($astBase.has(key)) ret = $astBase[key];
+        else $stmt astElse;
         ret;
     });
     return expr.compile(context).beExpression;

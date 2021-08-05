@@ -32,7 +32,11 @@ struct String string_alloc(size_t length) {
     return (struct String) { length, memory + sizeof(size_t) * 3, memory };
 }
 
-void print(struct String str) { printf("%.*s\n", (int) str.length, str.ptr); }
+void print(struct String str) {
+    printf("%.*s\n", (int) str.length, str.ptr);
+    fflush(stdout);
+}
+
 void assert(int test) {
     if (!test) {
         fprintf(stderr, "Assertion failed! Aborting.\n");

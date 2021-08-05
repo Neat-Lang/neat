@@ -12,31 +12,6 @@ class LLVMBackend : Backend {
     }
 }
 
-struct Global {
-    string name;
-    BackendType type;
-}
-
-struct Globals
-{
-    Global[] globals;
-    int used;
-    void add(Global global) {
-        if (globals.length == 0) globals = new Global[](1);
-        if (used == globals.length) {
-            auto copy = new Global[](globals.length * 2);
-            for (int i <- 0 .. globals.length)
-                copy[i] = globals[i];
-            globals = copy;
-        }
-        globals[used] = global;
-        used += 1;
-    }
-    Global[] array() {
-        return this.globals[0 .. this.used];
-    }
-}
-
 struct DeclarationEntry
 {
     string name;
@@ -67,7 +42,7 @@ class LLVMBackendModule : BackendModule {
     DeclarationEntry[] pendingDeclarations;
 
     int literalId;
-    Globals globals;
+    BackendType[string] globals;
 
     DebugInfo[] debugInfos;
     string compileUnit;
@@ -97,16 +72,14 @@ class LLVMBackendModule : BackendModule {
         defineIntrinsics(this, platform);
     }
 
-    override bool declared(string name) {
-        return [any a.name == name for a in this.globals.array];
-    }
+    override bool declared(string name) { return this.globals.has(name); }
 
     override void declare(string name, BackendType ret, BackendType[] args)
     {
         assert(!this.declared(name));
         auto type = new BackendFunctionPointerType(ret, args);
         pendingDeclarations ~= DeclarationEntry(name, true, type);
-        this.globals.add(Global(name, type));
+        this.globals[name] = type;
     }
 
     void removePendingDecl(string name)
@@ -139,7 +112,7 @@ class LLVMBackendModule : BackendModule {
         string name, string decoration, BackendType ret, BackendType[] args, BackendLocation loc)
     {
         removePendingDecl(name);
-        this.globals.add(Global(name, new BackendFunctionPointerType(ret, args)));
+        this.globals[name] = new BackendFunctionPointerType(ret, args);
 
         auto comps = split(loc.file, "/");
         auto dir = join(comps[0 .. $ - 1], "/");
@@ -160,7 +133,7 @@ class LLVMBackendModule : BackendModule {
         auto globalType = new BackendStaticArrayType(
             new BackendFunctionPointerType(new BackendVoidType, new BackendType[](0)), cast(int) length);
         pendingDeclarations ~= DeclarationEntry(name, false, globalType);
-        this.globals.add(Global(name, globalType));
+        this.globals[name] = globalType;
     }
 
     override void defineSymbolList(string name, (string | size_t)[] symbols)
@@ -193,7 +166,7 @@ class LLVMBackendModule : BackendModule {
         }
         this.output.appends(" ]");
         this.output.endl;
-        this.globals.add(Global(name, globalType));
+        this.globals[name] = globalType;
     }
 
     string nextLiteral() {
@@ -203,12 +176,11 @@ class LLVMBackendModule : BackendModule {
     }
 
     BackendType globalType(string name) {
-        auto globals = this.globals.array;
-        for (int i <- 0 .. globals.length)
-            if (globals[i].name == name)
-                return globals[i].type;
-        .print("no such global " ~ name);
-        assert(false);
+        return this.globals.get(name, ({
+            .print("no such global " ~ name);
+            assert(false);
+            BackendType t; t;
+        }));
     }
 
     override void done()
@@ -345,8 +317,7 @@ struct RegDefines
             regDefines = copy;
         }
     }
-    // TODO Maybe(RegDefine)
-    (RegDefine | :notFound) get(int reg) {
+    (RegDefine | fail :notFound) get(int reg) {
         if (reg >= regDefines.length || regDefines[reg].reg != reg)
             return :notFound;
         return regDefines[reg];
@@ -383,70 +354,52 @@ class LLVMBackendFunction : BackendFunction {
         this.output.endl;
     }
     string reg(int reg) {
-        // TODO
-        // if (RegDefine def <- this.regDefines.get(reg)) {
-        this.regDefines.get(reg).case {
-            RegDefine def:
-                return def.value.case(
-                    Reg r: "%reg" ~ itoa(r.id),
-                    Arg a: "%arg" ~ itoa(a.id),
-                    string s: s);
-            (:notFound):
-                return "%reg" ~ itoa(reg);
+        if (auto def <- this.regDefines.get(reg)) {
+            return def.value.case(
+                Reg r: "%reg" ~ itoa(r.id),
+                Arg a: "%arg" ~ itoa(a.id),
+                string s: s);
         }
+        return "%reg" ~ itoa(reg);
     }
     string treg(int reg) {
-        // TODO
-        // if (RegDefine def <- this.regDefines.get(reg)) {
-        this.regDefines.get(reg).case {
-            RegDefine def: {
-                string val = def.value.case(
-                    Reg r: "%reg" ~ itoa(r.id),
-                    Arg a: "%arg" ~ itoa(a.id),
-                    string s: s);
-                string type = llvmFmt(def.type, this.mod.platform);
-                return type ~ " " ~ val;
-            }
-            (:notFound):
-                return "NOTFOUND %reg" ~ itoa(reg);
+        if (auto def <- this.regDefines.get(reg)) {
+            string val = def.value.case(
+                Reg r: "%reg" ~ itoa(r.id),
+                Arg a: "%arg" ~ itoa(a.id),
+                string s: s);
+            string type = llvmFmt(def.type, this.mod.platform);
+            return type ~ " " ~ val;
         }
+        return "NOTFOUND %reg" ~ itoa(reg);
     }
     void outputReg(int reg) {
-        // TODO
-        // if (RegDefine def <- this.regDefines.get(reg)) {
-        this.regDefines.get(reg).case {
-            RegDefine def: {
-                def.value.case {
-                    Reg r: this.output.appendsi("%reg", r.id);
-                    Arg a: this.output.appendsi("%arg", a.id);
-                    string s: this.output.append(s);
-                }
+        if (RegDefine def <- this.regDefines.get(reg)) {
+            def.value.case {
+                Reg r: this.output.appendsi("%reg", r.id);
+                Arg a: this.output.appendsi("%arg", a.id);
+                string s: this.output.append(s);
             }
-            (:notFound): this.output.appendsi("%reg", reg);
+        } else {
+            this.output.appendsi("%reg", reg);
         }
     }
     void outputTreg(int reg) {
-        // TODO
-        // if (RegDefine def <- this.regDefines.get(reg)) {
-        this.regDefines.get(reg).case {
-            RegDefine def: {
-                llvmFmtInto(def.type, this.output, this.mod.platform);
+        if (RegDefine def <- this.regDefines.get(reg)) {
+            llvmFmtInto(def.type, this.output, this.mod.platform);
 
-                this.output.append(" ");
+            this.output.append(" ");
 
-                def.value.case {
-                    Reg r: this.output.appendsi("%reg", r.id);
-                    Arg a: this.output.appendsi("%arg", a.id);
-                    string s: this.output.append(s);
-                }
-
-                return;
+            def.value.case {
+                Reg r: this.output.appendsi("%reg", r.id);
+                Arg a: this.output.appendsi("%arg", a.id);
+                string s: this.output.append(s);
             }
-            (:notFound): {
-                .print("reg " ~ itoa(reg) ~ " not found!");
-                assert(false);
-            }
+
+            return;
         }
+        .print("reg " ~ itoa(reg) ~ " not found!");
+        assert(false);
     }
     void defReg2(int reg, BackendType type, (Reg | Arg | string) value) {
         this.regDefines.add(RegDefine(reg, type, value));

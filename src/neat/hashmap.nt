@@ -99,9 +99,16 @@ class HashMap : Type
         }
         if (base && field == "get") {
             // TODO args.loc
-            loc.assert2s(args.length == 1, "hashmap.get() expects one parameter, key");
+            loc.assert2s(args.length == 2, "hashmap.get() expects two parameters, key and default");
             auto key = args[0].sym.compile(context).beExpressionImplCall(context, loc);
-            return getHashmap(context, this, base, key);
+            auto deflt = args[1].sym.compile(context).beExpressionImplCall(context, loc);
+            return getHashmapDefault(context, this, base, key, deflt);
+        }
+        if (base && field == "has") {
+            // TODO args.loc
+            loc.assert2s(args.length == 1, "hashmap.has() expects one parameter, key");
+            auto key = args[0].sym.compile(context).beExpressionImplCall(context, loc);
+            return hasKeyHashmap(context, this, base, key);
         }
         if (base && field == "resize") {
             // TODO args.loc
@@ -374,6 +381,62 @@ private Expression getHashmap(Context context, HashMap hashmap, Expression base,
         context, "hashmap_get", hashmap.value, params, &body_);
 
     return context.compiler.mkCall(fn, [base, key], __HERE__);
+}
+
+private Expression hasKeyHashmap(Context context, HashMap hashmap, Expression base, Expression key) {
+    Parameter[] params = [
+        Parameter(false, "base", false, hashmap),
+        Parameter(false, "key", false, hashmap.key)];
+
+    ASTStatement body_() {
+        auto expr = context.compiler.$expr ({
+            // FIXME
+            alias T = Value[Key];
+            auto hash = T.hash(key);
+            mut auto data = cast(HashMapBase*) base;
+            if (!data) return false;
+            auto rows = cast(HashMapRow*) &data[1];
+            for (int i <- 0 .. data.capacity) {
+                // FIXME wraparound test instead of %
+                size_t index = (i + hash) % data.capacity;
+                rows[index].case {
+                    (:empty): return false;
+                    (:gravestone): {}
+                    (Key existingKey, Value existingValue): {
+                        if (key == existingKey) return true;
+                    }
+                }
+            }
+            mut int i = 0; i /= i;
+            // TODO
+            // assert(false); // hashmap was completely full, this should never happen
+            0; // expr result value. TODO void literal
+        });
+        return new ASTExprStatement(wrap(context, hashmap, expr), __HERE__);
+    }
+
+    auto fn = context.compiler.createRuntimeFunction(
+        context, "hashmap_has", new Integer, params, &body_);
+
+    return context.compiler.mkCall(fn, [base, key], __HERE__);
+}
+
+public Expression getHashmapDefault(
+    Context context, HashMap hashmap, Expression base, Expression key, Expression deflt)
+{
+    auto astValue = new ASTSymbolHelper(hashmap.value);
+    auto astBase = new ASTSymbolHelper(base);
+    auto astKey = new ASTSymbolHelper(key);
+    auto astDeflt = new ASTSymbolHelper(deflt);
+    // FIXME single lookup
+    auto expr = context.compiler.$expr ({
+        mut $astValue ret;
+        auto key = $astKey, base = $astBase;
+        if (base.has(key)) ret = base[key];
+        else ret = $astDeflt;
+        ret;
+    });
+    return expr.compile(context).beExpression;
 }
 
 public Expression releaseHashmap(Context context, Expression value) {

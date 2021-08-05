@@ -87,10 +87,21 @@ class HashMap : Type
         return context.compiler.exprStatement(releaseHashmap(context, reference));
     }
 
+    override Symbol accessMember(Loc loc, Context context, Expression base, string field, Protection protection)
+    {
+        if (base && field == "keys") {
+            return keysHashmap(context, this, base);
+        }
+        if (base && field == "values") {
+            return valuesHashmap(context, this, base);
+        }
+        return null;
+    }
+
     override Expression callMember(Context context, Expression base, string field, ASTArgument[] args, Protection protection, Loc loc)
     {
+        // TODO args.loc
         if (base && field == "set") {
-            // TODO args.loc
             loc.assert2s(args.length == 2, "hashmap.set() expects key, value");
             auto key = args[0].sym.compile(context).beExpressionImplCall(context, loc);
             auto value = args[1].sym.compile(context).beExpressionImplCall(context, loc);
@@ -98,40 +109,34 @@ class HashMap : Type
             return context.compiler.statementExpression(set, context.compiler.voidLiteral);
         }
         if (base && field == "get") {
-            // TODO args.loc
             loc.assert2s(args.length == 2, "hashmap.get() expects two parameters, key and default");
             auto key = args[0].sym.compile(context).beExpressionImplCall(context, loc);
             auto deflt = args[1].sym.compile(context).beExpressionImplCall(context, loc);
             return getHashmapDefault(context, loc, this, base, key, deflt, insert=false);
         }
         if (base && field == "require") {
-            // TODO args.loc
             loc.assert2s(args.length == 2, "hashmap.require() expects two parameters, key and default");
             auto key = args[0].sym.compile(context).beExpressionImplCall(context, loc);
             auto deflt = args[1].sym.compile(context).beExpressionImplCall(context, loc);
             return getHashmapDefault(context, loc, this, base, key, deflt, insert=true);
         }
         if (base && field == "has") {
-            // TODO args.loc
             loc.assert2s(args.length == 1, "hashmap.has() expects one parameter, key");
             auto key = args[0].sym.compile(context).beExpressionImplCall(context, loc);
             return hasKeyHashmap(context, this, base, key);
         }
         if (base && field == "resize") {
-            // TODO args.loc
             loc.assert2s(args.length == 1, "hashmap.resize() expects one parameter, new size");
             auto newsize = args[0].sym.compile(context).beExpressionImplCall(context, loc);
             return resizeHashmap(context, this, base, newsize);
         }
         if (!base && field == "allocate") {
-            // TODO args.loc
             loc.assert2s(args.length == 1, "hashmap.allocate() expects one parameter, size");
             auto size = args[0].sym.compile(context).beExpressionImplCall(context, loc);
             auto sizeT = expectImplicitConvertTo(context, size, context.nativeWordType, loc);
             return allocateHashmap(context, this, sizeT);
         }
         if (!base && field == "hash") {
-            // TODO args.loc
             loc.assert2s(args.length == 1, "hashmap.hash() expects one parameter, key");
             auto key = args[0].sym.compile(context).beExpressionImplCall(context, loc);
             return hashFun(context, loc, this, key);
@@ -505,6 +510,76 @@ public Expression releaseHashmap(Context context, Expression value) {
     auto fn = context.compiler.createRuntimeFunction(context, "hashmap_release", new Void, params, &body_);
 
     return context.compiler.mkCall(fn, [value], __HERE__);
+}
+
+private Expression keysHashmap(Context context, HashMap hashmap, Expression base) {
+    ASTStatement body_() {
+        auto expr = context.compiler.$expr ({
+            if (cast(void*) value == null) {
+                Key[] ret; return ret;
+            }
+            auto base = cast(HashMapBase*) value;
+            auto rows = cast(HashMapRow*) &base[1];
+            auto ret = new Key[](base.length);
+            mut int k = 0;
+            for (int i <- 0 .. base.capacity) {
+                rows[i].case {
+                    (:empty): continue;
+                    (:gravestone): continue;
+                    (Key key, Value value): {
+                        ret[k] = key;
+                        k += 1;
+                    }
+                }
+                0;
+            }
+            // assert(k == base.length);
+            if (k != base.length) { int* ip; *ip = *ip; }
+            ret;
+        });
+        return context.compiler.astReturn(wrap(context, hashmap, expr), __HERE__);
+    }
+
+    Parameter[] params = [Parameter(false, "value", false, hashmap)];
+    auto fn = context.compiler.createRuntimeFunction(
+        context, "hashmap_keys", new Array(hashmap.key), params, &body_);
+
+    return context.compiler.mkCall(fn, [base], __HERE__);
+}
+
+private Expression valuesHashmap(Context context, HashMap hashmap, Expression base) {
+    ASTStatement body_() {
+        auto expr = context.compiler.$expr ({
+            if (cast(void*) value == null) {
+                Value[] ret; return ret;
+            }
+            auto base = cast(HashMapBase*) value;
+            auto rows = cast(HashMapRow*) &base[1];
+            auto ret = new Value[](base.length);
+            mut int k = 0;
+            for (int i <- 0 .. base.capacity) {
+                rows[i].case {
+                    (:empty): continue;
+                    (:gravestone): continue;
+                    (Key key, Value value): {
+                        ret[k] = value;
+                        k += 1;
+                    }
+                }
+                0;
+            }
+            // assert(k == base.length);
+            if (k != base.length) { int* ip; *ip = *ip; }
+            ret;
+        });
+        return context.compiler.astReturn(wrap(context, hashmap, expr), __HERE__);
+    }
+
+    Parameter[] params = [Parameter(false, "value", false, hashmap)];
+    auto fn = context.compiler.createRuntimeFunction(
+        context, "hashmap_values", new Array(hashmap.value), params, &body_);
+
+    return context.compiler.mkCall(fn, [base], __HERE__);
 }
 
 class ASTHashMap : ASTSymbol

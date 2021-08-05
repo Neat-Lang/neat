@@ -1,9 +1,11 @@
 module neat.macros.cimport;
 
 import package(compiler).neat.base;
+import package(compiler).neat.decl;
 import package(compiler).neat.expr;
 import package(compiler).neat.parser_base;
 import package(compiler).neat.parser;
+import package(compiler).neat.struct_;
 import package(compiler).neat.stuff;
 import package(compiler).neat.types;
 import package(compiler).helpers;
@@ -30,12 +32,12 @@ class CImportMacro : Macro
         parser.expect("(");
         // TODO move into neat.base
         parser.expect("\"");
-        auto includeSym = parser.parseStringLiteral("\"");
+        auto includeSym = parser.parseStringLiteral(lexicalContext, "\"").instanceOf(ASTStringLiteral);
         parser.assert_(!!includeSym, "string expected");
         mut string flags;
         if (parser.accept(",")) {
             parser.expect("\"");
-            auto flagsSym = parser.parseStringLiteral("\"");
+            auto flagsSym = parser.parseStringLiteral(lexicalContext, "\"").instanceOf(ASTStringLiteral);
             parser.assert_(!!flagsSym, "flags string expected");
             flags = flagsSym.text ~ " ";
         }
@@ -75,7 +77,14 @@ class CImportMacro : Macro
                             print("define " ~ name ~ " = " ~ sym.repr);
                         }
                 }
-            cparserHelper.mod.entries ~= symbol.case(ASTExtern a: a, ASTSymbol sym: new ASTSymbolAlias(name, sym));
+            symbol.case {
+                ASTExtern a:
+                    cparserHelper.mod.entries ~= ASTModuleEntry(Protection.public_, a);
+                ASTSymbol sym:
+                    cparserHelper.mod.entries ~= ASTModuleEntry(
+                        Protection.public_,
+                        new ASTAliasDecl(name, sym));
+            }
         }
 
         void eatAttribute() {
@@ -151,11 +160,9 @@ class CImportMacro : Macro
             }
             // match struct foo { }; as "foo"
             if (cparser.accept("struct")) {
-                import package(compiler).neat.struct_ : ASTStructDecl;
-
                 auto type = cparserHelper.parseStructType;
                 if (!type) { cparser.eatline; continue; }
-                add(type.instanceOf(ASTStructDecl).name, type);
+                add(type.instanceOf(ASTStructDeclSym).decl.name, type);
                 continue;
             }
             if (cparser.accept("#")) {
@@ -250,7 +257,8 @@ class CStaticArray : ASTSymbol
         // TODO give this a better type
         mut StructMemberDeclaration[] members;
         for (int i <- 0 .. count)
-            members ~= new StructMemberDeclaration("_" ~ itoa(i), beType(this.loc, type.compile(context)));
+            members ~= new StructMemberDeclaration(
+                "_" ~ itoa(i), Protection.public_, beType(this.loc, type.compile(context)));
 
         return new Struct("SA_hack", members, this.loc, context.namespace.mangle);
     }
@@ -380,12 +388,10 @@ class CParserHelper {
     }
 
     ASTSymbol parseStructType() {
-        import package(compiler).neat.struct_ : ASTStructDecl;
-
         auto loc = parser.loc;
         auto name = parser.parseIdentifier;
-        mut (string name, ASTSymbol)[] members;
-        auto emptyStruct = new ASTStructDecl(name, [], [], null, loc); // opaque
+        mut (string name, Protection prot, ASTSymbol)[] members;
+        auto emptyStruct = new ASTStructDeclSym(new ASTStructDecl(name, [], [], loc)); // opaque
         if (!parser.accept("{")) {
             if (auto definedSym = this.mod.getSymbolAlias(name)) return definedSym;
             if (auto definedSym = this.sysmod.getSymbolAlias(name)) return definedSym;
@@ -414,7 +420,7 @@ class CParserHelper {
             if (!baseType) { parser.revert; scanToClosingBracket; return emptyStruct; }
             mut auto memberDecl = parseTypedDecl(baseType);
             void flush() {
-                members ~= (memberDecl.name, memberDecl.type);
+                members ~= (memberDecl.name, Protection.public_, memberDecl.type);
             }
             while (parser.accept(",")) {
                 flush;
@@ -425,7 +431,7 @@ class CParserHelper {
             if (!parser.accept(";")) { parser.revert; scanToClosingBracket; return emptyStruct; }
             parser.commit;
         }
-        return new ASTStructDecl(name, members, [], null, loc);
+        return new ASTStructDeclSym(new ASTStructDecl(name, members, [], loc));
     }
 
     ASTSymbol parseEnumType() {
@@ -459,6 +465,17 @@ class CParserHelper {
             parser.commit;
             return (:success, num);
         // }
+    }
+}
+
+class ASTStructDeclSym : ASTSymbol
+{
+    ASTStructDecl decl;
+
+    this(this.decl) { }
+
+    override Symbol compile(Context context) {
+        return this.decl.compileToStruct(context);
     }
 }
 

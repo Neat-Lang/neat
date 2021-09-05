@@ -485,7 +485,7 @@ ASTSymbol parseArrayLiteral(Parser parser, LexicalContext lexicalContext)
         parser.accept(",");
     }
     parser.commit;
-    return new ASTArrayLiteral(values);
+    return new ASTArrayLiteral(null, values);
 }
 
 // marker: type that converts to any array type.
@@ -559,9 +559,11 @@ struct ASTArrayLiteralElement
 
 class ASTArrayLiteral : ASTSymbol
 {
+    ASTSymbol typeHint;
+
     ASTArrayLiteralElement[] elements;
 
-    this(this.elements) { }
+    this(this.typeHint, this.elements) { }
 
     override Expression compile(Context context) {
         if (!elements.length)
@@ -569,23 +571,29 @@ class ASTArrayLiteral : ASTSymbol
         mut Expression[] values;
         for (auto element <- this.elements)
             values ~= beExpression3(context, element.value.compile(context), element.loc);
-        mut Expression mergedReference;
-        for (int i <- 0 .. this.elements.length) {
-            if (!mergedReference) mergedReference = values[i];
-            else {
-                // TODO centralize somewhere
-                auto value = values[i];
-                auto left = context.compiler.implicitConvertTo(context, value, mergedReference.type);
-                auto right = context.compiler.implicitConvertTo(context, mergedReference, value.type);
-                if (!left && !right)
-                    this.elements[i].loc.assert2s(false, "incompatible expression type");
-                else if (left && right && !left.type.same(right.type))
-                    this.elements[i].loc.assert2s(false, "ambiguous expression type");
-                if (left) mergedReference = left;
-                else if (right) mergedReference = right;
+        Type getType() {
+            if (this.typeHint) {
+                return beType(__HERE__, this.typeHint.compile(context));
             }
+            mut Expression mergedReference;
+            for (int i <- 0 .. this.elements.length) {
+                if (!mergedReference) mergedReference = values[i];
+                else {
+                    // TODO centralize somewhere
+                    auto value = values[i];
+                    auto left = context.compiler.implicitConvertTo(context, value, mergedReference.type);
+                    auto right = context.compiler.implicitConvertTo(context, mergedReference, value.type);
+                    if (!left && !right)
+                        this.elements[i].loc.assert2s(false, "incompatible expression type");
+                    else if (left && right && !left.type.same(right.type))
+                        this.elements[i].loc.assert2s(false, "ambiguous expression type");
+                    if (left) mergedReference = left;
+                    else if (right) mergedReference = right;
+                }
+            }
+            return mergedReference.type;
         }
-        auto mergeType = mergedReference.type;
+        auto mergeType = getType();
         for (int i <- 0 .. this.elements.length) {
             assert(!!values[i]);
             values[i] = context.compiler.implicitConvertTo(context, values[i], mergeType);

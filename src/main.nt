@@ -20,6 +20,7 @@ import neat.types;
 import neat.unittest_;
 import std.file : realpath;
 import std.json;
+import std.string : startsWith;
 
 extern(C) int getpid();
 extern(C) void neat_runtime_system(string command);
@@ -237,16 +238,19 @@ class BuildSettings
 
     bool forMacro;
 
+    string[] versions;
+
     PlatformFlags platformFlags;
 
     Platform platform() {
         mut BackendType macroWordType;
         if (x86_32) macroWordType = new BackendIntType;
         else macroWordType = new BackendLongType;
-        return new Platform(macroWordType, platformFlags);
+        return new Platform(macroWordType, platformFlags, versions);
     }
 
-    this(this.compiler, this.objectCache, this.backend, this.x86_32, this.caching, this.platformFlags, this.optimize, this.forMacro) { }
+    this(this.compiler, this.objectCache, this.backend, this.x86_32, this.caching, this.versions,
+         this.platformFlags, this.optimize, this.forMacro) { }
 }
 
 (string[] objFiles, string[] intermediateFiles, Module module_, Hash hash) buildAstModule(
@@ -555,6 +559,7 @@ class Options
     PlatformFlags platformFlags, macroPlatformFlags;
     // for neat.macros.cimport
     string[] cFlags;
+    string[] versions, macroVersions;
 
     this() {
         this.backend = new LLVMBackend();
@@ -607,6 +612,10 @@ class Options
                 this.backend = new CBackend;
             } else if (arg == "-macro-backend=c") {
                 this.macroBackend = new CBackend;
+            } else if (arg.startsWith("-version=")) {
+                this.versions ~= arg["-version=".length .. $];
+            } else if (arg.startsWith("-macro-version=")) {
+                this.versions ~= arg["-macro-version=".length .. $];
             } else if (arg == "-m32") {
                 this.x86_32 = true;
             } else if (arg == "-macro-m32") {
@@ -636,6 +645,21 @@ class Options
             }
         }
         return remArgs;
+    }
+
+    string[] allVersions() {
+        mut string[] ret;
+        // TODO [for a <- 0 .. 5]
+        for (int i <- 0 .. this.generation)
+            ret ~= "generation$(i+1)";
+        return ret ~ this.versions;
+    }
+
+    string[] allMacroVersions() {
+        mut string[] ret;
+        for (int i <- 0 .. __GENERATION__)
+            ret ~= "generation$(i+1)";
+        return ret ~ this.macroVersions;
     }
 
     void addPackage(string pak, bool relative) {
@@ -695,11 +719,11 @@ void buildBinary(Options options, string mainFile, string execPath, Package[] pa
     auto objectCache = new ObjectCache;
     auto modParseConfig = new ModuleParserConfig(packages, defaultImports, new ASTModuleCache);
     auto settings = new BuildSettings(compiler, objectCache, options.backend,
-        x86_32=options.x86_32, caching=options.caching, platformFlags=options.platformFlags,
-        optimize=options.optimize, forMacro=false);
+        x86_32=options.x86_32, caching=options.caching, versions=options.allVersions,
+        platformFlags=options.platformFlags, optimize=options.optimize, forMacro=false);
     auto macroSettings = new BuildSettings(compiler, objectCache, options.macroBackend,
-        x86_32=options.macro_x86_32, caching=options.caching, platformFlags=options.macroPlatformFlags,
-        optimize=false, forMacro=true);
+        x86_32=options.macro_x86_32, caching=options.caching, versions=options.allMacroVersions,
+        platformFlags=options.macroPlatformFlags, optimize=false, forMacro=true);
     auto helper = new ParserHelperImpl(macroSettings);
     mut CompilationVisitor[] compilationVisitors;
 

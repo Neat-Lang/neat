@@ -519,13 +519,11 @@ class ASTStructDecl : ASTDeclaration
 {
     string name;
 
-    (string name, Protection protection, ASTSymbol type)[] members;
-
-    ASTStructMethod[] methods;
+    ASTStructEntry[] entries;
 
     Loc loc;
 
-    this(this.name, this.members, this.methods, this.loc) { }
+    this(this.name, this.entries, this.loc) { }
 
     override Context compile(Context context)
     {
@@ -541,20 +539,36 @@ class ASTStructDecl : ASTDeclaration
 
     Struct compileToStruct(Context context)
     {
-        auto members = [
-            new StructMemberDeclaration(member.name, member.protection, beType(this.loc, member.type.compile(context)))
-            for member in this.members];
+        mut StructMemberDeclaration[] members;
+        mut ASTStructMethod[] methods;
+        void walk(ASTStructEntry entry) {
+            entry.case {
+                ASTStructMember member: {
+                    members ~= new StructMemberDeclaration(
+                        member.name, member.protection, beType(this.loc, member.type.compile(context)));
+                }
+                ASTStructVersionBlock ver: {
+                    if ([any a == ver.name for a in context.platform.versions]) {
+                        [walk(entry) for entry in ver.children];
+                    }
+                }
+                ASTStructMethod method: {
+                    methods ~= method;
+                }
+            }
+        }
+        [walk(a) for a in this.entries];
 
         auto struct_ = new Struct(this.name, members, this.loc, context.namespace.mangle);
         // make S visible in struct S {}
         auto structScope = context.compiler.symbolAlias(context.namespace, struct_.name, struct_);
         auto structContext = context.withNamespace(structScope);
 
-        struct_.methods = new StructMethod[](this.methods.length);
+        struct_.methods = new StructMethod[](methods.length);
         mut int k;
-        for (int i <- 0 .. this.methods.length)
+        for (int i <- 0 .. methods.length)
         {
-            auto method = this.methods[i];
+            auto method = methods[i];
             auto methodParams = new Parameter[](method.params.length);
 
             for (int k <- 0 .. method.params.length) {
@@ -582,12 +596,11 @@ class ASTStructDecl : ASTDeclaration
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        ASTSymbol[] entries = [a.quoteStructEntry(quoter) for a in this.members]
-            ~ [a.quoteStructEntry(quoter) for a in this.methods];
+        ASTSymbol[] entries = [a.quoteStructEntry(quoter) for a in this.entries];
         with (quoter.compiler) {
             ASTSymbol structEntry = astIdentifier("ASTStructEntry", __HERE__);
             return astNewExpression(
-                astIdentifier("ASTStructDecl2", __HERE__), [
+                astIdentifier("ASTStructDecl", __HERE__), [
                     astStringLiteral(this.name, __HERE__),
                     astArrayLiteralTypeHint(structEntry, entries, __HERE__),
                     quoter.quoteLoc(this.loc)], __HERE__);
@@ -597,6 +610,7 @@ class ASTStructDecl : ASTDeclaration
     override string repr() { return name; }
 }
 
+// FIXME remove
 class ASTStructDecl2 : ASTDeclaration
 {
     string name;
@@ -682,7 +696,7 @@ class ASTStructDecl2 : ASTDeclaration
         with (quoter.compiler) {
             ASTSymbol structEntry = astIdentifier("ASTStructEntry", __HERE__);
             return astNewExpression(
-                astIdentifier("ASTStructDecl2", __HERE__), [
+                astIdentifier("ASTStructDecl", __HERE__), [
                     astStringLiteral(this.name, __HERE__),
                     astArrayLiteralTypeHint(structEntry, entries, __HERE__),
                     quoter.quoteLoc(this.loc)], __HERE__);
@@ -692,7 +706,7 @@ class ASTStructDecl2 : ASTDeclaration
     override string repr() { return name; }
 }
 
-ASTStructDecl2 parseStructDecl(Parser parser, LexicalContext lexicalContext)
+ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
     parser.begin;
@@ -708,7 +722,7 @@ ASTStructDecl2 parseStructDecl(Parser parser, LexicalContext lexicalContext)
         entries ~= parseStructEntry(parser, lexicalContext);
     }
     parser.commit;
-    return new ASTStructDecl2(name, entries, loc);
+    return new ASTStructDecl(name, entries, loc);
 }
 
 ASTStructEntry[] parseStructEntry(Parser parser, LexicalContext lexicalContext)

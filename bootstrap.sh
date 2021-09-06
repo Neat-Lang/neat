@@ -481,6 +481,8 @@ at_revision 'ca7c71bf59db657a7d8d5bd9bbcb5b546a0cab38' 'rebuild neat' 'build/nea
 at_revision 'af2b64babf96eff4f477b15d0c03ba67f7cbe11e' 'rebuild neat' 'build/neat'
 # type hinting array literals
 at_revision 'a4f009fdbbc31476526bf18b81df096b150b7f86' 'rebuild neat' 'build/neat'
+# struct versioning support stage 1
+at_revision '17126fab07f076475fb69e82615daf46c83ecc7e' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

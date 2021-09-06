@@ -1079,6 +1079,15 @@ struct ASTClassDeclMethod
     ASTStatement body_;
 }
 
+class ASTClassVersionBlock
+{
+    string name;
+    ASTClassEntry[] children;
+    this(this.name, this.children) { }
+}
+
+alias ASTClassEntry = (ASTClassDeclMember | ASTClassDeclMethod | ASTDeclaration | ASTClassVersionBlock);
+
 class ASTClassDecl : ASTSymbol
 {
     string name;
@@ -1089,7 +1098,7 @@ class ASTClassDecl : ASTSymbol
 
     bool abstract_;
 
-    (ASTClassDeclMember | ASTClassDeclMethod | ASTDeclaration)[] members;
+    ASTClassEntry[] members;
 
     MacroState macroState;
 
@@ -1129,8 +1138,8 @@ class ASTClassDecl : ASTSymbol
         // Do those later; they need fields resolved for this.field assignments.
         mut (ASTClassDeclMethod method, Context context)[] lateMemberMethods;
 
-        for (auto member <- this.members) {
-            member.case {
+        void walk(ASTClassEntry entry) {
+            entry.case {
                 ASTClassDeclMember member: {
                     auto type = beType(member.loc, member.type.compile(currentContext));
                     memberFields ~= (member.name, member.protection, type);
@@ -1138,11 +1147,21 @@ class ASTClassDecl : ASTSymbol
                 ASTClassDeclMethod method: {
                     lateMemberMethods ~= (method, currentContext);
                 }
+                /**
+                 * Note: currentContext gets overwritten even in version blocks,
+                 * because version blocks *don't* open a scope.
+                 */
                 ASTDeclaration astDecl: {
                     currentContext = astDecl.compile(currentContext);
                 }
+                ASTClassVersionBlock ver: {
+                    if ([any a == ver.name for a in context.platform.versions]) {
+                        [walk(entry) for entry in ver.children];
+                    }
+                }
             }
         }
+        [walk(a) for a in this.members];
 
         target.members = memberFields;
 
@@ -1312,90 +1331,115 @@ ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
         }
     }
 
-    mut (ASTClassDeclMember | ASTClassDeclMethod | ASTDeclaration)[] members;
+    mut ASTClassEntry[] members;
     parser.expect("{");
-    while (!parser.accept("}"))
-    {
-        parser.strip;
-
-        auto loc = parser.loc;
-
-        mut ASTSymbol retType;
-        mut string memberName;
-        mut bool override_ = false;
-        mut bool abstract_ = false;
-        mut Protection protection = Protection.public_;
-        while (true) {
-            if (acceptIdentifier(parser, "override")) {
-                override_ = true;
-                continue;
-            }
-            if (acceptIdentifier(parser, "abstract")) {
-                abstract_ = true;
-                continue;
-            }
-            // FIXME only allow one
-            // FIXME parseProtection?
-            if (acceptIdentifier(parser, "public")) {
-                protection = Protection.public_;
-                continue;
-            }
-            if (acceptIdentifier(parser, "private")) {
-                protection = Protection.private_;
-                continue;
-            }
-            if (acceptIdentifier(parser, "protected")) {
-                protection = Protection.protected_;
-                continue;
-            }
-            break;
-        }
-
-        if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
-            members ~= decl;
-            continue;
-        }
-
-        if (parser.accept("this"))
-        {
-            parser.assert_(!override_, "cannot override constructor");
-            retType = new ASTBasicType("void", loc);
-            memberName = "__ctor";
-        }
-        else
-        {
-            retType = lexicalContext.compiler.parseType(parser, lexicalContext);
-            parser.assert_(!!retType, "expected member type");
-            memberName = parseIdentifier(parser);
-            parser.assert_(memberName.length > 0, "expected member name");
-        }
-        if (parser.accept("(")) // method
-        {
-            auto params = parseParamList(parser, lexicalContext);
-            ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext);
-            members ~= ASTClassDeclMethod(
-                loc, protection, override_, abstract_, memberName, retType, params, stmt);
-        }
-        else
-        {
-            void addMember() {
-                parser.assert_(!override_, "cannot override class member");
-                parser.assert_(!abstract_, "cannot declare class member abstract");
-                members ~= ASTClassDeclMember(protection, memberName, retType, loc);
-            }
-            addMember;
-            while (!parser.accept(";")) {
-                parser.expect(",");
-                if (parser.accept(";")) break;
-                memberName = parseIdentifier(parser);
-                parser.assert_(memberName.length > 0, "expected member name");
-                addMember;
-            }
-        }
+    while (!parser.accept("}")) {
+        members ~= parseClassEntry(parser, lexicalContext);
     }
     return new ASTClassDecl(
         name, supers, classFinal, classAbstract,
         members, lexicalContext.macroState, loc);
+}
+
+ASTClassEntry[] parseClassEntry(Parser parser, LexicalContext lexicalContext)
+{
+    if (parser.accept("version")) {
+        mut ASTClassEntry[] entries;
+        parser.expect("(");
+        string versionStr = parser.parseIdentifier;
+        parser.expect(")");
+        if (parser.accept("{")) {
+            while (!parser.accept("}")) {
+                entries ~= parser.parseClassEntry(lexicalContext);
+            }
+        } else {
+            entries ~= parser.parseClassEntry(lexicalContext);
+        }
+        // FIXME explicitly type hinted literal
+        ASTClassEntry result = new ASTClassVersionBlock(versionStr, entries);
+        return [result];
+    }
+
+    parser.strip;
+
+    auto loc = parser.loc;
+
+    mut ASTSymbol retType;
+    mut string memberName;
+    mut bool override_ = false;
+    mut bool abstract_ = false;
+    mut Protection protection = Protection.public_;
+    while (true) {
+        if (acceptIdentifier(parser, "override")) {
+            override_ = true;
+            continue;
+        }
+        if (acceptIdentifier(parser, "abstract")) {
+            abstract_ = true;
+            continue;
+        }
+        // FIXME only allow one
+        // FIXME parseProtection?
+        if (acceptIdentifier(parser, "public")) {
+            protection = Protection.public_;
+            continue;
+        }
+        if (acceptIdentifier(parser, "private")) {
+            protection = Protection.private_;
+            continue;
+        }
+        if (acceptIdentifier(parser, "protected")) {
+            protection = Protection.protected_;
+            continue;
+        }
+        break;
+    }
+
+    if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
+        // TODO return [ASTClassEntry: decl];
+        ASTClassEntry entry = decl;
+        return [entry];
+    }
+
+    if (parser.accept("this"))
+    {
+        parser.assert_(!override_, "cannot override constructor");
+        retType = new ASTBasicType("void", loc);
+        memberName = "__ctor";
+    }
+    else
+    {
+        retType = lexicalContext.compiler.parseType(parser, lexicalContext);
+        parser.assert_(!!retType, "expected member type");
+        memberName = parseIdentifier(parser);
+        parser.assert_(memberName.length > 0, "expected member name");
+    }
+    if (parser.accept("(")) // method
+    {
+        auto params = parseParamList(parser, lexicalContext);
+        ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext);
+        ASTClassEntry entry = ASTClassDeclMethod(
+            loc, protection, override_, abstract_, memberName, retType, params, stmt);
+        return [entry];
+    }
+    else
+    {
+        mut ASTClassEntry[] members;
+        void addMember() {
+            parser.assert_(!override_, "cannot override class member");
+            parser.assert_(!abstract_, "cannot declare class member abstract");
+            members ~= ASTClassDeclMember(protection, memberName, retType, loc);
+        }
+        addMember;
+        while (!parser.accept(";")) {
+            parser.expect(",");
+            if (parser.accept(";")) break;
+            memberName = parseIdentifier(parser);
+            parser.assert_(memberName.length > 0, "expected member name");
+            addMember;
+        }
+        return members;
+    }
 }
 
 ASTIntfDecl parseIntfDecl(Parser parser, LexicalContext lexicalContext)

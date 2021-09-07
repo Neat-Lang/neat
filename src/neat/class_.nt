@@ -24,7 +24,7 @@ class ClassMethod : Function
 
     bool abstract_;
 
-    this(Class classType, this.loc, this.protection, this.override_, this.abstract_, this.name,
+    this(ClassType classType, this.loc, this.protection, this.override_, this.abstract_, this.name,
          this.ret, this.params, this.statement, this.macroState, this.parent)
     {
         this.hasThisArg = true;
@@ -34,7 +34,7 @@ class ClassMethod : Function
     override string mangle()
     {
         // TODO mangle types
-        return this.parent.mangle ~ "_" ~ this.contextType.instanceOf(Class).name ~ "_" ~ this.name;
+        return this.parent.mangle ~ "_" ~ this.contextType.instanceOf(ClassType).class_.name ~ "_" ~ this.name;
     }
 
     Type funcPtrType()
@@ -46,7 +46,7 @@ class ClassMethod : Function
 
 class IntfMethod : FunctionDeclaration
 {
-    this(Intf intfType, this.name, this.ret, this.params)
+    this(IntfType intfType, this.name, this.ret, this.params)
     {
         this.contextType = intfType;
     }
@@ -54,7 +54,7 @@ class IntfMethod : FunctionDeclaration
     override string mangle()
     {
         // TODO mangle types
-        return this.contextType.instanceOf(Intf).name ~ "_" ~ this.name;
+        return this.contextType.instanceOf(IntfType).intf.name ~ "_" ~ this.name;
     }
 
     Type funcPtrType()
@@ -66,7 +66,7 @@ class IntfMethod : FunctionDeclaration
 
 class ClassNamespace : Namespace
 {
-    Class class_;
+    ClassType class_;
 
     this(this.parent, this.class_) { this.isContextScope = true; }
 
@@ -93,8 +93,14 @@ class ClassNamespace : Namespace
  *   - reference count
  * - class data
  * - interface pointers
+ *
+ * Note: Class is *not* a type, because compiling it involves some funky magic that requires
+ * mutating class state and is awkward,
+ * so we cannot also dup it for "nullable Class" because then we wouldn't be able to handle these changes.
+ * So this is what goes on: Class is wrapped by ClassType, which is what "ClassName" resolves to.
+ * Class declarations reference Class. ClassType has nullability.
  */
-class Class : Type
+class Class
 {
     string name;
 
@@ -133,8 +139,7 @@ class Class : Type
      */
     Struct dataStruct;
 
-    this(this.decl, this.superClass, this.superIntfs, this.namespace,
-         this.zeroInitializable)
+    this(this.decl, this.superClass, this.superIntfs, this.namespace)
     {
         if (superClass && superClass.final_)
             decl.loc.fail("cannot subclass a final class");
@@ -153,133 +158,7 @@ class Class : Type
             member.type.hash(this.cachedHash);
         }
         if (this.superClass)
-            this.superClass.hash(this.cachedHash);
-    }
-
-    Class makeNullable()
-    {
-        // TODO overloading, copy constructor
-        auto result = new Class(this.decl, this.superClass, this.superIntfs,
-            this.namespace, zeroInitializable=true);
-        result.members = this.members;
-        result.methods = this.methods;
-        result.dataStruct = this.dataStruct;
-        return result;
-    }
-
-    override string mangle() {
-        return this.mangledName;
-    }
-
-    override Expression truthy(Context context, Expression value, Loc loc)
-    {
-        Expression do_(Expression value) {
-            Type voidp = once new Pointer(new Void);
-
-            return .truthy(context, new PointerCast(voidp, value), loc);
-        }
-        return context.compiler.consume(context, value, &do_);
-    }
-
-    override Protection protectionAt(Namespace namespace)
-    {
-        auto provenance = findParent!ClassNamespace(namespace);
-        if (provenance && same(provenance.class_)) return Protection.private_;
-        // TODO implement protected
-        return Protection.public_;
-    }
-
-    override Symbol accessMember(Loc loc, Context context, Expression baseExpr, string member, Protection protection)
-    {
-        bool allowed(Protection symbol) {
-            int rank(Protection p) {
-                if (p == Protection.public_) return 0;
-                if (p == Protection.protected_) return 1;
-                return 2;
-            }
-            return rank(symbol) <= rank(protection);
-        }
-        bool test(typeof(this.vtable[0]) entry) {
-            return entry.case(
-                ClassMethod m: m.name == member && allowed(m.protection),
-                (:baseOffset, size_t offs): false);
-        }
-        size_t methodOffset = [first i for i, a in vtable where test(a) else -1];
-        if (methodOffset != -1)
-        {
-            return new ClassMethodSymbol(this, baseExpr, methodOffset, staticLookup=false);
-        }
-
-        if (!baseExpr) return null;
-
-        // FIXME self-recursion in nested function
-        mut Symbol delegate(Class) recurse;
-        Symbol recurse_(Class self) {
-            size_t memberOffset = [first i for i, m in self.members where m.name == member && allowed(m.protection) else -1];
-            if (memberOffset != -1) {
-                Reference asStruct = context.compiler.dereference(
-                    new PointerCast(new Pointer(self.dataStruct), baseExpr));
-                // select "data" substruct
-                auto dataMember = new StructMemberReference(asStruct, 1);
-                // select member field
-                if (self.superClass)
-                    return new StructMemberReference(dataMember, memberOffset);
-                // skip classinfo and refs
-                return new StructMemberReference(dataMember, memberOffset + 2);
-            }
-            if (self.superClass) {
-                return recurse(self.superClass);
-            }
-            return null;
-        }
-        recurse = &recurse_;
-        return recurse(this);
-    }
-
-    override Expression implicitConvertFrom(Expression from)
-    {
-        // upcast
-        if (from.type.instanceOf(Class))
-        {
-            mut Class currentClass = from.type.instanceOf(Class);
-
-            while (currentClass)
-            {
-                if (currentClass.same(this))
-                {
-                    return new PointerCast(this, from);
-                }
-                currentClass = currentClass.superClass;
-            }
-        }
-        // = null
-        if (from.instanceOf(NullExpr))
-        {
-            return new PointerCast(this, from);
-        }
-        return null;
-    }
-
-    override Expression implicitConvertTo(Context context, Expression from, Type to)
-    {
-        // (void*) class
-        auto voidp = once new Pointer(new Void);
-
-        // disabled cause cast() now tries to implcast first
-        // and we need `cast(void*) obj` (leaking!) for `once` macro.
-        // we still need proper errors
-        // TODO maybe a dedi keyword for leaking a reference to C?
-        /*if (to.same(voidp) && from.info.ownership == Ownership.gifted)
-        {
-            print("cannot convert temporary expression to void* - where would the reference go?");
-            // TODO return (Expression | Error)
-            assert(false);
-        }*/
-        if (to.same(voidp) && from.info.ownership != Ownership.gifted)
-        {
-            return new PointerCast(voidp, from);
-        }
-        return null;
+            this.cachedHash.applyHash(this.superClass.cachedHash);
     }
 
     void resolve(Context context)
@@ -287,11 +166,6 @@ class Class : Type
         // TODO compilation stage enum
         if (this.vtableSymbol != "") return;
         this.decl.compile2(context, this);
-    }
-
-    override BackendType emit(Platform platform)
-    {
-        return platform.voidp;
     }
 
     void initDataStruct(Context context)
@@ -303,7 +177,7 @@ class Class : Type
                 "super", Protection.public_, this.superClass.dataStruct);
         } else {
             structMembers ~= new StructMemberDeclaration(
-                "super", Protection.public_, new Struct("nothing", [], this.decl.loc, this.mangle));
+                "super", Protection.public_, new Struct("nothing", [], this.decl.loc, this.mangledName));
         }
 
         StructMemberDeclaration[] dataMembers() {
@@ -319,7 +193,7 @@ class Class : Type
             return [a.toMember for a in this.members];
         }
         structMembers ~= new StructMemberDeclaration(
-            "data", Protection.public_, new Struct("data", dataMembers, this.decl.loc, this.mangle));
+            "data", Protection.public_, new Struct("data", dataMembers, this.decl.loc, this.mangledName));
 
         StructMemberDeclaration[] intfSlots() {
             int slots = [sum i.slots for i in this.superIntfs];
@@ -330,9 +204,9 @@ class Class : Type
             return ret;
         }
         structMembers ~= new StructMemberDeclaration(
-            "islots", Protection.public_, new Struct("islots", intfSlots, this.decl.loc, this.mangle));
+            "islots", Protection.public_, new Struct("islots", intfSlots, this.decl.loc, this.mangledName));
 
-        this.dataStruct = new Struct("", structMembers, this.decl.loc, this.mangle);
+        this.dataStruct = new Struct("", structMembers, this.decl.loc, this.mangledName);
     }
 
     Struct classInfoStructCache;
@@ -352,7 +226,7 @@ class Class : Type
         }
 
         auto vtableMembers = [transform(entry) for entry in vtable];
-        classInfoStructCache = new Struct("", vtableMembers, this.decl.loc, this.mangle);
+        classInfoStructCache = new Struct("", vtableMembers, this.decl.loc, this.mangledName);
         return classInfoStructCache;
     }
 
@@ -516,7 +390,8 @@ class Class : Type
         mut Class current = this;
         while (current)
         {
-            auto classinfo = new ASTSymbolHelper(new ClassInfo(current));
+            auto classType = new ClassType(current, zeroInitializable=false);
+            auto classinfo = new ASTSymbolHelper(new ClassInfo(classType));
             castStmts ~= context.compiler.$stmt if (targetClassinfo is $classinfo) {
                 // take a bonus reference because the return type isn't right
                 (cast(size_t*) this)[1] += 1;
@@ -525,8 +400,9 @@ class Class : Type
             // TODO allow recursion in nested fn
             mut void delegate(Intf) recurse;
             void recurse_(Intf intf) {
-                auto astIntf = new ASTSymbolHelper(intf);
-                auto intfClassinfo = new ASTSymbolHelper(new ClassInfo(intf));
+                auto intfType = new IntfType(intf, zeroInitializable=false);
+                auto astIntf = new ASTSymbolHelper(intfType);
+                auto intfClassinfo = new ASTSymbolHelper(new ClassInfo(intfType));
                 castStmts ~= context.compiler.$stmt if (targetClassinfo is $intfClassinfo) {
                     // take a bonus reference because the return type isn't right
                     (cast(size_t*) this)[1] += 1;
@@ -547,9 +423,10 @@ class Class : Type
         castStmts ~= context.compiler.$stmt return null;;
         auto stmt = context.compiler.astSequence(castStmts, __HERE__);
 
-        auto methodNamespace = new ClassNamespace(this.namespace, this);
+        auto classType = new ClassType(this, zeroInitializable=false);
+        auto methodNamespace = new ClassNamespace(this.namespace, classType);
         return new ClassMethod(
-            this, __HERE__, Protection.public_, override_=true, abstract_=false, "__instanceof",
+            classType, __HERE__, Protection.public_, override_=true, abstract_=false, "__instanceof",
             once new Pointer(new Void), [Parameter(false, "targetClassinfo", false, once new Pointer(new Void))],
             stmt, new MacroState, methodNamespace);
     }
@@ -570,22 +447,173 @@ class Class : Type
         recurse(this);
         auto stmt = context.compiler.astSequence(statements, __HERE__);
 
-        auto methodNamespace = new ClassNamespace(this.namespace, this);
+        auto classType = new ClassType(this, zeroInitializable=false);
+        auto methodNamespace = new ClassNamespace(this.namespace, classType);
         return new ClassMethod(
-            this, __HERE__, Protection.public_, override_=true, abstract_=false, "__destroy",
+            classType, __HERE__, Protection.public_, override_=true, abstract_=false, "__destroy",
             once new Void, [], stmt, new MacroState, methodNamespace);
+    }
+}
+
+class ClassType : Type
+{
+    Class class_;
+
+    this(this.class_, this.zeroInitializable) { }
+
+    ClassType makeNullable() {
+        return new ClassType(this.class_, zeroInitializable=true);
+    }
+
+    ClassType superClass() {
+        if (!this.class_.superClass) return null;
+        return new ClassType(this.class_.superClass, zeroInitializable=false);
+    }
+
+    IntfType[] superIntfs() {
+        return [new IntfType(a, zeroInitializable=false) for a in this.class_.superIntfs];
+    }
+
+    override Expression implicitConvertFrom(Expression from)
+    {
+        // upcast
+        if (from.type.instanceOf(ClassType))
+        {
+            mut ClassType currentClass = from.type.instanceOf(ClassType);
+
+            while (currentClass)
+            {
+                // Class implconv to nullable Class
+                if (currentClass.same(this) || currentClass.makeNullable.same(this))
+                {
+                    return new PointerCast(this, from);
+                }
+                currentClass = currentClass.superClass;
+            }
+        }
+        // = null
+        if (from.instanceOf(NullExpr))
+        {
+            return new PointerCast(this, from);
+        }
+        return null;
+    }
+
+    override BackendType emit(Platform platform)
+    {
+        return platform.voidp;
+    }
+
+    override string mangle() {
+        if (this.zeroInitializable)
+            return "nullable_" ~ this.class_.mangledName;
+        return this.class_.mangledName;
+    }
+
+    override Expression truthy(Context context, Expression value, Loc loc)
+    {
+        Expression do_(Expression value) {
+            Type voidp = once new Pointer(new Void);
+
+            return .truthy(context, new PointerCast(voidp, value), loc);
+        }
+        return context.compiler.consume(context, value, &do_);
+    }
+
+    override Protection protectionAt(Namespace namespace)
+    {
+        auto provenance = findParent!ClassNamespace(namespace);
+        if (provenance && same(provenance.class_)) return Protection.private_;
+        // TODO implement protected
+        return Protection.public_;
+    }
+
+    override Symbol accessMember(Loc loc, Context context, Expression baseExpr, string member, Protection protection)
+    {
+        bool allowed(Protection symbol) {
+            int rank(Protection p) {
+                if (p == Protection.public_) return 0;
+                if (p == Protection.protected_) return 1;
+                return 2;
+            }
+            return rank(symbol) <= rank(protection);
+        }
+        bool test(typeof(this.class_.vtable[0]) entry) {
+            return entry.case(
+                ClassMethod m: m.name == member && allowed(m.protection),
+                (:baseOffset, size_t offs): false);
+        }
+        size_t methodOffset = [first i for i, a in this.class_.vtable where test(a) else -1];
+        if (methodOffset != -1)
+        {
+            return new ClassMethodSymbol(this.class_, baseExpr, methodOffset, staticLookup=false);
+        }
+
+        if (!baseExpr) return null;
+
+        // FIXME self-recursion in nested function
+        mut Symbol delegate(Class) recurse;
+        Symbol recurse_(Class self) {
+            size_t memberOffset = [first i for i, m in self.members where m.name == member && allowed(m.protection) else -1];
+            if (memberOffset != -1) {
+                Reference asStruct = context.compiler.dereference(
+                    new PointerCast(new Pointer(self.dataStruct), baseExpr));
+                // select "data" substruct
+                auto dataMember = new StructMemberReference(asStruct, 1);
+                // select member field
+                if (self.superClass)
+                    return new StructMemberReference(dataMember, memberOffset);
+                // skip classinfo and refs
+                return new StructMemberReference(dataMember, memberOffset + 2);
+            }
+            if (self.superClass) {
+                return recurse(self.superClass);
+            }
+            return null;
+        }
+        recurse = &recurse_;
+        return recurse(this.class_);
+    }
+
+    override Expression implicitConvertTo(Context context, Expression from, Type to)
+    {
+        // (void*) class
+        auto voidp = once new Pointer(new Void);
+
+        // disabled cause cast() now tries to implcast first
+        // and we need `cast(void*) obj` (leaking!) for `once` macro.
+        // we still need proper errors
+        // TODO maybe a dedi keyword for leaking a reference to C?
+        /*if (to.same(voidp) && from.info.ownership == Ownership.gifted)
+        {
+            print("cannot convert temporary expression to void* - where would the reference go?");
+            // TODO return (Expression | Error)
+            assert(false);
+        }*/
+        if (to.same(voidp) && from.info.ownership != Ownership.gifted)
+        {
+            return new PointerCast(voidp, from);
+        }
+        return null;
     }
 
     override bool same(Type other) {
-        Class otherClass = other.instanceOf(Class);
 
-        return otherClass && otherClass.name == this.name; // TODO module
+        if (ClassType otherClass = other.instanceOf(ClassType)) {
+            // TODO module
+            return otherClass.class_.name == this.class_.name
+                && this.zeroInitializable == otherClass.zeroInitializable;
+        }
+        return false;
     }
 
-    override string repr() { return this.name; }
+    override string repr() {
+        if (this.zeroInitializable) return "nullable $(this.class_.name)";
+        return this.class_.name;
+    }
 
     override void hash(Hash hash) {
-        hash.applyHash(this.cachedHash);
+        hash.applyHash(this.class_.cachedHash);
     }
 
     override Statement copyInto(Context context, Reference target, Expression source)
@@ -605,7 +633,7 @@ class Class : Type
             context = context.withNamespace(context.compiler.exprAlias(
                         context.namespace, "neat_runtime_refcount_inc", refCountIncFun));
             context = context.withNamespace(context.compiler.exprAlias(
-                        context.namespace, "inc_name", new StringLiteral("inc " ~ this.name)));
+                        context.namespace, "inc_name", new StringLiteral("inc " ~ this.class_.name)));
 
             auto incref = context.compiler.$stmt
             if (!!this) {
@@ -646,7 +674,7 @@ class Class : Type
         context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "neat_runtime_refcount_dec", refCountDecFun));
         context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "dec_name", new StringLiteral("dec " ~ this.name)));
+                    context.namespace, "dec_name", new StringLiteral("dec " ~ this.class_.name)));
         auto stmt = context.compiler.$stmt
             if (!!this) {
                 if (neat_runtime_refcount_dec(dec_name, &(cast(size_t*) this)[1]))
@@ -669,7 +697,7 @@ class Class : Type
  * - secondary super interface layouts
  * - own methods
  */
-class Intf : Type
+class Intf
 {
     string name;
 
@@ -691,48 +719,13 @@ class Intf : Type
 
     PolyHashState mangledHash;
 
-    this(this.decl, this.superIntfs, this.namespace, this.zeroInitializable)
+    this(this.decl, this.superIntfs, this.namespace)
     {
         assert(!!decl);
         this.name = decl.name;
         this.mangledName = namespace.mangle ~ "_intf_" ~ this.name;
         auto state = poly_hash_string("Intf" ~ this.mangledName);
         this.mangledHash = PolyHashState(state.add, state.mult);
-    }
-
-    Intf makeNullable()
-    {
-        return new Intf(this.decl, this.superIntfs, this.namespace,
-            zeroInitializable=true);
-    }
-
-    override string mangle() {
-        return this.mangledName;
-    }
-
-    override Expression truthy(Context context, Expression value, Loc loc)
-    {
-        Expression do_(Expression value) {
-            Type voidp = once new Pointer(new Void);
-
-            return .truthy(context, new PointerCast(voidp, value), loc);
-        }
-        return context.compiler.consume(context, value, &do_);
-    }
-
-    override Symbol accessMember(Loc loc, Context context, Expression baseExpr, string member, Protection _)
-    {
-        bool nameMatches(typeof(vtable[0]) entry) {
-            return entry.case(
-                IntfMethod m: m.name == member,
-                (:baseOffset): false);
-        }
-        size_t methodOffset = [first i for i, a in vtable where nameMatches(a) else -1];
-        if (methodOffset != -1)
-        {
-            return new IntfMethodSymbol(this, baseExpr, methodOffset);
-        }
-        return null;
     }
 
     public int slots() {
@@ -746,89 +739,11 @@ class Intf : Type
         return recurse(this);
     }
 
-    // get slot pointer of target in our hierarchy
-    // if not found, return the number of bases traversed
-    private (Expression | int) getSlot(Intf target, Expression islotTablePtr, mut int base) {
-        // FIXME self-recursion in nested function
-        mut int delegate(Intf) recurse;
-        int recurse_(Intf current) {
-            if (current.same(target)) return base;
-            if (current.superIntfs.length == 0) {
-                base += 1;
-                return -1;
-            }
-            for (auto superIntf <- current.superIntfs) {
-                int ret = superIntf.recurse;
-                if (ret != -1) return ret;
-            }
-            return -1;
-        }
-        recurse = &recurse_;
-        int slot = recurse(this);
-        if (slot != -1) {
-            auto basePtr = new PointerCast(once new Pointer(new Pointer(new Void)), islotTablePtr);
-            return new PointerCast(target, new PointerOffset(basePtr, new IntLiteral(slot)));
-        }
-        return base;
-    }
-
-    override Expression implicitConvertFrom(Expression from)
-    {
-        // upcast
-        if (from.type.instanceOf(Class)) {
-            mut Class currentClass = from.type.instanceOf(Class);
-            while (currentClass) {
-                auto asStructRef = new Dereference(new PointerCast(
-                    new Pointer(currentClass.dataStruct), from));
-                auto islotTablePtr = new ReferenceExpression(new StructMemberReference(asStructRef, 2));
-
-                // Count up slot base over all interfaces.
-                mut int base = 0;
-                for (auto intf <- currentClass.superIntfs) {
-                    intf.getSlot(this, islotTablePtr, base).case {
-                        Expression expr: return expr;
-                        int newBase: base = newBase;
-                    }
-                }
-                currentClass = currentClass.superClass;
-            }
-            return null;
-        }
-        if (auto intf = from.type.instanceOf(Intf)) {
-            intf.getSlot(this, from, 0).case {
-                Expression expr: return expr;
-                int newBase: { }
-            }
-        }
-        // = null
-        if (from.instanceOf(NullExpr))
-        {
-            return new PointerCast(this, from);
-        }
-        return null;
-    }
-
-    override Expression implicitConvertTo(Context context, Expression from, Type to)
-    {
-        // (void*) class
-        auto voidp = once new Pointer(new Void);
-        if (to.same(voidp) && from.info.ownership != Ownership.gifted)
-        {
-            return new PointerCast(voidp, from);
-        }
-        return null;
-    }
-
     void resolve(Context context)
     {
         // TODO compilation stage enum
         if (this.classInfoSymbol != "") return;
         this.decl.compile2(context, this);
-    }
-
-    override BackendType emit(Platform platform)
-    {
-        return platform.voidp;
     }
 
     Struct intfVtableStructCache;
@@ -850,7 +765,7 @@ class Intf : Type
         }
         auto vtableMembers = [transform(method) for method in vtable];
 
-        intfVtableStructCache = new Struct("", vtableMembers, this.decl.loc, this.mangle);
+        intfVtableStructCache = new Struct("", vtableMembers, this.decl.loc, this.mangledName);
         return intfVtableStructCache;
     }
 
@@ -898,17 +813,153 @@ class Intf : Type
 
         generator.mod.defineSymbolList(classInfoSymbol, classinfo);
     }
+}
 
-    override bool same(Type other) {
-        Intf otherIntf = other.instanceOf(Intf);
+/**
+ * Like ClassType, IntfType is split off from Intf to allow setting nullable with makeNullable.
+ * This is not necessary, as opposed to ClassType, IntfType does not need any mutable state.
+ * But it's easier to understand and remember if they're consistent.
+ */
+class IntfType : Type
+{
+    Intf intf;
 
-        return otherIntf && otherIntf.name == this.name; // TODO module
+    this(this.intf, this.zeroInitializable) { }
+
+    override string mangle() {
+        if (this.zeroInitializable)
+            return "nullable_" ~ this.intf.mangledName;
+        return this.intf.mangledName;
     }
 
-    override string repr() { return this.name; }
+    IntfType[] superIntfs() {
+        return [new IntfType(a, zeroInitializable=false) for a in this.intf.superIntfs];
+    }
+
+    IntfType makeNullable() {
+        return new IntfType(this.intf, true);
+    }
+
+    // get slot pointer of target in our hierarchy
+    // if not found, return the number of bases traversed
+    private (Expression | int) getSlot(IntfType target, Expression islotTablePtr, mut int base) {
+        // FIXME self-recursion in nested function
+        mut int delegate(IntfType) recurse;
+        int recurse_(IntfType current) {
+            // implconv intf to nullable intf
+            if (current.same(target) || current.makeNullable.same(target)) return base;
+            if (current.superIntfs.length == 0) {
+                base += 1;
+                return -1;
+            }
+            for (auto superIntf <- current.superIntfs) {
+                int ret = superIntf.recurse;
+                if (ret != -1) return ret;
+            }
+            return -1;
+        }
+        recurse = &recurse_;
+        int slot = recurse(this);
+        if (slot != -1) {
+            auto basePtr = new PointerCast(once new Pointer(new Pointer(new Void)), islotTablePtr);
+            return new PointerCast(target, new PointerOffset(basePtr, new IntLiteral(slot)));
+        }
+        return base;
+    }
+
+    override Expression truthy(Context context, Expression value, Loc loc)
+    {
+        Expression do_(Expression value) {
+            Type voidp = once new Pointer(new Void);
+
+            return .truthy(context, new PointerCast(voidp, value), loc);
+        }
+        return context.compiler.consume(context, value, &do_);
+    }
+
+    override Symbol accessMember(Loc loc, Context context, Expression baseExpr, string member, Protection _)
+    {
+        bool nameMatches(typeof(this.intf.vtable[0]) entry) {
+            return entry.case(
+                IntfMethod m: m.name == member,
+                (:baseOffset): false);
+        }
+        size_t methodOffset = [first i for i, a in this.intf.vtable where nameMatches(a) else -1];
+        if (methodOffset != -1)
+        {
+            return new IntfMethodSymbol(this, baseExpr, methodOffset);
+        }
+        return null;
+    }
+
+    override Expression implicitConvertFrom(Expression from)
+    {
+        // upcast
+        if (from.type.instanceOf(ClassType)) {
+            mut ClassType currentClass = from.type.instanceOf(ClassType);
+            while (currentClass) {
+                auto asStructRef = new Dereference(new PointerCast(
+                    new Pointer(currentClass.class_.dataStruct), from));
+                auto islotTablePtr = new ReferenceExpression(new StructMemberReference(asStructRef, 2));
+
+                // Count up slot base over all interfaces.
+                mut int base = 0;
+                for (auto intfType <- currentClass.superIntfs) {
+                    intfType.getSlot(this, islotTablePtr, base).case {
+                        Expression expr: return expr;
+                        int newBase: base = newBase;
+                    }
+                }
+                currentClass = currentClass.superClass;
+            }
+            return null;
+        }
+        if (auto intfType = from.type.instanceOf(IntfType)) {
+            intfType.getSlot(this, from, 0).case {
+                Expression expr: return expr;
+                int newBase: { }
+            }
+        }
+        // = null
+        if (from.instanceOf(NullExpr))
+        {
+            return new PointerCast(this, from);
+        }
+        return null;
+    }
+
+    override Expression implicitConvertTo(Context context, Expression from, Type to)
+    {
+        // (void*) class
+        auto voidp = once new Pointer(new Void);
+        if (to.same(voidp) && from.info.ownership != Ownership.gifted)
+        {
+            return new PointerCast(voidp, from);
+        }
+        return null;
+    }
+
+    override BackendType emit(Platform platform)
+    {
+        return platform.voidp;
+    }
+
+    override bool same(Type other) {
+        if (IntfType otherIntf = other.instanceOf(IntfType)) {
+            // TODO module
+            return otherIntf.intf.name == this.intf.name
+                && otherIntf.zeroInitializable == this.zeroInitializable;
+        }
+        return false;
+    }
+
+    override string repr() {
+        if (this.zeroInitializable) return "nullable $(this.intf.name)";
+        return this.intf.name;
+    }
 
     override void hash(Hash hash) {
-        hash.apply(mangledHash.add, mangledHash.mult);
+        hash.apply(intf.mangledHash.add, intf.mangledHash.mult);
     }
 
     override Statement copyInto(Context context, Reference target, Expression source)
@@ -928,7 +979,7 @@ class Intf : Type
             context = context.withNamespace(context.compiler.exprAlias(
                         context.namespace, "neat_runtime_refcount_inc", refCountIncFun));
             context = context.withNamespace(context.compiler.exprAlias(
-                        context.namespace, "inc_name", new StringLiteral("inc " ~ this.name)));
+                        context.namespace, "inc_name", new StringLiteral("inc " ~ this.intf.name)));
 
             auto incref = context.compiler.$stmt
             if (!!this) {
@@ -971,7 +1022,7 @@ class Intf : Type
         context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "neat_runtime_refcount_dec", refCountDecFun));
         context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "dec_name", new StringLiteral("dec " ~ this.name)));
+                    context.namespace, "dec_name", new StringLiteral("dec " ~ this.intf.name)));
         auto stmt = context.compiler.$stmt
             if (!!this) {
                 auto baseOffset = **cast(size_t**) this;
@@ -992,7 +1043,7 @@ class Intf : Type
 /// This is the sense in which two classes are substitutable in parameters or return types.
 bool isStrictSubtypeOf(Type first, Type second)
 {
-    mut auto firstClass = first.instanceOf(Class), secondClass = second.instanceOf(Class);
+    mut auto firstClass = first.instanceOf(ClassType), secondClass = second.instanceOf(ClassType);
     if (firstClass && secondClass)
     {
         // TODO check interface slots here once that's a thing (count distance from each root parent?)
@@ -1042,17 +1093,17 @@ class ClassMethodSymbol : LateSymbol
 
 class IntfMethodSymbol : LateSymbol
 {
-    Intf intf; // TODO does this cause a ref cycle? remove?
+    IntfType intfType; // TODO does this cause a ref cycle? remove?
 
     // methodOffset includes base offsets.
     size_t methodOffset;
 
-    this(this.intf, this.baseExpr, this.methodOffset) {}
+    this(this.intfType, this.baseExpr, this.methodOffset) {}
 
     override Expression resolve(Context context, Expression baseExpr)
     {
         Reference classInfo = context.compiler.dereference(context.compiler.dereference(new PointerCast(
-            new Pointer(new Pointer(intf.intfVtableStruct(context))),
+            new Pointer(new Pointer(this.intfType.intf.intfVtableStruct(context))),
             baseExpr)));
         mut Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
         auto funcPtr = funcPtrValue.type.instanceOf(FunctionPointer);
@@ -1132,7 +1183,7 @@ class ASTClassDecl : ASTSymbol
     this(this.name, this.supers, this.final_, this.abstract_,
          this.members, this.macroState, this.loc) { }
 
-    override Class compile(Context context)
+    override ClassType compile(Context context)
     {
         mut Class superClass = null;
         mut Intf[] superIntfs = [];
@@ -1140,10 +1191,10 @@ class ASTClassDecl : ASTSymbol
             auto super_ = this.supers[i];
             Symbol superObj = context.namespace.lookup(super_, context, loc, null);
             this.loc.assert2s(!!superObj, "super class/intf not found: $super_");
-            auto superClassTest = superObj.instanceOf(Class);
+            auto superClassTest = superObj.instanceOf(ClassType);
             if (i == 0 && superClassTest) {
                 // first super may be a class
-                superClass = superClassTest;
+                superClass = superClassTest.class_;
             } else {
                 // all others must be intfs
                 auto superIntf = superObj.instanceOf(Intf);
@@ -1151,13 +1202,14 @@ class ASTClassDecl : ASTSymbol
                 superIntfs ~= superIntf;
             }
         }
-        return new Class(this, superClass, superIntfs, context.namespace,
+        return new ClassType(new Class(this, superClass, superIntfs, context.namespace),
             zeroInitializable=false);
     }
 
     void compile2(Context context, Class target)
     {
-        auto classScope = context.compiler.symbolAlias(context.namespace, target.name, target);
+        auto classType = new ClassType(target, zeroInitializable=false);
+        auto classScope = context.compiler.symbolAlias(context.namespace, target.name, classType);
 
         mut Context currentContext = context.withNamespace(classScope);
         mut (string name, Protection protection, Type type)[] memberFields;
@@ -1225,9 +1277,10 @@ class ASTClassDecl : ASTSymbol
                 }
             }
 
-            auto methodNamespace = new ClassNamespace(currentContext.namespace, target);
+            auto classType = new ClassType(target, zeroInitializable=false);
+            auto methodNamespace = new ClassNamespace(currentContext.namespace, classType);
             target.methods[i] = new ClassMethod(
-                target,
+                classType,
                 method.loc,
                 method.protection,
                 method.override_,
@@ -1270,7 +1323,7 @@ class ASTIntfDecl : ASTSymbol
 
     this(this.name, this.superIntfs, this.members, this.macroState, this.loc) { }
 
-    override Intf compile(Context context)
+    override IntfType compile(Context context)
     {
         mut Intf[] superIntfs = [];
         if (this.superIntfs.length > 0)
@@ -1283,12 +1336,15 @@ class ASTIntfDecl : ASTSymbol
                 superIntfs ~= superIntf;
             }
         }
-        return new Intf(this, superIntfs, context.namespace, zeroInitializable=false);
+        return new IntfType(
+            new Intf(this, superIntfs, context.namespace),
+            zeroInitializable=false);
     }
 
     void compile2(Context context, Intf target)
     {
-        auto intfScope = context.compiler.symbolAlias(context.namespace, target.name, target);
+        auto intfType = new IntfType(target, zeroInitializable=false);
+        auto intfScope = context.compiler.symbolAlias(context.namespace, target.name, intfType);
 
         mut Context currentContext = context.withNamespace(intfScope);
 
@@ -1303,7 +1359,7 @@ class ASTIntfDecl : ASTSymbol
                     }
 
                     target.methods ~= new IntfMethod(
-                        target,
+                        intfType,
                         method.name,
                         beType(method.loc, method.ret.compile(currentContext)),
                         methodParams);
@@ -1524,7 +1580,7 @@ ASTIntfDecl parseIntfDecl(Parser parser, LexicalContext lexicalContext)
 
 class ClassInfo : Expression
 {
-    (Class | Intf) classType;
+    (ClassType | IntfType) classType;
 
     this(this.classType) {
         this.type = once new Pointer(new Void);
@@ -1533,13 +1589,13 @@ class ClassInfo : Expression
     override int emit(Generator output)
     {
         this.classType.case {
-            Class class_: {
-                class_.declare(output);
-                return output.fun.symbolList(class_.vtableSymbol);
+            ClassType classType: {
+                classType.class_.declare(output);
+                return output.fun.symbolList(classType.class_.vtableSymbol);
             }
-            Intf intf: {
-                intf.declare(output);
-                return output.fun.symbolList(intf.classInfoSymbol);
+            IntfType intfType: {
+                intfType.intf.declare(output);
+                return output.fun.symbolList(intfType.intf.classInfoSymbol);
             }
         }
     }
@@ -1549,15 +1605,15 @@ class ClassInfo : Expression
     override void hash(Hash hash) {
         hash.adds("ClassInfo");
         classType.case {
-            Class class_: class_.hash(hash);
-            Intf intf: intf.hash(hash);
+            ClassType classType: classType.hash(hash);
+            IntfType intfType: intfType.hash(hash);
         }
     }
 }
 
 class NewClassExpression : Expression
 {
-    Class classType;
+    ClassType classType;
 
     this(this.classType) {
         this.type = this.classType;
@@ -1570,7 +1626,7 @@ class NewClassExpression : Expression
         BackendType sizeT = output.platform.nativeWordType;
         auto basicClassStruct = new BackendStructType([voidp, sizeT]);
 
-        int classDataSize = this.classType.dataStruct.emit(output.platform).size(output.platform);
+        int classDataSize = this.classType.class_.dataStruct.emit(output.platform).size(output.platform);
         int classInfoPtr = (new ClassInfo(classType)).emit(output);
         int classPtr = output.fun.call(
             voidp, "neat_runtime_alloc", [output.fun.wordLiteral(output.platform, classDataSize)]);
@@ -1580,8 +1636,8 @@ class NewClassExpression : Expression
         int refCount = output.fun.fieldOffset(basicClassStruct, classPtr, 1);
         int one = output.fun.wordLiteral(output.platform, 1);
         // write interface slot pointers
-        for (int i <- 0 .. classType.vtable.length) {
-            classType.vtable[i].case {
+        for (int i <- 0 .. classType.class_.vtable.length) {
+            classType.class_.vtable[i].case {
                 ClassMethod method: continue;
                 (:baseOffset, size_t offset): {
                     // void*[] class_islot1;
@@ -1633,12 +1689,12 @@ class ASTInstanceOf : ASTSymbol
         Expression base = beExpression3(context, this.base.compile(context), loc);
         auto type = base.type;
         loc.assert2s(
-            type.instanceOf(Class) || type.instanceOf(Intf),
+            type.instanceOf(ClassType) || type.instanceOf(IntfType),
             "Base of instanceOf must be class or interface.");
         Expression do_(Expression base) {
             auto targetSym = target.compile(context);
-            Class targetClass = targetSym.instanceOf(Class);
-            Intf targetIntf = targetSym.instanceOf(Intf);
+            ClassType targetClass = targetSym.instanceOf(ClassType);
+            IntfType targetIntf = targetSym.instanceOf(IntfType);
             Type target() {
                 if (targetClass) return targetClass;
                 else return targetIntf;
@@ -1703,7 +1759,7 @@ class ASTNewExpression : ASTSymbol
     {
         Type type = beType(this.loc, this.type.compile(context));
 
-        if (Class classType = type.instanceOf(Class)) {
+        if (ClassType classType = type.instanceOf(ClassType)) {
             Expression classptr = new NewClassExpression(classType);
 
             this.loc.assert2s2(!!classType, "expected new <class>, not %s", type.repr);
@@ -1746,13 +1802,13 @@ class ASTNewExpression : ASTSymbol
 
 class Super : Symbol
 {
-    Class class_;
+    ClassType classType;
 
-    this(this.class_) { }
+    this(this.classType) { }
 
     Symbol lookup(Context context, string name, Loc loc) {
-        auto superClass = this.class_.superClass;
-        bool matches(typeof(class_.vtable[0]) entry) {
+        auto superClass = this.classType.class_.superClass;
+        bool matches(typeof(this.classType.class_.vtable[0]) entry) {
             return entry.case(
                 ClassMethod m: m.name == name,
                 (:baseOffset, size_t): false);
@@ -1801,10 +1857,10 @@ class ASTNullable : ASTSymbol
 
     override Symbol compile(Context context) {
         auto next = beType(this.loc, this.next.compile(context));
-        if (auto class_ = next.instanceOf(Class))
-            return class_.makeNullable;
-        else if (auto intf_ = next.instanceOf(Intf))
-            return intf_.makeNullable;
+        if (auto classType = next.instanceOf(ClassType))
+            return classType.makeNullable;
+        else if (auto intfType = next.instanceOf(IntfType))
+            return intfType.makeNullable;
         this.loc.fail("Cannot mark type as nullable: $(next.repr)");
     }
 }

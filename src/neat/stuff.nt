@@ -1981,11 +1981,27 @@ class ASTIfStatement : ASTStatement
                 auto pair = vardecl.compile(context);
                 prelude = pair.statement;
                 testSucceedsContext = pair.context;
-                // TODO lookup() that handles the stackframe thing
                 auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
-                test = beExpression3(context,
-                    testSucceedsContext.namespace.lookup(vardecl.name, context, this.loc, stackframe),
-                    this.loc);
+                auto var = testSucceedsContext.namespace.lookup(
+                    vardecl.name, context, this.loc, stackframe).beExpression;
+                // `if (auto var = (some nullable Foo))`
+                // since var must be non-null, rebind it to type `Foo`.
+                if (var.type.zeroInitializable && (
+                    var.type.instanceOf(ClassType) || var.type.instanceOf(IntfType)))
+                {
+                    Type notNullableType() {
+                        if (auto classType = var.type.instanceOf(ClassType)) return classType.makeNotNullable;
+                        if (auto intfType = var.type.instanceOf(IntfType)) return intfType.makeNotNullable;
+                        assert(false);
+                    }
+                    auto symbolAlias = new SymbolAlias(
+                        testSucceedsContext.namespace,
+                        vardecl.name,
+                        new PointerCast(notNullableType, var));
+                    testSucceedsContext = testSucceedsContext.withNamespace(symbolAlias);
+                }
+                // TODO lookup() that handles the stackframe thing
+                test = beExpression3(context, var, this.loc);
             }
             ASTVarExtractDeclStatement extractdecl: {
                 // validate source is Either

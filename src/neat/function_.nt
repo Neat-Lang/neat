@@ -19,7 +19,7 @@ class Function : FunctionDeclaration
 
     MacroState macroState;
 
-    Namespace parent;
+    nullable Namespace parent;
 
     bool hasThisArg;
 
@@ -72,7 +72,8 @@ class Function : FunctionDeclaration
 
     CompiledFunction compile(CompilerBase compiler, Platform platform)
     {
-        auto stackframe = new FunctionScope(compiler, this.ret, this.contextType, this.parent, this.mangle, this.loc);
+        auto stackframe = new FunctionScope(
+            compiler, this.ret, this.contextType, notNull!Namespace(this.parent), this.mangle, this.loc);
         mut Namespace scope_ = stackframe;
         mut int extra = 0;
         if (this.contextType)
@@ -80,14 +81,14 @@ class Function : FunctionDeclaration
 
         auto argAssignments = new Statement[](this.params.length + extra);
 
-        mut VariableDeclaration thisDecl;
-        if (this.contextType)
+        mut nullable VariableDeclaration thisDecl;
+        if (auto contextType = this.contextType)
         {
             // unnamed variable because of "first field in stackframe is 'this'" logic
             mut string framePtrName;
             if (this.hasThisArg) framePtrName = "this";
             thisDecl = new VariableDeclaration(
-                scope_, framePtrName, this.contextType, ExprInfo(false, Ownership.borrowed), framePtrName == "");
+                scope_, framePtrName, contextType, ExprInfo(false, Ownership.borrowed), framePtrName == "");
 
             Type voidp = once new Pointer(new Void);
 
@@ -95,7 +96,7 @@ class Function : FunctionDeclaration
 
             argAssignments[0] = compiler.assignStatement(
                 thisDecl.accessDecl(compiler),
-                new PointerCast(this.contextType, new ArgExpr(0, voidp)));
+                new PointerCast(contextType, new ArgExpr(0, voidp)));
         }
 
         mut auto context = makeContext(compiler, platform, scope_, this.macroState);
@@ -111,10 +112,11 @@ class Function : FunctionDeclaration
                         context, thisDecl.accessDecl(context.compiler), param.name, this.loc, false)
                     .instanceOf(Reference);
                 this.loc.assert2s2(!!target, "not a reference: ", param.name);
+                auto target = notNull!Reference(target);
 
-                mut auto stmt = param.type.copyInto(context, target, argExpr);
-                if (!stmt) stmt = compiler.assignStatement(target, argExpr);
-                argAssignments[extra + i] = stmt;
+                if (auto copy = param.type.copyInto(context, target, argExpr))
+                    argAssignments[extra + i] = copy;
+                else argAssignments[extra + i] = compiler.assignStatement(target, argExpr);
             } else {
                 if (param.mutable) {
                     // we're mutable, but functions borrow the caller args - copy them, then declare the arg owned.
@@ -122,17 +124,15 @@ class Function : FunctionDeclaration
                         scope_, param.name, param.type, ExprInfo(true, Ownership.owned), false);
                     auto target = argDecl.accessDecl(context.compiler);
 
-                    mut auto assign = param.type.copyInto(context, target, argExpr);
-                    if (!assign) assign = compiler.assignStatement(target, argExpr);
-
-                    argAssignments[extra + i] = assign;
+                    if (auto assign = param.type.copyInto(context, target, argExpr))
+                        argAssignments[extra + i] = assign;
+                    else argAssignments[extra + i] = compiler.assignStatement(target, argExpr);
                     scope_ = argDecl;
                 } else {
                     auto argDecl = new VariableDeclaration(
                         scope_, param.name, param.type, ExprInfo(false, Ownership.borrowed), false);
 
                     argAssignments[extra + i] = compiler.assignStatement(argDecl.accessDecl(context.compiler), argExpr);
-
                     scope_ = argDecl;
                 }
             }
@@ -222,7 +222,7 @@ class FunctionScope : Namespace
 
     Type ret;
 
-    Type extra;
+    nullable Type extra;
 
     StructMemberDeclaration[] variables;
 
@@ -251,16 +251,16 @@ class FunctionScope : Namespace
 
     override string mangle() { return this.mangle_; }
 
-    override Symbol lookup(string name, Context context, Loc loc, Expression frame)
+    override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression frame)
     {
         assert(!!this.parent);
 
-        mut Expression nextFrame;
+        mut nullable Expression nextFrame;
         if (this.extra && frame)
         {
             // first field in stackframe must be parent
             // TODO better?
-            auto framePtr = new PointerCast(once new Pointer(new Pointer(new Void)), frame);
+            auto framePtr = new PointerCast(once new Pointer(new Pointer(new Void)), notNull!Expression(frame));
 
             nextFrame = context.compiler.dereference(framePtr);
         }
@@ -299,10 +299,10 @@ class VariableDeclaration : DeclarationHolder
         return new InfoReference(reference, info);
     }
 
-    override Symbol lookup(string name, Context context, Loc loc, Expression frame)
+    override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression frame)
     {
         // Frame may be null for struct nested in function.
-        if (frame) {
+        if (auto frame = frame) {
             if (this.variable.name == name) {
                 return access(context.compiler, frame);
             }
@@ -393,11 +393,11 @@ class ArgExpr : Expression
         {
             mut bool mutable;
             if (parser.acceptIdentifier("mut")) mutable = true;
-            ASTSymbol argtype = lexicalContext.compiler.parseType(parser, lexicalContext);
+            nullable ASTSymbol argtype = lexicalContext.compiler.parseType(parser, lexicalContext);
             parser.assert_(!!argtype, "argument type expected");
             string argname = parseIdentifier(parser);
             parser.assert_(argname.length > 0, "argument name expected");
-            params ~= ASTParameter(name=argname, mutable, argtype, loc);
+            params ~= ASTParameter(name=argname, mutable, notNull!ASTSymbol(argtype), loc);
         }
     }
     return params;

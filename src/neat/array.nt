@@ -63,9 +63,10 @@ class Array : Type
 
     override bool same(Type other)
     {
-        Array otherArray = other.instanceOf(Array);
-
-        return otherArray && otherArray.elementType.same(this.elementType);
+        if (auto otherArray = other.instanceOf(Array)) {
+            return otherArray.elementType.same(this.elementType);
+        }
+        return false;
     }
 
     override string repr() { return this.elementType.repr ~ "[]"; }
@@ -74,11 +75,11 @@ class Array : Type
 
     override void hash(Hash hash) { hash.adds("array"); this.elementType.hash(hash); }
 
-    override Statement copyInto(Context context, Reference target, Expression source)
+    override nullable Statement copyInto(Context context, Reference target, Expression source)
     {
         auto compiler = context.compiler;
 
-        Statement assign(Expression source) {
+        nullable Statement assign(Expression source) {
             mut auto context = context.withNamespace(context.compiler.exprAlias(context.namespace, "source", source));
             auto refCountIncFun = once new FunctionDeclaration(
                 "neat_runtime_refcount_inc", new Void, [
@@ -98,23 +99,26 @@ class Array : Type
         return compiler.stmtWithTemporaryExpr(source, &assign);
     }
 
-    override Statement endLifetime(Context context, Reference reference)
+    override nullable Statement endLifetime(Context context, Reference reference)
     {
         return context.compiler.exprStatement(releaseArray(context, reference));
     }
 
-    override Symbol accessMember(Loc loc, Context context, Expression base, string field, Protection _)
+    override nullable Symbol accessMember(
+        Loc loc, Context context, nullable Expression base, string field, Protection _)
     {
-        if (field == "length")
-            return new ArrayLength(base, context.nativeWordType);
-        if (field == "ptr")
-            return new ArrayPointer(this.elementType, base);
-        if (field == "base")
-            return new ArrayBase(base);
+        if (auto base = base) {
+            if (field == "length")
+                return new ArrayLength(base, context.nativeWordType);
+            if (field == "ptr")
+                return new ArrayPointer(this.elementType, base);
+            if (field == "base")
+                return new ArrayBase(base);
+        }
         return null;
     }
 
-    override Expression binaryOp(Context context, string op, Expression left, Expression right, Loc loc) {
+    override nullable Expression binaryOp(Context context, string op, Expression left, Expression right, Loc loc) {
         if (op == "==" && right.type.instanceOf(Array)) {
             Expression do1(Expression left) {
                 Expression do2(Expression right) {
@@ -195,7 +199,7 @@ class ArrayPointer : Expression
     {
         int arrayReg = this.arrayValue.emit(output);
 
-        return getArrayPtr(output, this.arrayValue.type.instanceOf(Array), arrayReg);
+        return getArrayPtr(output, notNull!Array(this.arrayValue.type.instanceOf(Array)), arrayReg);
     }
 
     override ExprInfo info() { return ExprInfo(false, Ownership.global); }
@@ -305,10 +309,10 @@ class ArraySlice : Expression
 
     this(this.base, this.lower, this.upper, this.loc) {
         auto baseType = this.base.type;
-        if (baseType.instanceOf(Array)) {
-            this.arrayType = baseType.instanceOf(Array);
-        } else if (baseType.instanceOf(Pointer)) {
-            this.arrayType = new Array(baseType.instanceOf(Pointer).target);
+        if (auto arrayType = baseType.instanceOf(Array)) {
+            this.arrayType = arrayType;
+        } else if (auto pointerType = baseType.instanceOf(Pointer)) {
+            this.arrayType = new Array(pointerType.target);
         } else {
             this.loc.assert2s(false, "slice of non-array/non-pointer");
         }
@@ -356,9 +360,8 @@ class ArraySlice : Expression
 Expression arrayEqual(Context context, Expression left, Expression right) {
     auto compiler = context.compiler;
 
-    Array leftArray = left.type.instanceOf(Array);
-    Array rightArray = right.type.instanceOf(Array);
-    assert(leftArray && rightArray);
+    Array leftArray = notNull!Array(left.type.instanceOf(Array));
+    Array rightArray = notNull!Array(right.type.instanceOf(Array));
     assert(leftArray.same(rightArray));
 
     Parameter[] params = [
@@ -385,8 +388,7 @@ Expression arrayEqual(Context context, Expression left, Expression right) {
 Expression releaseArray(Context context, Expression value) {
     auto compiler = context.compiler;
 
-    Array array = value.type.instanceOf(Array);
-    assert(!!array);
+    Array array = notNull!Array(value.type.instanceOf(Array));
     Parameter[] params = [Parameter(false, "value", false, array)];
 
     ASTStatement body_()
@@ -410,8 +412,7 @@ Expression releaseArray(Context context, Expression value) {
 Expression arrayCat(Context context, Expression left, Expression right, Loc loc) {
     auto compiler = context.compiler;
 
-    Array leftArray = left.type.instanceOf(Array);
-    assert(!!leftArray);
+    Array leftArray = notNull!Array(left.type.instanceOf(Array));
     Parameter[] params = [
         Parameter(false, "left", false, leftArray),
         Parameter(false, "right", false, right.type)];
@@ -468,10 +469,11 @@ Expression arrayCat(Context context, Expression left, Expression right, Loc loc)
     auto astLeft = new ASTSymbolHelper(left);
     auto astRight = new ASTSymbolHelper(right);
 
-    return compiler.call(context, astFn, [ASTArgument(astLeft, ""), ASTArgument(astRight, "")], loc, false);
+    return notNull!Expression(
+        compiler.call(context, astFn, [ASTArgument(astLeft, ""), ASTArgument(astRight, "")], loc, false));
 }
 
-ASTSymbol parseArrayLiteral(Parser parser, LexicalContext lexicalContext)
+nullable ASTSymbol parseArrayLiteral(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto loc = parser.loc;
@@ -482,7 +484,7 @@ ASTSymbol parseArrayLiteral(Parser parser, LexicalContext lexicalContext)
     mut ASTArrayLiteralElement[] values;
     while (!parser.accept("]")) {
         auto loc = parser.loc;
-        ASTSymbol value = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+        ASTSymbol value = notNull!ASTSymbol(lexicalContext.compiler.parseExpression(parser, lexicalContext));
         values ~= ASTArrayLiteralElement(value, loc);
         parser.accept(",");
     }
@@ -504,7 +506,7 @@ class EmptyArrayType : Type
         return !!other.instanceOf(EmptyArrayType);
     }
 
-    override Expression implicitConvertTo(Context context, Expression source, Type target)
+    override nullable Expression implicitConvertTo(Context context, Expression source, Type target)
     {
         if (target.instanceOf(Array)) {
             return new EmptyArrayLiteral(target);
@@ -519,13 +521,11 @@ class EmptyArrayType : Type
 
 class EmptyArrayLiteral : Expression
 {
-    Type type_; // may be null
+    nullable Type type_; // may be null
 
     this(this.type_) {
-        this.type = this.type_;
-        if (!this.type) {
-            this.type = new EmptyArrayType;
-        }
+        if (auto type = this.type_) this.type = type; // Very good code.
+        else this.type = new EmptyArrayType;
     }
 
     override int emit(Generator generator) {
@@ -561,7 +561,7 @@ struct ASTArrayLiteralElement
 
 class ASTArrayLiteral : ASTSymbol
 {
-    ASTSymbol typeHint;
+    nullable ASTSymbol typeHint;
 
     ASTArrayLiteralElement[] elements;
 
@@ -577,14 +577,14 @@ class ASTArrayLiteral : ASTSymbol
             if (this.typeHint) {
                 return beType(__HERE__, this.typeHint.compile(context));
             }
-            mut Expression mergedReference;
+            mut nullable Expression mergedReference;
             for (int i <- 0 .. this.elements.length) {
                 if (!mergedReference) mergedReference = values[i];
                 else {
                     // TODO centralize somewhere
                     auto value = values[i];
                     auto left = context.compiler.implicitConvertTo(context, value, mergedReference.type);
-                    auto right = context.compiler.implicitConvertTo(context, mergedReference, value.type);
+                    auto right = context.compiler.implicitConvertTo(context, notNull!Expression(mergedReference), value.type);
                     if (!left && !right)
                         this.elements[i].loc.assert2s(false, "incompatible expression type");
                     else if (left && right && !left.type.same(right.type))
@@ -597,12 +597,12 @@ class ASTArrayLiteral : ASTSymbol
         }
         auto mergeType = getType();
         for (int i <- 0 .. this.elements.length) {
-            assert(!!values[i]);
-            values[i] = context.compiler.implicitConvertTo(context, values[i], mergeType);
-            assert(!!values[i]);
+            if (auto castValue = context.compiler.implicitConvertTo(context, values[i], mergeType))
+                values[i] = castValue;
+            else assert(false);
         }
         auto target = new ArrayAllocation(mergeType, values.length);
-        Expression do_(Expression target) {
+        nullable Expression do_(Expression target) {
             mut Statement[] moves;
             auto base = new ArrayPointer(mergeType, target);
             for (int i <- 0 .. values.length) {
@@ -613,7 +613,7 @@ class ASTArrayLiteral : ASTSymbol
             return context.compiler.statementExpression(
                 context.compiler.sequenceStatement(moves), target);
         }
-        return context.compiler.exprWithTemporaryExpr(target, &do_);
+        return notNull!Expression(context.compiler.exprWithTemporaryExpr(target, &do_));
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTArrayLiteral'"); assert(false); }
@@ -635,7 +635,7 @@ class ASTArrayLength : ASTSymbol
             "'\$' can only be used inside an array index context");
 
         return new ArrayLength(
-            surroundingArraySymbol.instanceOf(Expression),
+            notNull!Expression(surroundingArraySymbol.instanceOf(Expression)),
             context.nativeWordType);
     }
 

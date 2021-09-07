@@ -14,11 +14,11 @@ class ASTListComprehension : ASTSymbol
 {
     string iterationMode; // "", "any", "all", "first", "join", "count", "sum", "min", "max"
 
-    ASTSymbol expr;
+    nullable ASTSymbol expr;
 
-    ASTSymbol default_;
+    nullable ASTSymbol default_;
 
-    ASTSymbol joinKey;
+    nullable ASTSymbol joinKey;
 
     string iname; // iteration variable
 
@@ -26,7 +26,7 @@ class ASTListComprehension : ASTSymbol
 
     ASTSymbol source;
 
-    ASTSymbol where;
+    nullable ASTSymbol where;
 
     Loc loc;
 
@@ -47,7 +47,7 @@ class ASTListComprehension : ASTSymbol
         if (iterationMode == "count") {
             loc.assert2s(!expr, "no expr for count");
             mut auto test = compiler.$expr true;
-            if (where) test = compiler.$expr $where && $test;
+            if (auto where = where) test = compiler.$expr $where && $test;
             return (compiler.$expr ({
                 auto __source = $source;
                 mut int __count = 0;
@@ -59,13 +59,27 @@ class ASTListComprehension : ASTSymbol
             })).compile(context);
         }
 
-        auto astType = compiler.$type typeof(({ auto $varname = $source[0]; size_t $iname = 0; $expr; }));
-        auto type = astType.compile(context);
+        auto expr = notNull!ASTSymbol(this.expr);
+        mut auto astType = compiler.$type typeof(({ auto $varname = $source[0]; size_t $iname = 0; $expr; }));
+        mut auto type = astType.compile(context);
+
+        bool defaultIsNullExpr() {
+            // FIXME ?.
+            if (auto default_ = default_)
+                if (auto default_ = default_.instanceOf(ASTIdentifier))
+                    return default_.name == "null";
+            return false;
+        }
+
+        if (defaultIsNullExpr && context.compiler.isClassType(notNull!Type(type.instanceOf(Type)))) {
+            astType = compiler.$type nullable $astType;
+            type = astType.compile(context);
+        }
 
         if (type.instanceOf(Void)) {
             loc.assert2s(iterationMode == "", "non-void expression expected");
             assert(!default_);
-            if (where) {
+            if (auto where = where) {
                 return (compiler.$expr ({
                     auto __source = $source;
                     for (mut size_t $iname = 0; $i < __source.length; $i += 1) {
@@ -86,7 +100,7 @@ class ASTListComprehension : ASTSymbol
         } else if (iterationMode == "any") {
             assert(!default_);
             mut auto test = expr;
-            if (where) test = compiler.$expr $where && $test;
+            if (auto where = where) test = compiler.$expr $where && $test;
             return (compiler.$expr ({
                 auto __source = $source;
                 mut bool __result = false;
@@ -99,7 +113,7 @@ class ASTListComprehension : ASTSymbol
         } else if (iterationMode == "all") {
             assert(!default_);
             mut auto test = compiler.$expr !$expr;
-            if (where) test = compiler.$expr $where && $test;
+            if (auto where = where) test = compiler.$expr $where && $test;
             return (compiler.$expr ({
                 auto __source = $source;
                 mut bool __result = true;
@@ -112,7 +126,8 @@ class ASTListComprehension : ASTSymbol
         } else if (iterationMode == "join") {
             assert(!default_);
             mut auto test = compiler.$expr true;
-            if (where) test = compiler.$expr $where && $test;
+            if (auto where = where) test = compiler.$expr $where && $test;
+            auto joinKey = notNull!ASTSymbol(this.joinKey);
             return (compiler.$expr ({
                 auto __source = $source;
                 mut string __result;
@@ -131,26 +146,28 @@ class ASTListComprehension : ASTSymbol
                 __result;
             })).compile(context);
         } else if (iterationMode == "first") {
-            assert(!!default_);
             mut auto test = compiler.$expr true;
-            if (where) test = where;
+            if (auto where = where) test = where;
+            mut ASTStatement setDefault = compiler.$stmt assert(__found);;
+            if (auto default_ = default_) {
+                setDefault = compiler.$stmt if (!__found) __result = $default_;;
+            }
             return (compiler.$expr ({
                 auto __source = $source;
                 mut auto __found = false;
-                mut $astType __result;
+                mut uninitialized $astType __result;
                 for (mut size_t $iname = 0; $i < __source.length; $i += 1) {
                     auto $varname = __source[$i];
                     __result = $expr;
                     if ($test) { __found = true; break; }
                 }
-                // TODO for (...) { } finally { }
-                if (!__found) __result = $default_;
+                $stmt setDefault;
                 __result;
             })).compile(context);
         } else if (iterationMode == "sum") {
             assert(!default_);
             mut auto test = compiler.$expr true;
-            if (where) test = where;
+            if (auto where = where) test = where;
             return (compiler.$expr ({
                 auto __source = $source;
                 mut $astType __sum = 0;
@@ -162,12 +179,10 @@ class ASTListComprehension : ASTSymbol
             })).compile(context);
         } else if (iterationMode == "min") {
             mut auto test = compiler.$expr true;
-            if (where) test = where;
-            mut ASTSymbol init;
-            if (default_) {
-                init = default_;
-            } else {
-                init = compiler.$expr ({ assert(false); $astType __unreachable; __unreachable; });
+            if (auto where = where) test = where;
+            ASTSymbol init() {
+                if (auto ret = default_) return ret;
+                return compiler.$expr ({ assert(false); $astType __unreachable; __unreachable; });
             }
             return (compiler.$expr ({
                 auto __source = $source;
@@ -191,12 +206,11 @@ class ASTListComprehension : ASTSymbol
             })).compile(context);
         } else if (iterationMode == "max") {
             mut auto test = compiler.$expr true;
-            if (where) test = where;
-            mut ASTSymbol init;
-            if (default_) {
-                init = default_;
-            } else {
-                init = compiler.$expr ({ assert(false); $astType __unreachable; __unreachable; });
+            if (auto where = where) test = where;
+            // FIXME mangle with line
+            ASTSymbol init2() {
+                if (auto ret = default_) return ret;
+                return compiler.$expr ({ assert(false); $astType __unreachable; __unreachable; });
             }
             return (compiler.$expr ({
                 auto __source = $source;
@@ -215,12 +229,12 @@ class ASTListComprehension : ASTSymbol
                     }
                 }
                 __max.case(
-                    (:initial): $init,
+                    (:initial): $init2,
                     $astType v: v);
             })).compile(context);
         } else {
             assert(iterationMode == "");
-            if (where) {
+            if (auto where = where) {
                 return (compiler.$expr ({
                     auto __source = $source;
                     mut $astType[] __result;
@@ -250,13 +264,15 @@ class ListComprehension : Macro
 {
     this() { }
     override void apply(MacroArgs args) {
-        auto args = args.instanceOf(ParseExpressionBaseArgs);
-        if (args) {
-            args.symbol = this.parse(args.parser, args.lexicalContext);
+        if (auto args = args.instanceOf(ParseExpressionBaseArgs)) {
+            if (auto ret = this.parse(args.parser, args.lexicalContext))
+                args.symbol = ret;
+            // FIXME
+            // args.symbol = this.parse(args.parser, args.lexicalContext);
         }
     }
 
-    ASTSymbol parse(Parser parser, LexicalContext lexicalContext)
+    nullable ASTSymbol parse(Parser parser, LexicalContext lexicalContext)
     {
         auto compiler = lexicalContext.compiler;
         auto loc = parser.loc();
@@ -267,8 +283,8 @@ class ListComprehension : Macro
             return null;
         }
         mut string iterationMode;
-        mut ASTSymbol default_;
-        mut ASTSymbol joinKey;
+        mut nullable ASTSymbol default_;
+        mut nullable ASTSymbol joinKey;
         if (acceptIdentifier(parser, "any")) iterationMode = "any";
         else if (acceptIdentifier(parser, "all")) iterationMode = "all";
         else if (acceptIdentifier(parser, "first")) iterationMode = "first";
@@ -286,7 +302,7 @@ class ListComprehension : Macro
         }
         else if (acceptIdentifier(parser, "min")) iterationMode = "min";
         else if (acceptIdentifier(parser, "max")) iterationMode = "max";
-        mut ASTSymbol expr;
+        mut nullable ASTSymbol expr;
         // count is expressionless
         if (iterationMode != "count") {
             expr = compiler.parseExpression(parser, lexicalContext);
@@ -316,7 +332,8 @@ class ListComprehension : Macro
         if (!source) {
             parser.fail("source expression expected");
         }
-        mut ASTSymbol where;
+        auto source = notNull!ASTSymbol(source);
+        mut nullable ASTSymbol where;
         if (acceptIdentifier(parser, "where")) {
             where = compiler.parseExpression(parser, lexicalContext);
             if (!where) {
@@ -324,9 +341,9 @@ class ListComprehension : Macro
             }
         }
         if (iterationMode == "first") {
-            if (!acceptIdentifier(parser, "else"))
-                parser.fail("'else' expected");
-            default_ = compiler.parseExpression(parser, lexicalContext);
+            if (acceptIdentifier(parser, "else")) {
+                default_ = compiler.parseExpression(parser, lexicalContext);
+            }
         }
         else if (iterationMode == "min" || iterationMode == "max") {
             if (acceptIdentifier(parser, "base"))

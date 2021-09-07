@@ -491,10 +491,14 @@ at_revision '722ff03fae70a368c0f8dce18d6086f25dabb0ca' 'rebuild neat' 'build/nea
 at_revision 'f0f8b5ed0ed3c9f390257ab3c8b93f4c63d2662a' 'rebuild neat' 'build/neat'
 # improved "unexpected number of arguments" error
 at_revision '5fcfa62f1a0296636786e5bccabe06221d5581c0' 'rebuild neat' 'build/neat'
-# `version {} else {}`
+# 'else' block for 'version'
 at_revision '9ff2dce082c61102373350bf0e3e154ed184418f' 'rebuild neat' 'build/neat'
 # Add 'uninitialized' keyword to variable declaration, stage 1
 at_revision '2d67d6203922f3927742938a26ebff99fe5d795b' 'rebuild neat' 'build/neat'
+# stage 2, make 'nullable T' quotable, add 'isClassType'
+# bugfix `if (auto c = nullable class)`
+# bugfix mut uninitialized (A | B) varname
+at_revision '2aa2b17865ebe204fd606accf52b9c49a17312ed' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

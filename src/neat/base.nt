@@ -24,7 +24,7 @@ abstract class Symbol
  */
 abstract class Namespace
 {
-    Namespace parent; // lexical parent
+    nullable Namespace parent; // lexical parent
 
     bool isContextScope;
 
@@ -44,7 +44,7 @@ abstract class Namespace
      *          When looking up outer variables in nested functions, the frame pointer
      *          is taken from the inner stackframe.
      */
-    abstract Symbol lookup(string name, Context context, Loc loc, Expression frame) {
+    abstract nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression frame) {
         assert(false);
     }
 
@@ -90,7 +90,7 @@ abstract class LoopScope : Namespace
     abstract Statement breakFrom(Context context) { assert(false); }
     abstract Statement continueFrom(Context context) { assert(false); }
     // purely a marker
-    override Symbol lookup(string name, Context context, Loc loc, Expression frame) {
+    override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression frame) {
         return this.parent.lookup(name, context, loc, frame);
     }
 }
@@ -104,7 +104,7 @@ class SymbolAlias : Namespace
 
     this(this.parent, this.name, this.value) { this.isContextScope = parent.isContextScope; }
 
-    override Symbol lookup(string name, Context context, Loc loc, Expression frame)
+    override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression frame)
     {
         if (this.name == name) return value;
         if (this.parent) return this.parent.lookup(name, context, loc, frame);
@@ -113,10 +113,11 @@ class SymbolAlias : Namespace
 }
 
 template findParent(T) {
-    T findParent(Namespace namespace) {
-        auto hit = namespace.instanceOf(T);
-        if (hit) return hit;
-        if (namespace.parent) return findParent!T(namespace.parent);
+    nullable T findParent(nullable Namespace namespace) {
+        if (auto namespace = namespace) {
+            if (auto hit = namespace.instanceOf(T)) return hit;
+            if (auto parent = namespace.parent) return findParent!T(parent);
+        }
         return null;
     }
 }
@@ -158,18 +159,18 @@ abstract class Type : Symbol
 
     bool zeroInitializable;
 
-    Expression implicitConvertFrom(Expression source)
+    nullable Expression implicitConvertFrom(Expression source)
     {
         return null;
     }
 
     // TODO take Loc
-    Expression implicitConvertTo(Context context, Expression source, Type target)
+    nullable Expression implicitConvertTo(Context context, Expression source, Type target)
     {
         return null;
     }
 
-    Expression truthy(Context context, Expression expr, Loc loc)
+    nullable Expression truthy(Context context, Expression expr, Loc loc)
     {
         return null;
     }
@@ -178,7 +179,7 @@ abstract class Type : Symbol
      * Called to create a copy of an expression in a target.
      * Note that `target` is considered uninitialized and must not be destroyed!
      */
-    Statement copyInto(Context context, Reference target, Expression source)
+    nullable Statement copyInto(Context context, Reference target, Expression source)
     {
         return null;
     }
@@ -186,7 +187,7 @@ abstract class Type : Symbol
     /**
      * Called when a scoped expression goes out of scope.
      */
-    Statement endLifetime(Context context, Reference reference)
+    nullable Statement endLifetime(Context context, Reference reference)
     {
         return null;
     }
@@ -205,7 +206,8 @@ abstract class Type : Symbol
      * Called to resolve 'value.field'.
      * If 'base' is null, this indicates a static field access, 'Type.field'.
      */
-    Symbol accessMember(Loc loc, Context context, Expression base, string field, Protection protection)
+    nullable Symbol accessMember(
+        Loc loc, Context context, nullable Expression base, string field, Protection protection)
     {
         return null;
     }
@@ -213,7 +215,8 @@ abstract class Type : Symbol
     /**
      * Called to resolve `value.field(args)`.
      */
-    Expression callMember(Context context, Expression base, string field, ASTArgument[] args, Protection protection, Loc loc)
+    nullable Expression callMember(
+        Context context, nullable Expression base, string field, ASTArgument[] args, Protection protection, Loc loc)
     {
         return null;
     }
@@ -221,7 +224,7 @@ abstract class Type : Symbol
     /**
      * Called to resolve `base[index]`.
      */
-    Expression index(Context context, Expression base, Expression index, Loc loc)
+    nullable Expression index(Context context, Expression base, Expression index, Loc loc)
     {
         return null;
     }
@@ -229,7 +232,7 @@ abstract class Type : Symbol
     /**
      * Called to resolve `base[index] = value`.
      */
-    Statement indexAssignment(Context context, Expression base, Expression index, Expression value, Loc loc)
+    nullable Statement indexAssignment(Context context, Expression base, Expression index, Expression value, Loc loc)
     {
         return null;
     }
@@ -237,7 +240,7 @@ abstract class Type : Symbol
     /**
      * Called to resolve 'lhs op rhs' where op is a binary operator.
      */
-    Expression binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
+    nullable Expression binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
     {
         return null;
     }
@@ -245,7 +248,7 @@ abstract class Type : Symbol
     /**
      * Called to resolve 'Type(a, b, c)'.
      */
-    Expression call(Context context, Loc loc, ASTArgument[] args)
+    nullable Expression call(Context context, Loc loc, ASTArgument[] args)
     {
         return null;
     }
@@ -285,9 +288,9 @@ class Pointer : Type
 
     override bool same(Type other)
     {
-        Pointer otherPtr = other.instanceOf(Pointer);
-
-        return otherPtr && this.target.same(otherPtr.target);
+        if (auto otherPtr = other.instanceOf(Pointer))
+            return this.target.same(otherPtr.target);
+        return false;
     }
 
     override string repr() { return this.target.repr ~ "*"; }
@@ -297,11 +300,22 @@ class Pointer : Type
     override void hash(Hash hash) { hash.adds("pointer"); target.hash(hash); }
 }
 
+class NoopStatement : Statement
+{
+    this() { }
+
+    override void emit(Generator generator)
+    {
+    }
+
+    override void hash(Hash hash) { hash.adds("NoopStatement"); }
+}
+
 class Generator
 {
     BackendModule mod;
 
-    BackendFunction fun;
+    nullable BackendFunction fun;
 
     Platform platform;
 
@@ -363,19 +377,18 @@ Expression beExpression(Symbol symbol)
 {
     if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
         return new SymbolIdentifierExpression(symbolIdent.name);
-    Expression expr = symbol.instanceOf(Expression);
-    assert(!!expr);
-    return expr;
+    if (auto expr = symbol.instanceOf(Expression))
+        return expr;
+    assert(false);
 }
 
 Expression beExpression2(Symbol symbol, Loc loc)
 {
     if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
         return new SymbolIdentifierExpression(symbolIdent.name);
-    Expression expr = symbol.instanceOf(Expression);
-
-    loc.assert2s(!!expr, "expression expected");
-    return expr;
+    if (auto expr = symbol.instanceOf(Expression))
+        return expr;
+    loc.fail("expression expected");
 }
 
 Type beType(Loc loc, Symbol symbol)
@@ -521,7 +534,7 @@ class FunctionDeclaration : Symbol
 
     Parameter[] params;
 
-    Type contextType; // must be a pointer
+    nullable Type contextType; // must be a pointer
 
     this(this.name, this.ret, this.params)
     {
@@ -649,15 +662,15 @@ abstract class CompilerBase
     string[] cFlags;
 
     // parser
-    abstract ASTSymbol parseExpression(Parser parser, LexicalContext lexicalContext) { assert(false); }
+    abstract nullable ASTSymbol parseExpression(Parser parser, LexicalContext lexicalContext) { assert(false); }
 
-    abstract ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext) { assert(false); }
+    abstract nullable ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext) { assert(false); }
 
-    abstract ASTSymbol parseType(Parser parser, LexicalContext lexicalContext) { assert(false); }
+    abstract nullable ASTSymbol parseType(Parser parser, LexicalContext lexicalContext) { assert(false); }
 
     abstract ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext) { assert(false); }
 
-    abstract ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalContext) { assert(false); }
+    abstract nullable ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalContext) { assert(false); }
 
     abstract ASTStatement astExpressionStmt(ASTSymbol expr, Loc loc) { assert(false); }
 
@@ -666,7 +679,7 @@ abstract class CompilerBase
     // sequence of statements that don't open a new scope
     abstract ASTStatement astSequence(ASTStatement[] stmts, Loc loc) { assert(false); }
 
-    abstract ASTStatement astIf(ASTSymbol test, ASTStatement then, ASTStatement else_, Loc loc) { assert(false); }
+    abstract ASTStatement astIf(ASTSymbol test, ASTStatement then, nullable ASTStatement else_, Loc loc) { assert(false); }
 
     abstract ASTStatement astForLoop(
         ASTStatement init, ASTSymbol test, ASTStatement step, ASTStatement body_, Loc loc) {
@@ -676,28 +689,14 @@ abstract class CompilerBase
     abstract ASTStatement astAssign(ASTSymbol target, ASTSymbol source, Loc loc) { assert(false); }
 
     abstract ASTStatement astDeclareVar(
-        string name, bool mutable, bool uninitialized, ASTSymbol initial, Loc loc)
-    {
-        assert(false);
-    }
-
-    // FIXME remove this
-    abstract ASTStatement astDeclareVar2(
-        string name, bool mutable, bool uninitialized, ASTSymbol initial, Loc loc)
+        string name, bool mutable, bool uninitialized, nullable ASTSymbol initial, Loc loc)
     {
         assert(false);
     }
 
     // initial is optional
     abstract ASTStatement astDeclareTypedVar(
-        string name, bool mutable, bool uninitialized, ASTSymbol type, ASTSymbol initial, Loc loc)
-    {
-        assert(false);
-    }
-
-    // FIXME remove this
-    abstract ASTStatement astDeclareTypedVar2(
-        string name, bool mutable, bool uninitialized, ASTSymbol type, ASTSymbol initial, Loc loc)
+        string name, bool mutable, bool uninitialized, ASTSymbol type, nullable ASTSymbol initial, Loc loc)
     {
         assert(false);
     }
@@ -733,7 +732,7 @@ abstract class CompilerBase
         return astArrayLiteralTypeHint(null, values, loc);
     }
 
-    abstract ASTSymbol astArrayLiteralTypeHint(ASTSymbol typeHint, ASTSymbol[] values, Loc loc) { assert(false); }
+    abstract ASTSymbol astArrayLiteralTypeHint(nullable ASTSymbol typeHint, ASTSymbol[] values, Loc loc) { assert(false); }
 
     abstract ASTSymbol astTupleLiteral(ASTSymbol[] entries, Loc loc) { assert(false); }
 
@@ -766,7 +765,7 @@ abstract class CompilerBase
     abstract ASTSymbol astNullable(ASTSymbol next, Loc loc) { assert(false); }
 
     // expressions and statements
-    abstract Expression implicitConvertTo(Context context, Expression from, Type to) { assert(false); }
+    abstract nullable Expression implicitConvertTo(Context context, Expression from, Type to) { assert(false); }
 
     abstract Expression binaryOp(string op, Context context, Expression left, Expression right, Loc loc) {
         assert(false);
@@ -784,12 +783,12 @@ abstract class CompilerBase
 
     abstract Reference stackFrame(Type type) { assert(false); }
 
-    abstract Expression plainCall(Context context, Symbol sym, Expression[] args, Loc loc,
+    abstract nullable Expression plainCall(Context context, Symbol sym, Expression[] args, Loc loc,
         bool isImplCall) {
         assert(false);
     }
 
-    abstract Expression call(Context context, ASTSymbol target, ASTArgument[] args, Loc loc,
+    abstract nullable Expression call(Context context, ASTSymbol target, ASTArgument[] args, Loc loc,
         bool isImplCall) {
         assert(false);
     }
@@ -807,10 +806,10 @@ abstract class CompilerBase
 
     abstract Expression reference(Reference ref_) { assert(false); }
 
-    abstract Expression wrap(Statement before, Expression value, Statement after) { assert(false); }
+    abstract Expression wrap(nullable Statement before, Expression value, nullable Statement after) { assert(false); }
 
     // wrap(), allowing References
-    abstract Expression wrapRef(Statement before, Expression value, Statement after) { assert(false); }
+    abstract Expression wrapRef(nullable Statement before, Expression value, nullable Statement after) { assert(false); }
 
     // Call dg with expr or copy of expr.
     // If expr was a gift, it is freed after.
@@ -827,36 +826,45 @@ abstract class CompilerBase
     ///
     /// Set `mayUnwind` to true if `dg()` may unwind.
     /// in that case, borrowed `expr` must be copied.
-    abstract Expression consumeTemporary(
-            Context context, bool allowRefReturn, bool mayUnwind, Expression expr, Expression delegate(Reference) dg) {
+    abstract nullable Expression consumeTemporary(
+            Context context, bool allowRefReturn, bool mayUnwind, Expression expr,
+            nullable Expression delegate(Reference) dg)
+    {
         assert(false);
     }
 
-    abstract Statement consumeTemporaryStmt(Context context, Expression expr, Statement delegate(Reference) dg) {
+    abstract nullable Statement consumeTemporaryStmt(
+        Context context, Expression expr, nullable Statement delegate(Reference) dg)
+    {
         assert(false);
     }
 
-    abstract Symbol accessMember(Context context, Symbol base, string member, Loc loc, bool allowUndefined) {
+    abstract nullable Symbol accessMember(Context context, Symbol base, string member, Loc loc, bool allowUndefined) {
         assert(false);
     }
 
     abstract Reference structMemberReference(Reference base, int index) { assert(false); }
 
-    abstract Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc loc, bool allowUndefined)
+    abstract nullable Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc loc, bool allowUndefined)
     {
         assert(false);
     }
 
     // look up name following the namespace in context
-    abstract Symbol lookup(Context context, Loc loc, string name) { assert(false); }
+    abstract nullable Symbol lookup(Context context, Loc loc, string name) { assert(false); }
 
     abstract Statement assignStatement(Reference target, Expression value) { assert(false); }
 
-    abstract Statement sequence(Statement first, Statement second) { assert(false); }
+    abstract Statement sequence(Statement first, nullable Statement second) { assert(false); }
+
+    Statement sequence2(nullable Statement first, Statement second) {
+        if (auto first = first) return sequence(first, second);
+        return second;
+    }
 
     abstract Statement sequenceStatement(Statement[] stmts) { assert(false); }
 
-    abstract Statement ifStatement(Expression test, Statement then, Statement else_) { assert(false); }
+    abstract Statement ifStatement(Expression test, Statement then, nullable Statement else_) { assert(false); }
 
     abstract Statement loopStatement(
             Context context, Statement initializer, Expression test, Statement body_, Statement step) {
@@ -871,18 +879,22 @@ abstract class CompilerBase
 
     /// Create a temporary of `type`. Temporary is passed to `callback`, which returns an initializer.
     /// Returns Expression evaluating to "Initializer, then temporary".
-    abstract Expression exprWithScratchspace(Type type, bool temporary, Statement delegate(Reference) callback) { assert(false); }
+    abstract nullable Expression exprWithScratchspace(
+        Type type, bool temporary, nullable Statement delegate(Reference) callback) { assert(false); }
 
     abstract Statement unwindScope(Context context, Namespace target, Statement next) { assert(false); }
 
-    abstract Statement stmtWithTemporary(Expression value, Statement delegate(Reference) callback) { assert(false); }
+    abstract nullable Statement stmtWithTemporary(
+        Expression value, nullable Statement delegate(Reference) callback) { assert(false); }
 
-    abstract Expression exprWithTemporary(Expression value, Expression delegate(Reference) callback) { assert(false); }
+    abstract nullable Expression exprWithTemporary(
+        Expression value, nullable Expression delegate(Reference) callback) { assert(false); }
 
     // don't create referenceable memory
-    abstract Statement stmtWithTemporaryExpr(Expression value, Statement delegate(Expression) callback) { assert(false); }
+    abstract nullable Statement stmtWithTemporaryExpr(
+        Expression value, nullable Statement delegate(Expression) callback) { assert(false); }
 
-    abstract Expression exprWithTemporaryExpr(Expression value, Expression delegate(Expression) callback) { assert(false); }
+    abstract nullable Expression exprWithTemporaryExpr(Expression value, nullable Expression delegate(Expression) callback) { assert(false); }
 
     abstract Expression referenceFunction(FunctionDeclaration decl) { assert(false); }
 
@@ -897,13 +909,13 @@ abstract class CompilerBase
         assert(false);
     }
 
-    Namespace exprAlias(Namespace parent, string name, Symbol value) {
+    Namespace exprAlias(nullable Namespace parent, string name, Symbol value) {
         return symbolAlias(parent, name, value);
     }
 
-    abstract Namespace symbolAlias(Namespace parent, string name, Symbol value) { assert(false); }
+    abstract Namespace symbolAlias(nullable Namespace parent, string name, Symbol value) { assert(false); }
 
-    abstract DeclarationHolder variableDeclaration(Namespace parent, string name, Type type, ExprInfo info, bool hidden) {
+    abstract DeclarationHolder variableDeclaration(nullable Namespace parent, string name, Type type, ExprInfo info, bool hidden) {
         assert(false);
     }
 
@@ -915,8 +927,7 @@ abstract class CompilerBase
 
     Expression expectImplicitConvertTo(Context context, Expression from, Type to, Loc loc)
     {
-        auto result = implicitConvertTo(context, from, to);
-        if (result) return result;
+        if (auto result = implicitConvertTo(context, from, to)) return result;
         loc.assert2s4(false, "Cannot convert to ", to.repr, ": ", from.type.repr);
     }
 
@@ -953,7 +964,7 @@ struct Context
 
     Platform platform;
 
-    Namespace namespace;
+    nullable Namespace namespace;
 
     MacroState macroState;
 
@@ -971,7 +982,7 @@ struct Context
     string getLabel() { return "uniq$(idCounter.next)"; }
 }
 
-Expression isExpressionImplCall(Symbol symbol, Context context, Loc loc)
+nullable Expression isExpressionImplCall(Symbol symbol, Context context, Loc loc)
 {
     if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
         return new SymbolIdentifierExpression(symbolIdent.name);
@@ -979,10 +990,10 @@ Expression isExpressionImplCall(Symbol symbol, Context context, Loc loc)
     // implicit function calls
     // TODO check if we should propagate this upcall
     auto astSymbol = new ASTSymbolHelper(symbol);
-    mut Expression expr = context.compiler.call(context, astSymbol, [], loc, true);
-    // mut Expression expr = context.compiler.plainCall(context, symbol, [], loc, true);
-    if (!expr) expr = symbol.instanceOf(Expression);
-    return expr;
+    // if (auto expr = context.compiler.plainCall(context, symbol, [], loc, true))
+    if (auto expr = context.compiler.call(context, astSymbol, [], loc, true))
+        return expr;
+    return symbol.instanceOf(Expression);
 }
 
 Expression beExpression3(Context context, Symbol symbol, Loc loc)
@@ -992,12 +1003,12 @@ Expression beExpression3(Context context, Symbol symbol, Loc loc)
 
 Expression beExpressionImplCall(Symbol symbol, Context context, Loc loc)
 {
-    auto expr = symbol.isExpressionImplCall(context, loc);
-    loc.assert2s(!!expr, "expression expected");
-    return expr;
+    if (auto expr = symbol.isExpressionImplCall(context, loc))
+        return expr;
+    loc.fail("expression expected");
 }
 
-Context makeContext(CompilerBase compiler, Platform platform, Namespace namespace, MacroState macroState)
+Context makeContext(CompilerBase compiler, Platform platform, nullable Namespace namespace, MacroState macroState)
 {
     return Context(
         compiler, platform, namespace, macroState, compiler.nativeWordType(platform), new IdCounter);
@@ -1058,18 +1069,20 @@ class ASTIdentifier : ASTSymbol
 
     override Symbol compile(Context context)
     {
-        mut Symbol symbol;
-        if (this.moduleLevel) {
-            auto module_ = findParent!ModuleBase(context.namespace);
-            symbol = module_.lookup(this.name, context, loc, null);
-        } else if (context.namespace.isContextScope) {
-            auto stackframe = context.compiler.reference(context.compiler.stackFrame(new Void));
-            symbol = context.namespace.lookup(this.name, context, loc, stackframe);
-        } else {
-            symbol = context.namespace.lookup(this.name, context, loc, null);
+        nullable Symbol resolve() {
+            if (this.moduleLevel) {
+                auto module_ = findParent!ModuleBase(context.namespace);
+                return module_.lookup(this.name, context, loc, null);
+            } else if (context.namespace.isContextScope) {
+                auto stackframe = context.compiler.reference(context.compiler.stackFrame(new Void));
+                return context.namespace.lookup(this.name, context, loc, stackframe);
+            } else {
+                return context.namespace.lookup(this.name, context, loc, null);
+            }
         }
+        nullable Symbol symbol = resolve;
         this.loc.assert2s2(!!symbol, this.name, " not found");
-        return symbol;
+        return notNull!Symbol(symbol);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -1131,7 +1144,7 @@ class CallMacroArgs : MacroArgs
     ASTArgument[] args;
     Context context;
     Loc loc;
-    Expression transformed; // out
+    nullable Expression transformed; // out
     this(this.target, this.args, this.context, this.loc) {
         this.transformed = null;
     }
@@ -1143,7 +1156,7 @@ class ParseExpressionBaseArgs : MacroArgs
 {
     Parser parser;
     LexicalContext lexicalContext;
-    ASTSymbol symbol; // out
+    nullable ASTSymbol symbol; // out
     this(this.parser, this.lexicalContext) {
         this.symbol = null;
     }
@@ -1156,7 +1169,7 @@ class ParsePropertyArgs : MacroArgs
     Parser parser;
     LexicalContext lexicalContext;
     ASTSymbol left;
-    ASTSymbol result; // out
+    nullable ASTSymbol result; // out
     this(this.parser, this.lexicalContext, this.left) {
         this.result = null;
     }
@@ -1168,7 +1181,7 @@ class ParseStatementArgs : MacroArgs
 {
     Parser parser;
     LexicalContext lexicalContext;
-    ASTStatement statement; // out
+    nullable ASTStatement statement; // out
     this(this.parser, this.lexicalContext) {
         this.statement = null;
     }
@@ -1180,7 +1193,7 @@ class ParseImportArgs : MacroArgs
 {
     Parser parser;
     LexicalContext lexicalContext;
-    ASTModuleBase module_; // out
+    nullable ASTModuleBase module_; // out
     this(this.parser, this.lexicalContext) {
         this.module_ = null;
     }

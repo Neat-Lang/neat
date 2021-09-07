@@ -37,9 +37,9 @@ class Struct : Type
 
     override bool same(Type other) {
         // TODO mangling
-        Struct otherStruct = other.instanceOf(Struct);
-        if (!otherStruct) return false;
-        return this.name == otherStruct.name;
+        if (auto otherStruct = other.instanceOf(Struct))
+            return this.name == otherStruct.name;
+        return false;
     }
 
     override BackendStructType emit(Platform platform)
@@ -69,7 +69,9 @@ class Struct : Type
         return Protection.public_;
     }
 
-    override Symbol accessMember(Loc loc, Context context, Expression baseExpr, string member, Protection protection) {
+    override nullable Symbol accessMember(
+        Loc loc, Context context, nullable Expression baseExpr, string member, Protection protection)
+    {
         bool allowed(Protection symbol) {
             int rank(Protection p) {
                 if (p == Protection.public_) return 0;
@@ -78,15 +80,17 @@ class Struct : Type
             return rank(symbol) <= rank(protection);
         }
 
-        size_t memberOffset = [
-            first i for i, a in this.members
-            where a.name == member && allowed(a.protection)
-            else -1];
-        if (baseExpr && memberOffset != -1) {
-            if (auto reference = baseExpr.instanceOf(Reference)) {
-                return new StructMemberReference(reference, memberOffset);
+        if (auto baseExpr = baseExpr) {
+            size_t memberOffset = [
+                first i for i, a in this.members
+                where a.name == member && allowed(a.protection)
+                else -1];
+            if (memberOffset != -1) {
+                if (auto reference = baseExpr.instanceOf(Reference)) {
+                    return new StructMemberReference(reference, memberOffset);
+                }
+                return new StructMember(baseExpr, memberOffset);
             }
-            return new StructMember(baseExpr, memberOffset);
         }
         size_t methodOffset = [
             first i for i, a in this.methods
@@ -102,7 +106,7 @@ class Struct : Type
                 // TODO dereference-into-symbol so we can '&' it again
                 auto funcPtr = context.compiler.referenceFunction(method);
                 loc.assert2s(!!baseExpr, "non-static method cannot be called on type");
-                return new ClassMethodPtr(funcPtr, baseExpr, false, method.name);
+                return new ClassMethodPtr(funcPtr, notNull!Expression(baseExpr), false, method.name);
             }
         }
         return null;
@@ -123,7 +127,7 @@ class Struct : Type
         hash.applyHash(preHash);
     }
 
-    FunctionDeclaration getDtor()
+    nullable FunctionDeclaration getDtor()
     {
         return [first method for method in this.methods where method.name == "__dtor" else null];
     }
@@ -138,7 +142,7 @@ class Struct : Type
             else null];
     }
 
-    Statement callAutoDtor(Context context, Reference ref_)
+    nullable Statement callAutoDtor(Context context, Reference ref_)
     {
         auto compiler = context.compiler;
 
@@ -161,30 +165,34 @@ class Struct : Type
         ASTStatement body_ = compiler.astSequence(calls, __HERE__);
         // auto fn = compiler.createRuntimeFunction(context, "structrelease", new Void, params, body_);
         // return compiler.call(fn, [compiler.reference(ref_)], loc);
-        Statement do_(Expression refptr) {
+        nullable Statement do_(Expression refptr) {
             auto context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "ptr", refptr));
 
             return body_.compile(context).statement;
         }
-        return context.compiler.stmtWithTemporaryExpr(compiler.reference(ref_), &do_);
+        return notNull!Statement(context.compiler.stmtWithTemporaryExpr(compiler.reference(ref_), &do_));
     }
 
-    Statement copyRecursive(Context context, Reference target, Expression source)
+    nullable Statement copyRecursive(Context context, Reference target, Expression source)
     {
         auto compiler = context.compiler;
 
-        Statement do1(Expression targetptr) {
+        nullable Statement do1(Expression targetptr) {
             auto target = compiler.dereference(targetptr);
-            Statement do2(Expression source) {
+            nullable Statement do2(Expression source) {
                 mut Statement[] assigns;
                 mut bool anySpecialAssignments;
                 for (int i <- 0 .. members.length) {
                     auto targetField = new StructMemberReference(target, i);
                     auto sourceField = new StructMember(source, i);
-                    mut auto copyInto = members[i].type.copyInto(context, targetField, sourceField);
-                    if (copyInto) anySpecialAssignments = true;
-                    if (!copyInto) copyInto = compiler.assignStatement(targetField, sourceField);
+                    Statement copyInto() {
+                        if (auto stmt = members[i].type.copyInto(context, targetField, sourceField)) {
+                            anySpecialAssignments = true;
+                            return stmt;
+                        }
+                        return compiler.assignStatement(targetField, sourceField);
+                    }
                     assigns ~= copyInto;
                 }
                 if (!anySpecialAssignments) return null;
@@ -195,7 +203,7 @@ class Struct : Type
         return context.compiler.stmtWithTemporaryExpr(compiler.reference(target), &do1);
     }
 
-    override Statement copyInto(Context context, Reference target, Expression source)
+    override nullable Statement copyInto(Context context, Reference target, Expression source)
     {
         FunctionDeclaration copyCtor = getCopyCtor;
         if (copyCtor) {
@@ -209,17 +217,18 @@ class Struct : Type
         return null;
     }
 
-    override Statement endLifetime(Context context, Reference ref_)
+    override nullable Statement endLifetime(Context context, Reference ref_)
     {
-        FunctionDeclaration destructor = getDtor;
         Expression ptr = context.compiler.castTo(new Pointer(new Void), new ReferenceExpression(ref_));
-        mut Statement callDtor;
-        if (destructor) callDtor = new ExprStatement(new Call(destructor, [ptr], this.loc));
-        Statement callAutoDtor_ = callAutoDtor(context, ref_);
-        return sequence(callDtor, callAutoDtor_);
+        nullable Statement callAutoDtor_ = callAutoDtor(context, ref_);
+        if (auto destructor = getDtor) {
+            auto callDtor = new ExprStatement(new Call(destructor, [ptr], this.loc));
+            return sequence(callDtor, callAutoDtor_);
+        }
+        return callAutoDtor_;
     }
 
-    override Expression call(Context context, Loc loc, ASTArgument[] args)
+    override nullable Expression call(Context context, Loc loc, ASTArgument[] args)
     {
         loc.assert2s(args.length == this.members.length, "invalid number of args for struct constructor");
 
@@ -246,18 +255,18 @@ class Struct : Type
         return new StatementExpression(initialize, temp, false);
     }
 
-    override Expression binaryOp(Context context, string op, Expression left, Expression right, Loc loc) {
+    override nullable Expression binaryOp(Context context, string op, Expression left, Expression right, Loc loc) {
         if (op == "==" && right.type.same(left.type)) {
             // TODO this is shit, factor expr and temporary shit out into one generic function
             Expression do1(Expression left) {
                 Expression do2(Expression right) {
-                    Expression do3(Expression left) {
-                        Expression do4(Expression right) {
+                    nullable Expression do3(Expression left) {
+                        nullable Expression do4(Expression right) {
                             return structEqual(context, left, right, loc);
                         }
                         return context.compiler.exprWithTemporaryExpr(right, &do4);
                     }
-                    return context.compiler.exprWithTemporaryExpr(left, &do3);
+                    return notNull!Expression(context.compiler.exprWithTemporaryExpr(left, &do3));
                 }
                 return context.compiler.consume(context, right, &do2);
             }
@@ -273,8 +282,11 @@ Expression structEqual(Context context, Expression left, Expression right, Loc l
     for (int i <- 0 .. structType.members.length) {
         auto leftField = new StructMember(left, i);
         auto rightField = new StructMember(right, i);
-        mut auto cmp = leftField.type.binaryOp(context, "==", leftField, rightField, loc);
-        if (!cmp) cmp = new BinaryOp("==", leftField, rightField, loc);
+        Expression cmp() {
+            if (auto eq = leftField.type.binaryOp(context, "==", leftField, rightField, loc))
+                return eq;
+            return new BinaryOp("==", leftField, rightField, loc);
+        }
         test = new BoolAnd(test, cmp);
     }
     return test;
@@ -290,8 +302,7 @@ class StructMember : Expression
 
     this(this.base, this.index)
     {
-        this.structType = this.base.type.instanceOf(Struct);
-        assert(!!structType);
+        this.structType = notNull!Struct(this.base.type.instanceOf(Struct));
         this.type = this.structType.members[this.index].type;
     }
 
@@ -320,8 +331,7 @@ class StructMemberReference : Reference
 
     this(this.base, this.index)
     {
-        this.structType = this.base.type.instanceOf(Struct);
-        assert(!!this.structType);
+        this.structType = notNull!Struct(this.base.type.instanceOf(Struct));
         this.type = this.structType.members[this.index].type;
     }
 
@@ -457,12 +467,11 @@ class StructNamespace : Namespace
 
     this(this.parent, this.struct_) { this.isContextScope = true; }
 
-    override Symbol lookup(string name, Context context, Loc loc, Expression thisPtr)
+    override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression thisPtr)
     {
-        mut Expression thisPtr = thisPtr;
         // TODO early name check?
-        if (thisPtr) {
-            thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr);
+        if (auto thisPtr = thisPtr) {
+            auto thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr); // This is good code. Good code.
             if (auto result = context.compiler.accessMemberWithLifetime(
                     context, thisPtr, name, loc, true))
                 return result;
@@ -487,7 +496,7 @@ class StructMethod : Function
 
     string mangledName;
 
-    this(this.loc, Struct structType, Namespace namespace, this.static_, this.protection, this.name,
+    this(this.loc, Struct structType, nullable Namespace namespace, this.static_, this.protection, this.name,
          this.ret, this.params, this.statement, this.macroState)
     {
         // TODO super()
@@ -715,7 +724,7 @@ class ASTStructDecl2 : ASTDeclaration
     override string repr() { return name; }
 }
 
-ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
+nullable ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
     parser.begin;
@@ -763,7 +772,7 @@ ASTStructEntry[] parseStructEntry(Parser parser, LexicalContext lexicalContext)
     }
     mut ASTStructEntry[] entries;
     mut bool static_ = false;
-    mut ASTSymbol memberType;
+    mut nullable ASTSymbol memberType;
     mut string memberName;
     mut Protection protection = Protection.public_;
     auto loc = parser.loc;
@@ -808,7 +817,7 @@ ASTStructEntry[] parseStructEntry(Parser parser, LexicalContext lexicalContext)
             memberName != "__dtor" || params.length == 0, "destructor cannot take parameters");
         ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext);
         entries ~= ASTStructMethod(
-            parser.loc, static_, protection, memberName, memberType, params, stmt);
+            parser.loc, static_, protection, memberName, notNull!ASTSymbol(memberType), params, stmt);
     }
     else
     {
@@ -816,7 +825,7 @@ ASTStructEntry[] parseStructEntry(Parser parser, LexicalContext lexicalContext)
         void addMember() {
             parser.assert_(memberName != "__ctor", "constructor cannot be member");
             parser.assert_(memberName != "__dtor", "destructor cannot be member");
-            entries ~= (memberName, protection, memberType);
+            entries ~= (memberName, protection, notNull!ASTSymbol(memberType));
         }
         addMember;
         while (!parser.accept(";")) {

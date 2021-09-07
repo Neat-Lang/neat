@@ -98,8 +98,7 @@ class ObjectCache
     }
 
     BackgroundCompilation get(string earlyHash) {
-        typeof(entries[0]) nothing;
-        auto entry = [first a for a in entries where a.earlyHash == earlyHash else nothing];
+        auto entry = [first a for a in entries where a.earlyHash == earlyHash];
         return BackgroundCompilation(entry.resultHash, entry.srcFile, entry.objFile, entry.pid);
     }
 
@@ -243,9 +242,10 @@ class BuildSettings
     PlatformFlags platformFlags;
 
     Platform platform() {
-        mut BackendType macroWordType;
-        if (x86_32) macroWordType = new BackendIntType;
-        else macroWordType = new BackendLongType;
+        BackendType macroWordType() {
+            if (x86_32) return new BackendIntType;
+            else return new BackendLongType;
+        }
         return new Platform(macroWordType, platformFlags, versions);
     }
 
@@ -314,7 +314,7 @@ class ParserHelperImpl : ParserHelper
         else assert(false);
         if (settings.x86_32) baseCmd ~= " -m32";
 
-        auto simpleContext = makeContext(settings.compiler, settings.platform, null, null);
+        auto simpleContext = makeContext(settings.compiler, settings.platform, null, new MacroState);
         auto fun = result.module_.lookup(function_, simpleContext, __HERE__, null).instanceOf(Function);
         string name = fun.mangle;
         mut string soname;
@@ -386,7 +386,7 @@ Package[] resolvePackages(ASTPackage[] astPackages, string execPath) {
     for (int i <- 0 .. astPackages.length) {
         auto astPackage = astPackages[i];
         for (auto dep <- astPackage.deps) {
-            mut Package foundDep;
+            mut nullable Package foundDep;
             for (auto resultPak <- result) {
                 if (resultPak.name == dep) {
                     if (foundDep) print("Dependency '$dep' of '$(astPackage.name)' exists twice!");
@@ -399,7 +399,7 @@ Package[] resolvePackages(ASTPackage[] astPackages, string execPath) {
                 print("Missing package dependency: $dep");
                 assert(false);
             }
-            result[i].addDependency(foundDep);
+            result[i].addDependency(notNull!Package(foundDep));
         }
     }
     return result;
@@ -834,31 +834,35 @@ void main(mut string[] args)
             print("package.json not found.");
             exit(1);
         });*/
-        mut BinaryPackageFile pkgFile;
-        loadPkgFile(".").case {
-            PackageFile file: pkgFile = file.instanceOf(BinaryPackageFile);
-            (:notFound): {
-                print("package.json not found.");
-                exit(1);
+        BinaryPackageFile pkgFile() {
+            loadPkgFile(".").case {
+                PackageFile file: return notNull!BinaryPackageFile(file.instanceOf(BinaryPackageFile));
+                (:notFound): {
+                    print("package.json not found.");
+                    exit(1);
+                }
             }
         }
+        auto pkgFile = pkgFile;
         options.output = pkgFile.binary;
         mut PackageLock packageLock = loadPkgLock(".").case(
             PackageLock f: f,
             (:notFound): new PackageLock([]));
         // default commandline packages
         auto ret = resolvePackageVersions("src", ".", packages, [], packageLock, new VersionProvider);
-        mut Package pkg;
-        ret.case {
-            (:mismatched): {
-                print("Package resolution failed. :-(");
-                exit(1);
-            }
-            (Package package_, PackageLock resultLock): {
-                packageLock = resultLock;
-                pkg = package_;
+        Package pkg() {
+            ret.case {
+                (:mismatched): {
+                    print("Package resolution failed. :-(");
+                    exit(1);
+                }
+                (Package package_, PackageLock resultLock): {
+                    packageLock = resultLock;
+                    return package_;
+                }
             }
         }
+        auto pkg = pkg;
         writePkgLock(packageLock, ".");
         packages ~= pkg;
         buildBinary(options, pkgFile.main, execPath=execPath, packages);

@@ -15,13 +15,12 @@ import neat.types;
 Expression expectImplicitConvertTo(Context context, Expression from, Type to, Loc loc)
 {
     loc.assert2s(!!to, "no implconv target type");
-    auto result = implicitConvertTo(context, from, to);
-    if (result) return result;
+    if (auto result = implicitConvertTo(context, from, to)) return result;
     loc.assert2s4(false, "Cannot convert to ", to.repr, ": ", from.type.repr);
 }
 
 // TODO implicitConvertTo should only require Type - ie. return a Expression function(Expression).
-Expression implicitConvertTo(Context context, Expression from, Type to)
+nullable Expression implicitConvertTo(Context context, Expression from, Type to)
 {
     auto fromType = from.type;
 
@@ -76,9 +75,9 @@ Expression implicitConvertTo(Context context, Expression from, Type to)
     {
         return new PointerCast(to, from);
     }
-    Expression fromImplicit = to.implicitConvertFrom(from);
+    nullable Expression fromImplicit = to.implicitConvertFrom(from);
     if (fromImplicit) return fromImplicit;
-    Expression toImplicit = fromType.implicitConvertTo(context, from, to);
+    nullable Expression toImplicit = fromType.implicitConvertTo(context, from, to);
     if (toImplicit) return toImplicit;
     return null;
 }
@@ -529,8 +528,8 @@ class Call : Expression
 Expression truthy(Context context, Expression value, Loc loc) {
     Type type = value.type;
     loc.assert2s(!!type, "internal error");
-    Expression truthyExpr = type.truthy(context, value, loc);
-    if (truthyExpr) return truthyExpr;
+    if (auto truthyExpr = type.truthy(context, value, loc))
+        return truthyExpr;
 
     if (type.instanceOf(Pointer))
     {
@@ -538,7 +537,7 @@ Expression truthy(Context context, Expression value, Loc loc) {
 
         return new BinaryOp("!=", new CastExpr(sizeT, value), once new IntLiteral(0), loc);
     }
-    loc.assert2s(type.instanceOf(Integer) || type.instanceOf(Long), "integer expected");
+    loc.assert2s(type.instanceOf(Integer) || type.instanceOf(Long), "integer expected, not $(type.repr)");
     return new BinaryOp("!=", value, once new IntLiteral(0), loc);
 }
 
@@ -563,16 +562,15 @@ class ASTBinaryOp : ASTSymbol
         Expression right = beExpression3(context, this.right.compile(context), this.loc);
         auto leftType = left.type, rightType = right.type;
 
-        auto opOverload = leftType.binaryOp(context, this.op, left, right, this.loc);
-        if (opOverload) return opOverload;
+        if (auto opOverload = leftType.binaryOp(context, this.op, left, right, this.loc))
+            return opOverload;
 
         if (this.op == "~")
         {
             loc.assert2s2(
                 !!leftType.instanceOf(Array),
                 "Left hand side of concatenation isn't array, but ", leftType.repr);
-            auto converted = implicitConvertTo(context, right, leftType.instanceOf(Array).elementType);
-            if (converted) {
+            if (auto converted = implicitConvertTo(context, right, leftType.instanceOf(Array).elementType)) {
                 return context.compiler.binaryOp("~", context, left, converted, this.loc);
             }
 
@@ -602,8 +600,7 @@ class Dereference : Reference
 
     this(this.base)
     {
-        this.pointerType = base.type.instanceOf(Pointer);
-        assert(!!this.pointerType);
+        this.pointerType = notNull!Pointer(base.type.instanceOf(Pointer));
         this.type = this.pointerType.target;
     }
 
@@ -863,8 +860,7 @@ class NullExpr : Expression
 }
 
 Expression castTo(Context context, Type to, Expression from) {
-    auto implconv = implicitConvertTo(context, from, to);
-    if (implconv) return implconv;
+    if (auto implconv = implicitConvertTo(context, from, to)) return implconv;
     if (from.type.instanceOf(Integer) && to.instanceOf(Long))
         return new IntToLong(from);
     if (from.type.instanceOf(Short) && to.instanceOf(Integer))

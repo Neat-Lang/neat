@@ -12,15 +12,15 @@ import neat.parser_base;
 
 Expression makeTuple(Context context, Loc loc, TupleType type, Expression[] fields) {
     assert(type.members.length == fields.length);
-    Statement do_(Reference target) {
-        mut Statement init;
+    nullable Statement do_(Reference target) {
+        mut nullable Statement init;
         for (int i <- 0 .. fields.length) {
-            init = context.compiler.sequence(init,
+            init = context.compiler.sequence2(init,
                 context.compiler.move(context, new TupleMemberRef(loc, target, i), fields[i]));
         }
         return init;
     }
-    return context.compiler.exprWithScratchspace(type, true, &do_);
+    return notNull!Expression(context.compiler.exprWithScratchspace(type, true, &do_));
 }
 
 class ASTTupleExpr : ASTSymbol
@@ -47,7 +47,7 @@ class ASTTupleExpr : ASTSymbol
     }
 }
 
-ASTSymbol parseTupleExpression(Parser parser, LexicalContext lexicalContext)
+nullable ASTSymbol parseTupleExpression(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto loc = parser.loc;
@@ -67,8 +67,9 @@ ASTSymbol parseTupleExpression(Parser parser, LexicalContext lexicalContext)
             auto loc = parser.loc;
             loc.assert2s(false, "tuple: ',' expected");
         }
-        auto member = lexicalContext.compiler.parseExpression(parser, lexicalContext);
-        if (!member) {
+        if (auto member = lexicalContext.compiler.parseExpression(parser, lexicalContext)) {
+            members ~= member;
+        } else {
             // (bla bla) still
             if (members.length <= 1) {
                 parser.revert;
@@ -78,7 +79,6 @@ ASTSymbol parseTupleExpression(Parser parser, LexicalContext lexicalContext)
             auto loc = parser.loc;
             loc.assert2s(false, "tuple: member expected");
         }
-        members ~= member;
     }
     // (bla) is not a tuple, it's a paren expression
     if (members.length == 1) {
@@ -192,9 +192,10 @@ class TupleType : Type
         return "tuple_" ~ [join "_" member.type.mangle for member in members];
     }
 
-    override Symbol accessMember(Loc loc, Context context, Expression base, string field, Protection _)
+    override nullable Symbol accessMember(Loc loc, Context context, nullable Expression base, string field, Protection _)
     {
         if (!base) return null;
+        auto base = notNull!Expression(base);
         int index = [first cast(int) i for i, member in members where member.name == field else -1];
         // TODO return (Symbol | LookupError);
         if (index == -1) return null;
@@ -206,19 +207,23 @@ class TupleType : Type
     }
 
     // basically just like struct
-    override Statement copyInto(Context context, Reference target, Expression source)
+    override nullable Statement copyInto(Context context, Reference target, Expression source)
     {
-        Statement do1(Expression targetptr) {
+        nullable Statement do1(Expression targetptr) {
             auto target = context.compiler.dereference(targetptr);
-            Statement do2(Expression source) {
+            nullable Statement do2(Expression source) {
                 mut Statement[] assigns;
                 mut bool anySpecialAssignments;
                 for (int i <- 0 .. members.length) {
                     auto targetField = new TupleMemberRef(__HERE__, target, i);
                     auto sourceField = new TupleMemberExpr(__HERE__, source, i);
-                    mut auto copyInto = members[i].type.copyInto(context, targetField, sourceField);
-                    if (copyInto) anySpecialAssignments = true;
-                    if (!copyInto) copyInto = context.compiler.assignStatement(targetField, sourceField);
+                    Statement copyInto() {
+                        if (auto copyInto = members[i].type.copyInto(context, targetField, sourceField)) {
+                            anySpecialAssignments = true;
+                            return copyInto;
+                        }
+                        return context.compiler.assignStatement(targetField, sourceField);
+                    }
                     assigns ~= copyInto;
                 }
                 if (!anySpecialAssignments) return null;
@@ -230,11 +235,11 @@ class TupleType : Type
     }
 
     // also like struct
-    override Statement endLifetime(Context context, Reference ref_)
+    override nullable Statement endLifetime(Context context, Reference ref_)
     {
         auto compiler = context.compiler;
 
-        Statement doRef(Expression refptr) {
+        nullable Statement doRef(Expression refptr) {
             auto context = context.withNamespace(
                 compiler.exprAlias(context.namespace, "ref_", compiler.dereference(refptr)));
 
@@ -255,13 +260,14 @@ class TupleType : Type
         return compiler.stmtWithTemporaryExpr(compiler.reference(ref_), &doRef);
     }
 
-    override Expression implicitConvertTo(Context context, Expression source, Type target)
+    override nullable Expression implicitConvertTo(Context context, Expression source, Type target)
     {
         auto tupleTargetType = target.instanceOf(TupleType);
         if (!tupleTargetType || tupleTargetType.members.length != members.length)
             return null;
+        auto tupleTargetType = notNull!TupleType(tupleTargetType);
 
-        Expression do_(Expression source) {
+        nullable Expression do_(Expression source) {
             auto sourceMembers = [new TupleMemberExpr(__HERE__, source, cast(int) i) for i, _ in members];
             auto convFields = [
                 context.compiler.implicitConvertTo(context, member, tupleTargetType.members[i].type)
@@ -269,12 +275,13 @@ class TupleType : Type
 
             if ([any !a for a in convFields]) return null;
 
-            return makeTuple(context, __HERE__, tupleTargetType, convFields);
+            return makeTuple(
+                context, __HERE__, tupleTargetType, [notNull!Expression(a) for a in convFields]);
         }
         return context.compiler.exprWithTemporaryExpr(source, &do_);
     }
 
-    override Expression index(Context context, Expression base, Expression index, Loc loc) {
+    override nullable Expression index(Context context, Expression base, Expression index, Loc loc) {
         // TODO refcounting
         auto indexExpr = index.instanceOf(IntLiteral);
         loc.assert2s(!!indexExpr, "int literal expected for tuple access");

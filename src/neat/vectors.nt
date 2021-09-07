@@ -35,8 +35,9 @@ class VectorMember : Expression
 
     this(this.base, this.index)
     {
-        this.vectorType = this.base.type.instanceOf(VectorType);
-        assert(!!vectorType);
+        if (auto vectorType = this.base.type.instanceOf(VectorType))
+            this.vectorType = vectorType;
+        else assert(false);
         this.type = this.vectorType.elementType;
     }
 
@@ -65,8 +66,9 @@ class VectorMemberReference : Reference
 
     this(this.base, this.index)
     {
-        this.vectorType = this.base.type.instanceOf(VectorType);
-        assert(!!vectorType);
+        if (auto vectorType = this.base.type.instanceOf(VectorType))
+            this.vectorType = vectorType;
+        else assert(false);
         this.type = this.vectorType.elementType;
     }
 
@@ -129,10 +131,11 @@ class VectorType : Type
         hash.addl(length);
     }
 
-    override Symbol accessMember(Loc loc, Context context, Expression base, string field, Protection _)
+    override nullable Symbol accessMember(
+        Loc loc, Context context, nullable Expression base, string field, Protection _)
     {
         // TODO part of type? third parameter?
-        Expression do_(Expression base) {
+        nullable Expression do_(Expression base) {
             string coords1 = "uv", coords2 = "xyzw", coords3 = "rgba";
             mut Expression[] members;
             int indexIn(char ch, string str) {
@@ -151,10 +154,12 @@ class VectorType : Type
                 return members[0];
             return (new VectorType(elementType, cast(int) members.length)).mkVector(context, loc, members);
         }
-        return context.compiler.exprWithTemporaryExpr(base, &do_);
+        if (auto base = base)
+            return context.compiler.exprWithTemporaryExpr(base, &do_);
+        return null;
     }
 
-    override Expression binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
+    override nullable Expression binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
     {
         auto lhsVectorType = lhs.type.instanceOf(VectorType);
         auto rhsVectorType = rhs.type.instanceOf(VectorType);
@@ -167,18 +172,18 @@ class VectorType : Type
                 if (rhsVectorType) return new VectorMember(rhs, index);
                 return rhs;
             }
-            mut Expression andList;
+            mut nullable Expression andList;
             for (int i <- 0 .. lhsVectorType.length) {
                 auto leftMember = new VectorMember(lhs, i);
                 auto rightMember = getRight1(i);
                 auto test = context.compiler.binaryOp(op, context, leftMember, rightMember, loc);
-                if (!andList) andList = test;
-                else andList = new BoolAnd(andList, test);
+                if (auto left = andList) andList = new BoolAnd(left, test);
+                else andList = test;
             }
             return andList;
         }
-        Expression do1(Expression lhs) {
-            Expression do2(Expression rhs) {
+        nullable Expression do1(Expression lhs) {
+            nullable Expression do2(Expression rhs) {
                 Expression getRight2(int index) {
                     if (rhsVectorType) return new VectorMember(rhs, index);
                     return rhs;
@@ -196,7 +201,7 @@ class VectorType : Type
         return context.compiler.exprWithTemporaryExpr(lhs, &do1);
     }
 
-    override Expression call(Context context, Loc loc, ASTArgument[] args)
+    override nullable Expression call(Context context, Loc loc, ASTArgument[] args)
     {
         loc.assert2s(args.length == this.length || args.length == 1, "invalid number of args for vector constructor");
 
@@ -209,7 +214,7 @@ class VectorType : Type
         if (args.length == 1) {
             auto result = new PairedTemporary(this, Ownership.gifted);
             mut Statement initialize = new UninitializeTemporaryStatement(result);
-            Expression do1(Expression arg) {
+            nullable Expression do1(Expression arg) {
                 Expression do2(Expression arg) {
                     auto arg = expectImplicitConvertTo(context, arg, elementType, loc);
                     for (int i <- 0 .. this.length) {

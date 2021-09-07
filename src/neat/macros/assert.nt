@@ -24,12 +24,12 @@ class ASTAssertion : ASTStatement
         auto context = context.withNamespace(context.compiler.exprAlias(
                 context.namespace, "identName", context.compiler.stringLiteral(repr(sym))));
 
-        return (
+        return notNull!Expression((
             context.compiler.$expr identName ~ " = " ~ itoa(cast(int) $sym)
-        ).compile(context).instanceOf(Expression);
+        ).compile(context).instanceOf(Expression));
     }
 
-    Expression binopTest(mut Context context, ASTBinaryOp binop) {
+    nullable Expression binopTest(mut Context context, ASTBinaryOp binop) {
         void set(string name, Symbol value) {
             context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, name, value));
@@ -110,7 +110,7 @@ class ASTAssertion : ASTStatement
         return null;
     }
 
-    Expression negTest(mut Context context, ASTNegation astNegation)
+    nullable Expression negTest(mut Context context, ASTNegation astNegation)
     {
         void set(string name, Symbol value) {
             context = context.withNamespace(
@@ -128,7 +128,7 @@ class ASTAssertion : ASTStatement
         ).compile(context).instanceOf(Expression);
     }
 
-    Expression dispatch(Context context, ASTSymbol sym) {
+    nullable Expression dispatch(Context context, ASTSymbol sym) {
         if (auto ident = sym.instanceOf(ASTIdentifier))
         {
             return symbolTest(context, ident);
@@ -165,8 +165,7 @@ class ASTAssertion : ASTStatement
         context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "itoa", itoaFun));
         string failedMsg = loc.location() ~ ": assertion failed: " ~ exprText ~ ", because ";
-        auto ifFailed = dispatch(context, test);
-        if (ifFailed) {
+        if (auto ifFailed = dispatch(context, test)) {
             context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "ifFailed", ifFailed));
             context = context.withNamespace(context.compiler.exprAlias(
@@ -196,9 +195,9 @@ class ASTAssertion : ASTStatement
                 this.loc);
         Expression false_ = context.compiler.intLiteral(0);
         Statement printSt = context.compiler.exprStatement(
-            context.compiler.plainCall(context, printFun, [failStr], this.loc, false));
+            notNull!Expression(context.compiler.plainCall(context, printFun, [failStr], this.loc, false)));
         Statement failSt = context.compiler.exprStatement(
-            context.compiler.plainCall(context, assertFun, [false_], this.loc, false));
+            notNull!Expression(context.compiler.plainCall(context, assertFun, [false_], this.loc, false)));
         // `if (!$expression) { print($assertLocStr ~ ": '" ~ $exprText ~ "' was false."); assert(false); }`
         return StatementCompileResult(
             context.compiler.ifStatement(
@@ -244,13 +243,15 @@ class ParseAssert : Macro
 {
     this() { }
     override void apply(MacroArgs args) {
-        auto args = args.instanceOf(ParseStatementArgs);
-        if (args) {
-            args.statement = this.parse(args.parser, args.lexicalContext);
+        if (auto args = args.instanceOf(ParseStatementArgs)) {
+            // FIXME
+            // args.statement = this.parse(args.parser, args.lexicalContext);
+            if (auto ret = this.parse(args.parser, args.lexicalContext))
+                args.statement = ret;
         }
     }
 
-    ASTStatement parse(Parser parser, LexicalContext context)
+    nullable ASTStatement parse(Parser parser, LexicalContext context)
     {
         parser.begin();
         parser.strip();
@@ -268,7 +269,7 @@ class ParseAssert : Macro
         parser.commit();
         auto exprStartLoc = parser.loc;
         auto exprStart = parser.text;
-        auto expression = context.compiler.parseExpression(parser, context);
+        auto expression = notNull!ASTSymbol(context.compiler.parseExpression(parser, context));
         auto exprEnd = parser.text;
         auto exprText = exprStart[0 .. exprStart.length - exprEnd.length];
 

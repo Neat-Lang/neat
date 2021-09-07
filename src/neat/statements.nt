@@ -32,17 +32,6 @@ class AssignStatement : Statement
     override void hash(Hash hash) { hash.adds("AssignStatement"); target.hash(hash); value.hash(hash); }
 }
 
-class NoopStatement : Statement
-{
-    this() { }
-
-    override void emit(Generator generator)
-    {
-    }
-
-    override void hash(Hash hash) { hash.adds("NoopStatement"); }
-}
-
 class ReturnStatement : Statement
 {
     Expression value;
@@ -66,7 +55,7 @@ class IfStatement : Statement
 
     Statement then;
 
-    Statement else_;
+    nullable Statement else_;
 
     this(this.test, this.then, this.else_) { }
 
@@ -186,9 +175,9 @@ Statement move(Context context, Reference target, Expression source)
         return new AssignStatement(target, source);
     }
     auto type = target.type;
-    mut auto copyInto = type.copyInto(context, target, source);
-    if (!copyInto) copyInto = new AssignStatement(target, source);
-    return copyInto;
+    if (auto copyIntoStmt = type.copyInto(context, target, source))
+        return copyIntoStmt;
+    return new AssignStatement(target, source);
 }
 
 class ExprStatement : Statement
@@ -208,13 +197,17 @@ class ExprStatement : Statement
 Statement destroy(Context context, Expression expr)
 {
     auto type = expr.type;
-    auto reference = expr.instanceOf(Reference);
-    if (reference) return type.endLifetime(context, reference);
+    if (auto reference = expr.instanceOf(Reference)) {
+        if (auto endLifetime = type.endLifetime(context, reference)) {
+            return endLifetime;
+        }
+        return new NoopStatement;
+    }
     // TODO hasDestructor?
     Reference temp = new Temporary(new NullExpr(type));
     // call destructor on result
-    auto stmt = type.endLifetime(context, temp);
-    if (stmt) return sequence(new AssignStatement(temp, expr), stmt);
+    if (auto stmt = type.endLifetime(context, temp))
+        return sequence(new AssignStatement(temp, expr), stmt);
     return new ExprStatement(expr);
 }
 
@@ -244,13 +237,13 @@ class Loop : Statement
 {
     string label;
 
-    Statement setup;
+    nullable Statement setup;
 
     Expression condition;
 
     Statement body_;
 
-    Statement loopstep;
+    nullable Statement loopstep;
 
     this(this.label, this.setup, this.condition, this.body_, this.loopstep) { }
 
@@ -292,12 +285,12 @@ class LabelLoopScope : LoopScope
     override Statement breakFrom(Context context) {
         auto branch = new Branch(this.label ~ "_break");
 
-        return sequence(context.compiler.unwindScope(context, this, null), branch);
+        return sequence2(context.compiler.unwindScope(context, this, new NoopStatement), branch);
     }
     override Statement continueFrom(Context context) {
         auto branch = new Branch(this.label ~ "_continue");
 
-        return sequence(context.compiler.unwindScope(context, this, null), branch);
+        return sequence2(context.compiler.unwindScope(context, this, new NoopStatement), branch);
     }
 }
 
@@ -323,15 +316,20 @@ class SequenceStatement : Statement
     }
 }
 
-Statement sequence(Statement left, Statement right)
+Statement sequence(Statement left, nullable Statement right)
 {
-    if (!left) return right;
     if (!right) return left;
-    if (left.instanceOf(NoopStatement)) return right;
-    if (right.instanceOf(NoopStatement)) return left;
+    auto rightNonNull = notNull!Statement(right);
+    if (left.instanceOf(NoopStatement)) return rightNonNull;
+    if (rightNonNull.instanceOf(NoopStatement)) return left;
     auto prevSequence = left.instanceOf(SequenceStatement);
-    if (prevSequence) return new SequenceStatement(prevSequence.statements ~ right);
-    return new SequenceStatement([left, right]);
+    if (prevSequence) return new SequenceStatement(prevSequence.statements ~ rightNonNull);
+    return new SequenceStatement([left, rightNonNull]);
+}
+
+Statement sequence2(nullable Statement first, Statement second) {
+    if (auto first = first) return sequence(first, second);
+    return second;
 }
 
 class StatementExpression : Expression

@@ -133,7 +133,8 @@ class Class : Type
      */
     Struct dataStruct;
 
-    this(this.decl, this.superClass, this.superIntfs, this.namespace)
+    this(this.decl, this.superClass, this.superIntfs, this.namespace,
+         this.zeroInitializable)
     {
         if (superClass && superClass.final_)
             decl.loc.fail("cannot subclass a final class");
@@ -153,6 +154,17 @@ class Class : Type
         }
         if (this.superClass)
             this.superClass.hash(this.cachedHash);
+    }
+
+    Class makeNullable()
+    {
+        // TODO overloading, copy constructor
+        auto result = new Class(this.decl, this.superClass, this.superIntfs,
+            this.namespace, zeroInitializable=true);
+        result.members = this.members;
+        result.methods = this.methods;
+        result.dataStruct = this.dataStruct;
+        return result;
     }
 
     override string mangle() {
@@ -679,13 +691,19 @@ class Intf : Type
 
     PolyHashState mangledHash;
 
-    this(this.decl, this.superIntfs, this.namespace)
+    this(this.decl, this.superIntfs, this.namespace, this.zeroInitializable)
     {
         assert(!!decl);
         this.name = decl.name;
         this.mangledName = namespace.mangle ~ "_intf_" ~ this.name;
         auto state = poly_hash_string("Intf" ~ this.mangledName);
         this.mangledHash = PolyHashState(state.add, state.mult);
+    }
+
+    Intf makeNullable()
+    {
+        return new Intf(this.decl, this.superIntfs, this.namespace,
+            zeroInitializable=true);
     }
 
     override string mangle() {
@@ -1133,7 +1151,8 @@ class ASTClassDecl : ASTSymbol
                 superIntfs ~= superIntf;
             }
         }
-        return new Class(this, superClass, superIntfs, context.namespace);
+        return new Class(this, superClass, superIntfs, context.namespace,
+            zeroInitializable=false);
     }
 
     void compile2(Context context, Class target)
@@ -1264,7 +1283,7 @@ class ASTIntfDecl : ASTSymbol
                 superIntfs ~= superIntf;
             }
         }
-        return new Intf(this, superIntfs, context.namespace);
+        return new Intf(this, superIntfs, context.namespace, zeroInitializable=false);
     }
 
     void compile2(Context context, Intf target)
@@ -1770,4 +1789,22 @@ class ASTSuper : ASTSymbol
     }
 
     override string repr() { return "super"; }
+}
+
+class ASTNullable : ASTSymbol
+{
+    Loc loc;
+
+    ASTSymbol next;
+
+    this(this.loc, this.next) { }
+
+    override Symbol compile(Context context) {
+        auto next = beType(this.loc, this.next.compile(context));
+        if (auto class_ = next.instanceOf(Class))
+            return class_.makeNullable;
+        else if (auto intf_ = next.instanceOf(Intf))
+            return intf_.makeNullable;
+        this.loc.fail("Cannot mark type as nullable: $(next.repr)");
+    }
 }

@@ -483,6 +483,10 @@ at_revision 'af2b64babf96eff4f477b15d0c03ba67f7cbe11e' 'rebuild neat' 'build/nea
 at_revision 'a4f009fdbbc31476526bf18b81df096b150b7f86' 'rebuild neat' 'build/neat'
 # struct versioning support stage 1
 at_revision '17126fab07f076475fb69e82615daf46c83ecc7e' 'rebuild neat' 'build/neat'
+# stage 2
+at_revision '344e520b240d0b5436844cfb86f106e7e2751388' 'rebuild neat' 'build/neat'
+# more hashing for class type
+at_revision '722ff03fae70a368c0f8dce18d6086f25dabb0ca' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

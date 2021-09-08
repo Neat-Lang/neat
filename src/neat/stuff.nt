@@ -2026,8 +2026,9 @@ class ASTIfStatement : ASTStatement
                 test = ret.test;
 
                 auto actualVarDecl = new ASTVarDeclStatement(
-                    extractdecl.name, mutable=false, infer=false, type=new ASTSymbolHelper(extractType),
-                    initial=new ASTSymbolHelper(ret.value), extractdecl.loc);
+                    extractdecl.name, mutable=false, infer=false, uninitialized=false,
+                    type=new ASTSymbolHelper(extractType), initial=new ASTSymbolHelper(ret.value),
+                    extractdecl.loc);
                 auto pair = actualVarDecl.compile(context);
                 epilog = pair.statement;
                 testSucceedsContext = pair.context;
@@ -2332,16 +2333,21 @@ class ASTVarDeclStatement : ASTStatement
 
     bool infer;
 
+    bool uninitialized;
+
     ASTSymbol type;
 
     ASTSymbol initial;
 
     Loc loc;
 
-    this(this.name, this.mutable, this.infer, this.type, this.initial, this.loc)
+    this(this.name, this.mutable, this.infer, this.uninitialized,
+        this.type, this.initial, this.loc)
     {
+        assert(!uninitialized || mutable);
         assert(infer == !type);
         assert(!infer || initial);
+        assert(!uninitialized || !initial);
     }
 
     override StatementCompileResult compile(Context context)
@@ -2378,13 +2384,22 @@ class ASTVarDeclStatement : ASTStatement
                 move(context, decl.accessDecl(context.compiler), initial),
                 context.withNamespace(decl));
         }
+        else if (this.uninitialized)
+        {
+            auto decl = new VariableDeclaration(
+                context.namespace, this.name, type, ExprInfo(mutable, Ownership.owned), hidden=false);
+
+            return StatementCompileResult(
+                new NoopStatement,
+                context.withNamespace(decl));
+        }
         else
         {
             if (!type.zeroInitializable) {
                 // this.loc.fail("Cannot declare $(this.name) without initializer: $(type.repr) is not zero-initializable");
             }
             auto decl = new VariableDeclaration(
-                context.namespace, this.name, type, ExprInfo(mutable, Ownership.owned), false);
+                context.namespace, this.name, type, ExprInfo(mutable, Ownership.owned), hidden=false);
 
             return StatementCompileResult(
                 new AssignStatement(decl.accessDecl(context.compiler), new NullExpr(type)),
@@ -2402,28 +2417,31 @@ class ASTVarDeclStatement : ASTStatement
             varName = quoter.compiler.astStringLiteral(this.name, this.loc);
         }
         if (this.infer) {
-            return quoter.compilerCall("astDeclareVar", [
+            return quoter.compilerCall("astDeclareVar2", [
                 varName,
                 quoter.compiler.astBoolLiteral(this.mutable, this.loc),
+                quoter.compiler.astBoolLiteral(this.uninitialized, this.loc),
                 this.initial.quote(quoter)], this.loc);
         }
         if (this.initial) {
-            return quoter.compilerCall("astDeclareTypedVar", [
+            return quoter.compilerCall("astDeclareTypedVar2", [
                 varName,
                 quoter.compiler.astBoolLiteral(this.mutable, this.loc),
+                quoter.compiler.astBoolLiteral(this.uninitialized, this.loc),
                 this.type.quote(quoter),
                 this.initial.quote(quoter)], this.loc);
         }
-        return quoter.compilerCall("astDeclareTypedVar", [
+        return quoter.compilerCall("astDeclareTypedVar2", [
             varName,
             quoter.compiler.astBoolLiteral(this.mutable, this.loc),
+            quoter.compiler.astBoolLiteral(this.uninitialized, this.loc),
             this.type.quote(quoter),
             quoter.compiler.astIdentifier("null", this.loc)], this.loc);
     }
 }
 
 ASTVarDeclStatement parseVarInitialization(
-    Parser parser, LexicalContext lexicalContext, bool infer, bool mutable,
+    Parser parser, LexicalContext lexicalContext, bool infer, bool mutable, bool uninitialized,
     ASTSymbol type, string operator, bool requireInitializer)
 {
     parser.begin;
@@ -2461,7 +2479,7 @@ ASTVarDeclStatement parseVarInitialization(
         return null;
     }
     parser.commit;
-    return new ASTVarDeclStatement(name, mutable, infer, type, initial, parser.loc);
+    return new ASTVarDeclStatement(name, mutable, infer, uninitialized=uninitialized, type, initial, parser.loc);
 }
 
 ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext, bool requireInitializer)
@@ -2469,8 +2487,10 @@ ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext, b
     parser.begin;
     mut bool infer = false;
     mut bool mutable = false;
+    mut bool uninitialized = false;
     mut ASTSymbol type;
     if (parser.acceptIdentifier("mut")) mutable = true;
+    if (parser.acceptIdentifier("uninitialized")) uninitialized = true;
     if (acceptIdentifier(parser, "auto")) {
         infer = true;
     } else {
@@ -2484,7 +2504,8 @@ ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext, b
             }
         }
     }
-    auto decl = parseVarInitialization(parser, lexicalContext, infer, mutable, type, "=", requireInitializer);
+    auto decl = parseVarInitialization(
+        parser, lexicalContext, infer, mutable, uninitialized, type, "=", requireInitializer);
     if (!decl) {
         parser.revert;
         return null;
@@ -2500,8 +2521,10 @@ ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
     auto loc = parser.loc;
     mut bool infer = false;
     mut bool mutable = false;
+    mut bool uninitialized = false;
     mut ASTSymbol type;
     if (parser.acceptIdentifier("mut")) mutable = true;
+    if (parser.acceptIdentifier("uninitialized")) uninitialized = true;
     if (acceptIdentifier(parser, "auto")) {
         infer = true;
     } else {
@@ -2515,9 +2538,11 @@ ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
     mut ASTStatement[] decls;
     while (true) {
         if (decls.length) parser.expect(",");
-        if (auto decl = parseVarInitialization(parser, lexicalContext, infer, mutable, type, "=", false)) {
+        if (auto decl = parseVarInitialization(parser, lexicalContext, infer, mutable, uninitialized, type, "=", false)) {
             decls ~= decl;
-        } else if (auto decl2 = parseVarInitialization(parser, lexicalContext, infer, mutable, type, "<-", false)) {
+        } else if (auto decl2 = parseVarInitialization(
+            parser, lexicalContext, infer, mutable, uninitialized, type, "<-", false))
+        {
             decls ~= extractFromVarDecl(decl2);
         } else {
             parser.assert_(decls.length == 0, "couldn't parse continuing variable declaration");
@@ -2641,7 +2666,8 @@ ASTVarExtractDeclStatement parseVarExtractDecl(Parser parser, LexicalContext lex
             }
         }
     }
-    auto decl = parseVarInitialization(parser, lexicalContext, infer, mutable, type, "<-", requireInitializer=true);
+    auto decl = parseVarInitialization(
+        parser, lexicalContext, infer, mutable, uninitialized=false, type, "<-", requireInitializer=true);
     if (!decl) {
         parser.revert;
         return null;

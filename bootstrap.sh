@@ -487,6 +487,10 @@ at_revision '17126fab07f076475fb69e82615daf46c83ecc7e' 'rebuild neat' 'build/nea
 at_revision '344e520b240d0b5436844cfb86f106e7e2751388' 'rebuild neat' 'build/neat'
 # more hashing for class type
 at_revision '722ff03fae70a368c0f8dce18d6086f25dabb0ca' 'rebuild neat' 'build/neat'
+# nullable keyword
+at_revision 'f0f8b5ed0ed3c9f390257ab3c8b93f4c63d2662a' 'rebuild neat' 'build/neat'
+# improved "unexpected number of arguments" error
+at_revision '5fcfa62f1a0296636786e5bccabe06221d5581c0' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

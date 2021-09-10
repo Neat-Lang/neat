@@ -1956,6 +1956,20 @@ private Type typeWithoutFail(Either source)
     return new Either([a for a in source.types where !a.fail]);
 }
 
+class InfoExpression : Expression
+{
+    Expression base;
+
+    ExprInfo info_;
+
+    this(this.base, this.info_) { this.type = base.type; }
+
+    override int emit(Generator output) { return base.emit(output); }
+    // TODO hash ExprInfo
+    override void hash(Hash hash) { hash.adds("InfoExpression"); base.hash(hash); }
+    override ExprInfo info() { return this.info_; }
+}
+
 class ASTIfStatement : ASTStatement
 {
     (ASTSymbol | ASTVarDeclStatement | ASTVarExtractDeclStatement) test;
@@ -1979,30 +1993,44 @@ class ASTIfStatement : ASTStatement
                 test = beExpression3(context, symbol.compile(context), this.loc);
             }
             ASTVarDeclStatement vardecl: {
-                auto pair = vardecl.compile(context);
-                prelude = pair.statement;
-                testSucceedsContext = pair.context;
-                auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
-                auto var = testSucceedsContext.namespace.lookup(
-                    vardecl.name, context, this.loc, stackframe).beExpression;
-                // `if (auto var = (some nullable Foo))`
-                // since var must be non-null, rebind it to type `Foo`.
-                if (var.type.zeroInitializable && (
-                    var.type.instanceOf(ClassType) || var.type.instanceOf(IntfType)))
-                {
-                    Type notNullableType() {
-                        if (auto classType = var.type.instanceOf(ClassType)) return classType.makeNotNullable;
-                        if (auto intfType = var.type.instanceOf(IntfType)) return intfType.makeNotNullable;
-                        assert(false);
-                    }
-                    auto symbolAlias = new SymbolAlias(
-                        testSucceedsContext.namespace,
-                        vardecl.name,
-                        new PointerCast(notNullableType, var));
-                    testSucceedsContext = testSucceedsContext.withNamespace(symbolAlias);
+                auto initial = vardecl.initial.compile(context).beExpressionImplCall(context, vardecl.loc);
+
+                // `if (Foo var = some nullable Foo)`:
+                //   - cache `some`, test for nullness, then declare Foo var.
+                if (initial.type.zeroInitializable && context.compiler.isClassType(initial.type)) {
+                    mut uninitialized Type notNullableType;
+                    if (auto classType = initial.type.instanceOf(ClassType))
+                        notNullableType = classType.makeNotNullable;
+                    else if (auto intfType = initial.type.instanceOf(IntfType))
+                        notNullableType = intfType.makeNotNullable;
+                    else assert(false);
+
+                    auto tempInitial = new PairedTemporary(initial.type, initial.info.ownership);
+                    auto initTemp = new InitializeTemporaryStatement(tempInitial, initial);
+
+                    prelude = initTemp;
+                    // don't worry about memory management - if it's non-null, we'll stick it in a variable,
+                    // and that'll take care of refcounting for us.
+                    test = new InfoExpression(tempInitial, ExprInfo(false, Ownership.global));
+
+                    auto actualVarDecl = new ASTVarDeclStatement(
+                        vardecl.name, mutable=vardecl.mutable, infer=false, uninitialized=false,
+                        type=new ASTSymbolHelper(notNullableType),
+                        initial=new ASTSymbolHelper(new PointerCast(notNullableType, tempInitial)),
+                        vardecl.loc);
+                    auto pair = actualVarDecl.compile(context);
+                    epilog = pair.statement;
+                    testSucceedsContext = pair.context;
+                } else {
+                    auto pair = vardecl.compile(context);
+                    prelude = pair.statement;
+                    testSucceedsContext = pair.context;
+                    auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
+                    auto var = testSucceedsContext.namespace.lookup(
+                        vardecl.name, context, this.loc, stackframe).beExpression;
+                    // TODO lookup() that handles the stackframe thing
+                    test = beExpression3(context, var, this.loc);
                 }
-                // TODO lookup() that handles the stackframe thing
-                test = beExpression3(context, var, this.loc);
             }
             ASTVarExtractDeclStatement extractdecl: {
                 // validate source is Either

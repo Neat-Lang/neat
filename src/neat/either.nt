@@ -37,11 +37,10 @@ class ASTEitherDecl : ASTSymbol
     override Type compile(Context context)
     {
         auto partTypes = new (bool fail, Type)[](this.partTypes.length);
-        for (int i <- 0 .. this.partTypes.length) {
-            auto loc = this.partTypes[i].loc;
+        for (i, partType in this.partTypes) {
             partTypes[i] = (
-                this.partTypes[i].fail,
-                beType(loc, this.partTypes[i].symbol.compile(context)));
+                partType.fail,
+                beType(partType.loc, partType.symbol.compile(context)));
         }
 
         return new Either(partTypes);
@@ -55,7 +54,7 @@ class ASTEitherDecl : ASTSymbol
             return quoter.compiler.astIdentifier("false", __HERE__);
         }
         mut ASTSymbol[] quotedParts;
-        for (auto entry <- this.partTypes) {
+        for (entry in this.partTypes) {
             quotedParts ~= quoter.compiler.astCall(
                 quoter.compiler.astIdentifier("ASTEitherDeclEntry", __HERE__), [
                     quoter.quoteLoc(entry.loc),
@@ -224,8 +223,8 @@ class Either : Type
     override BackendType emit(Platform platform) {
         mut int size = 0;
         mut int alignment = 1;
-        for (int i <- 0 .. this.types.length) {
-            auto llvmType = this.types[i].type.emit(platform);
+        for (i, pair in this.types) {
+            auto llvmType = pair.type.emit(platform);
             int memberSize = llvmType.size(platform);
             int memberAlignment = llvmType.alignment(platform);
 
@@ -240,13 +239,11 @@ class Either : Type
 
     override nullable Expression implicitConvertFrom(Context context, Expression source)
     {
-        for (int i <- 0 .. this.types.length) {
-            auto eitherType = this.types[i].type;
-            if (eitherType.same(source.type)) return new EitherExpr(this, source, i);
+        for (int i, entry in this.types) {
+            if (entry.type.same(source.type)) return new EitherExpr(this, source, i);
         }
-        for (int i <- 0 .. this.types.length) {
-            auto eitherType = this.types[i].type;
-            if (auto converted = context.compiler.implicitConvertTo(context, source, eitherType))
+        for (int i, entry in this.types) {
+            if (auto converted = context.compiler.implicitConvertTo(context, source, entry.type))
                 return new EitherExpr(this, converted, i);
         }
         return null;
@@ -255,7 +252,7 @@ class Either : Type
     override nullable Expression implicitConvertTo(Context context, Expression source, Type targetType)
     {
         // Check that every member can be converted.
-        for (int i <- 0 .. this.types.length) {
+        for (int i, _ in this.types) {
             auto member = new EitherMember(source, i);
             auto converted = context.compiler.implicitConvertTo(context, member, targetType);
             // print("try $(member.type.repr) => $(targetType.repr): $(!!converted)");
@@ -265,8 +262,7 @@ class Either : Type
             nullable Statement do2(Reference target) {
                 mut nullable Statement ifTree = null;
                 auto sourceType = new EitherType(source);
-                for (int i <- 0 .. this.types.length) {
-                    auto type = this.types[i];
+                for (int i, type in this.types) {
                     auto member = new EitherMember(source, i);
                     if (auto converted = context.compiler.implicitConvertTo(context, member, targetType)) {
                         Expression test = context.compiler.binaryOp(
@@ -287,24 +283,24 @@ class Either : Type
         auto other = type.instanceOf(Either);
         if (!other || types.length != other.types.length)
             return false;
-        for (int i <- 0 .. types.length)
-            if (!types[i].type.same(other.types[i].type))
+        for (i, type in types)
+            if (!type.type.same(other.types[i].type))
                 return false;
         return true;
     }
 
     override string mangle() {
         mut string ret = "either";
-        for (int i <- 0 .. types.length)
-            ret ~= "_" ~ types[i].type.mangle();
+        for (i, type in types)
+            ret ~= "_" ~ type.type.mangle();
         return ret;
     }
 
     override string repr() {
         mut string ret = "(";
-        for (int i <- 0 .. types.length) {
+        for (i, entry in types) {
             if (i) ret ~= " | ";
-            ret ~= types[i].type.repr();
+            ret ~= entry.type.repr();
         }
         ret ~= ")";
         return ret;
@@ -313,8 +309,8 @@ class Either : Type
     override void hash(Hash hash) {
         hash.adds("Either");
         hash.addl(types.length);
-        for (int i <- 0 .. types.length)
-            types[i].type.hash(hash);
+        for (entry in types)
+            entry.type.hash(hash);
     }
 
     /**
@@ -328,13 +324,12 @@ class Either : Type
             auto typeAssignment = context.compiler.assignStatement(targetType, sourceType);
 
             mut nullable Statement ifTree;
-            for (int i <- 0 .. types.length) {
-                auto type = types[i].type;
+            for (int i, entry in types) {
                 auto targetMember = new EitherReference(target, i);
                 auto sourceMember = new EitherMember(source, i);
 
                 Statement copy() {
-                    if (auto copyInto = type.copyInto(context, targetMember, sourceMember))
+                    if (auto copyInto = entry.type.copyInto(context, targetMember, sourceMember))
                         return copyInto;
                     return context.compiler.assignStatement(targetMember, sourceMember);
                 }
@@ -360,11 +355,10 @@ class Either : Type
             auto valueType = new EitherType(reference);
 
             mut nullable Statement ifTree;
-            for (int i <- 0 .. types.length) {
-                auto type = types[i].type;
+            for (int i, entry in types) {
                 auto member = new EitherReference(reference, i);
 
-                if (auto destroy = type.endLifetime(context, member))
+                if (auto destroy = entry.type.endLifetime(context, member))
                 {
                     Expression test = context.compiler.binaryOp(
                         "==", context, valueType, context.compiler.intLiteral(i + 1), __HERE__);
@@ -421,11 +415,11 @@ class ASTEitherCaseExpr : ASTSymbol
         mut Type[] resultTypes;
         void mergeType(Loc loc, Expression expr) {
             auto exprType = expr.type;
-            for (int i <- 0 .. resultTypes.length)
-                if (resultTypes[i].same(exprType)) return;
+            for (resultType in resultTypes)
+                if (resultType.same(exprType)) return;
             resultTypes ~= exprType;
         }
-        for (auto case_ <- this.cases) {
+        for (case_ in this.cases) {
             if (case_.return_) continue;
 
             auto caseType = beType(loc, case_.type.compile(context));
@@ -444,7 +438,7 @@ class ASTEitherCaseExpr : ASTSymbol
         if (resultTypes.length == 1) mergeType = resultTypes[0];
         else {
             mut (bool fail, Type)[] members;
-            for (auto type <- resultTypes) members ~= (false, type);
+            for (type in resultTypes) members ~= (false, type);
             mergeType = new Either(members);
         }
         auto resultNamespace = context.compiler.variableDeclaration(
@@ -454,13 +448,13 @@ class ASTEitherCaseExpr : ASTSymbol
         Reference resultVar = resultNamespace.accessDecl2(context.compiler);
         mut nullable Statement ifTree;
 
-        for (auto case_ <- this.cases) {
+        for (case_ in this.cases) {
             auto caseLoc = case_.loc;
             Type type = beType(caseLoc, case_.type.compile(resultContext));
 
             mut int matched = -1;
-            for (int k <- 0 .. either.types.length) {
-                if (type.same(either.types[k].type)) {
+            for (int k, eitherType in either.types) {
+                if (type.same(eitherType.type)) {
                     caseLoc.assert2s(matched == -1, "either type " ~ type.repr() ~ " matched twice");
                     matched = k;
                 }
@@ -490,8 +484,8 @@ class ASTEitherCaseExpr : ASTSymbol
 
             ifTree = context.compiler.ifStatement(test, then, ifTree);
         }
-        for (int i <- 0 .. handled.length) {
-            loc.assert2s(handled[i], "Type " ~ either.types[i].type.repr() ~ " not handled!");
+        for (i, handled in handled) {
+            loc.assert2s(handled, "Type " ~ either.types[i].type.repr() ~ " not handled!");
         }
         assert(!!ifTree);
 
@@ -504,7 +498,7 @@ class ASTEitherCaseExpr : ASTSymbol
             if (b) return quoter.compiler.astIdentifier("true", __HERE__);
             return quoter.compiler.astIdentifier("false", __HERE__);
         }
-        for (auto case_ <- this.cases) {
+        for (case_ in this.cases) {
             quotedCases ~= quoter.compiler.astCall(
                 quoter.compiler.astIdentifier("ASTEitherCaseExprCase", __HERE__), [
                     quoter.quoteLoc(case_.loc),
@@ -587,12 +581,12 @@ class ASTEitherCaseStmt : ASTStatement
         nullable Statement do_(Expression baseExpr) {
             bool[] handled = new bool[](either.types.length);
             mut nullable Statement ifTree = null;
-            for (auto case_ <- this.cases) {
+            for (case_ in this.cases) {
                 Type type = beType(case_.loc, case_.type.compile(context));
 
                 mut int matched = -1;
-                for (int k <- 0 .. either.types.length) {
-                    if (type.same(either.types[k].type)) {
+                for (int k, entry in either.types) {
+                    if (type.same(entry.type)) {
                         case_.loc.assert2s(matched == -1, "either type " ~ type.repr() ~ " matched twice");
                         matched = k;
                     }
@@ -614,8 +608,8 @@ class ASTEitherCaseStmt : ASTStatement
                     ifTree = ifStatement(test, then, ifTree);
                 }
             }
-            for (int i <- 0 .. handled.length) {
-                loc.assert2s(handled[i], "Type " ~ either.types[i].type.repr() ~ " not handled!");
+            for (i, handled in handled) {
+                loc.assert2s(handled, "Type " ~ either.types[i].type.repr() ~ " not handled!");
             }
             return ifTree;
         }
@@ -626,7 +620,7 @@ class ASTEitherCaseStmt : ASTStatement
 
     override ASTSymbol quote(Quoter quoter) {
         mut ASTSymbol[] quotedCases;
-        for (auto case_ <- this.cases) {
+        for (case_ in this.cases) {
             quotedCases ~= quoter.compiler.astCall(
                 quoter.compiler.astIdentifier("ASTEitherCaseStmtCase", __HERE__), [
                     quoter.quoteLoc(case_.loc),

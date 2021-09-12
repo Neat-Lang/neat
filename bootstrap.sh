@@ -499,6 +499,8 @@ at_revision '2d67d6203922f3927742938a26ebff99fe5d795b' 'rebuild neat' 'build/nea
 # bugfix `if (auto c = nullable class)`
 # bugfix mut uninitialized (A | B) varname
 at_revision '2aa2b17865ebe204fd606accf52b9c49a17312ed' 'rebuild neat' 'build/neat'
+# fix Either conversion bug
+at_revision 'df38b9b0daaab11918d62c3e48f4731941d79460' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

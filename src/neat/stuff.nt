@@ -3001,6 +3001,54 @@ nullable ASTStatementStatement parseStatementStatement(Parser parser, LexicalCon
     return new ASTStatementStatement(loc, variable);
 }
 
+alias ExtForVarDecl = ((:auto_ | ASTSymbol | :none) type, Loc loc, string name);
+
+(ExtForVarDecl | fail :fail) parseExtForVarDecl(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin;
+    if (parser.acceptIdentifier("auto")) {
+        auto loc = parser.loc;
+        auto identifier = parser.parseIdentifier;
+        if (!identifier.length) {
+            parser.revert;
+            return :fail;
+        }
+        parser.commit;
+        // (auto i in 0..10)
+        return (:auto_, loc, identifier);
+    }
+    {
+        auto loc = parser.loc;
+        auto ident = parser.parseIdentifier;
+        parser.begin;
+        // peek ahead
+        if (parser.accept(",") || parser.acceptIdentifier("in") || parser.accept("<-")) {
+            // (i in 0..10)
+            parser.revert; // revert peek
+            parser.commit; // commit identifier
+            return (:none, loc, ident);
+        }
+        parser.revert; // revert failed peek
+        parser.revert; // revert identifier parse
+        parser.begin;
+    }
+    // (int i in 0..10)
+    auto type = parser.parseType(lexicalContext);
+    if (!type) {
+        parser.revert;
+        return :fail;
+    }
+    auto type = notNull!ASTSymbol(type);
+    auto loc = parser.loc;
+    auto ident = parser.parseIdentifier;
+    if (!ident.length) {
+        parser.revert;
+        return :fail;
+    }
+    parser.commit;
+    return (type, loc, ident);
+}
+
 // This is a placeholder for proper range semantics.
 nullable ASTStatement parseExtFor(Parser parser, LexicalContext lexicalContext)
 {
@@ -3010,22 +3058,45 @@ nullable ASTStatement parseExtFor(Parser parser, LexicalContext lexicalContext)
         return null;
     }
     auto compiler = lexicalContext.compiler;
-    mut bool auto_;
-    mut nullable ASTSymbol type;
-    if (parser.accept("auto")) auto_ = true;
-    else type = parser.parseType(lexicalContext);
-    auto identifierLoc = parser.loc;
-    auto identifier = parser.parseIdentifier;
-    if (!identifier.length || !parser.accept("<-")) {
+    // TODO: parseExtForVarDecl(...).discard((:fail): { parser.revert; return null; });
+    auto match1 = parseExtForVarDecl(parser, lexicalContext);
+    mut uninitialized ExtForVarDecl match1decl;
+    match1.case {
+        (:fail): {
+            parser.revert;
+            return null;
+        }
+        ExtForVarDecl decl: {
+            match1decl = decl;
+        }
+    }
+    mut bool keyValueLoop = false;
+    mut uninitialized ExtForVarDecl match2decl;
+    if (parser.accept(",")) {
+        parseExtForVarDecl(parser, lexicalContext).case {
+            (:fail): {
+                parser.revert;
+                return null;
+            }
+            ExtForVarDecl decl: {
+                match2decl = decl;
+            }
+        }
+        keyValueLoop = true;
+    }
+    if (parser.accept("<-")) {
+        print("warn: $(parser.loc.location): use 'in'");
+    } else if (!parser.acceptIdentifier("in")) {
         parser.revert;
         return null;
     }
     auto source = parseExpression(parser, lexicalContext);
     if (!source) parser.fail("expression expected");
     auto source = notNull!ASTSymbol(source);
-    // range expression loop, for (int i <- 0..10)
+    // range expression loop, for (int i in 0..10)
     if (parser.accept(".."))
     {
+        if (keyValueLoop) parser.fail("cannot key-value iterate a range expression: TODO");
         auto lower = source;
         auto upper = parseExpression(parser, lexicalContext);
         if (!upper) parser.fail("range upper bound expected");
@@ -3034,34 +3105,53 @@ nullable ASTStatement parseExtFor(Parser parser, LexicalContext lexicalContext)
         auto body_ = parseStatement(parser, lexicalContext);
         parser.commit;
 
-        auto loopvar = compiler.astIdentifier(identifier, identifierLoc);
-        if (auto_)
-            return compiler.$stmt {
-                for (mut auto $identifier = $lower; $loopvar < $upper; $loopvar += 1) {
-                    $stmt body_;
-                }
-            };
-        auto type = notNull!ASTSymbol(type);
-        return compiler.$stmt {
-            for (mut $type $identifier = $lower; $loopvar < $upper; $loopvar += 1) {
+        auto identifier = match1decl.name;
+        auto loopvar = compiler.astIdentifier(match1decl.name, match1decl.loc);
+        auto autoLoop = compiler.$stmt {
+            for (mut auto $identifier = $lower; $loopvar < $upper; $loopvar += 1) {
                 $stmt body_;
             }
         };
+        match1decl.type.case {
+            (:auto_): return autoLoop;
+            (:none): return autoLoop;
+            ASTSymbol type: return compiler.$stmt {
+                for (mut $type $identifier = $lower; $loopvar < $upper; $loopvar += 1) {
+                    $stmt body_;
+                }
+            };
+        }
     }
-    // array loop, for (auto bla <- array)
+    // array loop, for (i, k in array)
     parser.expect(")");
     auto body_ = parseStatement(parser, lexicalContext);
     parser.commit;
 
     mut uninitialized ASTStatement declIdentifier;
-    if (auto_) declIdentifier = compiler.$stmt auto $identifier = __source[__loopvar];;
-    else {
-        auto type = notNull!ASTSymbol(type);
-        declIdentifier = compiler.$stmt $type $identifier = __source[__loopvar];;
+    mut uninitialized ExtForVarDecl valueMatch;
+    if (keyValueLoop) valueMatch = match2decl; // key, value
+    else valueMatch = match1decl; // value
+
+    mut string keyName = "__loopvar";
+    mut ASTSymbol loopType = compiler.astIdentifier("size_t", __HERE__);
+    mut string valueName = valueMatch.name;
+    if (keyValueLoop) {
+        keyName = match1decl.name;
+        loopType = match1decl.type.case(
+            (:auto_): compiler.astIdentifier("size_t", __HERE__),
+            (:none): compiler.astIdentifier("size_t", __HERE__),
+            ASTSymbol type: type);
     }
+
+    ASTSymbol keyIdent = compiler.astIdentifier(keyName, __HERE__);
+    ASTStatement declIdentifier = valueMatch.type.case(
+        (:auto_): compiler.$stmt auto $valueName = __source[$keyIdent]; ,
+        (:none): compiler.$stmt auto $valueName = __source[$keyIdent]; ,
+        ASTSymbol type: compiler.$stmt $type $valueName = __source[$keyIdent]; );
+
     return compiler.$stmt {
         auto __source = $source;
-        for (mut int __loopvar = 0; __loopvar < __source.length; __loopvar += 1) {
+        for (mut $loopType $keyName = 0; $keyIdent < __source.length; $keyIdent += 1) {
             $stmt declIdentifier;
             $stmt body_;
         }

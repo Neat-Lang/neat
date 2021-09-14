@@ -505,6 +505,8 @@ at_revision 'df38b9b0daaab11918d62c3e48f4731941d79460' 'rebuild neat' 'build/nea
 at_revision '56428f1ecb83bee101d0d170cf7ede6bc6ea17eb' 'rebuild neat' 'build/neat'
 # allow quoting if statements with vardecls/varextracts
 at_revision 'e1cadbf9cc070c1318106f469b14d457f971a900' 'rebuild neat' 'build/neat'
+# Add non-null picking declarations.
+at_revision 'de71869e4ba7917e9ec52bf55b8e60617701f45c' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

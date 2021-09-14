@@ -1995,6 +1995,14 @@ class InfoExpression : Expression
     override ExprInfo info() { return this.info_; }
 }
 
+Type makeNotNullable(Type type) {
+    if (auto classType = type.instanceOf(ClassType))
+        return classType.makeNotNullable;
+    else if (auto intfType = type.instanceOf(IntfType))
+        return intfType.makeNotNullable;
+    else assert(false);
+}
+
 class ASTIfStatement : ASTStatement
 {
     (ASTSymbol | ASTVarDeclStatement | ASTVarExtractDeclStatement) test;
@@ -2023,12 +2031,7 @@ class ASTIfStatement : ASTStatement
                 // `if (Foo var = some nullable Foo)`:
                 //   - cache `some`, test for nullness, then declare Foo var.
                 if (initial.type.zeroInitializable && context.compiler.isClassType(initial.type)) {
-                    mut uninitialized Type notNullableType;
-                    if (auto classType = initial.type.instanceOf(ClassType))
-                        notNullableType = classType.makeNotNullable;
-                    else if (auto intfType = initial.type.instanceOf(IntfType))
-                        notNullableType = intfType.makeNotNullable;
-                    else assert(false);
+                    Type notNullableType = initial.type.makeNotNullable;
 
                     auto tempInitial = new PairedTemporary(initial.type, initial.info.ownership);
                     auto initTemp = new InitializeTemporaryStatement(tempInitial, initial);
@@ -2069,7 +2072,7 @@ class ASTIfStatement : ASTStatement
                 auto initTemp = new InitializeTemporaryStatement(tempSource, source);
                 // check expected type
                 mut uninitialized Type extractType;
-                if (extractdecl.auto_) {
+                if (extractdecl.infer) {
                     extractType = typeWithoutFail(sourceType);
                 } else {
                     extractType = beType(extractdecl.loc, extractdecl.type.compile(context));
@@ -2080,7 +2083,7 @@ class ASTIfStatement : ASTStatement
                 test = ret.test;
 
                 auto actualVarDecl = new ASTVarDeclStatement(
-                    extractdecl.name, mutable=false, infer=false, uninitialized=false,
+                    extractdecl.name, mutable=extractdecl.mutable, infer=false, uninitialized=false,
                     type=new ASTSymbolHelper(extractType), initial=new ASTSymbolHelper(ret.value),
                     extractdecl.loc);
                 auto pair = actualVarDecl.compile(context);
@@ -2531,6 +2534,14 @@ nullable ASTVarDeclStatement parseVarInitialization(
         else if (parser.accept(operator)) {
             initial = parseExpression(parser, lexicalContext);
             if (!initial) parser.fail("variable initializer expected");
+        } else {
+            // FIXME this is very hacky
+            if (operator == "=" && parser.accept("<-")) {
+                // recognize that we're failing to parse a <- instead of ==
+                // FIXME check for both here instead of passing a parameter
+                parser.revert;
+                return null;
+            }
         }
     }
     if (requireInitializer && !initial) {
@@ -2622,7 +2633,9 @@ class ASTVarExtractDeclStatement : ASTStatement
 {
     string name;
 
-    bool auto_;
+    bool mutable;
+
+    bool infer;
 
     nullable ASTSymbol type;
 
@@ -2630,16 +2643,22 @@ class ASTVarExtractDeclStatement : ASTStatement
 
     Loc loc;
 
-    this(this.name, this.auto_, this.type, this.source, this.loc)
+    this(this.name, this.mutable, this.infer, this.type, this.source, this.loc)
     {
         assert(!!source);
-        assert(auto_ == !type);
+        assert(infer == !type);
     }
 
     override StatementCompileResult compile(Context context)
     {
         auto source = this.source.compile(context).beExpressionImplCall(context, this.loc);
         nullable Either sourceType = source.type.instanceOf(Either);
+        if (!sourceType) {
+            // either can also turn nullables into non-nullables
+            if (context.compiler.isClassType(source.type) && source.type.zeroInitializable) {
+                return compileObjectDenullFallback(context, source);
+            }
+        }
         this.loc.assert2s(!!sourceType, "Source type for extract decl must be sumtype");
         auto sourceType = notNull!Either(sourceType);
 
@@ -2654,7 +2673,7 @@ class ASTVarExtractDeclStatement : ASTStatement
         }
 
         auto decl = new VariableDeclaration(
-            context.namespace, this.name, type, ExprInfo(mutable=false, Ownership.owned), false);
+            context.namespace, this.name, type, ExprInfo(mutable=this.mutable, Ownership.owned), false);
         auto astType = new ASTSymbolHelper(type);
 
         mut ASTEitherCaseExprCase[] cases;
@@ -2685,6 +2704,28 @@ class ASTVarExtractDeclStatement : ASTStatement
             context.withNamespace(decl));
     }
 
+    StatementCompileResult compileObjectDenullFallback(Context context, Expression source) {
+        mut uninitialized Type type;
+        if (this.type) type = beType(this.loc, this.type.compile(context));
+        else type = source.type.makeNotNullable;
+        assert(type.same(source.type.makeNotNullable));
+
+        auto astSource = new ASTSymbolHelper(source);
+        auto astType = new ASTSymbolHelper(type);
+        auto initial = context.compiler.$expr ({
+            mut uninitialized $astType result;
+            if (auto a = $astSource) result = a;
+            else return null;
+            result;
+        });
+        auto decl = new VariableDeclaration(
+            context.namespace, this.name, type, ExprInfo(mutable=this.mutable, Ownership.owned), false);
+
+        return StatementCompileResult(
+            move(context, decl.accessDecl(context.compiler), initial.compile(context).beExpression),
+            context.withNamespace(decl));
+    }
+
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTVarExtractDeclStatement'!"); assert(false); }
 
     /*
@@ -2701,7 +2742,7 @@ class ASTVarExtractDeclStatement : ASTStatement
 ASTVarExtractDeclStatement extractFromVarDecl(ASTVarDeclStatement decl)
 {
     return new ASTVarExtractDeclStatement(
-        name=decl.name, auto_=decl.infer, type=decl.type,
+        name=decl.name, mutable=decl.mutable, infer=decl.infer, type=decl.type,
         source=notNull!ASTSymbol(decl.initial), loc=decl.loc);
 }
 

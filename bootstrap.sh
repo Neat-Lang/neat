@@ -503,6 +503,8 @@ at_revision '2aa2b17865ebe204fd606accf52b9c49a17312ed' 'rebuild neat' 'build/nea
 at_revision 'df38b9b0daaab11918d62c3e48f4731941d79460' 'rebuild neat' 'build/neat'
 # new for loop syntax
 at_revision '56428f1ecb83bee101d0d170cf7ede6bc6ea17eb' 'rebuild neat' 'build/neat'
+# allow quoting if statements with vardecls/varextracts
+at_revision 'e1cadbf9cc070c1318106f469b14d457f971a900' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

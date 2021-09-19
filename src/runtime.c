@@ -113,6 +113,13 @@ void neat_runtime_system(struct String command) {
     free(cmd);
 }
 
+int neat_runtime_system_iret(struct String command) {
+    char *cmd = toStringz(command);
+    int ret = system(cmd);
+    free(cmd);
+    return ret;
+}
+
 int neat_runtime_execbg(struct String command, struct StringArray arguments) {
     int ret = fork();
     if (ret != 0) return ret;

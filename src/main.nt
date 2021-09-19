@@ -553,9 +553,10 @@ class Options
     bool unittest_;
     bool noMain;
     PlatformFlags platformFlags, macroPlatformFlags;
-    // for neat.macros.cimport
-    string[] cFlags;
+    string[] cFlags; // for neat.macros.cimport
     string[] versions, macroVersions;
+    string runningCompilerVersion;
+    string requestedCompilerVersion;
 
     this() {
         this.backend = new LLVMBackend();
@@ -565,6 +566,12 @@ class Options
     }
 
     string[] parseArgs(string executable, string[] args) {
+        (string | fail :notFound) startsWith(string haystack, string needle) {
+            if (needle.length < haystack.length && haystack[0 .. needle.length] == needle) {
+                return haystack[needle.length .. $];
+            }
+            return :notFound;
+        }
         mut string[] remArgs;
         for (mut size_t i = 0; i < args.length; i += 1) {
             string arg = args[i];
@@ -588,6 +595,11 @@ class Options
                 assert(i + 1 < args.length);
                 addPackage(args[i + 1], true);
                 i += 1;
+            } else if (string ver <- arg.startsWith("-running-compiler-version=")) {
+                // Should only be passed via neat.ini!
+                this.runningCompilerVersion = ver;
+            } else if (string ver <- arg.startsWith("-compiler-version=")) {
+                this.requestedCompilerVersion = ver;
             } else if (flag == "-I") {
                 cFlags ~= arg;
             } else if (flag == "-l") {
@@ -608,10 +620,10 @@ class Options
                 this.backend = new CBackend;
             } else if (arg == "-macro-backend=c") {
                 this.macroBackend = new CBackend;
-            } else if (arg.startsWith("-version=")) {
-                this.versions ~= arg["-version=".length .. $];
-            } else if (arg.startsWith("-macro-version=")) {
-                this.macroVersions ~= arg["-macro-version=".length .. $];
+            } else if (string ver <- arg.startsWith("-version=")) {
+                this.versions ~= ver;
+            } else if (string ver <- arg.startsWith("-macro-version=")) {
+                this.macroVersions ~= ver;
             } else if (arg == "-m32") {
                 this.x86_32 = true;
             } else if (arg == "-macro-m32") {
@@ -810,11 +822,30 @@ void main(mut string[] args)
 {
     string executable = args[0];
     args = args[1 .. $];
+    string[] allArgs = args;
     string execPath = "/proc/self/exe".realpath.dirname;
     auto options = new Options;
     // TODO make configurable somehow? commandline arg?
     options.parseConfig(execPath ~ "/neat.ini");
     args = options.parseArgs(executable, args);
+
+    string reqVer = options.requestedCompilerVersion;
+    if (options.runningCompilerVersion != "" && reqVer != options.runningCompilerVersion) {
+        print("Wrong compiler version, running $(options.runningCompilerVersion) but requested $(
+            reqVer). Bootstrapping $(reqVer)...");
+        string zipName = "neat-$reqVer-gcc.zip";
+        string url = "https://github.com/Neat-Lang/neat/releases/download/v$reqVer/$zipName";
+        import std.process : getEnv, system;
+        string targetPath = getEnv("HOME") ~ "/.neat/compilers/v$(reqVer)";
+        int system_v(string s) { print("\$ " ~ s); return system_iret(s); }
+        if (!targetPath.exists) {
+            system_v("mkdir -p $targetPath");
+            system_v("wget -q $url -O $targetPath/$zipName");
+            system_v("cd $targetPath && unzip $zipName && ./build.sh");
+        }
+        // TODO shell escape
+        exit(system_v("$targetPath/bin/neat " ~ allArgs.join(" ")));
+    }
 
     mut Package[] packages = options.astPackages.resolvePackages(execPath);
 

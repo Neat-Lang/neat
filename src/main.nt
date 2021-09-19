@@ -833,10 +833,9 @@ void main(mut string[] args)
      * Must be done first to ensure we allow some degree of forward compat.
      * Really, we should be pulling out -compiler-version= separately.
      */
-    string reqVer = options.requestedCompilerVersion;
-    if (reqVer != "" && reqVer != options.runningCompilerVersion) {
+    void swapCompilerVersion(string reqVer, string where) {
         print("Wrong compiler version, running $(options.runningCompilerVersion) but requested $(
-            reqVer). Bootstrapping $(reqVer)...");
+            reqVer) $where. Bootstrapping $(reqVer)...");
         string zipName = "neat-$reqVer-gcc.zip";
         string url = "https://github.com/Neat-Lang/neat/releases/download/v$reqVer/$zipName";
         import std.process : system_iret;
@@ -861,6 +860,11 @@ void main(mut string[] args)
         exit(system_iret_v("$targetPath/neat/neat " ~ allArgs.join(" ")));
     }
 
+    string reqVer = options.requestedCompilerVersion;
+    if (reqVer != "" && reqVer != options.runningCompilerVersion) {
+        swapCompilerVersion(reqVer, "on the commandline");
+    }
+
     mut Package[] packages = options.astPackages.resolvePackages(execPath);
 
     if (args.length != 1)
@@ -876,8 +880,10 @@ void main(mut string[] args)
             exit(1);
         });*/
         BinaryPackageFile pkgFile() {
-            loadPkgFile(".").case {
+            loadPkgFile(".", options.runningCompilerVersion).case {
                 PackageFile file: return notNull!BinaryPackageFile(file.instanceOf(BinaryPackageFile));
+                ReloadCompiler reload:
+                    swapCompilerVersion(reload.requestedVer, "in package.json");
                 (:notFound): {
                     print("package.json not found.");
                     exit(1);
@@ -890,13 +896,16 @@ void main(mut string[] args)
             PackageLock f: f,
             (:notFound): new PackageLock([]));
         // default commandline packages
-        auto ret = resolvePackageVersions("src", ".", packages, [], packageLock, new VersionProvider);
+        auto ret = resolvePackageVersions("src", ".", packages, [], packageLock, new VersionProvider,
+                                          currentCompiler=options.runningCompilerVersion);
         Package pkg() {
             ret.case {
                 (:mismatched): {
                     print("Package resolution failed. :-(");
                     exit(1);
                 }
+                ReloadCompiler reload:
+                    assert(false); // should have been handled earlier
                 (Package package_, PackageLock resultLock): {
                     packageLock = resultLock;
                     return package_;

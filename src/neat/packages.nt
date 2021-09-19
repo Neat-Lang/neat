@@ -209,13 +209,30 @@ class BinaryPackageFile : PackageFile {
     this(this.main, this.binary, this.srcDir, this.deps) { }
 }
 
-(PackageFile | :notFound) loadPkgFile(string path) {
-    string file = path ~ "/" ~ "package.json";
+/**
+ * Indicates that we need to load a compiler version with
+ * the specified tag from GH, then pass all our arguments to it.
+ * To avoid incompatibility, the compiler should try to do as
+ * little work as possible before handing off control to the
+ * future (or past) version.
+ */
+struct ReloadCompiler {
+    string requestedVer;
+}
+
+(PackageFile | ReloadCompiler | :notFound) loadPkgFile(string path, string compilerVersion) {
+    string file = "$(path)/package.json";
     if (!file.exists) return :notFound;
     JSONValue pkgFile = JSONValue.loadFile(file);
     if (!pkgFile.isObject) {
         print("package.json: object expected");
         exit(1);
+    }
+    if (compilerVersion != "" && pkgFile.has("compilerVersion")) {
+        string requestedCompilerVer = pkgFile.require("compilerVersion").requireString;
+        if (requestedCompilerVer != compilerVersion) {
+            return ReloadCompiler(requestedVer=requestedCompilerVer);
+        }
     }
     mut string srcDir = "";
     if (pkgFile.has("source")) {
@@ -297,20 +314,21 @@ void writePkgLock(PackageLock pkgLock, string path) {
 }
 
 // Returns a Package for the name/path.
-((Package package_, PackageLock packageLock) | :mismatched) resolvePackageVersions(
+((Package package_, PackageLock packageLock) | :mismatched | ReloadCompiler) resolvePackageVersions(
     string name, string path, Package[] defaultPkgs, Dependency[] allDeps,
-    mut PackageLock packageLock, VersionProvider provider)
+    mut PackageLock packageLock, VersionProvider provider, string currentCompiler)
 {
-    PackageFile pkgFile() {
-        loadPkgFile(path).case {
+    (PackageFile | ReloadCompiler) pkgFile() {
+        loadPkgFile(path, currentCompiler).case {
             PackageFile file: return file;
+            ReloadCompiler reload: return reload;
             (:notFound): {
                 print(path ~ "/package.json not found.");
                 exit(1);
             }
         }
     }
-    auto pkgFile = pkgFile;
+    PackageFile pkgFile <- pkgFile;
 
     mut Package[] deps = defaultPkgs;
     auto combinedDeps = allDeps ~ pkgFile.deps;
@@ -320,12 +338,15 @@ void writePkgLock(PackageLock pkgLock, string path) {
             auto version_ = packageLock.get(dep.source);
             // TODO assert version_ matches requirements still
             auto depPath = checkoutVer(dep.source, version_);
-            auto result = resolvePackageVersions(dep.name, depPath, defaultPkgs, combinedDeps, packageLock, provider);
+            auto result = resolvePackageVersions(
+                dep.name, depPath, defaultPkgs, combinedDeps, packageLock, provider, "");
             result.case {
                 (Package package_, PackageLock resultLock): {
                     deps ~= package_;
                     packageLock = resultLock; // might have added further locks in dependencies
                 }
+                // should never happen with currentCompiler=""
+                ReloadCompiler reload: assert(false);
                 (:mismatched): {
                     // What the fuck happened here??
                     return :mismatched;
@@ -349,11 +370,14 @@ void writePkgLock(PackageLock pkgLock, string path) {
              */
             auto version_ = allowedVersions[i];
             auto newLock = packageLock.withPkg(dep.source, version_);
-            auto result = resolvePackageVersions(name, path, defaultPkgs, allDeps, newLock, provider);
+            auto result = resolvePackageVersions(
+                name, path, defaultPkgs, allDeps, newLock, provider, "");
             result.case {
                 (Package package_, PackageLock resultLock): {
                     return (package_, resultLock);
                 }
+                // should never happen with currentCompiler=""
+                ReloadCompiler reload: assert(false);
                 (:mismatched): {
                     continue;
                 }
@@ -369,30 +393,19 @@ void writePkgLock(PackageLock pkgLock, string path) {
 }
 
 JSONValue require(JSONValue v, string key) {
-    void fail() { print("Expected '" ~ key ~ "', not " ~ v.str); exit(1); }
-    v.value.case {
-        (:false): fail;
-        (:true): fail;
-        int: fail;
-        string: fail;
-        JSONValue[]: fail;
-        (string key, JSONValue value)[] obj: {
-            for (entry in obj)
-                if (entry.key == key) return entry.value;
-            print("Expected '" ~ key ~ "' in " ~ v.str);
-            exit(1);
-        }
+    if ((string key, JSONValue value)[] obj <- v.value) {
+        for (entry in obj)
+            if (entry.key == key) return entry.value;
+        print("Expected '$(key)' in $(v.str)");
+        exit(1);
     }
+
+    print("Expected '$(key), not $(v.str)");
+    exit(1);
 }
 
 string requireString(JSONValue v) {
-    void fail() { print("Expected string, not " ~ v.str); exit(1); }
-    v.value.case {
-        (:false): fail;
-        (:true): fail;
-        int: fail;
-        string s: return s;
-        JSONValue[]: fail;
-        (string key, JSONValue value)[]: fail;
-    }
+    if (string s <- v.value) return s;
+    print("Expected string, not " ~ v.str);
+    exit(1);
 }

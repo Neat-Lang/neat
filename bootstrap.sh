@@ -509,6 +509,8 @@ at_revision 'e1cadbf9cc070c1318106f469b14d457f971a900' 'rebuild neat' 'build/nea
 at_revision 'de71869e4ba7917e9ec52bf55b8e60617701f45c' 'rebuild neat' 'build/neat'
 # Add -compiler-version
 at_revision '35942409c84403fe18e82ddaf0e66858917ab6c9' 'rebuild neat' 'build/neat'
+# fix for Either case expression logic
+at_revision '9ff3dfefb223ae125f4a618f0b10d718ad53d9bc' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

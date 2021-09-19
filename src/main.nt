@@ -829,22 +829,36 @@ void main(mut string[] args)
     options.parseConfig(execPath ~ "/neat.ini");
     args = options.parseArgs(executable, args);
 
+    /**
+     * Must be done first to ensure we allow some degree of forward compat.
+     * Really, we should be pulling out -compiler-version= separately.
+     */
     string reqVer = options.requestedCompilerVersion;
-    if (options.runningCompilerVersion != "" && reqVer != options.runningCompilerVersion) {
+    if (reqVer != "" && reqVer != options.runningCompilerVersion) {
         print("Wrong compiler version, running $(options.runningCompilerVersion) but requested $(
             reqVer). Bootstrapping $(reqVer)...");
         string zipName = "neat-$reqVer-gcc.zip";
         string url = "https://github.com/Neat-Lang/neat/releases/download/v$reqVer/$zipName";
         import std.process : getEnv, system;
         string targetPath = getEnv("HOME") ~ "/.neat/compilers/v$(reqVer)";
-        int system_v(string s) { print("\$ " ~ s); return system_iret(s); }
+        void system_v(string s) {
+            print("\$ " ~ s);
+            int ret = system_iret(s);
+            if (ret != 0) {
+                print("command failed with $ret!");
+                // avoid cycle
+                if (!s.startsWith("rm -rf")) system_v("rm -rf $targetPath");
+                exit(1);
+            }
+        }
+        int system_iret_v(string s) { print("\$ " ~ s); return system_iret(s); }
         if (!targetPath.exists) {
             system_v("mkdir -p $targetPath");
-            system_v("wget -q $url -O $targetPath/$zipName");
-            system_v("cd $targetPath && unzip $zipName && ./build.sh");
+            system_v("wget -c $url -O $targetPath/$zipName");
+            system_v("cd $targetPath && unzip $zipName && cd neat && ./build.sh");
         }
         // TODO shell escape
-        exit(system_v("$targetPath/bin/neat " ~ allArgs.join(" ")));
+        exit(system_iret_v("$targetPath/neat/neat " ~ allArgs.join(" ")));
     }
 
     mut Package[] packages = options.astPackages.resolvePackages(execPath);

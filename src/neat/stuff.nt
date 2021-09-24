@@ -1088,6 +1088,62 @@ nullable ASTMember parseMember(Parser parser, ASTSymbol base)
     return new ASTMember(base, name, parser.loc);
 }
 
+class ASTParenPropertyExpression : ASTSymbol
+{
+    ASTSymbol base;
+
+    ASTSymbol prop;
+
+    Loc loc;
+
+    this(this.base, this.prop, this.loc) { }
+
+    override Symbol compile(Context context) {
+        auto baseExpr = this.base.compile(context).beExpressionImplCall(context, this.loc);
+        Expression do2(Expression baseExpr) {
+            nullable Expression do1(Expression baseExpr) {
+                auto context = context.withNamespace(
+                    context.compiler.exprAlias(context.namespace, "that", baseExpr));
+                return this.prop.compile(context).beExpressionImplCall(context, this.loc);
+            }
+            // FIXME this should be <-
+            if (auto ret = context.compiler.exprWithTemporaryExpr(baseExpr, &do1)) return ret;
+            assert(false);
+        }
+        return context.compiler.consume(context, baseExpr, &do2);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compiler.astNewExpression(
+            quoter.compiler.astIdentifier("ASTParenPropertyExpression", __HERE__), [
+                this.base.quote(quoter),
+                this.prop.quote(quoter),
+                quoter.quoteLoc(this.loc)], __HERE__);
+    }
+
+    override string repr() {
+        return "$(this.base.repr).($(this.prop.repr))";
+    }
+}
+
+nullable ASTParenPropertyExpression parseParenPropertyExpression(
+    Parser parser, LexicalContext lexicalContext, ASTSymbol base
+) {
+    parser.begin;
+    auto loc = parser.loc;
+    if (parser.accept("..") || !parser.accept(".") || !parser.accept("(")) // don't accept '..'
+    {
+        parser.revert;
+        return null;
+    }
+    auto sym = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+    if (!sym) parser.fail("expression expected");
+    auto sym <- sym;
+    if (!parser.accept(")")) parser.fail("closing parenthesis expected");
+    parser.commit;
+    return new ASTParenPropertyExpression(base, sym, loc);
+}
+
 nullable ASTSymbol parseTemplateInstantiation(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
 {
     parser.begin;
@@ -1129,6 +1185,11 @@ ASTSymbol parseProperties(Parser parser, LexicalContext lexicalContext, mut ASTS
         if (ASTSymbol call = parser.parseCall(lexicalContext, current))
         {
             current = call;
+            continue;
+        }
+        if (ASTSymbol prop = parser.parseParenPropertyExpression(lexicalContext, current))
+        {
+            current = prop;
             continue;
         }
         if (ASTSymbol memberAccess = parser.parseMember(current))

@@ -335,9 +335,10 @@ nullable ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
     return lexicalContext.compiler.astIdentifier(identifier, parser.loc);
 }
 
-ASTParameter[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
+(ASTParameter[] params, bool variadic) parseIdentifierList(Parser parser, LexicalContext lexicalContext, bool variadics)
 {
     mut ASTParameter[] params;
+    mut bool variadic = false;
     while (!parser.accept(")"))
     {
         if (params.length) {
@@ -345,6 +346,16 @@ ASTParameter[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
                 parser.fail("',' or ')' expected");
             }
         }
+        if (variadics) {
+            parser.begin;
+            if (parser.accept("...") && parser.accept(")")) {
+                parser.commit;
+                variadic = true;
+                break;
+            }
+            parser.revert;
+        }
+
         auto loc = parser.loc;
         mut bool mutable;
         if (parser.acceptIdentifier("mut")) mutable = true;
@@ -355,7 +366,7 @@ ASTParameter[] parseIdentifierList(Parser parser, LexicalContext lexicalContext)
         string paramName = parser.parseIdentifier;
         params ~= ASTParameter(paramName, mutable, notNull!ASTSymbol(paramType), loc);
     }
-    return params;
+    return (params, variadic);
 }
 
 class FuncPtrCall : Expression
@@ -479,7 +490,10 @@ nullable Expression plainCall(Context context, Symbol target, mut Expression[] a
 {
     if (auto fundecl = target.instanceOf(FunctionDeclaration))
     {
-        args = [expectImplicitConvertTo(context, arg, fundecl.params[i].type, loc) for i, arg in args];
+        // skip variadic args
+        args = [
+            expectImplicitConvertTo(context, arg, fundecl.params[i].type, loc)
+            for i, arg in args[0 .. fundecl.params.length]] ~ args[fundecl.params.length .. $];
         return new Call(fundecl, args, loc);
     }
     if (ClassMethodPtr method = target.instanceOf(ClassMethodPtr))
@@ -648,12 +662,12 @@ nullable Expression call(Context context, ASTSymbol astTarget, ASTArgument[] ast
     }
 
     if (auto fundecl = target.instanceOf(FunctionDeclaration)) {
-        validateCall(fundecl.params, astArgs, fundecl.name, loc);
+        validateCall(fundecl.params, astArgs, fundecl.name, variadic=fundecl.variadic, loc);
     }
     if (auto method = target.instanceOf(ClassMethodPtr)) {
         if (auto funcptr = method.funcPtr.type.instanceOf(FunctionPointer)) {
             // skip "this"
-            validateCall(funcptr.params[1 .. $], astArgs, method.name, loc);
+            validateCall(funcptr.params[1 .. $], astArgs, method.name, variadic=false, loc);
         }
     }
 
@@ -686,7 +700,7 @@ nullable Expression call(Context context, ASTSymbol astTarget, ASTArgument[] ast
             auto funcPtr = lateSym.resolve(context, baseExpr);
             mut Expression[] args = args;
             if (auto funcPtr = funcPtr.type.instanceOf(FunctionPointer)) {
-                validateCall(funcPtr.params[1 .. $], astArgs, "function pointer", loc);
+                validateCall(funcPtr.params[1 .. $], astArgs, "function pointer", variadic=false, loc);
                 args = [expectImplicitConvertTo(context, arg, funcPtr.params[i+1].type, loc) for i, arg in args];
             } else {
                 loc.fail("function reference or funcptr expected? but is '$(funcPtr.type.repr)'");
@@ -3363,9 +3377,11 @@ nullable ASTFunction parseFunction(Parser parser, LexicalContext lexicalContext)
         return null;
     }
     parser.commit;
-    ASTParameter[] params = parseIdentifierList(parser, lexicalContext);
+    // FIXME
+    // auto params = parseIdentifierList(parser, lexicalContext, variadics=false).params;
+    auto params = parseIdentifierList(parser, lexicalContext, variadics=false);
     ASTStatement stmt = parseStatement(parser, lexicalContext);
-    return new ASTFunction(parser.loc, name, notNull!ASTSymbol(ret), params, false, stmt, lexicalContext.macroState);
+    return new ASTFunction(parser.loc, name, notNull!ASTSymbol(ret), params.params, false, stmt, lexicalContext.macroState);
 }
 
 class ModuleEntry
@@ -3735,9 +3751,11 @@ class ASTExtern
 
     ASTParameter[] params;
 
+    bool variadic;
+
     Loc retLoc;
 
-    this(this.name, this.ret, this.params, this.retLoc) { }
+    this(this.name, this.ret, this.params, this.variadic, this.retLoc) { }
 
     FunctionDeclaration compile(Context context)
     {
@@ -3745,7 +3763,10 @@ class ASTExtern
             Parameter(false, param.name, false, beType(param.loc, param.type.compile(context)))
             for param in this.params];
 
-        return new FunctionDeclaration(this.name, beType(this.retLoc, this.ret.compile(context)), params);
+        auto decl = new FunctionDeclaration(this.name, beType(this.retLoc, this.ret.compile(context)), params);
+        decl.variadic = this.variadic;
+
+        return decl;
     }
 
     string repr() {
@@ -3769,9 +3790,9 @@ nullable ASTExtern parseExtern(Parser parser, LexicalContext lexicalContext)
         string name = parser.parseIdentifier;
         if (!name.length) parser.fail("identifier expected");
         parser.expect("(");
-        ASTParameter[] params = parseIdentifierList(parser, lexicalContext);
+        auto params = parseIdentifierList(parser, lexicalContext, variadics=true);
         parser.expect(";");
-        return new ASTExtern(name, ret, params, retLoc);
+        return new ASTExtern(name, ret, params=params.params, variadic=params.variadic, retLoc);
     }
     return null;
 }

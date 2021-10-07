@@ -511,6 +511,8 @@ at_revision 'de71869e4ba7917e9ec52bf55b8e60617701f45c' 'rebuild neat' 'build/nea
 at_revision '35942409c84403fe18e82ddaf0e66858917ab6c9' 'rebuild neat' 'build/neat'
 # fix for Either case expression logic
 at_revision '9ff3dfefb223ae125f4a618f0b10d718ad53d9bc' 'rebuild neat' 'build/neat'
+# expr.(...that...)
+at_revision '9f29c9b262cba6956053838a97db843b4ce7632e' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

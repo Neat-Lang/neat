@@ -74,10 +74,10 @@ class LLVMBackendModule : BackendModule {
 
     override bool declared(string name) { return this.globals.has(name); }
 
-    override void declare(string name, BackendType ret, BackendType[] args)
+    override void declare(string name, BackendType ret, BackendType[] args, bool variadic)
     {
         assert(!this.declared(name));
-        auto type = new BackendFunctionPointerType(ret, args);
+        auto type = new BackendFunctionPointerType(ret, args, variadic);
         pendingDeclarations ~= DeclarationEntry(name, true, type);
         this.globals[name] = type;
     }
@@ -112,7 +112,7 @@ class LLVMBackendModule : BackendModule {
         string name, string decoration, BackendType ret, BackendType[] args, BackendLocation loc)
     {
         removePendingDecl(name);
-        this.globals[name] = new BackendFunctionPointerType(ret, args);
+        this.globals[name] = new BackendFunctionPointerType(ret, args, variadic=false);
 
         auto comps = split(loc.file, "/");
         auto dir = join(comps[0 .. $ - 1], "/");
@@ -131,7 +131,7 @@ class LLVMBackendModule : BackendModule {
     override void declareSymbolList(string name, size_t length)
     {
         auto globalType = new BackendStaticArrayType(
-            new BackendFunctionPointerType(new BackendVoidType, new BackendType[](0)), cast(int) length);
+            new BackendFunctionPointerType(new BackendVoidType, new BackendType[](0), variadic=false), cast(int) length);
         pendingDeclarations ~= DeclarationEntry(name, false, globalType);
         this.globals[name] = globalType;
     }
@@ -143,7 +143,7 @@ class LLVMBackendModule : BackendModule {
 
         removePendingDecl(name);
         auto globalType = new BackendStaticArrayType(
-            new BackendFunctionPointerType(new BackendVoidType, new BackendType[](0)), cast(int) symbols.length);
+            new BackendFunctionPointerType(new BackendVoidType, new BackendType[](0), variadic=false), cast(int) symbols.length);
 
         this.output.append3s("@", name, " = global ");
         llvmFmtInto(globalType, this.output, this.platform);
@@ -211,6 +211,10 @@ class LLVMBackendModule : BackendModule {
                     }
                     this.output.appendsi(" %arg", i);
                 }
+                if (type.variadic) {
+                    if (type.params.length) this.output.appends(", ");
+                    this.output.appends("...");
+                }
                 this.output.appends(")");
             } else {
                 this.output.append3s("@", decl.name, " = external global ");
@@ -260,26 +264,8 @@ string llvmFmt2(BackendType type, Platform platform, bool returnType) {
         res ~= " }";
         return res;
     }
-    auto backendFpType = type.instanceOf(BackendFunctionPointerType);
-    if (backendFpType) {
-        bool sret = passByMemory(backendFpType.ret, platform);
-        mut string res;
-        if (sret) res ~= "void";
-        else res ~= llvmFmt2(backendFpType.ret, platform, true);
-        res ~= "(";
-        if (sret) {
-            res ~= llvmFmt2(backendFpType.ret, platform, true) ~ "*";
-            if (backendFpType.params.length) res ~= ", ";
-        }
-        for (i, param in backendFpType.params) {
-            if (i) res ~= ", ";
-            if (passByMemory(param, platform))
-                res ~= llvmFmt2(param, platform, false) ~ "*";
-            else
-                res ~= llvmFmt2(param, platform, false);
-        }
-        res = res ~ ")*";
-        return res;
+    if (auto backendFpType = type.instanceOf(BackendFunctionPointerType)) {
+        return llvmFmtFunc(backendFpType, platform) ~ "*";
     }
     auto backendSAtype = type.instanceOf(BackendStaticArrayType);
     if (backendSAtype) {
@@ -287,6 +273,31 @@ string llvmFmt2(BackendType type, Platform platform, bool returnType) {
     }
     print(type.repr);
     assert(false);
+}
+
+string llvmFmtFunc(BackendFunctionPointerType backendFpType, Platform platform) {
+    bool sret = passByMemory(backendFpType.ret, platform);
+    mut string res;
+    if (sret) res ~= "void";
+    else res ~= llvmFmt2(backendFpType.ret, platform, true);
+    res ~= "(";
+    if (sret) {
+        res ~= llvmFmt2(backendFpType.ret, platform, true) ~ "*";
+        if (backendFpType.params.length) res ~= ", ";
+    }
+    for (i, param in backendFpType.params) {
+        if (i) res ~= ", ";
+        if (passByMemory(param, platform))
+            res ~= llvmFmt2(param, platform, false) ~ "*";
+        else
+            res ~= llvmFmt2(param, platform, false);
+    }
+    if (backendFpType.variadic) {
+        if (backendFpType.params.length) res ~= ", ";
+        res ~= "...";
+    }
+    res = res ~ ")";
+    return res;
 }
 
 struct Reg { int id; }
@@ -614,11 +625,31 @@ class LLVMBackendFunction : BackendFunction {
         this.defReg2(reg, new BackendFloatType, Reg(reg));
         return reg;
     }
+    BackendType[] patchVariadicParams(BackendFunctionPointerType type, int[] args) {
+        if (!type.variadic)
+            return type.params;
+        mut BackendType[] realParams = type.params;
+        if (realParams.length >= args.length) return realParams;
+        auto variadicArgs = args[realParams.length .. $];
+        for (auto reg in variadicArgs) {
+            if (auto def <- this.regDefines.get(reg)) {
+                realParams ~= def.type;
+            } else assert(false);
+        }
+        assert(realParams.length == args.length);
+        return realParams;
+    }
+
     override int call(BackendType ret, string name, int[] args) {
         if (!mod.declared(name)) { .print(name ~ " not declared"); assert(false); }
         int reg = this.nextReg;
-        auto type = this.mod.globalType(name).instanceOf(BackendFunctionPointerType);
-        assert(!!type);
+        BackendFunctionPointerType globalType() {
+            if (auto type = this.mod.globalType(name).instanceOf(BackendFunctionPointerType))
+                return type;
+            assert(false);
+        }
+        auto type = globalType;
+        BackendType[] params = patchVariadicParams(type, args);
         string coerceReg(int i) {
             return "%reg" ~ itoa(reg) ~ ".coerce" ~ itoa(i);
         }
@@ -626,10 +657,10 @@ class LLVMBackendFunction : BackendFunction {
             return "%reg" ~ itoa(reg) ~ ".ret";
         }
         for (int i, arg in args) {
-            if (passByMemory(type.params[i], this.mod.platform)) {
+            if (passByMemory(params[i], this.mod.platform)) {
                 string coerceReg = coerceReg(i);
-                string typeFmt = llvmFmt(type.params[i], this.mod.platform);
-                staticAllocas ~= StaticAlloca(coerceReg, type.params[i]);
+                string typeFmt = llvmFmt(params[i], this.mod.platform);
+                staticAllocas ~= StaticAlloca(coerceReg, params[i]);
                 this.print("store " ~ this.treg(arg) ~ ", " ~ typeFmt ~ "* " ~ coerceReg);
             }
         }
@@ -645,23 +676,25 @@ class LLVMBackendFunction : BackendFunction {
         }
         for (int i, arg in args) {
             if (i) argstr ~= ", ";
-            if (passByMemory(type.params[i], this.mod.platform))
-                argstr ~= llvmFmt(type.params[i], this.mod.platform) ~ "* byval " ~ coerceReg(i);
+            if (passByMemory(params[i], this.mod.platform))
+                argstr ~= llvmFmt(params[i], this.mod.platform) ~ "* byval " ~ coerceReg(i);
             else
                 argstr ~= this.treg(arg);
         }
         argstr ~= ")";
 
         string locationKey = this.mod.debugInfo("!DILocation(line: 0, column: 0, scope: " ~ this.debugSubProgram ~ ")");
+        string callType = llvmFmtFunc(type, this.mod.platform);
+
         if (ret.instanceOf(BackendVoidType)) {
-            this.print("call void @" ~ name ~ argstr ~ ", !dbg " ~ locationKey);
+            this.print("call " ~ callType ~ " @" ~ name ~ argstr ~ ", !dbg " ~ locationKey);
         } else if (sret) {
-            this.print("call void @" ~ name ~ argstr ~ ", !dbg " ~ locationKey);
+            this.print("call " ~ callType ~ " @" ~ name ~ argstr ~ ", !dbg " ~ locationKey);
             this.defReg2(reg, ret, Reg(reg));
         } else {
             this.print(
                 "%reg" ~ itoa(reg)
-                ~ " = call " ~ retFmt ~ " @" ~ name ~ argstr ~ ", !dbg " ~ locationKey);
+                ~ " = call " ~ callType ~ " @" ~ name ~ argstr ~ ", !dbg " ~ locationKey);
             this.defReg2(reg, ret, Reg(reg));
         }
         if (sret)
@@ -1048,6 +1081,10 @@ void llvmFmtInto2(BackendType type, LineWriter output, Platform platform, bool r
             } else
                 llvmFmtInto2(param, output, platform, false);
         }
+        if (backendFpType.variadic) {
+            if (backendFpType.params.length) output.append(", ");
+            output.append("...");
+        }
         output.append(")*");
         return;
     }
@@ -1074,15 +1111,15 @@ void defineIntrinsics(LLVMBackendModule mod, Platform platform) {
         argTypes[2] = sizet;
         argTypes[3] = sizet;
         argTypes[4] = sizet;
-        mod.declare("_arraycmp", new BackendIntType, argTypes);
+        mod.declare("_arraycmp", new BackendIntType, argTypes, variadic=false);
     }
     {
         auto argTypes = new BackendType[](3);
         argTypes[0] = voidp;
         argTypes[1] = voidp;
         argTypes[2] = sizet;
-        mod.declare("memcpy", voidp, argTypes);
+        mod.declare("memcpy", voidp, argTypes, variadic=false);
     }
-    mod.declare("neat_runtime_ptr_test", new BackendIntType, [voidp]);
-    mod.declare("neat_runtime_alloc", voidp, [sizet]);
+    mod.declare("neat_runtime_ptr_test", new BackendIntType, [voidp], variadic=false);
+    mod.declare("neat_runtime_alloc", voidp, [sizet], variadic=false);
 }

@@ -64,7 +64,7 @@ class CBackendModule : BackendModule {
         return false;
     }
 
-    override void declare(string name, BackendType ret, BackendType[] args)
+    override void declare(string name, BackendType ret, BackendType[] args, bool variadic)
     {
         if (this.declared(name)) return;
         if (name == "memcpy" || name == "malloc" || name == "calloc"
@@ -75,6 +75,10 @@ class CBackendModule : BackendModule {
             if (i) argstr ~= ", ";
             argstr ~= typeFmt(this, arg) ~ " arg" ~ itoa(i);
         }
+        if (variadic) {
+            if (args.length) argstr ~= ", ";
+            argstr ~= "...";
+        }
         argstr ~= ")";
         mut string retstr;
         if (ret.instanceOf(BackendVoidType)) {
@@ -83,7 +87,7 @@ class CBackendModule : BackendModule {
             retstr = typeFmt(this, ret);
         }
         this.output.print(retstr ~ " " ~ name ~ argstr ~ ";");
-        this.globals.add(Global(name, typeFmt(this, new BackendFunctionPointerType(ret, args))));
+        this.globals.add(Global(name, typeFmt(this, new BackendFunctionPointerType(ret, args, variadic))));
     }
 
     override BackendFunction define(
@@ -91,7 +95,7 @@ class CBackendModule : BackendModule {
     {
         mut string name = name;
         if (name == "main") name = "_main"; // TODO mangle
-        this.globals.add(Global(name, typeFmt(this, new BackendFunctionPointerType(ret, args))));
+        this.globals.add(Global(name, typeFmt(this, new BackendFunctionPointerType(ret, args, variadic=false))));
         return new CBackendFunction(this, name, ret, args);
     }
     override void declareSymbolList(string name, size_t length)
@@ -143,7 +147,10 @@ string typeMangle(BackendType type) {
     }
     auto backendFpType = type.instanceOf(BackendFunctionPointerType);
     if (backendFpType) {
-        mut string res = "F" ~ typeMangle(backendFpType.ret);
+        mut string res;
+        if (backendFpType.variadic) res ~= "Fv";
+        else res ~= "F";
+        res ~= typeMangle(backendFpType.ret);
         res ~= ltoa(backendFpType.params.length);
         for (i, param in backendFpType.params) {
             res ~= typeMangle(param);
@@ -201,8 +208,7 @@ string typeFmtInternal(CBackendModule mod, BackendType type, bool indirect) {
         mod.globals.add(Global(typestr, ""));
         return typestr;
     }
-    auto backendFpType = type.instanceOf(BackendFunctionPointerType);
-    if (backendFpType) {
+    if (auto backendFpType = type.instanceOf(BackendFunctionPointerType)) {
         string mangle = typeMangle(type);
         string typestr = "fp_" ~ mangle;
         if (mod.declared(typestr)) return typestr;
@@ -211,6 +217,10 @@ string typeFmtInternal(CBackendModule mod, BackendType type, bool indirect) {
         for (i, param in backendFpType.params) {
             if (i) def ~= ", ";
             def ~= typeFmtInternal(mod, param, false);
+        }
+        if (backendFpType.variadic) {
+            if (backendFpType.params.length) def ~= ", ";
+            def ~= "...";
         }
         def ~= ");";
         mod.output.print(def);
@@ -884,8 +894,8 @@ void defineCIntrinsics(CBackendModule mod, Platform platform) {
         argTypes[2] = sizet;
         argTypes[3] = sizet;
         argTypes[4] = sizet;
-        mod.declare("_arraycmp", new BackendIntType, argTypes);
+        mod.declare("_arraycmp", new BackendIntType, argTypes, variadic=false);
     }
-    mod.declare("neat_runtime_ptr_test", new BackendIntType, [voidp]);
-    mod.declare("neat_runtime_alloc", voidp, [sizet]);
+    mod.declare("neat_runtime_ptr_test", new BackendIntType, [voidp], variadic=false);
+    mod.declare("neat_runtime_alloc", voidp, [sizet], variadic=false);
 }

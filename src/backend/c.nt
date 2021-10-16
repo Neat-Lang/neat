@@ -130,23 +130,19 @@ string typeMangle(BackendType type) {
     if (type.instanceOf(BackendFloatType)) return "f";
     if (type.instanceOf(BackendDoubleType)) return "d";
     if (type.instanceOf(BackendVoidType)) return "v";
-    auto backendSpacerType = type.instanceOf(BackendSpacerType);
     // sure?
-    if (backendSpacerType) return "U" ~ ltoa(backendSpacerType.size_);
-    auto backendPointerType = type.instanceOf(BackendPointerType);
-    if (backendPointerType) {
+    if (auto backendSpacerType = type.instanceOf(BackendSpacerType)) return "U" ~ ltoa(backendSpacerType.size_);
+    if (auto backendPointerType = type.instanceOf(BackendPointerType)) {
         return "P" ~ typeMangle(backendPointerType.target);
     }
-    auto backendStructType = type.instanceOf(BackendStructType);
-    if (backendStructType) {
+    if (auto backendStructType = type.instanceOf(BackendStructType)) {
         mut string mangle = "S" ~ ltoa(backendStructType.members.length);
         for (i, member in backendStructType.members) {
             mangle ~= typeMangle(member);
         }
         return mangle;
     }
-    auto backendFpType = type.instanceOf(BackendFunctionPointerType);
-    if (backendFpType) {
+    if (auto backendFpType = type.instanceOf(BackendFunctionPointerType)) {
         mut string res;
         if (backendFpType.variadic) res ~= "Fv";
         else res ~= "F";
@@ -178,9 +174,7 @@ string typeFmtInternal(CBackendModule mod, BackendType type, bool indirect) {
         if (indirect) return "void";
         else return "VOIDTYPE";
     }
-    auto backendSpacerType = type.instanceOf(BackendSpacerType);
-    if (backendSpacerType)
-    {
+    if (auto backendSpacerType = type.instanceOf(BackendSpacerType)) {
         string mangle = typeMangle(type);
         string typestr = "arr_" ~ mangle;
         if (mod.declared(typestr)) return typestr;
@@ -190,18 +184,21 @@ string typeFmtInternal(CBackendModule mod, BackendType type, bool indirect) {
         mod.globals.add(Global(typestr, ""));
         return typestr;
     }
-    auto backendPointerType = type.instanceOf(BackendPointerType);
-    if (backendPointerType) {
+    if (auto backendPointerType = type.instanceOf(BackendPointerType)) {
         return typeFmtInternal(mod, backendPointerType.target, true) ~ "*";
     }
-    auto backendStructType = type.instanceOf(BackendStructType);
-    if (backendStructType) {
+    if (auto backendStructType = type.instanceOf(BackendStructType)) {
         string mangle = typeMangle(type);
         string typestr = "str_" ~ mangle;
         if (mod.declared(typestr)) return typestr;
         mut string def = "typedef struct { ";
         for (int i, member in backendStructType.members) {
-            def ~= typeFmtInternal(mod, member, false) ~ " _" ~ itoa(i) ~ ";";
+            if (member.size(mod.platform) > 0) {
+                def ~= typeFmtInternal(mod, member, false) ~ " _" ~ itoa(i) ~ ";";
+            } else {
+                string fieldmangle = typeMangle(member);
+                def ~= "/* $fieldmangle _$(i); */";
+            }
         }
         def ~= "} " ~ typestr ~ ";";
         mod.output.print(def);
@@ -214,12 +211,17 @@ string typeFmtInternal(CBackendModule mod, BackendType type, bool indirect) {
         if (mod.declared(typestr)) return typestr;
         mut string def = "typedef ";
         def ~= typeFmtInternal(mod, backendFpType.ret, true) ~ "(*" ~ typestr ~ ")(";
+        mut bool comma = false;
         for (i, param in backendFpType.params) {
-            if (i) def ~= ", ";
-            def ~= typeFmtInternal(mod, param, false);
+            if (param.size(mod.platform) > 0) {
+                if (comma) def ~= ", ";
+                comma = true;
+                def ~= typeFmtInternal(mod, param, false);
+            }
         }
         if (backendFpType.variadic) {
-            if (backendFpType.params.length) def ~= ", ";
+            if (comma) def ~= ", ";
+            comma = true;
             def ~= "...";
         }
         def ~= ");";
@@ -293,6 +295,15 @@ struct Value {
     string type;
     string value;
     bool exactType;
+
+    // empty type and empty value: void, never emitted
+    bool fake() {
+        return type == "" && value == "";
+    }
+
+    static Value none() {
+        return Value(type="", value="", exactType=true);
+    }
 }
 
 struct SSAInstr {
@@ -337,11 +348,11 @@ class CBackendFunction : BackendFunction {
     }
     int addInstr(Instr instr) {
         int reg = cast(int) this.instrs.length;
-        this.instrs ~= SSAInstr(SSAMode.pending, reg, 0, Value("", "", true), instr);
+        this.instrs ~= SSAInstr(SSAMode.pending, reg, 0, Value.none, instr);
         return reg;
     }
     void addBlockEnderInstr(Instr instr) {
-        this.instrs ~= SSAInstr(SSAMode.pending, -1, 0, Value("", "", true), instr);
+        this.instrs ~= SSAInstr(SSAMode.pending, -1, 0, Value.none, instr);
     }
     void useReg(int reg) {
         this.instrs[reg].uses += 1;
@@ -479,7 +490,7 @@ class CBackendFunction : BackendFunction {
                 if (ssaInstr.mode == SSAMode.held) this.instrs[reg].mode = SSAMode.done;
 
                 mut auto value = ssaInstr.heldValue;
-                if (type != value.type) value = Value(type, value.value, false);
+                if (type != value.type) value = Value(type, value.value, exactType=false);
 
                 return valueFormat(value, true);
             }
@@ -511,25 +522,25 @@ class CBackendFunction : BackendFunction {
             ssaInstr.instr.case {
                 (:arg, int index): {
                     string typestr = typeFmt(mod, this.args[index]);
-                    ret = Value(typestr, "arg" ~ itoa(index), false);
+                    ret = Value(typestr, "arg" ~ itoa(index), exactType=false);
                 }
                 (:intLiteral, long value): {
-                    ret = Value("int", ltoa(value), true);
+                    ret = Value("int", ltoa(value), exactType=true);
                 }
                 (:shortLiteral, int value): {
-                    ret = Value("short", itoa(value), true);
+                    ret = Value("short", itoa(value), exactType=true);
                 }
                 (:byteLiteral, int value): {
-                    ret = Value("char", itoa(value), true);
+                    ret = Value("char", itoa(value), exactType=true);
                 }
                 (:longLiteral, long value): {
-                    ret = Value("long long int", ltoa(value), true);
+                    ret = Value("long long int", ltoa(value), exactType=true);
                 }
                 (:floatLiteral, float value): {
-                    ret = Value("float", ftoa(value), true);
+                    ret = Value("float", ftoa(value), exactType=true);
                 }
                 (:wordLiteral, Platform, long value): {
-                    ret = Value("int", ltoa(value), true);
+                    ret = Value("int", ltoa(value), exactType=true);
                 }
                 (:stringLiteral, string text): {
                     mut string escapedText;
@@ -542,24 +553,24 @@ class CBackendFunction : BackendFunction {
                         else if (text[i .. i + 1] == "\0") escapedText ~= "\\0";
                         else escapedText ~= text[i .. i + 1];
                     }
-                    ret = Value("char*", "\"" ~ escapedText ~ "\"", true);
+                    ret = Value("char*", "\"" ~ escapedText ~ "\"", exactType=true);
                 }
                 (:zeroLiteral, BackendType type): {
-                    if (!type.instanceOf(BackendVoidType)) {
+                    if (type.size(mod.platform) > 0) {
                         string typestr = typeFmt(mod, type);
                         mut string init = "0";
                         if (type.instanceOf(BackendStructType)) init = "{0}";
-                        ret = Value(typestr, init, false);
+                        ret = Value(typestr, init, exactType=false);
                     }
-                    else ret = Value("", "", true);
+                    else ret = Value.none;
                 }
                 (:structLiteral, BackendType struct_, int[] regs): {
                     string typestr = typeFmt(mod, struct_);
                     string fields = [join ", " reg(a) for a in regs];
-                    ret = Value(typestr, "{" ~ fields ~ "}", false);
+                    ret = Value(typestr, "{" ~ fields ~ "}", exactType=false);
                 }
                 (:symbolList, string name): {
-                    ret = Value("void*", name, true);
+                    ret = Value("void*", name, exactType=true);
                 }
                 (:binOp, string op, BackendType type, int left, int right): {
                     mut string typestr = typeFmt(mod, type);
@@ -567,93 +578,112 @@ class CBackendFunction : BackendFunction {
                         typestr = "int";
                     }
                     if (op == ">>>") {
-                        ret = Value(typestr, "(" ~ unsignedReg(left) ~ " >> " ~ reg(right) ~ ")", true);
+                        ret = Value(typestr, "(" ~ unsignedReg(left) ~ " >> " ~ reg(right) ~ ")", exactType=true);
                     } else {
-                        ret = Value(typestr, "(" ~ reg(left) ~ " " ~ op ~ " " ~ reg(right) ~ ")", true);
+                        ret = Value(typestr, "(" ~ reg(left) ~ " " ~ op ~ " " ~ reg(right) ~ ")", exactType=true);
                     }
                 }
                 (:bitCast, int from, BackendType to): {
-                    string typestr = typeFmt(mod, to);
                     auto from = regExt(from);
+                    if (from.fake) ret = Value.none;
+                    else {
+                        string typestr = typeFmt(mod, to);
 
-                    ret = Value(typestr, from.value, false);
+                        ret = Value(typestr, from.value, exactType=false);
+                    }
                 }
                 (:zeroExtend, int value, BackendType to): {
                     string type = typeFmt(mod, to);
-                    ret = Value(type, unsignedReg(value), true);
+                    ret = Value(type, unsignedReg(value), exactType=true);
                 }
                 (:signExtend, int value, BackendType to): {
                     // TODO revisit when we have unsigned types
                     string type = typeFmt(mod, to);
-                    ret = Value(type, reg(value), true);
+                    ret = Value(type, reg(value), exactType=true);
                 }
                 (:trunc, int value, BackendType to): {
                     string type = typeFmt(mod, to);
-                    ret = Value(type, reg(value), false);
+                    ret = Value(type, reg(value), exactType=false);
                 }
                 (:intToFloat, int regId): {
-                    ret = Value("float", reg(regId), true);
+                    ret = Value("float", reg(regId), exactType=true);
                 }
                 (:floatToInt, int regId): {
-                    ret = Value("int", reg(regId), false);
+                    ret = Value("int", reg(regId), exactType=false);
                 }
                 (:callInstr, BackendType retType, string name, int[] args): {
-                    string argstr = [join ", " reg(a) for a in args];
+                    string argstr = [
+                        join ", " valueFormat(value, parens=false)
+                        for value in [regExt(a) for a in args]
+                        where !value.fake
+                    ];
                     flushRegs;
-                    if (retType.instanceOf(BackendVoidType)) {
-                        ret = Value("", name ~ "(" ~ argstr ~ ")", true);
-                    } else {
+                    if (retType.size(mod.platform) > 0) {
                         string type = typeFmt(mod, retType);
-                        ret = Value(type, name ~ "(" ~ argstr ~ ")", true);
+                        ret = Value(type, name ~ "(" ~ argstr ~ ")", exactType=true);
+                    } else {
+                        ret = Value("", name ~ "(" ~ argstr ~ ")", exactType=true);
                     }
                 }
                 (:getFuncPtr, string name): {
-                    ret = Value("", name, false);
+                    ret = Value("", name, exactType=false);
                 }
                 (:callFuncPtr, BackendType type, int regId, int[] args): {
                     auto backendFpType = type.instanceOf(BackendFunctionPointerType);
                     assert(!!backendFpType);
                     auto retType = backendFpType.ret;
-                    string argstr = [join ", " reg(a) for a in args];
+                    string argstr = [
+                        join ", " valueFormat(value, parens=false)
+                        for value in [regExt(a) for a in args]
+                        where !value.fake
+                    ];
                     string target = reg(regId);
                     flushRegs;
-                    if (retType.instanceOf(BackendVoidType)) {
-                        ret = Value("", "(" ~ target ~ ")(" ~ argstr ~ ")", true);
-                    } else {
+                    if (retType.size(mod.platform) > 0) {
                         string typestr = typeFmt(mod, retType);
-                        ret = Value(typestr, "(" ~ target ~ ")(" ~ argstr ~ ")", true);
+                        ret = Value(typestr, "(" ~ target ~ ")(" ~ argstr ~ ")", exactType=true);
+                    } else {
+                        ret = Value("", "(" ~ target ~ ")(" ~ argstr ~ ")", exactType=true);
                     }
                 }
                 (:load, BackendType type, int regId): {
-                    if (!type.instanceOf(BackendVoidType)) {
+                    if (type.size(mod.platform) > 0) {
                         string type = typeFmt(mod, type);
-                        ret = Value(type, "*" ~ reg(regId), true);
-                    } else ret = Value("", "", true);
+                        ret = Value(type, "*" ~ reg(regId), exactType=true);
+                    } else ret = Value.none;
                 }
                 (:staticAlloca, BackendType type): {
                     flushRegs; // TODO is this right?
-                    if (!type.instanceOf(BackendVoidType)) {
+                    if (type.size(mod.platform) > 0) {
                         string typefmt = typeFmt(mod, type);
                         mut string init = "0";
                         if (type.instanceOf(BackendStructType)) init = "{0}";
                         this.print(typefmt ~ " reg" ~ itoa(regId) ~ "_frame = " ~ init ~ ";");
-                        ret = Value(typefmt ~ "*", "&reg" ~ itoa(regId) ~ "_frame", true);
-                    } else ret = Value("", "", true);
+                        ret = Value(typefmt ~ "*", "&reg" ~ itoa(regId) ~ "_frame", exactType=true);
+                    } else ret = Value.none;
                 }
                 (:field, BackendType type, int regId, int index): {
                     auto backendStructType = type.instanceOf(BackendStructType);
                     assert(!!backendStructType);
 
-                    string typefmt = typeFmt(mod, backendStructType.members[index]);
-                    ret = Value(typefmt, "(" ~ reg(regId) ~ ")._" ~ ltoa(index), true);
+                    if (backendStructType.members[index].size(mod.platform) > 0) {
+                        string typefmt = typeFmt(mod, backendStructType.members[index]);
+                        ret = Value(typefmt, "(" ~ reg(regId) ~ ")._" ~ ltoa(index), exactType=true);
+                    } else {
+                        ret = Value.none;
+                    }
                 }
                 (:fieldOffset, BackendType type, int regId, size_t index): {
                     auto backendStructType = type.instanceOf(BackendStructType);
                     assert(!!backendStructType);
 
-                    string typefmt = typeFmt(mod, backendStructType) ~ "*";
-                    string memberfmt = typeFmt(mod, backendStructType.members[index]);
-                    ret = Value(memberfmt ~ "*", "&(" ~ reg2(regId, typefmt) ~ ")->_" ~ ltoa(index), true);
+                    if (backendStructType.members[index].size(mod.platform) > 0) {
+                        string typefmt = typeFmt(mod, backendStructType) ~ "*";
+                        string memberfmt = typeFmt(mod, backendStructType.members[index]);
+                        ret = Value(memberfmt ~ "*", "&(" ~ reg2(regId, typefmt) ~ ")->_" ~ ltoa(index), exactType=true);
+                    } else {
+                        ret = Value.none;
+                    }
                 }
                 (:ptrOffset, BackendType type, int ptrReg, int offsetReg): {
                     string typefmt = typeFmt(mod, type) ~ "*";
@@ -661,36 +691,37 @@ class CBackendFunction : BackendFunction {
                         typefmt,
                         "&(" ~ reg2(ptrReg, typefmt) ~ ")"
                             ~ "[" ~ reg(offsetReg) ~ "]",
-                        true);
+                        exactType=true);
                 }
                 (:store, BackendType type, int targetReg, int valueReg): {
-                    auto targetReg = reg(targetReg);
-                    auto valueReg = reg(valueReg);
-                    flushRegs;
-                    string typeStr = typeFmt(mod, type);
-                    if (!type.instanceOf(BackendVoidType))
+                    if (type.size(mod.platform) > 0) {
+                        auto targetReg = reg(targetReg);
+                        auto valueReg = reg(valueReg);
+                        flushRegs;
+                        string typeStr = typeFmt(mod, type);
                         this.print("*(" ~ typeStr ~ "*) " ~ targetReg
                             ~ " = " ~ valueReg ~ ";");
-                    ret = Value("", "", true);
+                    }
+                    ret = Value.none;
                 }
                 (:return_, int regId): {
-                    if (this.ret_.instanceOf(BackendVoidType)) {
-                        this.print("return;");
-                    } else {
+                    if (this.ret_.size(mod.platform) > 0) {
                         this.print("return " ~ reg(regId) ~ ";");
+                    } else {
+                        this.print("return;");
                     }
                     flushRegs;
-                    ret = Value("", "", true);
+                    ret = Value.none;
                 }
                 (:setLabel, string label): {
                     flushRegs;
                     this.print(label ~ ":;");
-                    ret = Value("", "", true);
+                    ret = Value.none;
                 }
                 (:branch, string label): {
                     flushRegs;
                     this.print("goto " ~ label ~ ";");
-                    ret = Value("", "", true);
+                    ret = Value.none;
                 }
                 (:testBranch, int regId, string thenLabel, string elseLabel): {
                     auto testReg = reg(regId);
@@ -698,7 +729,7 @@ class CBackendFunction : BackendFunction {
                     this.print("if (" ~ testReg ~ ") "
                         ~ "goto " ~ thenLabel ~ "; "
                         ~ "else goto " ~ elseLabel ~ ";");
-                    ret = Value("", "", true);
+                    ret = Value.none;
                 }
             }
             return ret;
@@ -723,7 +754,7 @@ class CBackendFunction : BackendFunction {
                 this.print(value.type ~ " reg" ~ itoa(regId) ~ " = " ~ init ~ ";");
             }
             this.instrs[regId].mode = SSAMode.persisted;
-            this.instrs[regId].heldValue = Value(value.type, "reg" ~ itoa(regId), true);
+            this.instrs[regId].heldValue = Value(value.type, "reg" ~ itoa(regId), exactType=true);
         }
         void flushRegsImpl(size_t limit) {
             for (regId in 0 .. limit) {
@@ -756,10 +787,10 @@ class CBackendFunction : BackendFunction {
         }
         argstr ~= ")";
         mut string retstr;
-        if (this.ret_.instanceOf(BackendVoidType)) {
-            retstr = "void";
-        } else {
+        if (this.ret_.size(mod.platform) > 0) {
             retstr = typeFmt(mod, this.ret_);
+        } else {
+            retstr = "void";
         }
         this.mod.output.print(retstr ~ " " ~ this.name ~ argstr ~ "{");
         auto funtext = this.output.text;

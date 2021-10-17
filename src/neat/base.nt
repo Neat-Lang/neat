@@ -62,6 +62,35 @@ class ASTImportStatement
     Loc loc;
 
     this(this.target, this.isMacroImport, this.symbols, this.loc) { }
+
+    ASTSymbol quote(Quoter quoter) {
+        ASTSymbol target = this.target.case(
+            (:normal, string name, string pak):
+                quoter.compiler.astTupleLiteral([
+                    new ASTSymbolIdentifier("normal"),
+                    quoter.compiler.astStringLiteral(name, __HERE__),
+                    quoter.compiler.astStringLiteral(pak, __HERE__)], __HERE__),
+            (:macro_, ASTModuleBase module_):
+                ({
+                    assert(false);
+                    mut uninitialized ASTSymbol bottom;
+                    bottom;
+                }));
+        mut ASTSymbol[] symbols;
+        for (sym in this.symbols)
+            symbols ~= quoter.compiler.astStringLiteral(sym, __HERE__);
+        auto symbolArray = quoter.compiler.astArrayLiteralTypeHint(
+            quoter.compiler.astIdentifier("string", __HERE__),
+            symbols,
+            this.loc);
+
+        return quoter.compiler.astNewExpression(
+            quoter.compiler.astIdentifier("ASTImportStatement", __HERE__), [
+                target,
+                quoter.compiler.astBoolLiteral(this.isMacroImport, __HERE__),
+                symbolArray,
+                quoter.quoteLoc(this.loc)], __HERE__);
+    }
 }
 
 // bleh cycle
@@ -73,13 +102,15 @@ class LexicalContext
 {
     CompilerBase compiler;
 
+    Package pak;
+
     MacroState macroState;
 
     // break an annoying dependency cycle
     // TODO subclass LexicalContext in stuff.nt
     ASTModuleBase delegate(ASTImportStatement) resolveImport;
 
-    this(this.compiler, this.macroState, this.resolveImport) { }
+    this(this.compiler, this.pak, this.macroState, this.resolveImport) { }
 }
 
 /**
@@ -775,6 +806,10 @@ abstract class CompilerBase
 
     abstract ASTSymbol astNullable(ASTSymbol next, Loc loc) { assert(false); }
 
+    abstract ASTDeclaration astImport(ASTImportStatement import_, ASTModuleBase module_, Loc loc) { assert(false); }
+
+    abstract ASTModuleBase resolveImport(string pak, ASTImportStatement import_, Loc loc) { assert(false); }
+
     // expressions and statements
     abstract nullable Expression implicitConvertTo(Context context, Expression from, Type to) { assert(false); }
 
@@ -1221,6 +1256,17 @@ class Package
 
     void addDependency(Package dep) {
         this.deps ~= dep;
+    }
+
+    ASTSymbol quote(Quoter quoter) {
+        mut ASTSymbol[] deps_;
+        for (auto dep in this.deps)
+            deps_ ~= dep.quote(quoter);
+        return quoter.compiler.astNewExpression(
+            quoter.compiler.astIdentifier("Package", __HERE__), [
+                quoter.compiler.astStringLiteral(this.name, __HERE__),
+                quoter.compiler.astStringLiteral(this.path, __HERE__),
+                quoter.compiler.astArrayLiteral(deps_, __HERE__)], __HERE__);
     }
 }
 

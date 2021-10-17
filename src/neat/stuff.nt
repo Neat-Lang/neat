@@ -2991,8 +2991,9 @@ class ASTStatementExpression : ASTSymbol
         auto quotedStatements = new ASTSymbol[](this.statements.length);
         for (int i, statement in this.statements)
             quotedStatements[i] = statement.quote(quoter);
+        auto type = quoter.compiler.astIdentifier("ASTStatement", __HERE__);
         return quoter.compilerCall("astStatementExpression", [
-            quoter.compiler.astArrayLiteral(quotedStatements, loc),
+            quoter.compiler.astArrayLiteralTypeHint(type, quotedStatements, loc),
             this.expr.quote(quoter)
         ], loc);
     }
@@ -3306,7 +3307,7 @@ nullable ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalCo
         auto importedModule = notNull!ASTModule(
             lexicalContext.resolveImport(import_).instanceOf(ASTModule));
 
-        return new ASTImport(importedModule, import_.symbols);
+        return new ASTImport(import_, importedModule);
     }
     if (auto aliasDecl = parseAliasDecl(parser, lexicalContext)) {
         return aliasDecl;
@@ -3334,7 +3335,9 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
         return stmt;
     if (ASTStatement stmt = parseScope(parser, lexicalContext))
         return stmt;
-    if (ASTStatement decl = parseDeclaration(parser, lexicalContext))
+    // FIXME why did this work?!
+    // if (ASTStatement decl = parseDeclaration(parser, lexicalContext))
+    if (ASTDeclaration decl = parseDeclaration(parser, lexicalContext))
         return new ASTDeclarationStatement(decl);
     if (ASTStatement stmt = parseNestedFunctionDecl(parser, lexicalContext))
         return stmt;
@@ -3875,15 +3878,15 @@ class ImportNamespace : Namespace
 // Classes do double duty for both module-level and statement-level imports
 class ASTImport : ASTDeclaration
 {
+    ASTImportStatement statement;
+
     ASTModule module_;
 
-    string[] symbols; // symbols imported. null for "all".
-
-    this(this.module_, string[] symbols) { }
+    this(this.statement, this.module_) { }
 
     override Context compile(Context context) {
         auto module_ = compileModule(context, this.module_, true);
-        auto namespace = new ImportNamespace(context.namespace, module_, this.symbols);
+        auto namespace = new ImportNamespace(context.namespace, module_, this.statement.symbols);
         auto contextModule = findParent!Module(context.namespace);
 
         contextModule.addModuleDependency(module_);
@@ -3891,8 +3894,16 @@ class ASTImport : ASTDeclaration
         return context.withNamespace(namespace);
     }
 
-    // If you figure out how to do this, I will be grateful. I'mma let it lie for now.
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTImport'!"); assert(false); }
+    override ASTSymbol quote(Quoter quoter) {
+        auto importStatement = this.statement.quote(quoter);
+        auto mod = quoter.compilerCall("resolveImport", [
+            quoter.compiler.astStringLiteral(this.module_.pak.name, __HERE__),
+            importStatement], __HERE__);
+
+        return quoter.compilerCall("astImport", [
+            importStatement,
+            mod], __HERE__);
+    }
 }
 
 nullable ASTImportStatement parseImportStatement(Parser parser, LexicalContext lexicalContext)
@@ -4155,10 +4166,10 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
     ModuleParserConfig config)
 {
     ASTModuleBase resolveImport(ASTImportStatement import_) {
-        return .resolveImport(compiler, module_.pak, import_, helper, config);
+        return .resolveImport(compiler, module_.pak.name, import_, helper, config);
     }
 
-    mut LexicalContext lexicalContext = new LexicalContext(compiler, module_.macroState, &resolveImport);
+    mut LexicalContext lexicalContext = new LexicalContext(compiler, module_.pak, module_.macroState, &resolveImport);
 
     while (!parser.eof)
     {
@@ -4177,13 +4188,13 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             if (import_.isMacroImport)
             {
                 module_.macroState = module_.macroState.dup;
-                lexicalContext = new LexicalContext(compiler, module_.macroState, &resolveImport);
+                lexicalContext = new LexicalContext(compiler, module_.pak, module_.macroState, &resolveImport);
 
                 lexicalContext.macroState.addImport(importedModule.macroState);
             }
             else
             {
-                add(new ASTImport(importedModule, import_.symbols));
+                add(new ASTImport(import_, importedModule));
             }
             continue;
         }
@@ -4229,12 +4240,13 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
     return module_;
 }
 
-ASTModule resolveImport(CompilerBase compiler, mut Package pak, ASTImportStatement import_, ParserHelper helper,
+ASTModule resolveImport(CompilerBase compiler, string pak, ASTImportStatement import_, ParserHelper helper,
     ModuleParserConfig config)
 {
     (string name, string pak) target = import_.target.case(
         (:normal, string name, string pak): (name, pak),
         (:macro_, ASTModuleBase module_): return module_.instanceOf(ASTModule));
+    mut Package pak = selectPackage(config.packages, pak, import_.loc);
     // TODO enum SearchMode { Transitive, Direct, Commandline }
     mut bool transitive = true;
     if (target.pak.length) {
@@ -4275,7 +4287,7 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
             {
                 auto importedModule = compileModule(context, import_.module_, true);
 
-                module_.addImport(importedModule, import_.symbols);
+                module_.addImport(importedModule, import_.statement.symbols);
             }
             ASTDeclaration astDecl: {
                 if (auto structDecl = astDecl.instanceOf(ASTStructDecl)) {

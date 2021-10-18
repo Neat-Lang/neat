@@ -638,19 +638,29 @@ class LLVMBackendFunction : BackendFunction {
             return target;
         } else assert(false);
     }
-    BackendType[] patchVariadicParams(BackendFunctionPointerType type, int[] args) {
-        if (!type.variadic)
-            return type.params;
+    (BackendType[] params, int[] args) patchVariadicParams(BackendFunctionPointerType type, int[] args) {
+        if (!type.variadic || type.params.length >= args.length)
+            return (type.params, args);
+        mut int[] realArgs = args[0 .. type.params.length];
+        auto variadicArgs = args[type.params.length .. $];
         mut BackendType[] realParams = type.params;
-        if (realParams.length >= args.length) return realParams;
-        auto variadicArgs = args[realParams.length .. $];
-        for (auto reg in variadicArgs) {
+        for (i, auto reg in variadicArgs) {
             if (auto def <- this.regDefines.get(reg)) {
                 realParams ~= def.type;
+                // variadic floats are promoted to double
+                auto arg = args[type.params.length + i];
+                if (def.type.instanceOf(BackendFloatType)) {
+                    auto newArg = this.nextReg;
+                    this.print("%reg$newArg = fpext float %reg$arg to double");
+                    this.defReg2(newArg, new BackendDoubleType, Reg(newArg));
+                    realArgs ~= newArg;
+                } else {
+                    realArgs ~= arg;
+                }
             } else assert(false);
         }
         assert(realParams.length == args.length);
-        return realParams;
+        return (realParams, realArgs);
     }
 
     override int call(BackendType ret, string name, int[] args) {
@@ -662,7 +672,9 @@ class LLVMBackendFunction : BackendFunction {
             assert(false);
         }
         auto type = globalType;
-        BackendType[] params = patchVariadicParams(type, args);
+        auto patch = patchVariadicParams(type, args);
+        BackendType[] params = patch.params;
+        int[] args = patch.args;
         string coerceReg(int i) {
             return "%reg" ~ itoa(reg) ~ ".coerce" ~ itoa(i);
         }

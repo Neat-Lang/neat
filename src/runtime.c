@@ -68,24 +68,6 @@ float neat_runtime_atof(struct String str) {
     // printf("atof(%.*s) = %f\n", str.length, str.ptr, res);
     return res;
 }
-struct String neat_runtime_itoa(int i) {
-    int len = snprintf(NULL, 0, "%i", i);
-    struct String res = string_alloc(len + 1);
-    res.length = snprintf(res.ptr, res.length, "%i", i);
-    return res;
-}
-struct String neat_runtime_ltoa(long long l) {
-    int len = snprintf(NULL, 0, "%lld", l);
-    struct String res = string_alloc(len + 1);
-    res.length = snprintf(res.ptr, res.length, "%lld", l);
-    return res;
-}
-struct String neat_runtime_ftoa(float f) {
-    int len = snprintf(NULL, 0, "%f", f);
-    struct String res = string_alloc(len + 1);
-    res.length = snprintf(res.ptr, res.length, "%f", f);
-    return res;
-}
 struct String neat_runtime_ftoa_hex(float f) {
     double d = f;
     int len = snprintf(NULL, 0, "%llx", *(long long int*) &d);

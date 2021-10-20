@@ -16,24 +16,13 @@ struct Global {
     string type;
 }
 
-// TODO: Global[auto~] globals;
-struct Globals
-{
-    Global[] globals;
-    int used;
+struct Globals {
+    Global[string] globals;
     void add(Global global) {
-        if (globals.length == 0) globals = new Global[](1);
-        if (used == globals.length) {
-            auto copy = new Global[](globals.length * 2);
-            for (i, global in globals)
-                copy[i] = global;
-            globals = copy;
-        }
-        globals[used] = global;
-        used += 1;
+        this.globals[global.name] = global;
     }
-    Global[] array() {
-        return this.globals[0 .. this.used];
+    bool defined(string name) {
+        return this.globals.has(name);
     }
 }
 
@@ -58,10 +47,7 @@ class CBackendModule : BackendModule {
     }
 
     override bool declared(string name) {
-        auto globals = this.globals.array;
-        for (i, global in globals)
-            if (global.name == name) return true;
-        return false;
+        return this.globals.defined(name);
     }
 
     override void declare(string name, BackendType ret, BackendType[] args, bool variadic)
@@ -88,6 +74,13 @@ class CBackendModule : BackendModule {
         }
         this.output.print(retstr ~ " " ~ name ~ argstr ~ ";");
         this.globals.add(Global(name, typeFmt(this, new BackendFunctionPointerType(ret, args, variadic))));
+    }
+
+    void declareVar(string name, BackendType type)
+    {
+        if (this.declared(name)) return;
+        this.output.print("extern " ~ typeFmt(this, type) ~ " $name;");
+        this.globals.add(Global(name, typeFmt(this, type)));
     }
 
     override BackendFunction define(
@@ -247,6 +240,7 @@ alias Instr = (
     | :zeroLiteral, BackendType type
     | :structLiteral, BackendType struct_, int[] regs
     | :symbolList, string name
+    | :globalVar, string name, BackendType type
     | :binOp, string op, BackendType type, int left, int right
     | :bitCast, int from, BackendType to
     | :zeroExtend, int value, BackendType to
@@ -392,6 +386,9 @@ class CBackendFunction : BackendFunction {
     }
     override int symbolList(string name) {
         return addInstr((:symbolList, name));
+    }
+    override int globalVar(string name, BackendType type) {
+        return addInstr((:globalVar, name, type));
     }
     override int binop(string op, BackendType type, int left, int right) {
         useReg(left); useReg(right);
@@ -566,6 +563,10 @@ class CBackendFunction : BackendFunction {
                 }
                 (:symbolList, string name): {
                     ret = Value("void*", name, exactType=true);
+                }
+                (:globalVar, string name, BackendType type): {
+                    mod.declareVar(name, type);
+                    ret = Value(typeFmt(mod, type), name, exactType = true);
                 }
                 (:binOp, string op, BackendType type, int left, int right): {
                     mut string typestr = typeFmt(mod, type);

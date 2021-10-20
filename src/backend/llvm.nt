@@ -82,6 +82,14 @@ class LLVMBackendModule : BackendModule {
         this.globals[name] = type;
     }
 
+    void declareVar(string name, BackendType type)
+    {
+        if (this.declared(name))
+            return;
+        pendingDeclarations ~= DeclarationEntry(name, false, type);
+        this.globals[name] = type;
+    }
+
     void removePendingDecl(string name)
     {
         for (i, pendingDeclaration in pendingDeclarations) {
@@ -453,14 +461,25 @@ class LLVMBackendFunction : BackendFunction {
     override int stringLiteral(string text) {
         // TODO move to LLVMBackendModule
         string literalId = this.mod.nextLiteral;
-        string type = "[" ~ ltoa(text.length) ~ " x i8]";
+        string type = "[" ~ ltoa(text.length + 1) ~ " x i8]";
         mut string escapedText;
-        // TODO ord()
         for (int i in 0 .. text.length) {
-            if (text[i .. i + 1] == "\"") escapedText ~= "\\22";
-            else if (text[i .. i + 1] == "\\") escapedText ~= "\\5C";
-            else escapedText ~= text[i .. i + 1];
+            char ch = text[i];
+            char hex(int i) {
+                if (i < 10) return cast(char) (cast(int) "0"[0] + i);
+                if (i < 16) return cast(char) (cast(int) "A"[0] - 10 + i);
+                assert(false);
+            }
+            if (ch >= "A"[0] && ch <= "Z"[0]
+                || ch >= "a"[0] && ch <= "z"[0]
+                || ch >= "0"[0] && ch <= "9"[0]
+                || ch == " "[0] || ch == "%"[0]) {
+                escapedText ~= ch;
+            } else {
+                escapedText ~= "\\" ~ hex(cast(int) ch >> 4) ~ hex(cast(int) ch & 0xf);
+            }
         }
+        escapedText ~= "\\00";
         this.mod.output.print(
             literalId ~ " = private unnamed_addr constant " ~ type ~ " c\"" ~ escapedText ~ "\"");
         int reg = this.nextReg;
@@ -493,6 +512,13 @@ class LLVMBackendFunction : BackendFunction {
             "%reg" ~ itoa(reg)
             ~ " = bitcast " ~ llvmFmt(type, this.mod.platform) ~ "* @" ~ name ~ " to i8*");
         return this.defReg(new BackendPointerType(new BackendCharType), Reg(reg));
+    }
+    override int globalVar(string name, BackendType type) {
+        this.mod.declareVar(name, type);
+        int reg = this.nextReg;
+        auto typefmt = llvmFmt(type, this.mod.platform);
+        this.print("%reg$reg = load $typefmt, $typefmt* @$name");
+        return this.defReg(type, Reg(reg));
     }
     override int binop(string op, BackendType type, int left, int right) {
         mut int reg = this.nextReg;

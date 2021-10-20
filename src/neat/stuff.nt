@@ -3406,8 +3406,8 @@ struct ASTModuleEntry
 {
     Protection protection;
 
-    (ASTImport | ASTSymbol | ASTExtern | ASTFunction
-        | ASTDeclaration | ASTTemplateDecl | ASTUnitTest
+    (ASTImport | ASTSymbol | ASTExternFunction | ASTExternVariable
+        | ASTFunction | ASTDeclaration | ASTTemplateDecl | ASTUnitTest
     ) symbol;
 }
 
@@ -3752,7 +3752,42 @@ abstract class ParserHelper
     }
 }
 
-class ASTExtern
+class ExternCVariable : Expression
+{
+    string name;
+
+    this(this.type, this.name) { }
+
+    override int emit(Generator output) {
+        return output.fun.globalVar(this.name, this.type.emit(output.platform));
+    }
+    override ExprInfo info() {
+        return ExprInfo(true, Ownership.global);
+    }
+    override void hash(Hash hash) {
+        hash.adds("ExternCVariable");
+        this.type.hash(hash);
+        hash.adds(this.name);
+    }
+}
+
+class ASTExternVariable
+{
+    ASTSymbol type;
+
+    string name;
+
+    Loc loc;
+
+    this(this.type, this.name) { }
+
+    ExternCVariable compile(Context context)
+    {
+        return new ExternCVariable(beType(this.loc, this.type.compile(context)), this.name);
+    }
+}
+
+class ASTExternFunction
 {
     string name;
 
@@ -3787,7 +3822,7 @@ class ASTExtern
     }
 }
 
-nullable ASTExtern parseExtern(Parser parser, LexicalContext lexicalContext)
+(ASTExternFunction | ASTExternVariable | :none) parseExtern(Parser parser, LexicalContext lexicalContext)
 {
     if (parser.accept("extern"))
     {
@@ -3795,15 +3830,19 @@ nullable ASTExtern parseExtern(Parser parser, LexicalContext lexicalContext)
         parser.expect("C");
         parser.expect(")");
         auto retLoc = parser.loc;
-        ASTSymbol ret = notNull!ASTSymbol(parser.parseType(lexicalContext));
+        ASTSymbol type = notNull!ASTSymbol(parser.parseType(lexicalContext));
         string name = parser.parseIdentifier;
         if (!name.length) parser.fail("identifier expected");
-        parser.expect("(");
-        auto params = parseIdentifierList(parser, lexicalContext, variadics=true);
-        parser.expect(";");
-        return new ASTExtern(name, ret, params=params.params, variadic=params.variadic, retLoc);
+        if (parser.accept("(")) {
+            auto params = parseIdentifierList(parser, lexicalContext, variadics=true);
+            parser.expect(";");
+            return new ASTExternFunction(name, type, params=params.params, variadic=params.variadic, retLoc);
+        } else {
+            parser.accept(";");
+            return new ASTExternVariable(type, name);
+        }
     }
-    return null;
+    return :none;
 }
 
 string moduleToFile(string module_)
@@ -4216,9 +4255,16 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             add(templateDecl);
             continue;
         }
-        if (ASTExtern extern_ = parseExtern(parser, lexicalContext)) {
-            add(extern_);
-            continue;
+        parseExtern(parser, lexicalContext).case {
+            ASTExternFunction fun: {
+                add(fun);
+                continue;
+            }
+            ASTExternVariable var: {
+                add(var);
+                continue;
+            }
+            (:none): {}
         }
         if (ASTDeclaration decl = parseDeclaration(parser, lexicalContext)) {
             add(decl);
@@ -4321,7 +4367,9 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
                 }
                 else assert(false);
             }
-            ASTExtern extern_:
+            ASTExternFunction extern_:
+                module_.register(extern_.name, entry.protection, extern_.compile(context));
+            ASTExternVariable extern_:
                 module_.register(extern_.name, entry.protection, extern_.compile(context));
             ASTFunction function_:
                 module_.add(function_.name, entry.protection, function_);

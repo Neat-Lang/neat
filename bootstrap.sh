@@ -515,6 +515,10 @@ at_revision '9ff3dfefb223ae125f4a618f0b10d718ad53d9bc' 'rebuild neat' 'build/nea
 at_revision '9f29c9b262cba6956053838a97db843b4ce7632e' 'rebuild neat' 'build/neat'
 # add neat.runtime
 at_revision '4c32f2705ae2017a79b0cc7fbf20a8680411ca62' 'rebuild neat' 'build/neat'
+# start moving things to neat.runtime
+at_revision '4c32f2705ae2017a79b0cc7fbf20a8680411ca62' 'rebuild neat' 'build/neat'
+# extern(C) variables
+at_revision '367cd56b938cfaf6da30962bf8fe5d11eaa18a82' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

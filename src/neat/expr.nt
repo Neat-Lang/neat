@@ -50,9 +50,11 @@ nullable Expression implicitConvertTo(Context context, Expression from, Type to)
     {
         return new IntToLong(new ShortToInt(from));
     }
-    if (fromType.instanceOf(Integer) && to.instanceOf(Float))
+    if (fromType.instanceOf(Integer) && to.instanceOf(Float) ||
+        fromType.instanceOf(Integer) && to.instanceOf(Double) ||
+        fromType.instanceOf(Float) && to.instanceOf(Double))
     {
-        return new IntToFloat(from);
+        return new FloatConvert(from, to);
     }
     // short-sized literals shrink to short
     auto literal = from.instanceOf(IntLiteral);
@@ -125,12 +127,16 @@ class BinaryOp : Expression
             right = new IntToLong(right);
             rtype = ltype;
         }
-        if (ltype.instanceOf(Integer) && rtype.instanceOf(Float)) {
-            left = new IntToFloat(left);
+        if (ltype.instanceOf(Integer) && rtype.instanceOf(Float) ||
+            ltype.instanceOf(Float) && rtype.instanceOf(Double))
+        {
+            left = new FloatConvert(left, rtype);
             ltype = rtype;
         }
-        if (ltype.instanceOf(Float) && rtype.instanceOf(Integer)) {
-            right = new IntToFloat(right);
+        if (ltype.instanceOf(Float) && rtype.instanceOf(Integer) ||
+            ltype.instanceOf(Double) && rtype.instanceOf(Float))
+        {
+            right = new FloatConvert(right, ltype);
             rtype = ltype;
         }
         mut string op = this.op;
@@ -243,24 +249,24 @@ class CharToInt : Expression
     override void hash(Hash hash) { hash.adds("CharToInt"); charValue.hash(hash); }
 }
 
-class IntToFloat : Expression
+// (int, float, double) to (int, float, double)
+class FloatConvert : Expression
 {
-    Expression intValue;
+    Expression from;
 
-    this(this.intValue) {
-        this.type = once new Float;
+    this(this.from, this.type) {
+        assert(this.type.instanceOf(Integer) || this.type.instanceOf(Float) || this.type.instanceOf(Double));
+        assert(!this.from.type.same(this.type));
     }
 
     override int emit(Generator output) {
-        assert(!!this.intValue.type.instanceOf(Integer));
-
-        int intValue = this.intValue.emit(output);
-        return output.fun.intToFloat(intValue);
+        int from = this.from.emit(output);
+        return output.fun.convert(from, this.type.emit(output.platform));
     }
 
     override ExprInfo info() { return ExprInfo(false, Ownership.global); }
 
-    override void hash(Hash hash) { hash.adds("IntToFloat"); intValue.hash(hash); }
+    override void hash(Hash hash) { hash.adds("FloatConvert"); from.hash(hash); type.hash(hash); }
 }
 
 class BoolOr : Expression
@@ -875,8 +881,10 @@ Expression castTo(Context context, Type to, Expression from) {
         return new CharToInt(from);
     if (from.type.instanceOf(Short) && to.instanceOf(Long))
         return new IntToLong(new ShortToInt(from));
-    if (from.type.instanceOf(Integer) && to.instanceOf(Float))
-        return new IntToFloat(from);
+    if (from.type.instanceOf(Integer) && to.instanceOf(Float) ||
+        from.type.instanceOf(Integer) && to.instanceOf(Double) ||
+        from.type.instanceOf(Float) && to.instanceOf(Double))
+        return new FloatConvert(from, to);
     return new CastExpr(to, from);
 }
 
@@ -895,8 +903,11 @@ class CastExpr : Expression
         if (type.instanceOf(Long) && this.target.instanceOf(Integer)) {
             return generator.fun.trunc(value, target);
         }
-        if (type.instanceOf(Float) && this.target.instanceOf(Integer)) {
-            return generator.fun.floatToInt(value);
+        if (type.instanceOf(Float) && this.target.instanceOf(Integer) ||
+            type.instanceOf(Double) && this.target.instanceOf(Integer) ||
+            type.instanceOf(Double) && this.target.instanceOf(Float))
+        {
+            return generator.fun.convert(value, target);
         }
 
         return generator.fun.bitcast(value, target);

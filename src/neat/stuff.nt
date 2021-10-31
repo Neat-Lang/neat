@@ -3601,6 +3601,9 @@ class Module : ModuleBase
 
     size_t hash; // hash of mangled name
 
+    // Inert imports have no lookup effect, they solely define a module dependency
+    (Module mod, (:inert|:private_|:public_) visibility, string[] symbols)[] imports;
+
     this(this.loc, this.name, this.mangledName, this.parentModule) {
         this.isContextScope = false;
         this.resolver = new Resolver;
@@ -3624,22 +3627,22 @@ class Module : ModuleBase
         this.resolver.register(name, protection, symbol);
     }
 
-    // bool visible: whether it affects lookups
-    (Module mod, bool visible, string[] symbols)[] imports;
-
-    override void addImport(ModuleBase module_, string[] symbols) {
+    override void addImport(ModuleBase module_, bool public_, string[] symbols) {
         auto module_ = notNull!Module(module_.instanceOf(Module));
         // TODO error?
         // TODO merge symbols?
         if ([any a.mod.mangledName == module_.mangledName for a in this.imports])
             return;
-        this.imports ~= (module_, true, symbols);
+        if (public_)
+            this.imports ~= (module_, :public_, symbols);
+        else
+            this.imports ~= (module_, :private_, symbols);
     }
 
     void addModuleDependency(Module module_) {
         string[] empty;
         // TODO , [])
-        this.imports ~= (module_, false, empty);
+        this.imports ~= (module_, :inert, empty);
     }
 
     override string mangle() { return this.mangledName; }
@@ -3716,10 +3719,26 @@ class Module : ModuleBase
         [symbol.emit(generator) for symbol in this.finishedSymbols];
     }
 
+    // TODO merge import search with lookup()
     nullable Symbol lookupPublic(Context context, Loc loc, string name)
     {
         // not counting imports (non-transitive)
-        return this.resolver.lookup(context, loc, name, Protection.public_);
+        auto ret = this.resolver.lookup(context, loc, name, Protection.public_);
+        if (ret) return ret;
+        // transitive public import search
+        for (import_ in this.imports) {
+            // FIXME !=
+            if (!import_.visibility.case((:inert): false, (:private_): false, (:public_): true))
+                continue;
+            // TODO yet another import class? struct? we've written this line three times now...
+            auto importMod = import_.mod;
+            assert(!!importMod);
+            if (!import_.symbols.length || [any a == name for a in import_.symbols]) {
+                if (Symbol entry = importMod.lookupPublic(context, loc, name))
+                    return entry;
+            }
+        }
+        return null;
     }
 
     override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression frame)
@@ -3729,7 +3748,9 @@ class Module : ModuleBase
         if (auto symbol = this.resolver.lookup(context, loc, name, Protection.private_))
             return symbol;
         for (import_ in this.imports) {
-            if (!import_.visible) continue;
+            // FIXME !=
+            if (import_.visibility.case((:inert): true, (:private_): false, (:public_): false))
+                continue;
             auto importMod = import_.mod;
             assert(!!importMod);
             if (!import_.symbols.length || [any a == name for a in import_.symbols]) {
@@ -4338,8 +4359,10 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
             ASTImport import_:
             {
                 auto importedModule = compileModule(context, import_.module_, true);
+                bool public_ = entry.protection == Protection.public_;
 
-                module_.addImport(importedModule, import_.statement.symbols);
+                module_.addImport(
+                    importedModule, public_=public_, import_.statement.symbols);
             }
             ASTDeclaration astDecl: {
                 if (auto structDecl = astDecl.instanceOf(ASTStructDecl)) {

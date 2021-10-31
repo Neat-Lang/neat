@@ -519,6 +519,8 @@ at_revision '4c32f2705ae2017a79b0cc7fbf20a8680411ca62' 'rebuild neat' 'build/nea
 at_revision '4c32f2705ae2017a79b0cc7fbf20a8680411ca62' 'rebuild neat' 'build/neat'
 # extern(C) variables
 at_revision '367cd56b938cfaf6da30962bf8fe5d11eaa18a82' 'rebuild neat' 'build/neat'
+# public imports
+at_revision '54a48af351bfea2310263668e846c720a86f105a' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

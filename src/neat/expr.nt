@@ -123,26 +123,13 @@ class BinaryOp : Expression
         mut Expression right = this.right;
         mut Type ltype = left.type;
         mut Type rtype = right.type;
+        // FIXME afaik this is just used for == 0 checks. make those properly generate longs.
         if (ltype.instanceOf(Integer) && rtype.instanceOf(Long)) {
             left = new IntToLong(left);
             ltype = rtype;
         }
         if (ltype.instanceOf(Long) && rtype.instanceOf(Integer)) {
             right = new IntToLong(right);
-            rtype = ltype;
-        }
-        if (ltype.instanceOf(Integer) && rtype.instanceOf(Float) ||
-            ltype.instanceOf(Integer) && rtype.instanceOf(Double) ||
-            ltype.instanceOf(Float) && rtype.instanceOf(Double))
-        {
-            left = new FloatConvert(left, rtype);
-            ltype = rtype;
-        }
-        if (ltype.instanceOf(Float) && rtype.instanceOf(Integer) ||
-            ltype.instanceOf(Double) && rtype.instanceOf(Integer) ||
-            ltype.instanceOf(Double) && rtype.instanceOf(Float))
-        {
-            right = new FloatConvert(right, ltype);
             rtype = ltype;
         }
         mut string op = this.op;
@@ -600,19 +587,18 @@ class ASTBinaryOp : ASTSymbol
 
     override Expression compile(Context context)
     {
-        Expression left = beExpression3(context, this.left.compile(context), this.loc);
-        Expression right = beExpression3(context, this.right.compile(context), this.loc);
-        auto leftType = left.type, rightType = right.type;
+        mut Expression left = beExpression3(context, this.left.compile(context), this.loc);
+        mut Expression right = beExpression3(context, this.right.compile(context), this.loc);
 
-        if (auto opOverload = leftType.binaryOp(context, this.op, left, right, this.loc))
+        if (auto opOverload = left.type.binaryOp(context, this.op, left, right, this.loc))
             return opOverload;
 
         if (this.op == "~")
         {
             loc.assert2s2(
-                !!leftType.instanceOf(Array),
-                "Left hand side of concatenation isn't array, but ", leftType.repr);
-            if (auto converted = implicitConvertTo(context, right, leftType.instanceOf(Array).elementType)) {
+                !!left.type.instanceOf(Array),
+                "Left hand side of concatenation isn't array, but ", left.type.repr);
+            if (auto converted = implicitConvertTo(context, right, left.type.instanceOf(Array).elementType)) {
                 return context.compiler.binaryOp("~", context, left, converted, this.loc);
             }
 
@@ -622,6 +608,14 @@ class ASTBinaryOp : ASTSymbol
             return new BoolAnd(truthy(context, left, this.loc), truthy(context, right, this.loc));
         if (this.op == "||")
             return new BoolOr(truthy(context, left, this.loc), truthy(context, right, this.loc));
+
+        // try to merge types
+        if (auto converted = implicitConvertTo(context, right, left.type)) {
+            right = converted;
+        }
+        if (auto converted = implicitConvertTo(context, left, right.type)) {
+            left = converted;
+        }
 
         return new BinaryOp(this.op, left, right, this.loc);
     }

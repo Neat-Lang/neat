@@ -1,5 +1,7 @@
 module neat.either;
 
+macro import neat.macros.quasiquoting;
+
 import backend.base;
 import helpers;
 import neat.base;
@@ -368,6 +370,47 @@ class Either : Type
         return context.compiler.stmtWithTemporaryExpr(
             context.compiler.reference(reference),
             &do_);
+    }
+
+    override nullable Expression binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
+    {
+        if (op == "==") {
+            mut auto rhs = rhs;
+            if (auto converted = context.compiler.implicitConvertTo(context, rhs, lhs.type)) {
+                rhs = converted;
+            } else {
+                return null;
+            }
+
+            auto eitherType = notNull!Either(rhs.type.instanceOf(Either));
+
+            nullable Expression do1(Expression lhs) {
+                nullable Expression do2(Expression rhs) {
+                    auto lhsType = new EitherType(lhs);
+                    auto rhsType = new EitherType(rhs);
+                    auto typeEq = context.compiler.astBinaryOp(
+                        "==", new ASTSymbolHelper(lhsType), new ASTSymbolHelper(rhsType), __HERE__);
+                    mut ASTEitherCaseExprCase[] eqCases;
+                    for (i, entry in eitherType.types) {
+                        auto rhsMember = new EitherMember(rhs, cast(int) i);
+                        auto memberEq = context.compiler.astBinaryOp(
+                            "==",
+                            context.compiler.astIdentifier("a", __HERE__),
+                            new ASTSymbolHelper(rhsMember), __HERE__);
+
+                        eqCases ~= ASTEitherCaseExprCase(
+                            __HERE__, new ASTSymbolHelper(entry.type), "a", return_=false, memberEq);
+                    }
+                    auto eqTest = new ASTEitherCaseExpr(__HERE__, new ASTSymbolHelper(lhs), eqCases);
+                    auto combinedExpr = context.compiler.astBinaryOp("&&", typeEq, eqTest, __HERE__);
+
+                    return combinedExpr.compile(context).beExpression;
+                }
+                return context.compiler.exprWithTemporaryExpr(rhs, &do2);
+            }
+            return context.compiler.exprWithTemporaryExpr(lhs, &do1);
+        }
+        return null;
     }
 }
 

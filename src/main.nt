@@ -78,12 +78,13 @@ struct BackgroundCompilation
     string srcFile;
     string objFile;
     int pid;
+    string[] extraLibs;
 }
 
 // how many levels of cache are we even on rn
 class ObjectCache
 {
-    (string earlyHash, Hash resultHash, string srcFile, string objFile, int pid)[] entries;
+    (string earlyHash, BackgroundCompilation compilation)[] entries;
 
     int[] donePids;
 
@@ -93,13 +94,13 @@ class ObjectCache
         return [any a.earlyHash == earlyHash for a in entries];
     }
 
-    void add(string earlyHash, Hash resultHash, string srcFile, string objFile, int pid) {
-        this.entries ~= (earlyHash, resultHash, srcFile, objFile, pid);
+    void add(string earlyHash, BackgroundCompilation compilation) {
+        this.entries ~= (earlyHash, compilation);
     }
 
     BackgroundCompilation get(string earlyHash) {
         auto entry = [first a for a in entries where a.earlyHash == earlyHash];
-        return BackgroundCompilation(entry.resultHash, entry.srcFile, entry.objFile, entry.pid);
+        return entry.compilation;
     }
 
     void waitpid(int pid) {
@@ -181,8 +182,13 @@ BackgroundCompilation emitModule(Module module_, CompilationVisitor[] visitors, 
 
     if (settings.caching && exists(objFile) && exists(srcFile)) {
         // preexisting object
-        settings.objectCache.add(earlyHash, hash, srcFile, objFile, 0);
-        return BackgroundCompilation(hash, srcFile, objFile, 0);
+        mut string[] extraLibs;
+        if (".obj/$(hash.text).extralibs".exists) {
+            extraLibs = ".obj/$(hash.text).extralibs".readText.split("\n");
+        }
+        auto compilation = BackgroundCompilation(hash, srcFile, objFile, 0, extraLibs);
+        settings.objectCache.add(earlyHash, compilation);
+        return compilation;
     }
 
     auto generator = new Generator(settings.platform, backendModule);
@@ -204,8 +210,18 @@ BackgroundCompilation emitModule(Module module_, CompilationVisitor[] visitors, 
         }
         pid = build(srcFile, objFile);
     }
-    settings.objectCache.add(earlyHash, hash, srcFile, objFile, pid);
-    return BackgroundCompilation(hash, srcFile, objFile, pid);
+    auto compilation = BackgroundCompilation(hash, srcFile, objFile, pid, generator.extraLibs);
+
+    if (generator.extraLibs.length > 0) {
+        // FIXME [join line on "\n"
+        ".obj/$(hash.text).extralibs".write(
+            [join "\n" line for line in generator.extraLibs]);
+    } else {
+        ".obj/$(hash.text).extralibs".remove;
+    }
+
+    settings.objectCache.add(earlyHash, compilation);
+    return compilation;
 }
 
 class UnittestVisitor : CompilationVisitor
@@ -255,7 +271,7 @@ class BuildSettings
 }
 
 (string[] objFiles, string[] intermediateFiles, Module module_, Hash hash) buildAstModule(
-    ASTModule astModule, BuildSettings settings, CompilationVisitor[] visitors)
+    ASTModule astModule, BuildSettings settings, CompilationVisitor[] visitors, Options options)
 {
     auto context = makeContext(settings.compiler, settings.platform, null, astModule.macroState);
     Module module_ = compileModule(context, astModule, addDefaultImports=true);
@@ -275,6 +291,7 @@ class BuildSettings
         for (remainingModule in remainingModules) {
             auto compilation = emitModule(remainingModule, visitors, settings);
             objFiles ~= compilation.objFile;
+            options.linkerArgs ~= ["-l$lib" for lib in compilation.extraLibs];
             intermediateFiles ~= compilation.srcFile;
             with (compilation.hash.state) hash.apply(add, mult);
             if (compilation.pid != 0) pids ~= compilation.pid;
@@ -306,7 +323,9 @@ class ParserHelperImpl : ParserHelper
     override void proxyCall(ASTModule astModule, string function_, MacroState macroState)
     {
         print("# stageM");
-        auto result = buildAstModule(astModule, this.settings, []);
+        // ignore pragma(lib) in macro (what are you doing)
+        auto dummyOptions = new Options;
+        auto result = buildAstModule(astModule, this.settings, [], dummyOptions);
         string objFiles = [join "" " " ~ a for a in result.objFiles];
 
         mut string baseCmd;
@@ -748,7 +767,7 @@ void buildBinary(Options options, string mainFile, string execPath, Package[] pa
     }
 
     auto astModule = getModule(compiler, mainFile, null, false, helper, modParseConfig, __HERE__);
-    auto result = buildAstModule(astModule, settings, compilationVisitors);
+    auto result = buildAstModule(astModule, settings, compilationVisitors, options);
     mut string fileArgs = [join "" " " ~ a for a in result.objFiles];
     string[] intermediateFiles = result.intermediateFiles;
 

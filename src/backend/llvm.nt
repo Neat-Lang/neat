@@ -6,9 +6,21 @@ import backend.base;
 import helpers;
 
 class LLVMBackend : Backend {
-    this() { }
+    int major;
+    this() {
+        import std.file : readText;
+        import std.process : system;
+
+        system("mkdir -p .obj; llvm-config --version > .obj/llvm-version");
+
+        this.major = ".obj/llvm-version".readText.split(".")[0].atoi;
+    }
     override LLVMBackendModule createModule(Platform platform, BackendLocation loc, bool forMacro) {
-        return new LLVMBackendModule(platform, loc, forMacro);
+        return new LLVMBackendModule(platform, loc, forMacro, this.major);
+    }
+    override void hash(Hash hash) {
+        hash.adds("LLVM");
+        hash.addl(this.major);
     }
 }
 
@@ -49,7 +61,9 @@ class LLVMBackendModule : BackendModule {
 
     bool forMacro;
 
-    this(this.platform, BackendLocation loc, this.forMacro) {
+    int major;
+
+    this(this.platform, BackendLocation loc, this.forMacro, this.major) {
         this.output = new LineWriter;
         this.output.print("target triple = \"x86_64-pc-linux-gnu\"");
         this.output.print("declare i8* @llvm.stacksave()");
@@ -206,14 +220,21 @@ class LLVMBackendModule : BackendModule {
                 this.output.append3s(" @", decl.name, "(");
                 if (retByMemory) {
                     llvmFmtInto2(type.ret, this.output, this.platform, true);
-                    this.output.appends("* sret %ret");
+                    this.output.appends("* sret");
+                    if (this.major > 10) {
+                        this.output.appends("(");
+                        llvmFmtInto2(type.ret, this.output, this.platform, true);
+                        this.output.appends(") %ret");
+                    }
                     if (type.params.length) this.output.appends(", ");
                 }
                 for (i, param in type.params) {
                     if (i) this.output.appends(", ");
                     if (passByMemory(param, this.platform)) {
                         llvmFmtInto(param, this.output, this.platform);
-                        this.output.appends("* byval");
+                        this.output.appends("* byval(");
+                        llvmFmtInto(param, this.output, this.platform);
+                        this.output.appends(")");
                     } else {
                         llvmFmtInto(param, this.output, this.platform);
                     }
@@ -727,13 +748,19 @@ class LLVMBackendFunction : BackendFunction {
         }
         mut string argstr = "(";
         if (sret) {
-            argstr ~= retFmt ~ "* sret " ~ retReg;
+            if (this.mod.major > 10) {
+                argstr ~= "$retFmt* sret($retFmt) $retReg";
+            } else {
+                argstr ~= "$retFmt* sret $retReg";
+            }
             if (args.length) argstr ~= ", ";
         }
         for (int i, arg in args) {
             if (i) argstr ~= ", ";
-            if (passByMemory(params[i], this.mod.platform))
-                argstr ~= llvmFmt(params[i], this.mod.platform) ~ "* byval " ~ coerceReg(i);
+            if (passByMemory(params[i], this.mod.platform)) {
+                auto paramType = llvmFmt(params[i], this.mod.platform);
+                argstr ~= "$paramType* byval($paramType) $(coerceReg(i))";
+            }
             else
                 argstr ~= this.treg(arg);
         }
@@ -805,14 +832,22 @@ class LLVMBackendFunction : BackendFunction {
         output.append("(");
         if (sret) {
             llvmFmtInto(backendFpType.ret, this.output, this.mod.platform);
-            this.output.append2s("* sret ", retReg);
+            this.output.appends("* sret");
+            if (this.mod.major > 10) {
+                this.output.appends("(");
+                llvmFmtInto(backendFpType.ret, this.output, this.mod.platform);
+                this.output.appends(") ");
+            }
+            this.output.appends(retReg);
             if (args.length) this.output.appends(", ");
         }
         for (int i, arg in args) {
             if (i) output.append(", ");
             if (passByMemory(backendFpType.params[i], this.mod.platform)) {
                 llvmFmtInto(backendFpType.params[i], this.output, this.mod.platform);
-                this.output.append2s("* byval ", coerceReg(i));
+                this.output.appends("* byval(");
+                llvmFmtInto(backendFpType.params[i], this.output, this.mod.platform);
+                this.output.append2s(") ", coerceReg(i));
             }
             else
                 this.outputTreg(arg);
@@ -936,16 +971,20 @@ class LLVMBackendFunction : BackendFunction {
         bool sret = passByMemory(this.ret_, this.mod.platform);
         string retFmt = llvmFmt2(this.ret_, this.mod.platform, true);
         if (sret) {
-            argstr ~= retFmt ~ "* sret %ret";
+            if (this.mod.major > 10) {
+                argstr ~= "$retFmt* sret($retFmt) %ret";
+            } else {
+                argstr ~= "$retFmt* sret %ret";
+            }
             if (this.args.length) argstr ~= ", ";
         }
         for (int i, arg in this.args) {
             if (i) argstr = argstr ~ ", ";
+            string argfmt = llvmFmt(arg, this.mod.platform);
             if (passByMemory(arg, this.mod.platform))
-                argstr ~= llvmFmt(arg, this.mod.platform)
-                    ~ "* byval %arg" ~ itoa(i) ~ ".coerce";
+                argstr ~= "$argfmt* byval($argfmt) %arg$i.coerce";
             else
-                argstr ~= llvmFmt(arg, this.mod.platform) ~ " %arg" ~ itoa(i);
+                argstr ~= "$argfmt %arg$i";
         }
         mut string retstr;
         if (sret)

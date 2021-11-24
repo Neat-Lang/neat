@@ -46,6 +46,13 @@ nullable Expression implicitConvertTo(Context context, Expression from, Type to)
     {
         return new CharToInt(from);
     }
+    if (fromType.instanceOf(Boolean) && (to.instanceOf(Integer) || to.instanceOf(Long)))
+    {
+        // TODO transition to bytes
+        if (to.instanceOf(Long)) return new IntToLong(new CastExpr(new Integer, from));
+        return new CastExpr(to, from);
+        // return new CharToInt(from);
+    }
     if (fromType.instanceOf(Short) && to.instanceOf(Long))
     {
         return new IntToLong(new ShortToInt(from));
@@ -111,7 +118,7 @@ class BinaryOp : Expression
             else this.type = left.type;
         }
         else if (op == "==" || op == "!=" || op == ">=" || op == "<=" || op == ">" || op == "<" || op == "is")
-            this.type = once new Integer;
+            this.type = once new Boolean;
         else {
             this.loc.fail("unknown op '" ~ op ~ "'");
         }
@@ -232,7 +239,9 @@ class CharToInt : Expression
     }
 
     override int emit(Generator output) {
-        assert(this.charValue.type.instanceOf(Character) || this.charValue.type.instanceOf(UByte));
+        assert(this.charValue.type.instanceOf(Character)
+            || this.charValue.type.instanceOf(UByte)
+            || this.charValue.type.instanceOf(Boolean));
 
         int charValue = this.charValue.emit(output);
         return output.fun.zeroExtend(charValue, once new BackendIntType);
@@ -270,7 +279,7 @@ class BoolOr : Expression
     Expression right;
 
     this(this.left, this.right) {
-        this.type = once new Integer;
+        this.type = once new Boolean;
     }
 
     override int emit(Generator output)
@@ -311,7 +320,7 @@ class BoolAnd : Expression
     Expression right;
 
     this(this.left, this.right) {
-        this.type = once new Integer;
+        this.type = once new Boolean;
     }
 
     override int emit(Generator output)
@@ -372,6 +381,16 @@ class IntLiteral : Expression
     override int emit(Generator output) { return output.fun.intLiteral(this.value); }
     override ExprInfo info() { return ExprInfo(false, Ownership.global); }
     override void hash(Hash hash) { hash.adds("IntLiteral"); hash.addl(value); }
+}
+
+class BoolLiteral : Expression
+{
+    bool value;
+    this(this.value) { this.type = once new Boolean; }
+    // FIXME transition to bytes
+    override int emit(Generator output) { return output.fun.intLiteral(this.value); }
+    override ExprInfo info() { return ExprInfo(false, Ownership.global); }
+    override void hash(Hash hash) { hash.adds("BoolLiteral"); hash.addl(value); }
 }
 
 class ASTLongLiteral : ASTSymbol
@@ -560,13 +579,17 @@ Expression truthy(Context context, Expression value, Loc loc) {
     if (auto truthyExpr = type.truthy(context, value, loc))
         return truthyExpr;
 
+    if (type.instanceOf(Boolean))
+    {
+        return value;
+    }
     if (type.instanceOf(Pointer))
     {
         auto sizeT = context.nativeWordType;
 
         return new BinaryOp("!=", new CastExpr(sizeT, value), once new IntLiteral(0), loc);
     }
-    loc.assert2s(type.instanceOf(Integer) || type.instanceOf(Long), "integer expected, not $(type.repr)");
+    loc.assert2s(type.instanceOf(Integer) || type.instanceOf(Long), "integer or bool expected, not $(type.repr)");
     return new BinaryOp("!=", value, once new IntLiteral(0), loc);
 }
 
@@ -933,6 +956,10 @@ class CastExpr : Expression
         {
             return generator.fun.convert(value, target);
         }
+        if (this.value.type.emit(generator.platform).same(target))
+        {
+            return value;
+        }
 
         return generator.fun.bitcast(value, target);
     }
@@ -979,7 +1006,7 @@ class ASTNegation : ASTSymbol
     {
         Expression isTrue = truthy(context, beExpression3(context, this.next.compile(context), this.loc), this.loc);
 
-        return new BinaryOp("==", isTrue, new IntLiteral(0), this.loc);
+        return new BinaryOp("==", isTrue, new BoolLiteral(false), this.loc);
     }
 
     override ASTSymbol quote(Quoter quoter) {

@@ -525,6 +525,8 @@ at_revision '54a48af351bfea2310263668e846c720a86f105a' 'rebuild neat' 'build/nea
 at_revision 'ba68db1edeee04d5fd9ee6c104198206f226bcf6' 'rebuild neat' 'build/neat'
 # LLVM 12 fixes
 at_revision '153e6ed361253046cc26f3377ce17744c3a62d6e' 'rebuild neat' 'build/neat'
+# symbol identifier == should be bool, tuple equality
+at_revision '818c24014c40d3fceca3840dd65b88234f4e7869' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

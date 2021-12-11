@@ -527,6 +527,8 @@ at_revision 'ba68db1edeee04d5fd9ee6c104198206f226bcf6' 'rebuild neat' 'build/nea
 at_revision '153e6ed361253046cc26f3377ce17744c3a62d6e' 'rebuild neat' 'build/neat'
 # symbol identifier == should be bool, tuple equality
 at_revision '818c24014c40d3fceca3840dd65b88234f4e7869' 'rebuild neat' 'build/neat'
+# allow quoted names in extended for loops
+at_revision '92285900a1f432be84d0be984a908f550033f9a6' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

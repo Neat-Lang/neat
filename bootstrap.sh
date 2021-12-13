@@ -529,6 +529,8 @@ at_revision '153e6ed361253046cc26f3377ce17744c3a62d6e' 'rebuild neat' 'build/nea
 at_revision '818c24014c40d3fceca3840dd65b88234f4e7869' 'rebuild neat' 'build/neat'
 # allow quoted names in extended for loops
 at_revision '92285900a1f432be84d0be984a908f550033f9a6' 'rebuild neat' 'build/neat'
+# add std.range.iota
+at_revision 'fbbf13981a02ecc8d6207c7fe1a3462f83af2424' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

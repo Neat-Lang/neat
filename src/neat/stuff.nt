@@ -691,7 +691,7 @@ nullable Expression call(Context context, ASTSymbol astTarget, ASTArgument[] ast
 
     mut nullable Statement pre, post;
     Expression[] args_ = new Expression[](args.length);
-    for (int i in 0 .. args.length) {
+    for (i in 0 .. args.length) {
         mut Expression arg = args[i];
         // we must free arg after the call, so make a copy
         if (arg.info.ownership == Ownership.gifted) {
@@ -972,18 +972,11 @@ nullable ASTSymbol parseIndex(Parser parser, LexicalContext lexicalContext, ASTS
     nullable ASTSymbol index = parseExpression(parser, lexicalContext);
     loc.assert2s(!!index, "index expected");
     auto index = notNull!ASTSymbol(index);
-    if (parser.accept(".."))
-    {
-        ASTSymbol lower = index;
-        nullable ASTSymbol upper = parseExpression(parser, lexicalContext);
-        parser.assert_(!!upper, "slice upper bound expected");
-        auto upper = notNull!ASTSymbol(upper);
-        parser.expect("]");
-        parser.commit;
-        return new ASTArraySlice(base, lower, upper, parser.loc);
-    }
     parser.expect("]");
     parser.commit;
+    if (auto iota = index.instanceOf(ASTIota)) {
+        return new ASTArraySlice(base, iota.from, iota.to, loc);
+    }
     return new ASTIndexAccess(base, index, parser.loc);
 }
 
@@ -1792,6 +1785,42 @@ ASTSymbol parseBoolOr(Parser parser, LexicalContext lexicalContext, mut ASTSymbo
     }
 }
 
+// a .. b
+class ASTIota : ASTSymbol
+{
+    ASTSymbol from;
+
+    ASTSymbol to;
+
+    Loc loc;
+
+    this(this.from, this.to, this.loc) { }
+
+    override Expression compile(Context context)
+    {
+        auto iotaValue = context.compiler.$expr ({ import package(compiler).std.range.iota : Iota; Iota($from, $to); });
+
+        return iotaValue.compile(context).beExpression;
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compilerCall("astIota", [
+            from.quote(quoter),
+            to.quote(quoter)], loc);
+    }
+}
+
+ASTSymbol parseIota(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
+{
+    if (parser.accept(".."))
+    {
+        ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+
+        return new ASTIota(left, right, parser.loc);
+    }
+    return left;
+}
+
 ASTSymbol parseComparison(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
     if (parser.accept("=="))
@@ -1847,12 +1876,13 @@ ASTSymbol parseComparison(Parser parser, LexicalContext lexicalContext, ASTSymbo
 
 ASTSymbol parseArithmetic(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int level)
 {
-    if (level <= 8) left = parseBitAnd(parser, lexicalContext, left, 8);
-    if (level <= 7) left = parseBitXor(parser, lexicalContext, left, 7);
-    if (level <= 6) left = parseBitOr(parser, lexicalContext, left, 6);
-    if (level <= 5) left = parseMulDiv(parser, lexicalContext, left, 5);
-    if (level <= 4) left = parseAddSubCat(parser, lexicalContext, left, 4);
-    if (level <= 3) left = parseBitShift(parser, lexicalContext, left, 3);
+    if (level <= 9) left = parseBitAnd(parser, lexicalContext, left, 9);
+    if (level <= 8) left = parseBitXor(parser, lexicalContext, left, 8);
+    if (level <= 7) left = parseBitOr(parser, lexicalContext, left, 7);
+    if (level <= 6) left = parseMulDiv(parser, lexicalContext, left, 6);
+    if (level <= 5) left = parseAddSubCat(parser, lexicalContext, left, 5);
+    if (level <= 4) left = parseBitShift(parser, lexicalContext, left, 4);
+    if (level <= 3) left = parseIota(parser, lexicalContext, left, 3);
     if (level <= 2) left = parseComparison(parser, lexicalContext, left, 2);
     if (level <= 1) left = parseBoolAnd(parser, lexicalContext, left, 1);
     if (level <= 0) left = parseBoolOr(parser, lexicalContext, left, 0);
@@ -2037,7 +2067,7 @@ Statement unwindScope(Context context, nullable Namespace target, Statement body
     auto init2 = new InitializeTemporaryStatement(resBool, new IntLiteral(0)); // false
     auto sourceTypeId = new EitherType(source);
     mut nullable Statement iftree = null;
-    for (int i, entry in extractEither.types) {
+    for (i, entry in extractEither.types) {
         auto extractType = entry.type;
         int eithermember = [first cast(int) i for i, a in either.types where a.type.same(extractType) else -1];
         loc.assert2s(eithermember != -1, "sumtype $(extractType.repr) not in source $(either.repr)");
@@ -2045,7 +2075,7 @@ Statement unwindScope(Context context, nullable Namespace target, Statement body
         auto test = context.compiler.binaryOp("==", context, sourceTypeId, cmpTypeId, __HERE__);
 
         auto extractValue = new EitherMember(source, eithermember);
-        auto repacked = new EitherExpr(extractEither, extractValue, i);
+        auto repacked = new EitherExpr(extractEither, extractValue, cast(int) i);
         auto setStmt = new AssignStatement(result, repacked);
         auto setBoolStmt = new AssignStatement(resBool, new IntLiteral(1)); // true
 
@@ -3004,7 +3034,7 @@ class ASTStatementExpression : ASTSymbol
     // TODO on CompilerBase?
     override ASTSymbol quote(Quoter quoter) {
         auto quotedStatements = new ASTSymbol[](this.statements.length);
-        for (int i, statement in this.statements)
+        for (i, statement in this.statements)
             quotedStatements[i] = statement.quote(quoter);
         auto type = quoter.compiler.astIdentifier("ASTStatement", __HERE__);
         return quoter.compilerCall("astStatementExpression", [
@@ -3254,7 +3284,10 @@ class ASTExtForLoop : ASTStatement
                 $stmt body_;
             }
         };
-        return rangeLoop.compile(context);
+        context.pushErrorLoc(this.loc);
+        auto ret = rangeLoop.compile(context);
+        context.popErrorLoc;
+        return ret;
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -3315,36 +3348,6 @@ nullable ASTStatement parseExtFor(Parser parser, LexicalContext lexicalContext)
     auto source = parseExpression(parser, lexicalContext);
     if (!source) parser.fail("expression expected");
     auto source = notNull!ASTSymbol(source);
-    // range expression loop, for (int i in 0..10)
-    // TODO replace with Iota shortcut
-    if (parser.accept(".."))
-    {
-        if (keyValueLoop) parser.fail("cannot key-value iterate a range expression: TODO");
-        auto lower = source;
-        auto upper = parseExpression(parser, lexicalContext);
-        if (!upper) parser.fail("range upper bound expected");
-        auto upper = notNull!ASTSymbol(upper);
-        parser.expect(")");
-        auto body_ = parseStatement(parser, lexicalContext);
-        parser.commit;
-
-        auto identifier = match1decl.name;
-        auto loopvar = compiler.astIdentifier(match1decl.name, match1decl.loc);
-        auto autoLoop = compiler.$stmt {
-            for (mut auto $identifier = $lower; $loopvar < $upper; $loopvar += 1) {
-                $stmt body_;
-            }
-        };
-        match1decl.type.case {
-            (:auto_): return autoLoop;
-            (:none): return autoLoop;
-            ASTSymbol type: return compiler.$stmt {
-                for (mut $type $identifier = $lower; $loopvar < $upper; $loopvar += 1) {
-                    $stmt body_;
-                }
-            };
-        }
-    }
     // array loop, for (i, k in array)
     parser.expect(")");
     auto body_ = parseStatement(parser, lexicalContext);
@@ -3545,7 +3548,7 @@ string mangleModuleName(string name, Package pak, int depth)
     assert(!!pak);
     mut string mangledName;
     // mangledName = [(a == '.') ? '_' : a for a in name];
-    for (int i in 0 .. name.length) {
+    for (i in 0 .. name.length) {
         if (name[i .. i + 1] == ".") mangledName ~= "_";
         else mangledName ~= name[i .. i + 1];
     }
@@ -3659,8 +3662,8 @@ class Resolver
 
     void resolveAll(Context context)
     {
-        for (int i in 0 .. this.entries.length) {
-            resolve(context, __HERE__, i);
+        for (i in 0 .. this.entries.length) {
+            resolve(context, __HERE__, cast(int) i);
         }
     }
 }
@@ -3965,7 +3968,7 @@ class ASTExternFunction
 string moduleToFile(string module_)
 {
     mut string modulePath;
-    for (int i in 0 .. module_.length) {
+    for (i in 0 .. module_.length) {
         if (module_[i .. i + 1] == ".") modulePath ~= "/";
         else modulePath ~= module_[i .. i + 1];
     }

@@ -531,6 +531,8 @@ at_revision '818c24014c40d3fceca3840dd65b88234f4e7869' 'rebuild neat' 'build/nea
 at_revision '92285900a1f432be84d0be984a908f550033f9a6' 'rebuild neat' 'build/neat'
 # add std.range.iota
 at_revision 'fbbf13981a02ecc8d6207c7fe1a3462f83af2424' 'rebuild neat' 'build/neat'
+# use iota for a..b, range loops
+at_revision '2b4d60dfb08c45d805aede5d0e6bcbd07a50af34' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

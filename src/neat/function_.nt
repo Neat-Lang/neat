@@ -32,7 +32,9 @@ class Function : FunctionDeclaration
     override string mangle()
     {
         if (this.name == "main") return "_main"; // globally unique
-        return this.parent.mangle() ~ "_" ~ this.name;
+        auto paramMangle = "$(this.params.length)_"
+            ~ [join "_" param.type.mangle for param in this.params];
+        return this.parent.mangle() ~ "_" ~ this.name ~ "_" ~ this.ret.mangle ~ "_" ~ paramMangle;
     }
 
     override string repr()
@@ -428,6 +430,32 @@ class FunctionReference : FunctionReferenceBase
     override void hash(Hash hash) { hash.adds("FunctionReference"); hash.adds(fun.mangle); }
 }
 
+class NestedFunction : LateSymbol
+{
+    Function fun;
+
+    this(this.fun, this.baseExpr) { }
+
+    override Expression resolve(Context context, Expression baseExpr) {
+        return new FunctionReference(this.fun);
+    }
+
+    override Expression patchContext(Context context, Expression baseExpr) {
+        return new PointerCast(once new Pointer(new Void), baseExpr);
+    }
+}
+
+class LatentNestedFunction : LatentSymbol
+{
+    Function fun;
+
+    this(this.fun) { }
+
+    override Symbol resolve(Context context, nullable Expression frame) {
+        return new NestedFunction(this.fun, notNull!Expression(frame));
+    }
+}
+
 class ASTFunction
 {
     Loc loc;
@@ -446,7 +474,7 @@ class ASTFunction
 
     this(this.loc, this.name, this.ret, this.params, this.isDeclaration, this.statement, this.macroState) { }
 
-    FunctionDeclaration compile(Context context)
+    (FunctionDeclaration | LatentNestedFunction) compile(Context context)
     {
         auto params = [
             Parameter(false, param.name, param.mutable, beType(param.loc, param.type.compile(context)))
@@ -458,12 +486,30 @@ class ASTFunction
                 this.name, beType(this.loc, this.ret.compile(context)), params);
         }
 
+        auto module_ = findParent!ModuleBase(context.namespace);
+
         auto fun = new Function(
             this.loc,
             this.name,
             beType(this.loc, this.ret.compile(context)),
             params,
             this.statement, this.macroState, false);
+
+        if (auto functionScope = findParent!FunctionScope(context.namespace)) {
+            auto structType = functionScope.structType;
+            auto voidp = once new Pointer(new Void);
+            auto latent = new LatentNestedFunction(fun);
+
+            fun.contextType = new Pointer(structType);
+
+            auto namespace = new SymbolAlias(context.namespace, fun.name, latent);
+
+            fun.parent = namespace;
+
+            module_.track(fun);
+
+            return latent;
+        }
 
         fun.parent = context.namespace;
         return fun;

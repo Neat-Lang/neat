@@ -1995,27 +1995,6 @@ nullable ASTReturnStatement parseReturn(Parser parser, LexicalContext lexicalCon
     return new ASTReturnStatement(expr, parser.loc);
 }
 
-class NestedFunctionDeclaration : Namespace
-{
-    Function nestedFunction;
-
-    // TODO collision check
-    this(this.parent, this.nestedFunction) { this.isContextScope = true; }
-
-    override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression frame)
-    {
-        if (this.nestedFunction.name == name)
-        {
-            auto framePtr = new PointerCast(once new Pointer(new Void), notNull!Expression(frame));
-
-            return new ClassMethodPtr(
-                new FunctionReference(this.nestedFunction), framePtr, true, this.nestedFunction.name);
-        }
-        if (this.parent) return this.parent.lookup(name, context, loc, frame);
-        return null;
-    }
-}
-
 Statement unwindScope(Context context, nullable Namespace target, Statement body_)
 {
     mut Statement result = body_;
@@ -2900,22 +2879,15 @@ class ASTNestedFunctionDeclStatement : ASTStatement
 
     override StatementCompileResult compile(Context context)
     {
-        auto module_ = findParent!Module(context.namespace);
-        auto fun_ = notNull!Function(this.fun.compile(context).instanceOf(Function));
-        auto structType = findParent!FunctionScope(context.namespace).structType;
-        auto voidp = once new Pointer(new Void);
-
-        fun_.contextType = new Pointer(structType);
-
-        auto namespace = new NestedFunctionDeclaration(context.namespace, fun_);
-
-        fun_.parent = namespace;
-
-        module_.track(fun_);
-
-        return StatementCompileResult(
-            new NoopStatement,
-            context.withNamespace(namespace));
+        this.fun.compile(context).case {
+            FunctionDeclaration decl: assert(false);
+            LatentNestedFunction latent: {
+                return StatementCompileResult(
+                    new NoopStatement,
+                    context.withNamespace(new SymbolAlias(
+                        context.namespace, latent.fun.name, latent)));
+            }
+        }
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTNestedFunctionDeclStatement'"); assert(false); }
@@ -3408,6 +3380,9 @@ nullable ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalCo
     if (auto structDecl = parseStructDecl(parser, lexicalContext)) {
         return structDecl;
     }
+    if (auto templateDecl = parseTemplateDecl(parser, lexicalContext)) {
+        return templateDecl;
+    }
     return null;
 }
 
@@ -3494,7 +3469,7 @@ struct ASTModuleEntry
     Protection protection;
 
     (ASTImport | ASTSymbol | ASTExternFunction | ASTExternVariable
-        | ASTFunction | ASTDeclaration | ASTTemplateDecl | ASTUnitTest
+        | ASTFunction | ASTDeclaration | ASTUnitTest
         | ASTPragma
     ) symbol;
 }
@@ -3636,7 +3611,14 @@ class Resolver
             return new NotYetResolvedSymbol(this, hit, loc);
         }
         resolve(context, loc, hit);
-        return this.entries[hit].resolution;
+
+        mut nullable Symbol ret = this.entries[hit].resolution;
+        if (!ret) return null;
+        if (auto latent = ret.instanceOf(LatentSymbol)) {
+            // we're at global scope; no frame pointer will be applied.
+            ret = latent.resolve(context, null);
+        }
+        return ret;
     }
 
     void resolve(Context context, Loc loc, int i)
@@ -3649,7 +3631,9 @@ class Resolver
             this.entries[i].resolving = true;
             this.entries[i].resolution = this.entries[i].symbol.case(
                 // TODO compile function statement immediately too
-                ASTFunction fun: fun.compile(context),
+                ASTFunction fun: fun.compile(context).case(
+                    FunctionDeclaration decl: decl,
+                    LatentNestedFunction latent: ({ assert(false); cast(Symbol) null; })),
                 ASTUnitTest ut: ut.compile(context),
                 ASTClassDecl decl: decl.compile(context),
                 ASTIntfDecl decl: decl.compile(context),
@@ -4194,7 +4178,7 @@ class ASTTemplateInstance : ASTSymbol
     {
         auto symbol = this.templateDecl.compile(context);
         auto type = beType(this.loc, this.type.compile(context));
-        auto templDecl = symbol.instanceOf(TemplateDecl);
+        auto templDecl = symbol.instanceOf(ScopeBoundTemplateDecl);
 
         loc.assert2s(!!templDecl, "cannot instantiate non-template");
 
@@ -4222,63 +4206,85 @@ class TemplateInstantiationNamespace : Namespace
     }
 }
 
-// very similar to ASTTemplateDecl
-// they'll differentiate themselves later, when constraints are added.
-class TemplateDecl : Symbol
+class ScopeBoundTemplateDecl : Symbol
 {
-    string name;
+    TemplateDecl latent;
 
-    Namespace templateScope;
+    // Held to allow resolving nested functions.
+    nullable Expression frame;
 
-    string typeParameterName;
-
-    (ASTClassDecl | ASTFunction) content;
-
-    this(this.name, this.templateScope, this.typeParameterName, this.content) { }
-
-    (Module mod, Symbol sym, Type type)[] instantiations;
+    this(this.latent, this.frame) { }
 
     Symbol resolve(mut Context context, Loc loc, Type parameter)
     {
+        return this.latent.getInstance(context, loc, parameter, this.frame);
+    }
+}
+
+// very similar to ASTTemplateDecl
+// they'll differentiate themselves later, when constraints are added.
+class TemplateDecl : LatentSymbol
+{
+    Namespace parent;
+
+    ASTTemplateDecl decl;
+
+    (Module mod, Type type, Symbol value)[] instantiations;
+
+    this(this.parent, this.decl) { }
+
+    override Symbol resolve(Context context, nullable Expression frame) {
+        return new ScopeBoundTemplateDecl(this, frame);
+    }
+
+    Symbol getInstance(mut Context context, Loc loc, Type parameter, nullable Expression frame)
+    {
         auto contextModule = findParent!Module(context.namespace);
 
-        for (entry in instantiations) {
+        for (entry in this.instantiations) {
             if (entry.type.same(parameter)) {
                 contextModule.addModuleDependency(entry.mod);
-                return entry.sym;
+                if (auto latent = entry.value.instanceOf(LatentSymbol)) {
+                    return latent.resolve(context, notNull!Expression(frame));
+                }
+                return entry.value;
             }
         }
-
-        context = context.withNamespace(
-            new TemplateInstantiationNamespace(templateScope, typeParameterName, parameter));
-        auto content = this.content.case(
+        context = context.withNamespace(new TemplateInstantiationNamespace(
+            this.parent, this.decl.typeParameterName, parameter));
+        Symbol value = this.decl.content.case(
             ASTClassDecl decl: decl.compile(context),
-            ASTFunction fun: notNull!Function(fun.compile(context).instanceOf(Function)));
-        string moduleMangle = name ~ "_instance_" ~ parameter.mangle;
+            ASTFunction fun: fun.compile(context));
 
         /*
          * Emit instance into new module.
          * This is so that an instantiation with the same types in different modules
          * gets the same reused symbols.
          */
-        Module module_ = new Module(loc, name, moduleMangle, null);
+        string moduleMangle = this.decl.name ~ "_instance_" ~ parameter.mangle;
+        Module module_ = new Module(loc, this.decl.name, moduleMangle, null);
 
-        auto sym = notNull!Symbol(content.case(
-            ClassType classType: classType.instanceOf(Symbol),
-            Function fun: fun.instanceOf(Symbol)));
-        module_.track(sym);
+        this.instantiations ~= (module_, parameter, value);
 
-        instantiations ~= (module_, sym, parameter);
+        Symbol resolvedValue() {
+            if (auto latent = value.instanceOf(LatentSymbol)) {
+                return latent.resolve(context, notNull!Expression(frame));
+            }
+            return value;
+        }
+        auto resolvedValue = resolvedValue;
+
+        module_.track(resolvedValue);
 
         // after append, to break recursion loops
         module_.compile(context);
 
         contextModule.addModuleDependency(module_);
-        return sym;
+        return resolvedValue;
     }
 }
 
-class ASTTemplateDecl
+class ASTTemplateDecl : ASTDeclaration
 {
     string name;
 
@@ -4289,10 +4295,19 @@ class ASTTemplateDecl
 
     this(this.name, this.typeParameterName, this.content) { }
 
-    Symbol compile(Context context)
-    {
-        return new TemplateDecl(name, notNull!Namespace(context.namespace), typeParameterName, content);
+    Symbol compileSymbol(Context context) {
+        auto parent = notNull!Namespace(context.namespace);
+
+        return new TemplateDecl(parent, this);
     }
+
+    override Context compile(Context context) {
+        auto parent = notNull!Namespace(context.namespace);
+
+        return context.withNamespace(new SymbolAlias(parent, this.name, compileSymbol(context)));
+    }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTTemplateDecl'!"); assert(false); }
 }
 
 nullable ASTTemplateDecl parseTemplateDecl(Parser parser, LexicalContext lexicalContext)
@@ -4372,10 +4387,6 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
         }
         if (ASTIntfDecl intfDecl = parseIntfDecl(parser, lexicalContext)) {
             add(intfDecl);
-            continue;
-        }
-        if (ASTTemplateDecl templateDecl = parseTemplateDecl(parser, lexicalContext)) {
-            add(templateDecl);
             continue;
         }
         parseExtern(parser, lexicalContext).case {
@@ -4475,6 +4486,8 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
                     module_.add(structDecl.name, entry.protection, structDecl);
                 } else if (auto aliasDecl = astDecl.instanceOf(ASTAliasDecl)) {
                     module_.register(aliasDecl.name, entry.protection, aliasDecl.target.compile(context));
+                } else if (auto templateDecl = astDecl.instanceOf(ASTTemplateDecl)) {
+                    module_.register(templateDecl.name, entry.protection, templateDecl.compileSymbol(context));
                 } else {
                     print(astDecl.repr);
                     assert(false);
@@ -4506,8 +4519,6 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
                 module_.add("", entry.protection, ut);
             ASTPragma pragma_:
                 module_.track(pragma_.compile(context));
-            ASTTemplateDecl astTemplateDecl:
-                module_.register(astTemplateDecl.name, entry.protection, astTemplateDecl.compile(context));
         }
     }
     module_.compile(context);

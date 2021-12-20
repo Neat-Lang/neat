@@ -373,38 +373,6 @@ class ArgExpr : Expression
     override void hash(Hash hash) { hash.adds("ArgExpr"); hash.addl(index); }
 }
 
-(ASTParameter | ASTThisAssignment)[] parseParamList(Parser parser, LexicalContext lexicalContext)
-{
-    mut (ASTParameter | ASTThisAssignment)[] params;
-    while (!parser.accept(")"))
-    {
-        if (params.length > 0)
-        {
-            if (!parser.accept(","))
-            {
-                parser.fail("',' or ')' expected");
-            }
-        }
-        auto loc = parser.loc;
-        if (parser.accept("this."))
-        {
-            string argname = parseIdentifier(parser);
-            params ~= ASTThisAssignment(argname);
-        }
-        else
-        {
-            mut bool mutable;
-            if (parser.acceptIdentifier("mut")) mutable = true;
-            nullable ASTSymbol argtype = lexicalContext.compiler.parseType(parser, lexicalContext);
-            parser.assert_(!!argtype, "argument type expected");
-            string argname = parseIdentifier(parser);
-            parser.assert_(argname.length > 0, "argument name expected");
-            params ~= ASTParameter(name=argname, mutable, notNull!ASTSymbol(argtype), loc);
-        }
-    }
-    return params;
-}
-
 class FunctionReference : FunctionReferenceBase
 {
     FunctionDeclaration fun;
@@ -514,4 +482,95 @@ class ASTFunction : ASTSymbol
         fun.parent = context.namespace;
         return fun;
     }
+}
+
+nullable ASTFunction parseFunction(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin;
+    nullable ASTSymbol ret = lexicalContext.compiler.parseType(parser, lexicalContext);
+    if (!ret)
+    {
+        parser.revert;
+        return null;
+    }
+    string name = parser.parseIdentifier;
+    // avoid 'mut typeof(expr)' from matching as a function
+    // TODO reserved identifier list
+    if (!name.length || name == "typeof" || !parser.accept("("))
+    {
+        parser.revert;
+        return null;
+    }
+    parser.commit;
+    // FIXME
+    // auto params = parseIdentifierList(parser, lexicalContext, variadics=false).params;
+    auto params = parseIdentifierList(parser, lexicalContext, variadics=false);
+    ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext);
+    return new ASTFunction(parser.loc, name, notNull!ASTSymbol(ret), params.params, false, stmt, lexicalContext.macroState);
+}
+
+(ASTParameter[] params, bool variadic) parseIdentifierList(Parser parser, LexicalContext lexicalContext, bool variadics)
+{
+    mut ASTParameter[] params;
+    mut bool variadic = false;
+    while (!parser.accept(")"))
+    {
+        if (params.length) {
+            if (!parser.accept(",")) {
+                parser.fail("',' or ')' expected");
+            }
+        }
+        if (variadics) {
+            parser.begin;
+            if (parser.accept("...") && parser.accept(")")) {
+                parser.commit;
+                variadic = true;
+                break;
+            }
+            parser.revert;
+        }
+
+        auto loc = parser.loc;
+        mut bool mutable;
+        if (parser.acceptIdentifier("mut")) mutable = true;
+        nullable ASTSymbol paramType = lexicalContext.compiler.parseType(parser, lexicalContext);
+        if (!paramType) {
+            parser.fail("type expected");
+        }
+        string paramName = parser.parseIdentifier;
+        params ~= ASTParameter(paramName, mutable, notNull!ASTSymbol(paramType), loc);
+    }
+    return (params, variadic);
+}
+
+(ASTParameter | ASTThisAssignment)[] parseParamList(Parser parser, LexicalContext lexicalContext)
+{
+    mut (ASTParameter | ASTThisAssignment)[] params;
+    while (!parser.accept(")"))
+    {
+        if (params.length > 0)
+        {
+            if (!parser.accept(","))
+            {
+                parser.fail("',' or ')' expected");
+            }
+        }
+        auto loc = parser.loc;
+        if (parser.accept("this."))
+        {
+            string argname = parseIdentifier(parser);
+            params ~= ASTThisAssignment(argname);
+        }
+        else
+        {
+            mut bool mutable;
+            if (parser.acceptIdentifier("mut")) mutable = true;
+            nullable ASTSymbol argtype = lexicalContext.compiler.parseType(parser, lexicalContext);
+            parser.assert_(!!argtype, "argument type expected");
+            string argname = parseIdentifier(parser);
+            parser.assert_(argname.length > 0, "argument name expected");
+            params ~= ASTParameter(name=argname, mutable, notNull!ASTSymbol(argtype), loc);
+        }
+    }
+    return params;
 }

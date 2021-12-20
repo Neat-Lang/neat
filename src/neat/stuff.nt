@@ -24,6 +24,7 @@ import neat.pragmas;
 import neat.parser_base;
 import neat.statements;
 import neat.struct_;
+import neat.templ;
 import neat.tuples;
 import neat.types;
 import neat.unittest_;
@@ -363,40 +364,6 @@ nullable ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
 
     parser.commit;
     return lexicalContext.compiler.astIdentifier(identifier, parser.loc);
-}
-
-(ASTParameter[] params, bool variadic) parseIdentifierList(Parser parser, LexicalContext lexicalContext, bool variadics)
-{
-    mut ASTParameter[] params;
-    mut bool variadic = false;
-    while (!parser.accept(")"))
-    {
-        if (params.length) {
-            if (!parser.accept(",")) {
-                parser.fail("',' or ')' expected");
-            }
-        }
-        if (variadics) {
-            parser.begin;
-            if (parser.accept("...") && parser.accept(")")) {
-                parser.commit;
-                variadic = true;
-                break;
-            }
-            parser.revert;
-        }
-
-        auto loc = parser.loc;
-        mut bool mutable;
-        if (parser.acceptIdentifier("mut")) mutable = true;
-        nullable ASTSymbol paramType = parser.parseType(lexicalContext);
-        if (!paramType) {
-            parser.fail("type expected");
-        }
-        string paramName = parser.parseIdentifier;
-        params ~= ASTParameter(paramName, mutable, notNull!ASTSymbol(paramType), loc);
-    }
-    return (params, variadic);
 }
 
 class FuncPtrCall : Expression
@@ -1180,38 +1147,6 @@ nullable ASTParenPropertyExpression parseParenPropertyExpression(
     if (!parser.accept(")")) parser.fail("closing parenthesis expected");
     parser.commit;
     return new ASTParenPropertyExpression(base, sym, loc);
-}
-
-nullable ASTSymbol parseTemplateInstantiation(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
-{
-    parser.begin;
-    auto instanceLoc = parser.loc;
-    // TODO better way to exclude !operator cases
-    if (!parser.accept("!") || parser.accept("=") || acceptIdentifier(parser, "is")) {
-        parser.revert;
-        return null;
-    }
-    mut ASTSymbol[] templateArgs;
-    void getTemplateArg() {
-        auto templateArg = parser.parseType(lexicalContext);
-        parser.assert_(!!templateArg, "template argument expected");
-        templateArgs ~= notNull!ASTSymbol(templateArg);
-    }
-
-    if (parser.accept("(")) {
-        // ( [a [, a]*]? )
-        if (!parser.accept(")")) {
-            getTemplateArg;
-            while (!parser.accept(")")) {
-                parser.expect(",");
-                getTemplateArg;
-            }
-        }
-    } else {
-        getTemplateArg;
-    }
-    parser.commit;
-    return new ASTTemplateInstance(base, templateArgs, instanceLoc);
 }
 
 ASTSymbol parseProperties(Parser parser, LexicalContext lexicalContext, mut ASTSymbol current)
@@ -3462,32 +3397,6 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
     parser.fail("statement expected");
 }
 
-// TODO move to function_
-nullable ASTFunction parseFunction(Parser parser, LexicalContext lexicalContext)
-{
-    parser.begin;
-    nullable ASTSymbol ret = parser.parseType(lexicalContext);
-    if (!ret)
-    {
-        parser.revert;
-        return null;
-    }
-    string name = parser.parseIdentifier;
-    // avoid 'mut typeof(expr)' from matching as a function
-    // TODO reserved identifier list
-    if (!name.length || name == "typeof" || !parser.accept("("))
-    {
-        parser.revert;
-        return null;
-    }
-    parser.commit;
-    // FIXME
-    // auto params = parseIdentifierList(parser, lexicalContext, variadics=false).params;
-    auto params = parseIdentifierList(parser, lexicalContext, variadics=false);
-    ASTStatement stmt = parseStatement(parser, lexicalContext);
-    return new ASTFunction(parser.loc, name, notNull!ASTSymbol(ret), params.params, false, stmt, lexicalContext.macroState);
-}
-
 class ModuleEntry
 {
     string name;
@@ -3743,10 +3652,10 @@ class Module : ModuleBase
             this.imports ~= (module_, :private_, symbols);
     }
 
-    void addModuleDependency(Module module_) {
+    override void addModuleDependency(ModuleBase module_) {
         string[] empty;
         // TODO , [])
-        this.imports ~= (module_, :inert, empty);
+        this.imports ~= (notNull!Module(module_.instanceOf(Module)), :inert, empty);
     }
 
     override string mangle() { return this.mangledName; }
@@ -3759,7 +3668,7 @@ class Module : ModuleBase
         [import_.mod.walkModules(cb) for import_ in imports];
     }
 
-    void compile(Context context)
+    override void compile(Context context)
     {
         auto compiler = context.compiler, platform = context.platform;
 
@@ -4194,203 +4103,6 @@ nullable ASTModule parseMacroContinuation(CompilerBase compiler, Parser parser, 
     auto subModule = new ASTModule(astModule.loc, astModule.name, astModule.pak, newMacroState, astModule);
 
     return parseModuleBody(compiler, parser, helper, subModule, config);
-}
-
-class ASTTemplateInstance : ASTSymbol
-{
-    ASTSymbol templateDecl;
-
-    ASTSymbol[] types;
-
-    Loc loc;
-
-    this(this.templateDecl, this.types, this.loc) { }
-
-    override Symbol compile(Context context)
-    {
-        auto symbol = this.templateDecl.compile(context);
-        // TODO LocRange in ASTSymbol
-        auto types = [beType(this.loc, type.compile(context)) for type in this.types];
-        auto templDecl = symbol.instanceOf(ScopeBoundTemplateDecl);
-
-        loc.assert2s(!!templDecl, "cannot instantiate non-template");
-
-        return templDecl.resolve(context, this.loc, types);
-    }
-
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTTemplateInstance'!"); assert(false); }
-}
-
-class TemplateInstantiationNamespace : Namespace
-{
-    string[] parameterNames;
-
-    Type[] parameterTypes;
-
-    this(this.parent, this.parameterNames, this.parameterTypes) { this.isContextScope = false; }
-
-    override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression frame) {
-        for (i, parameterName in parameterNames) {
-            if (name == parameterName) return parameterTypes[i];
-        }
-        return parent.lookup(name, context, loc, frame);
-    }
-
-    override string mangle() {
-        string mangle(Type[] types) {
-            return "$(types.length)" ~ [join "" "_$(type.mangle)" for type in types];
-        }
-        return this.parent.mangle ~ "_instance_" ~ parameterTypes.mangle;
-    }
-}
-
-class ScopeBoundTemplateDecl : Symbol
-{
-    TemplateDecl latent;
-
-    // Held to allow resolving nested functions.
-    nullable Expression frame;
-
-    this(this.latent, this.frame) { }
-
-    Symbol resolve(mut Context context, Loc loc, Type[] parameters)
-    {
-        return this.latent.getInstance(context, loc, parameters, this.frame);
-    }
-}
-
-// very similar to ASTTemplateDecl
-// they'll differentiate themselves later, when constraints are added.
-class TemplateDecl : LatentSymbol
-{
-    Namespace parent;
-
-    ASTTemplateDecl decl;
-
-    (Module mod, Type[] types, Symbol value)[] instantiations;
-
-    this(this.parent, this.decl) { }
-
-    override Symbol resolve(Context context, nullable Expression frame) {
-        return new ScopeBoundTemplateDecl(this, frame);
-    }
-
-    Symbol getInstance(mut Context context, Loc loc, Type[] parameters, nullable Expression frame)
-    {
-        loc.assert2s(parameters.length == this.decl.typeParameterNames.length,
-            "Unexpected number of parameters to template: " ~
-            "expected $(this.decl.typeParameterNames.length), but got $(parameters.length)");
-        bool areSame(Type[] left, Type[] right) {
-            if (left.length != right.length) return false;
-            return [all left[i].same(right[i]) for i in 0 .. left.length];
-        }
-        string mangle(Type[] types) {
-            return "$(types.length)" ~ [join "" "_$(type.mangle)" for type in types];
-        }
-        auto contextModule = findParent!Module(context.namespace);
-
-        for (entry in this.instantiations) {
-            if (entry.types.areSame(parameters)) {
-                contextModule.addModuleDependency(entry.mod);
-                if (auto latent = entry.value.instanceOf(LatentSymbol)) {
-                    return latent.resolve(context, notNull!Expression(frame));
-                }
-                return entry.value;
-            }
-        }
-        context = context.withNamespace(new TemplateInstantiationNamespace(
-            this.parent, this.decl.typeParameterNames, parameters));
-        Symbol value = this.decl.content.compile(context);
-
-        /*
-         * Emit instance into new module.
-         * This is so that an instantiation with the same types in different modules
-         * gets the same reused symbols.
-         */
-        string moduleMangle = this.decl.name ~ "_instance_" ~ parameters.mangle;
-        Module module_ = new Module(loc, this.decl.name, moduleMangle, null);
-
-        this.instantiations ~= (module_, parameters, value);
-
-        Symbol resolvedValue() {
-            if (auto latent = value.instanceOf(LatentSymbol)) {
-                return latent.resolve(context, notNull!Expression(frame));
-            }
-            return value;
-        }
-        auto resolvedValue = resolvedValue;
-
-        module_.track(resolvedValue);
-
-        // after append, to break recursion loops
-        module_.compile(context);
-
-        contextModule.addModuleDependency(module_);
-        return resolvedValue;
-    }
-}
-
-class ASTTemplateDecl : ASTDeclaration
-{
-    string name;
-
-    string[] typeParameterNames;
-
-    ASTSymbol content;
-
-    this(this.name, this.typeParameterNames, this.content) { }
-
-    Symbol compileSymbol(Context context) {
-        auto parent = notNull!Namespace(context.namespace);
-
-        return new TemplateDecl(parent, this);
-    }
-
-    override Context compile(Context context) {
-        auto parent = notNull!Namespace(context.namespace);
-
-        return context.withNamespace(new SymbolAlias(parent, this.name, compileSymbol(context)));
-    }
-
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTTemplateDecl'!"); assert(false); }
-}
-
-nullable ASTTemplateDecl parseTemplateDecl(Parser parser, LexicalContext lexicalContext)
-{
-    auto loc = parser.loc;
-    if (!acceptIdentifier(parser, "template"))
-    {
-        return null;
-    }
-    auto name = parser.parseIdentifier;
-    mut string[] typeParameters;
-    // ( [identifier [, identifier]*]? )
-    parser.expect("(");
-    auto typeParameter = parser.parseIdentifier;
-    if (typeParameter.length == 0) {
-        parser.expect(")");
-    } else {
-        typeParameters ~= typeParameter;
-        while (!parser.accept(")")) {
-            parser.expect(",");
-            auto typeParameter = parser.parseIdentifier;
-            typeParameters ~= typeParameter;
-        }
-    }
-    parser.expect("{");
-    // TODO generalize (parseSymbol)?
-    mut uninitialized ASTSymbol member;
-    if (ASTClassDecl classDecl = parseClassDecl(parser, lexicalContext))
-    {
-        member = classDecl;
-    }
-    else if (ASTFunction fun = parseFunction(parser, lexicalContext))
-    {
-        member = fun;
-    }
-
-    parser.expect("}");
-    return new ASTTemplateDecl(name, typeParameters, member);
 }
 
 Package selectPackage(Package[] packages, string name, Loc loc)

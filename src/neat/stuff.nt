@@ -657,6 +657,10 @@ nullable Expression call(Context context, ASTSymbol astTarget, ASTArgument[] ast
             if (auto ret = type_.call(context, loc, astArgs))
                 return ret;
         }
+        if (auto expr = target.instanceOf(Expression)) {
+            if (auto ret = expr.type.callExpr(context, loc, expr, astArgs))
+                return ret;
+        }
     }
 
     if (auto fundecl = target.instanceOf(FunctionDeclaration)) {
@@ -1275,6 +1279,130 @@ class ASTReference : ASTSymbol
     }
 }
 
+class Lambda : Type
+{
+    TemplateDecl decl;
+
+    this(this.decl) {
+        this.zeroInitializable = true;
+    }
+
+    override BackendType emit(Platform platform) {
+        return once (new Pointer(new Void)).emit(platform);
+    }
+
+    override nullable Expression callExpr(Context context, Loc loc, Expression base, ASTArgument[] args)
+    {
+        // Reconstruct a ScopeBoundTemplateDecl using `base`
+        auto scopeTempl = new ScopeBoundTemplateDecl(this.decl, base);
+        // Instantiate with `args`' types
+        Expression[] argExprs = [
+            arg.sym.compile(context).beExpressionImplCall(context, loc) for arg in args];
+        auto instance = scopeTempl.instantiate(context, loc, [arg.type for arg in argExprs]);
+        // call(`args`)
+        return .call(context, new ASTSymbolHelper(instance), args, loc, autoCall=true);
+    }
+
+    override bool same(Type other) {
+        if (auto otherLambda = other.instanceOf(Lambda)) {
+            return this.decl.same(otherLambda.decl);
+        }
+        return false;
+    }
+
+    override string mangle() {
+        return "__lambda";
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("lambda");
+        hash.adds(this.decl.mangle);
+    }
+}
+
+class LambdaExpr : Expression
+{
+    ScopeBoundTemplateDecl templ;
+
+    this(this.templ) {
+        this.type = new Lambda(this.templ.latent);
+    }
+
+    override int emit(Generator output) {
+        int reg = this.templ.frame.emit(output);
+
+        return output.fun.bitcast(reg, this.type.emit(output.platform));
+    }
+    override ExprInfo info() {
+        return this.templ.frame.info;
+    }
+    override void hash(Hash hash) {
+        hash.adds("lambdaexpr");
+        hash.adds(this.templ.latent.mangle);
+        this.templ.frame.hash(hash);
+    }
+}
+
+class ASTLambdaExpr : ASTSymbol
+{
+    string paramName;
+
+    ASTSymbol value;
+
+    MacroState macroState;
+
+    Loc loc;
+
+    this(this.paramName, this.value, this.macroState, this.loc) { }
+
+    override Symbol compile(Context context) {
+        /**
+         * ({
+         *     template lambda__(T) {
+         *          typeof(({ mut uninitialized T $paramName; $value; })) lambda__(T $paramName) {
+         *              return $value;
+         *          }
+         *      }
+         *      __lambda(lambda__);
+         * })
+         */
+        ASTStatement declareUninitializedT = new ASTVarDeclStatement(
+            this.paramName, mutable=true, infer=false, uninitialized=true,
+            type=new ASTIdentifier("T", false, __HERE__), initial=null, __HERE__);
+        auto typeofProbe = new ASTStatementExpression([declareUninitializedT], value, __HERE__);
+        auto typeofLambda = new ASTTypeof(typeofProbe, __HERE__);
+        auto returnLambdaExpr = new ASTReturnStatement(value, __HERE__);
+        // Hax: Every compilation is unique!
+        string lambdaName = "__lambda_$(this.loc.row)_$(context.getLabel)";
+        auto lambdaFun = new ASTFunction(
+            __HERE__, lambdaName, typeofLambda, [
+                ASTParameter(paramName, mutable=false, new ASTIdentifier("T", false, __HERE__), __HERE__)],
+            isDeclaration=false, statement=returnLambdaExpr, this.macroState);
+        auto astTemplateDecl = new ASTTemplateDecl(lambdaName, ["T"], lambdaFun);
+        auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
+        auto templateDecl = new ScopeBoundTemplateDecl(
+            new TemplateDecl(context.namespace, astTemplateDecl),
+            stackframe);
+
+        return new LambdaExpr(notNull!ScopeBoundTemplateDecl(templateDecl));
+    }
+}
+
+nullable ASTSymbol parseLambdaExpression(Parser parser, LexicalContext lexicalContext)
+{
+    auto loc = parser.loc;
+    parser.begin;
+    auto arg = parser.parseIdentifier;
+    if (!arg.length || !parser.accept("->")) {
+        parser.revert;
+        return null;
+    }
+    parser.commit;
+    auto expr = parser.parseExpression(lexicalContext);
+    loc.assert2s(!!expr, "lambda expression expected");
+    return new ASTLambdaExpr(arg, notNull!ASTSymbol(expr), lexicalContext.macroState, loc);
+}
+
 nullable ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
@@ -1331,6 +1459,9 @@ nullable ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalCont
         ASTSymbol value = notNull!ASTSymbol(parseExpressionLeaf(parser, lexicalContext));
 
         return new ASTCastExpr(notNull!ASTSymbol(target), value, loc);
+    }
+    if (auto lambda = parser.parseLambdaExpression(lexicalContext)) {
+        return lambda;
     }
     if (auto tuple = parser.parseTupleExpression(lexicalContext))
     {
@@ -2858,7 +2989,10 @@ class ASTNestedFunctionDeclStatement : ASTStatement
                 context.namespace, latent.fun.name, latent)));
     }
 
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTNestedFunctionDeclStatement'"); assert(false); }
+    override ASTSymbol quote(Quoter quoter) {
+        print("cannot quote 'ASTNestedFunctionDeclStatement'");
+        assert(false);
+    }
 }
 
 nullable ASTNestedFunctionDeclStatement parseNestedFunctionDecl(Parser parser, LexicalContext lexicalContext)

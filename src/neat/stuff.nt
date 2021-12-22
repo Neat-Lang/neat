@@ -3545,7 +3545,7 @@ struct ASTModuleEntry
     Protection protection;
 
     (ASTImport | ASTSymbol | ASTExternFunction | ASTExternVariable
-        | ASTFunction | ASTDeclaration | ASTUnitTest
+        | ASTDeclaration | ASTUnitTest
         | ASTPragma
     ) symbol;
 }
@@ -3644,7 +3644,7 @@ struct ResolvingModuleEntry
 
     nullable Symbol resolution;
 
-    (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest | Nothing) symbol;
+    (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStruct | ASTAliasDecl | ASTUnitTest | Nothing) symbol;
 }
 
 class Resolver
@@ -3656,7 +3656,7 @@ class Resolver
     void add(
         string name,
         Protection protection,
-        (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) astSymbol)
+        (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStruct | ASTAliasDecl | ASTUnitTest) astSymbol)
     {
         this.entries ~= ResolvingModuleEntry(name, protection, false, null, astSymbol);
     }
@@ -3712,7 +3712,7 @@ class Resolver
                 ASTUnitTest ut: ut.compile(context),
                 ASTClassDecl decl: decl.compile(context),
                 ASTIntfDecl decl: decl.compile(context),
-                ASTStructDecl decl: decl.compileToStruct(context),
+                ASTStruct struct_: struct_.compile(context),
                 ASTAliasDecl decl: decl.target.compile(context),
                 Nothing _: ({ assert(false); cast(Symbol) null; }));
             this.entries[i].resolving = false;
@@ -3759,7 +3759,7 @@ class Module : ModuleBase
 
     void add(
         string name, Protection protection,
-        (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) symbol)
+        (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStruct | ASTAliasDecl | ASTUnitTest) symbol)
     {
         this.resolver.add(name, protection, symbol);
     }
@@ -4282,12 +4282,12 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             }
             continue;
         }
-        if (ASTClassDecl classDecl = parseClassDecl(parser, lexicalContext)) {
-            add(classDecl);
+        if (auto sym = parseTemplateContents(parser, lexicalContext)) {
+            add(sym);
             continue;
         }
-        if (ASTIntfDecl intfDecl = parseIntfDecl(parser, lexicalContext)) {
-            add(intfDecl);
+        if (ASTDeclaration decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
+            add(decl);
             continue;
         }
         parseExtern(parser, lexicalContext).case {
@@ -4301,21 +4301,8 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             }
             (:none): {}
         }
-        if (ASTDeclaration decl = parseDeclaration(parser, lexicalContext)) {
-            add(decl);
-            continue;
-        }
-        if (ASTEnumDecl enumDecl = parseEnumDecl(parser, lexicalContext)) {
-            add(enumDecl);
-            continue;
-        }
         if (ASTModule submod = parseMacroContinuation(compiler, parser, helper, module_, config))
             return submod;
-        if (ASTFunction fun = parseFunction(parser, lexicalContext))
-        {
-            add(fun);
-            continue;
-        }
         if (ASTUnitTest ut = parseUnitTest(parser, lexicalContext)) {
             add(ut);
             continue;
@@ -4384,13 +4371,13 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
             }
             ASTDeclaration astDecl: {
                 if (auto structDecl = astDecl.instanceOf(ASTStructDecl)) {
-                    module_.add(structDecl.name, entry.protection, structDecl);
+                    module_.add(structDecl.struct_.name, entry.protection, structDecl.struct_);
                 } else if (auto aliasDecl = astDecl.instanceOf(ASTAliasDecl)) {
                     module_.register(aliasDecl.name, entry.protection, aliasDecl.target.compile(context));
                 } else if (auto templateDecl = astDecl.instanceOf(ASTTemplateDecl)) {
                     module_.register(templateDecl.name, entry.protection, templateDecl.compileSymbol(context));
                 } else {
-                    print(astDecl.repr);
+                    print("declaration $(astDecl.repr)");
                     assert(false);
                 }
             }
@@ -4408,14 +4395,20 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
                 else if (auto aliasDecl = symbol.instanceOf(ASTAliasDecl)) {
                     module_.add(aliasDecl.name, entry.protection, aliasDecl);
                 }
-                else assert(false);
+                else if (auto struct_ = symbol.instanceOf(ASTStruct)) {
+                    module_.add(struct_.name, entry.protection, struct_);
+                }
+                else if (auto funDef = symbol.instanceOf(ASTFunction)) {
+                    module_.add(funDef.name, entry.protection, funDef);
+                } else {
+                    print("symbol $(symbol.repr)");
+                    assert(false);
+                }
             }
             ASTExternFunction extern_:
                 module_.register(extern_.name, entry.protection, extern_.compile(context));
             ASTExternVariable extern_:
                 module_.register(extern_.name, entry.protection, extern_.compile(context));
-            ASTFunction function_:
-                module_.add(function_.name, entry.protection, function_);
             ASTUnitTest ut:
                 module_.add("", entry.protection, ut);
             ASTPragma pragma_:

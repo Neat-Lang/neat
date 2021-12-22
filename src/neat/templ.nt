@@ -4,6 +4,7 @@ macro import neat.macros.listcomprehension;
 
 import neat.base;
 import neat.class_;
+import neat.enums;
 import neat.function_;
 import neat.parser;
 
@@ -201,6 +202,8 @@ class ASTTemplateDecl : ASTDeclaration
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTTemplateDecl'!"); assert(false); }
+
+    override string repr() { return "template $name"; }
 }
 
 nullable ASTTemplateDecl parseTemplateDecl(Parser parser, LexicalContext lexicalContext)
@@ -228,16 +231,44 @@ nullable ASTTemplateDecl parseTemplateDecl(Parser parser, LexicalContext lexical
     parser.expect("{");
     // TODO generalize (parseSymbol)?
     mut uninitialized ASTSymbol member;
-    if (ASTClassDecl classDecl = parseClassDecl(parser, lexicalContext))
-    {
-        member = classDecl;
-    }
-    else if (ASTFunction fun = parseFunction(parser, lexicalContext))
-    {
-        member = fun;
+    parser.strip;
+    auto contentLoc = parser.loc;
+    nullable ASTSymbol member = parseTemplateContents(parser, lexicalContext);
+    if (!member) {
+        contentLoc.fail("template member expected");
     }
 
     parser.expect("}");
-    return new ASTTemplateDecl(name, typeParameters, member);
+    return new ASTTemplateDecl(name, typeParameters, notNull!ASTSymbol(member));
 }
 
+// parse "the sort of thing that can appear in a `template`"
+// TODO better name for this category. Maybe it really is parseDeclaration?
+nullable ASTSymbol parseTemplateContents(Parser parser, LexicalContext lexicalContext) {
+    if (ASTClassDecl classDecl = parseClassDecl(parser, lexicalContext)) {
+        return classDecl;
+    }
+    if (ASTIntfDecl intfDecl = parseIntfDecl(parser, lexicalContext)) {
+        return intfDecl;
+    }
+    parser.begin;
+    if (ASTDeclaration decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
+        // FIXME figure out how to converge ASTDeclaration and ASTSymbol
+        // imports and structs are only "sort of" the same thing - maybe make
+        // an ASTTypeDeclaration that can wrap an ASTSymbol?
+        if (auto structDecl = decl.instanceOf(ASTStructDecl)) {
+            parser.commit;
+            return structDecl.struct_;
+        }
+        parser.revert;
+        return null;
+    }
+    parser.revert;
+    if (ASTFunction fun = parseFunction(parser, lexicalContext)) {
+        return fun;
+    }
+    if (ASTEnumDecl enumDecl = parseEnumDecl(parser, lexicalContext)) {
+        return enumDecl;
+    }
+    return null;
+}

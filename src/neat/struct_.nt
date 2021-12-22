@@ -468,6 +468,7 @@ class StructNamespace : Namespace
 
     override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression thisPtr)
     {
+        if (name == struct_.name) return struct_;
         // TODO early name check?
         if (auto thisPtr = thisPtr) {
             auto thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr); // This is good code. Good code.
@@ -528,7 +529,7 @@ class ASTStructVersionBlock
 
 alias ASTStructEntry = (ASTStructMember | ASTStructMethod | ASTStructVersionBlock);
 
-class ASTStructDecl : ASTDeclaration
+class ASTStruct : ASTSymbol
 {
     string name;
 
@@ -538,20 +539,7 @@ class ASTStructDecl : ASTDeclaration
 
     this(this.name, this.entries, this.loc) { }
 
-    override Context compile(Context context)
-    {
-        auto struct_ = compileToStruct(context);
-        auto module_ = findParent!ModuleBase(context.namespace);
-
-        for (method in struct_.methods) {
-            module_.track(method);
-        }
-
-        return context.withNamespace(new SymbolAlias(context.namespace, this.name, struct_));
-    }
-
-    Struct compileToStruct(Context context)
-    {
+    override Struct compile(Context context) {
         mut StructMemberDeclaration[] members;
         mut ASTStructMethod[] methods;
         void walk(ASTStructEntry entry) {
@@ -605,22 +593,51 @@ class ASTStructDecl : ASTDeclaration
                 methodParams,
                 method.body_, context.macroState);
         }
+
         return struct_;
     }
 
+    override string repr() { return "repr(ASTStruct)"; }
+}
+
+class ASTStructDecl : ASTDeclaration
+{
+    ASTStruct struct_;
+
+    this(string name, ASTStructEntry[] entries, Loc loc) {
+        this.struct_ = new ASTStruct(name, entries, loc);
+    }
+
+    override Context compile(Context context)
+    {
+        auto struct_ = this.struct_.compile(context);
+        auto module_ = findParent!ModuleBase(context.namespace);
+
+        for (method in struct_.methods) {
+            module_.track(method);
+        }
+
+        return context.withNamespace(new SymbolAlias(context.namespace, this.struct_.name, struct_));
+    }
+
+    Struct compileToStruct(Context context)
+    {
+        return this.struct_.compile(context);
+    }
+
     override ASTSymbol quote(Quoter quoter) {
-        ASTSymbol[] entries = [a.quoteStructEntry(quoter) for a in this.entries];
+        ASTSymbol[] entries = [a.quoteStructEntry(quoter) for a in this.struct_.entries];
         with (quoter.compiler) {
             ASTSymbol structEntry = astIdentifier("ASTStructEntry", __HERE__);
             return astNewExpression(
                 astIdentifier("ASTStructDecl", __HERE__), [
-                    astStringLiteral(this.name, __HERE__),
+                    astStringLiteral(this.struct_.name, __HERE__),
                     astArrayLiteralTypeHint(structEntry, entries, __HERE__),
-                    quoter.quoteLoc(this.loc)], __HERE__);
+                    quoter.quoteLoc(this.struct_.loc)], __HERE__);
         }
     }
 
-    override string repr() { return name; }
+    override string repr() { return struct_.name; }
 }
 
 nullable ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalContext)

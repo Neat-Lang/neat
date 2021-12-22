@@ -677,6 +677,18 @@ nullable Expression call(Context context, ASTSymbol astTarget, ASTArgument[] ast
         beExpression3(context, arg.sym.compile(context), loc)
         for arg in astArgs];
 
+    if (auto templ = target.instanceOf(ScopeBoundTemplateDecl)) {
+        // Simplest conceivable IFTI
+        auto types = [arg.type for arg in args];
+        // Some types, like Lambda, generate different types every time they're compiled.
+        auto repackagedArgs = [
+            ASTArgument(new ASTSymbolHelper(arg), astArgs[i].name)
+            for i, arg in args];
+        auto instance = templ.instantiate(context, loc, types);
+
+        return call(context, new ASTSymbolHelper(instance), repackagedArgs, loc, autoCall);
+    }
+
     mut nullable Statement pre, post;
     Expression[] args_ = new Expression[](args.length);
     for (i in 0 .. args.length) {
@@ -1283,7 +1295,9 @@ class Lambda : Type
 {
     TemplateDecl decl;
 
-    this(this.decl) {
+    string repr_;
+
+    this(this.decl, this.repr_) {
         this.zeroInitializable = true;
     }
 
@@ -1314,6 +1328,10 @@ class Lambda : Type
         return "__lambda";
     }
 
+    override string repr() {
+        return "typeof($(this.repr_))";
+    }
+
     override void hash(Hash hash) {
         hash.adds("lambda");
         hash.adds(this.decl.mangle);
@@ -1324,8 +1342,10 @@ class LambdaExpr : Expression
 {
     ScopeBoundTemplateDecl templ;
 
-    this(this.templ) {
-        this.type = new Lambda(this.templ.latent);
+    string repr_;
+
+    this(this.templ, this.repr_) {
+        this.type = new Lambda(this.templ.latent, this.repr_);
     }
 
     override int emit(Generator output) {
@@ -1335,6 +1355,9 @@ class LambdaExpr : Expression
     }
     override ExprInfo info() {
         return this.templ.frame.info;
+    }
+    override string repr() {
+        return this.repr_;
     }
     override void hash(Hash hash) {
         hash.adds("lambdaexpr");
@@ -1383,8 +1406,9 @@ class ASTLambdaExpr : ASTSymbol
         auto templateDecl = new ScopeBoundTemplateDecl(
             new TemplateDecl(context.namespace, astTemplateDecl),
             stackframe);
+        string repr = "$paramName -> $(this.value.repr)";
 
-        return new LambdaExpr(notNull!ScopeBoundTemplateDecl(templateDecl));
+        return new LambdaExpr(notNull!ScopeBoundTemplateDecl(templateDecl), repr);
     }
 }
 

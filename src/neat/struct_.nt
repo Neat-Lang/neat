@@ -21,6 +21,10 @@ class Struct : Type
 
     StructMethod[] methods;
 
+    // While compiling the struct, we will already reference it, but
+    // some methods will be null.
+    size_t validMethods;
+
     Loc loc;
 
     string mangledName;
@@ -33,6 +37,7 @@ class Struct : Type
         this.mangledName = manglePrefix ~ "_struct_" ~ this.name;
         this.zeroInitializable = [
             all member.type.zeroInitializable for member in this.members];
+        this.validMethods = this.methods.length;
     }
 
     override bool same(Type other) {
@@ -93,7 +98,7 @@ class Struct : Type
             }
         }
         size_t methodOffset = [
-            first i for i, a in this.methods
+            first i for i, a in this.methods[0 .. this.validMethods]
             where a.name == member && allowed(a.protection)
             else -1];
         if (methodOffset != -1)
@@ -129,6 +134,7 @@ class Struct : Type
 
     nullable FunctionDeclaration getDtor()
     {
+        assert(this.validMethods == this.methods.length);
         return [first method for method in this.methods where method.name == "__dtor" else null];
     }
 
@@ -137,6 +143,7 @@ class Struct : Type
      */
     FunctionDeclaration getCopyCtor()
     {
+        assert(this.validMethods == this.methods.length);
         return [first method for method in this.methods
             where method.name == "__ctor" && method.params.length == 1 && method.params[0].type.same(this)
             else null];
@@ -564,11 +571,11 @@ class ASTStruct : ASTSymbol
 
         auto struct_ = new Struct(this.name, members, this.loc, context.namespace.mangle);
         // make S visible in struct S {}
-        auto structScope = context.compiler.symbolAlias(context.namespace, struct_.name, struct_);
-        auto structContext = context.withNamespace(structScope);
+        auto structNamespace = new StructNamespace(
+            context.namespace, struct_);
+        auto structContext = context.withNamespace(structNamespace);
 
         struct_.methods = new StructMethod[](methods.length);
-        mut int k;
         for (i, method in methods) {
             auto methodParams = new Parameter[](method.params.length);
 
@@ -582,7 +589,7 @@ class ASTStruct : ASTSymbol
                 }
             }
 
-            struct_.methods[k++] = new StructMethod(
+            struct_.methods[i] = new StructMethod(
                 method.loc,
                 struct_,
                 context.namespace,
@@ -592,6 +599,7 @@ class ASTStruct : ASTSymbol
                 beType(this.loc, method.ret.compile(structContext)),
                 methodParams,
                 method.body_, context.macroState);
+            struct_.validMethods = i + 1;
         }
 
         return struct_;

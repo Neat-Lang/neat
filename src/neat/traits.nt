@@ -1,0 +1,58 @@
+// Very, very similar to neat.pragma. (Copypaste, why can't I quit you)
+module neat.traits;
+
+import helpers;
+import neat.base;
+import neat.expr;
+import neat.parser_base;
+import neat.types;
+
+nullable ASTTrait parseTrait(Parser parser, LexicalContext lexicalContext)
+{
+    if (!parser.accept("__traits"))
+        return null;
+    parser.expect("(");
+    auto trait = parser.parseIdentifier;
+    auto loc = parser.loc;
+    mut ASTSymbol[] args;
+    while (parser.accept(",")) {
+        if (auto arg = lexicalContext.compiler.parseExpression(parser, lexicalContext))
+            args ~= arg;
+        else parser.fail("expected expression argument");
+    }
+    parser.expect(")");
+    return new ASTTrait(loc, trait, args);
+}
+
+class ASTTrait : ASTSymbol
+{
+    Loc loc;
+
+    string name;
+
+    ASTSymbol[] args;
+
+    this(this.loc, this.name, this.args) { }
+
+    override Symbol compile(Context context) {
+        if (name == "hasMember") {
+            this.loc.assert2s(args.length == 2, "__traits(hasMember) expected two arguments");
+            return .hasMember(
+                context, args[0].compile(context), args[1].compile(context), loc);
+        }
+        this.loc.fail("unknown trait: \"$name\"");
+    }
+}
+
+Symbol hasMember(Context context, Symbol value, Symbol member, Loc loc) {
+    auto valueExpr = value.isExpressionImplCall(context, loc);
+    auto stringLit = member.instanceOf(StringLiteral);
+    loc.assert2s(!!valueExpr, "__traits(hasMember) expected expression as first argument");
+    loc.assert2s(!!stringLit, "__traits(hasMember) expected string literal as second argument");
+    auto valueExpr = notNull!Expression(valueExpr);
+    auto stringLit = notNull!StringLiteral(stringLit);
+    auto sym = valueExpr.type.accessMember(
+        loc, context, valueExpr, stringLit.text, Protection.private_);
+
+    return context.compiler.boolLiteral(!!sym);
+}

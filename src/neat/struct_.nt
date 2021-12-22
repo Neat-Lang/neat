@@ -41,9 +41,8 @@ class Struct : Type
     }
 
     override bool same(Type other) {
-        // TODO mangling
         if (auto otherStruct = other.instanceOf(Struct))
-            return this.name == otherStruct.name;
+            return this.mangledName == otherStruct.mangledName;
         return false;
     }
 
@@ -387,6 +386,7 @@ ASTSymbol quoteStructEntry(ASTStructEntry entry, Quoter quoter) {
         ASTStructMember member: return member.quoteStructMember(quoter);
         ASTStructMethod method: return method.quoteStructMethod(quoter);
         ASTStructVersionBlock blk: return blk.quoteVersionBlock(quoter);
+        ASTStructStaticIf staticIf: return staticIf.quoteStaticIf(quoter);
     }
 }
 
@@ -448,6 +448,20 @@ ASTSymbol quoteVersionBlock(ASTStructVersionBlock block, Quoter quoter) {
                     __HERE__),
                 astArrayLiteral(
                     [a.quoteStructEntry(quoter) for a in block.else_],
+                    __HERE__)], __HERE__);
+    }
+}
+
+ASTSymbol quoteStaticIf(ASTStructStaticIf staticIf, Quoter quoter) {
+    with (quoter.compiler) {
+        return astNewExpression(
+            astIdentifier("ASTStructStaticIf", __HERE__), [
+                staticIf.condition.quote(quoter),
+                astArrayLiteral(
+                    [a.quoteStructEntry(quoter) for a in staticIf.then],
+                    __HERE__),
+                astArrayLiteral(
+                    [a.quoteStructEntry(quoter) for a in staticIf.else_],
                     __HERE__)], __HERE__);
     }
 }
@@ -525,6 +539,7 @@ class StructMethod : Function
     }
 }
 
+// TODO generalize all this
 alias ASTStructMember = (string name, Protection protection, ASTSymbol type);
 
 class ASTStructVersionBlock
@@ -534,7 +549,15 @@ class ASTStructVersionBlock
     this(this.name, this.then, this.else_) { }
 }
 
-alias ASTStructEntry = (ASTStructMember | ASTStructMethod | ASTStructVersionBlock);
+class ASTStructStaticIf
+{
+    ASTSymbol condition;
+    ASTStructEntry[] then, else_;
+    this(this.condition, this.then, this.else_) { }
+}
+
+alias ASTStructEntry = (ASTStructMember | ASTStructMethod
+    | ASTStructVersionBlock | ASTStructStaticIf);
 
 class ASTStruct : ASTSymbol
 {
@@ -564,6 +587,22 @@ class ASTStruct : ASTSymbol
                 }
                 ASTStructMethod method: {
                     methods ~= method;
+                }
+                ASTStructStaticIf staticIf: {
+                    auto tern = staticTruthy(context, staticIf.condition);
+
+                    tern.case {
+                        bool b: {
+                            if (b)
+                                [walk(entry) for entry in staticIf.then];
+                            else
+                                [walk(entry) for entry in staticIf.else_];
+                        }
+                        (:unknown): {
+                            this.loc.fail("cannot statically evaluate condition: "
+                                ~ staticIf.condition.repr);
+                        }
+                    }
                 }
             }
         }
@@ -673,33 +712,52 @@ nullable ASTStructDecl parseStructDecl(Parser parser, LexicalContext lexicalCont
     return new ASTStructDecl(name, entries, loc);
 }
 
+ASTStructEntry[] parseStructBlock(Parser parser, LexicalContext lexicalContext) {
+    mut ASTStructEntry[] entries;
+    if (parser.accept("{")) {
+        while (!parser.accept("}")) {
+            entries ~= parser.parseStructEntry(lexicalContext);
+        }
+    } else {
+        entries ~= parser.parseStructEntry(lexicalContext);
+    }
+    return entries;
+}
+
 ASTStructEntry[] parseStructEntry(Parser parser, LexicalContext lexicalContext)
 {
     if (parser.accept("version")) {
-        mut ASTStructEntry[] then, else_;
         parser.expect("(");
         string versionStr = parser.parseIdentifier;
         parser.expect(")");
-        if (parser.accept("{")) {
-            while (!parser.accept("}")) {
-                then ~= parser.parseStructEntry(lexicalContext);
-            }
-        } else {
-            then ~= parser.parseStructEntry(lexicalContext);
-        }
+        ASTStructEntry[] then = parser.parseStructBlock(lexicalContext);
+        mut ASTStructEntry[] else_;
         if (parser.accept("else")) {
-            if (parser.accept("{")) {
-                while (!parser.accept("}")) {
-                    else_ ~= parser.parseStructEntry(lexicalContext);
-                }
-            } else {
-                else_ ~= parser.parseStructEntry(lexicalContext);
-            }
+            else_ = parser.parseStructBlock(lexicalContext);
         }
         // FIXME explicitly type hinted literal
         ASTStructEntry result = new ASTStructVersionBlock(versionStr, then, else_);
         return [result];
     }
+    parser.begin;
+    if (parser.acceptIdentifier("static") && parser.acceptIdentifier("if")) {
+        parser.commit;
+        parser.expect("(");
+        auto cond = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+        if (!cond) {
+            parser.fail("static if condition expected");
+        }
+        parser.expect(")");
+        ASTStructEntry[] then = parser.parseStructBlock(lexicalContext);
+        mut ASTStructEntry[] else_;
+        if (parser.accept("else")) {
+            else_ = parser.parseStructBlock(lexicalContext);
+        }
+        // FIXME explicitly type hinted literal
+        ASTStructEntry result = new ASTStructStaticIf(notNull!ASTSymbol(cond), then, else_);
+        return [result];
+    }
+    parser.revert;
     mut ASTStructEntry[] entries;
     mut bool static_ = false;
     mut nullable ASTSymbol memberType;

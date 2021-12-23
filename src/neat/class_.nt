@@ -388,7 +388,7 @@ class Class
         mut nullable Class current = this;
         while (current)
         {
-            auto classType = new ClassType(notNull!Class(current), zeroInitializable=false);
+            auto classType = new ClassType(current.notNull, zeroInitializable=false);
             auto classinfo = new ASTSymbolHelper(new ClassInfo(classType));
             castStmts ~= context.compiler.$stmt if (targetClassinfo is $classinfo) {
                 // take a bonus reference because the return type isn't right
@@ -558,7 +558,7 @@ class ClassType : Type
         size_t methodOffset = [first i for i, a in this.class_.vtable where test(a) else -1];
         if (methodOffset != -1)
         {
-            return new ClassMethodSymbol(this.class_, notNull!Expression(baseExpr), methodOffset, staticLookup=false);
+            return new ClassMethodSymbol(this.class_, baseExpr.notNull, methodOffset, staticLookup=false);
         }
 
         if (!baseExpr) return null;
@@ -569,7 +569,7 @@ class ClassType : Type
             size_t memberOffset = [first i for i, m in self.members where m.name == member && allowed(m.protection) else -1];
             if (memberOffset != -1) {
                 Reference asStruct = context.compiler.dereference(
-                    new PointerCast(new Pointer(self.dataStruct), notNull!Expression(baseExpr)));
+                    new PointerCast(new Pointer(self.dataStruct), baseExpr.notNull));
                 // select "data" substruct
                 auto dataMember = new StructMemberReference(asStruct, 1);
                 // select member field
@@ -924,7 +924,7 @@ class IntfType : Type
         size_t methodOffset = [first i for i, a in this.intf.vtable where nameMatches(a) else -1];
         if (methodOffset != -1)
         {
-            return new IntfMethodSymbol(this, notNull!Expression(baseExpr), methodOffset);
+            return new IntfMethodSymbol(this, baseExpr.notNull, methodOffset);
         }
         return null;
     }
@@ -1322,7 +1322,7 @@ class ASTClassDecl : ASTSymbol
                         auto type = findType(target);
                         // TODO specific loc
                         method.loc.assert2s2(!!type, "no such member: ", param.name);
-                        methodParams[k] = Parameter(true, param.name, false, notNull!Type(type));
+                        methodParams[k] = Parameter(true, param.name, false, type.notNull);
                     }
                     ASTParameter param:
                         methodParams[k] = Parameter(
@@ -1562,7 +1562,7 @@ ASTClassEntry[] parseClassEntry(Parser parser, LexicalContext lexicalContext)
         auto params = parseParamList(parser, lexicalContext);
         ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext);
         ASTClassEntry entry = ASTClassDeclMethod(
-            loc, protection, override_, abstract_, memberName, notNull!ASTSymbol(retType), params, stmt);
+            loc, protection, override_, abstract_, memberName, retType.notNull, params, stmt);
         return [entry];
     }
     else
@@ -1571,7 +1571,7 @@ ASTClassEntry[] parseClassEntry(Parser parser, LexicalContext lexicalContext)
         void addMember() {
             parser.assert_(!override_, "cannot override class member");
             parser.assert_(!abstract_, "cannot declare class member abstract");
-            members ~= ASTClassDeclMember(protection, memberName, notNull!ASTSymbol(retType), loc);
+            members ~= ASTClassDeclMember(protection, memberName, retType.notNull, loc);
         }
         addMember;
         while (!parser.accept(";")) {
@@ -1634,7 +1634,7 @@ nullable ASTIntfDecl parseIntfDecl(Parser parser, LexicalContext lexicalContext)
         // FIXME bottom
         ASTParameter fail() { assert(false); }
         auto astParameters = [a.case(ASTParameter p: p, ASTThisAssignment: fail) for a in params];
-        members ~= ASTIntfDeclMethod(loc, memberName, notNull!ASTSymbol(retType), astParameters);
+        members ~= ASTIntfDeclMethod(loc, memberName, retType.notNull, astParameters);
     }
     return new ASTIntfDecl(name, superIntfs, members, lexicalContext.macroState, loc);
 }
@@ -1783,14 +1783,15 @@ class ASTInstanceOf : ASTSymbol
             }
 
             // must exist.
-            Symbol instanceOf = notNull!Symbol(
-                context.compiler.accessMember(context, base, "__instanceof", loc, false));
+            Symbol instanceOf = context.compiler.accessMember(
+                    context, base, "__instanceof", loc, false)
+                .notNull;
             auto astInstanceOf = new ASTSymbolHelper(instanceOf);
-            return new PointerCast(target,
-                notNull!Expression(
-                    context.compiler.call(context, astInstanceOf, [ASTArgument(astClassInfo, "")], loc, false)));
+            return new PointerCast(target, context.compiler.call(
+                    context, astInstanceOf, [ASTArgument(astClassInfo, "")], loc, false)
+                .notNull);
         }
-        return notNull!Expression(context.compiler.exprWithTemporaryExpr(base, &do_));
+        return context.compiler.exprWithTemporaryExpr(base, &do_).notNull;
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTInstanceOf'"); assert(false); }
@@ -1805,7 +1806,7 @@ nullable ASTSymbol parseInstanceOf(Parser parser, LexicalContext lexicalContext,
         return null;
     }
     parser.expect("(");
-    ASTSymbol type = notNull!ASTSymbol(lexicalContext.compiler.parseType(parser, lexicalContext));
+    ASTSymbol type = lexicalContext.compiler.parseType(parser, lexicalContext).notNull;
     parser.expect(")");
     parser.commit;
     return new ASTInstanceOf(left, type, parser.loc);
@@ -1835,14 +1836,14 @@ class ASTNewExpression : ASTSymbol
                 nullable Symbol ctor = context.compiler.accessMember(
                     context, new IgnoreLifetimeExpr(classptr), "__ctor", this.loc, false);
                 assert(!!ctor);
-                auto astCtor = new ASTSymbolHelper(notNull!Symbol(ctor));
+                auto astCtor = new ASTSymbolHelper(ctor.notNull);
                 auto ctorCall = context.compiler.exprStatement(
-                    notNull!Expression(
-                        context.compiler.call(context, astCtor, this.astArgs, this.loc, false)));
+                        context.compiler.call(context, astCtor, this.astArgs, this.loc, false)
+                    .notNull);
 
                 return context.compiler.statementExpression(ctorCall, classptr);
             }
-            return notNull!Expression(context.compiler.exprWithTemporaryExpr(classptr, &do_));
+            return context.compiler.exprWithTemporaryExpr(classptr, &do_).notNull;
         }
         if (auto arrayType = type.instanceOf(Array)) {
             this.loc.assert2s(this.astArgs.length == 1, "expected one argument to loc");
@@ -1875,7 +1876,7 @@ class Super : Symbol
     this(this.classType) { }
 
     Symbol lookup(Context context, string name, Loc loc) {
-        auto superClass = notNull!Class(this.classType.class_.superClass);
+        auto superClass = this.classType.class_.superClass.notNull;
         bool matches(typeof(this.classType.class_.vtable[0]) entry) {
             return entry.case(
                 ClassMethod m: m.name == name,
@@ -1885,8 +1886,9 @@ class Super : Symbol
         loc.assert2s3(methodOffset != -1, "Method '", name, "' not found in super class!");
         // TODO lookup() that handles the stackframe thing
         auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
-        auto baseExpr = notNull!Expression(
-            context.namespace.lookup("this", context, loc, stackframe).instanceOf(Expression));
+        auto baseExpr = context.namespace.lookup("this", context, loc, stackframe)
+            .instanceOf(Expression)
+            .notNull;
         return new ClassMethodSymbol(superClass, baseExpr, methodOffset, staticLookup=true);
     }
 }

@@ -533,6 +533,8 @@ at_revision '92285900a1f432be84d0be984a908f550033f9a6' 'rebuild neat' 'build/nea
 at_revision 'fbbf13981a02ecc8d6207c7fe1a3462f83af2424' 'rebuild neat' 'build/neat'
 # use iota for a..b, range loops
 at_revision '2b4d60dfb08c45d805aede5d0e6bcbd07a50af34' 'rebuild neat' 'build/neat'
+# ifti, lambdas, struct templates, static if, nonnullable
+at_revision 'cef694ae13f81bf985d2af05b26864d3d2f07b7e' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

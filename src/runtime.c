@@ -3,6 +3,7 @@
 #ifdef __GLIBC__
 #include <execinfo.h>
 #endif
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -323,7 +324,7 @@ void neat_runtime_refcount_violation(struct String s, long long int *ptr)
 void neat_runtime_refcount_inc(struct String s, long long int *ptr)
 {
     // long long int result = *ptr += 1;
-    long long int result = __atomic_add_fetch(ptr, 1, __ATOMIC_RELEASE);
+    long long int result = __atomic_add_fetch(ptr, 1, __ATOMIC_ACQ_REL);
     if (result <= 1) {
         neat_runtime_refcount_violation(s, ptr);
     }
@@ -332,13 +333,19 @@ void neat_runtime_refcount_inc(struct String s, long long int *ptr)
 int neat_runtime_refcount_dec(struct String s, long long int *ptr)
 {
     // long long int result = *ptr -= 1;
-    long long int result = __atomic_sub_fetch(ptr, 1, __ATOMIC_ACQUIRE);
+    long long int result = __atomic_sub_fetch(ptr, 1, __ATOMIC_ACQ_REL);
     if (result <= -1)
     {
         neat_runtime_refcount_violation(s, ptr);
     }
 
     return result == 0;
+}
+
+void neat_runtime_refcount_set(long long int *ptr, long long int value)
+{
+    // *ptr = value;
+    __atomic_store(ptr, &value, __ATOMIC_RELEASE);
 }
 
 struct CacheEntry
@@ -393,4 +400,18 @@ void neat_runtime_cache_set(int key, void *ptr, void(*free)(void*))
         neat_runtime_cache.length = newlen;
     }
     neat_runtime_cache.entries[key] = (struct CacheEntry) { .ptr = ptr, .free = free };
+}
+
+pthread_mutex_t stdout_lock;
+
+__attribute__((constructor)) void neat_runtime_stdout_lock_init(void) {
+    pthread_mutex_init(&stdout_lock, NULL);
+}
+
+void neat_runtime_lock_stdout(void) {
+    pthread_mutex_lock(&stdout_lock);
+}
+
+void neat_runtime_unlock_stdout(void) {
+    pthread_mutex_unlock(&stdout_lock);
 }

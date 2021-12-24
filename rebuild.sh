@@ -32,6 +32,8 @@ then
     cp -R src build/src
 fi
 
+# include new runtime.c immediately
+cp src/runtime.c build/src/
 rm build/neat.ini || true
 
 I=1
@@ -49,7 +51,6 @@ then
 fi
 
 cp neat.ini build/
-cp src/runtime.c build/src/
 
 SUM=$(checksum build/neat_test$I)
 SUMNEXT=""

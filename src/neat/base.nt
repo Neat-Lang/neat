@@ -67,6 +67,14 @@ class ASTImportStatement
 
     this(this.target, this.isMacroImport, this.symbols, this.loc) { }
 
+    string repr() {
+        return this.target.case(
+            (:normal, string name, string pak):
+                "import package($pak).$name",
+            (:macro_, ASTModuleBase module_):
+                "macro import $(module_.mangledName)");
+    }
+
     ASTSymbol quote(Quoter quoter) {
         ASTSymbol target = this.target.case(
             (:normal, string name, string pak):
@@ -100,9 +108,10 @@ class ASTImportStatement
 // bleh cycle
 class ASTModuleBase
 {
+    string mangledName;
 }
 
-class LexicalContext
+abstract class LexicalContext
 {
     CompilerBase compiler;
 
@@ -111,10 +120,9 @@ class LexicalContext
     MacroState macroState;
 
     // break an annoying dependency cycle
-    // TODO subclass LexicalContext in stuff.nt
-    ASTModuleBase delegate(ASTImportStatement) resolveImport;
+    abstract ASTModuleBase resolveImport(ASTImportStatement importStmt) { assert(false); }
 
-    this(this.compiler, this.pak, this.macroState, this.resolveImport) { }
+    this(this.compiler, this.pak, this.macroState) { }
 }
 
 /**
@@ -664,12 +672,12 @@ void validateCall(Parameter[] params, ASTArgument[] args, string name, bool vari
                 "unexpected number of arguments to $(name): expected $(params.length), but got $(args.length)");
         }
     }
-    for (i, param in params[0 .. args.length]) {
-        if (args[i].name.length > 0) {
+    for (i, arg in args[0 .. params.length]) {
+        if (arg.name.length > 0) {
             // TODO args.loc
             loc.assert2s(
-                args[i].name == param.name,
-                "expected parameter named '$(param.name)', but got '$(args[i].name)'");
+                arg.name == params[i].name,
+                "expected parameter named '$(params[i].name)', but got '$(arg.name)'");
         }
     }
 }
@@ -734,6 +742,8 @@ abstract class ModuleBase : Namespace
 {
     string name;
 
+    string mangledName;
+
     abstract void addImport(ModuleBase module_, bool public_, string[] symbols) { assert(false); }
 
     abstract void addModuleDependency(ModuleBase module_) { assert(false); }
@@ -768,6 +778,8 @@ ASTSymbol quoteExtForVarDecl(ExtForVarDecl decl, Quoter quoter) {
  */
 abstract class CompilerBase
 {
+    WorkPoolBase workPool;
+
     // for neat.macros.cimport
     string[] cFlags;
 
@@ -1069,11 +1081,17 @@ abstract class CompilerBase
     abstract void addDefaultImports(Context context, ModuleBase module_) { assert(false); }
 
     abstract ModuleBase createModule(string name, string mangle, Loc loc, nullable ModuleBase parent) { assert(false); }
+}
 
-    // module cache
-    abstract ModuleBase findModule(string key) { assert(false); }
+abstract class WorkPoolBase
+{
+    abstract void queue(string id, ITask task) { }
+    abstract ITask wait(string id) { }
+}
 
-    abstract void addModule(string key, ModuleBase module_) { assert(false); }
+interface ITask
+{
+    void run();
 }
 
 class IdCounter

@@ -18,6 +18,7 @@ import neat.parser_base;
 import neat.stuff;
 import neat.types;
 import neat.unittest_;
+import neat.workpool;
 import std.file;
 import std.json;
 import std.string : startsWith;
@@ -87,50 +88,34 @@ struct BackgroundCompilation
     string[] extraLibs;
 }
 
-// how many levels of cache are we even on rn
-class ObjectCache
-{
-    (string earlyHash, BackgroundCompilation compilation)[] entries;
-
-    int[] donePids;
-
-    this() { }
-
-    bool has(string earlyHash) {
-        return [any a.earlyHash == earlyHash for a in entries];
-    }
-
-    void add(string earlyHash, BackgroundCompilation compilation) {
-        this.entries ~= (earlyHash, compilation);
-    }
-
-    BackgroundCompilation get(string earlyHash) {
-        auto entry = [first a for a in entries where a.earlyHash == earlyHash];
-        return entry.compilation;
-    }
-
-    void waitpid(int pid) {
-        if (pid == 0) return;
-        if ([any a == pid for a in donePids]) return;
-        if (!neat_runtime_waitpid(pid))
-            assert(false);
-        donePids ~= pid;
-    }
-}
-
 class CompilationVisitor
 {
     void visit(FinishedSymbol sym) {}
 }
 
-BackgroundCompilation emitModule(Module module_, CompilationVisitor[] visitors, BuildSettings settings)
+string hashBuild(string mangle, BuildSettings settings) {
+    auto hash = new Hash;
+
+    hash.apply(compiler_hash_add, compiler_hash_mult);
+
+    settings.backend.hash(hash);
+    if (settings.x86_32) hash.adds("m32");
+    if (settings.optimize) hash.adds("opt");
+    // Macros and binaries must not share objects!
+    // Macros have special magic to avoid dlopen issues.
+    if (settings.forMacro) hash.adds("macro");
+    for (ver in settings.versions) hash.adds("version=$(ver)");
+
+    hash.adds(mangle);
+    return hash.text;
+}
+
+BackgroundCompilation emitModule(
+    Module module_, CompilationVisitor[] visitors, BuildSettings settings, Mutex visitorLock, string earlyHash)
 {
     auto backendModule = settings.backend.createModule(settings.platform, module_.loc.toBackendLoc, settings.forMacro);
     auto backendModuleLLVM = backendModule.instanceOf(LLVMBackendModule);
     auto backendModuleC = backendModule.instanceOf(CBackendModule);
-    auto hash = new Hash;
-
-    hash.apply(compiler_hash_add, compiler_hash_mult);
 
     int build(string src, string obj) {
         import std.string : join;
@@ -152,25 +137,15 @@ BackgroundCompilation emitModule(Module module_, CompilationVisitor[] visitors, 
         return pid;
     }
 
-    settings.backend.hash(hash);
-    if (settings.x86_32) hash.adds("m32");
-    if (settings.optimize) hash.adds("opt");
-    // Macros and binaries must not share objects!
-    // Macros have special magic to avoid dlopen issues.
-    if (settings.forMacro) hash.adds("macro");
-    for (ver in settings.versions) hash.adds("version=$(ver)");
+    auto hash = new Hash;
 
-    string moduleMangle = module_.mangle;
-    hash.adds(moduleMangle);
-
-    string earlyHash = hash.text;
-    if (settings.objectCache.has(earlyHash)) {
-        return settings.objectCache.get(earlyHash);
-    }
+    hash.adds(earlyHash);
 
     auto symbols = module_.finishedSymbols;
     [symbol.hash(hash) for symbol in symbols];
+    visitorLock.lock;
     [[visitor.visit(symbol) for symbol in symbols] for visitor in visitors];
+    visitorLock.unlock;
 
     mut string objFile = ".obj/$(hash.text).o";
     if (backendModuleLLVM && settings.optimize) {
@@ -179,10 +154,10 @@ BackgroundCompilation emitModule(Module module_, CompilationVisitor[] visitors, 
 
     mut string srcFile;
     if (backendModuleLLVM) {
-        srcFile = ".obj/$(compress(removeSlashes(moduleMangle))).ll";
+        srcFile = ".obj/$(compress(removeSlashes(module_.mangle))).ll";
     } else {
         assert(!!backendModuleC);
-        srcFile = ".obj/$(compress(removeSlashes(moduleMangle))).c";
+        srcFile = ".obj/$(compress(removeSlashes(module_.mangle))).c";
     }
 
     if (settings.caching && exists(objFile) && exists(srcFile)) {
@@ -191,9 +166,7 @@ BackgroundCompilation emitModule(Module module_, CompilationVisitor[] visitors, 
         if (".obj/$(hash.text).extralibs".exists) {
             extraLibs = ".obj/$(hash.text).extralibs".readText.split("\n");
         }
-        auto compilation = BackgroundCompilation(hash, srcFile, objFile, 0, extraLibs);
-        settings.objectCache.add(earlyHash, compilation);
-        return compilation;
+        return BackgroundCompilation(hash, srcFile, objFile, 0, extraLibs);
     }
 
     auto generator = new Generator(settings.platform, backendModule);
@@ -225,7 +198,6 @@ BackgroundCompilation emitModule(Module module_, CompilationVisitor[] visitors, 
         ".obj/$(hash.text).extralibs".remove;
     }
 
-    settings.objectCache.add(earlyHash, compilation);
     return compilation;
 }
 
@@ -247,8 +219,6 @@ class BuildSettings
 {
     CompilerBase compiler;
 
-    ObjectCache objectCache;
-
     Backend backend;
 
     bool x86_32;
@@ -263,6 +233,8 @@ class BuildSettings
 
     PlatformFlags platformFlags;
 
+    WorkPool pool;
+
     Platform platform() {
         BackendType macroWordType() {
             if (x86_32) return new BackendIntType;
@@ -271,8 +243,43 @@ class BuildSettings
         return new Platform(macroWordType, platformFlags, versions);
     }
 
-    this(this.compiler, this.objectCache, this.backend, this.x86_32, this.caching, this.versions,
-         this.platformFlags, this.optimize, this.forMacro) { }
+    this(this.compiler, this.backend, this.x86_32, this.caching, this.versions,
+         this.platformFlags, this.optimize, this.forMacro, this.pool) { }
+}
+
+class CompilationTask : ITask
+{
+    Module module_;
+    CompilationVisitor[] visitors;
+    BuildSettings settings;
+    Mutex visitorLock;
+    (:none | BackgroundCompilation) result;
+    string hash;
+    bool done;
+
+    BackgroundCompilation compilation() {
+        if (BackgroundCompilation c <- result) return c;
+        assert(false);
+    }
+
+    this(this.module_, this.visitors, this.settings, this.visitorLock) {
+        this.result = :none;
+        this.hash = hashBuild(module_.mangle, settings);
+    }
+
+    override void run() {
+        this.result = emitModule(
+            this.module_, this.visitors, this.settings, this.visitorLock, this.hash);
+    }
+
+    void waitDone() {
+        if (done) return;
+        int pid = compilation.pid;
+        if (pid != 0) {
+            neat_runtime_waitpid(pid);
+        }
+        done = true;
+    }
 }
 
 (string[] objFiles, string[] intermediateFiles, Module module_, Hash hash) buildAstModule(
@@ -281,25 +288,19 @@ class BuildSettings
     auto context = makeContext(settings.compiler, settings.platform, null, astModule.macroState);
     Module module_ = compileModule(context, astModule, addDefaultImports=true);
 
-    mut string[] objFiles;
-    mut string[] intermediateFiles;
-    mut int[] pids;
+    mut string[] taskHashes;
 
     auto allModules = new ModuleSet;
     bool add(Module mod) { return allModules.add(mod); }
     module_.walkModules(&add);
 
-    auto hash = new Hash;
-    hash.addl(__GENERATION__);
+    auto visitorLock = new Mutex;
     mut auto remainingModules = allModules.array;
     while (remainingModules.length > 0) {
         for (remainingModule in remainingModules) {
-            auto compilation = emitModule(remainingModule, visitors, settings);
-            objFiles ~= compilation.objFile;
-            options.linkerArgs ~= ["-l$lib" for lib in compilation.extraLibs];
-            intermediateFiles ~= compilation.srcFile;
-            with (compilation.hash.state) hash.apply(add, mult);
-            if (compilation.pid != 0) pids ~= compilation.pid;
+            auto task = new CompilationTask(remainingModule, visitors, settings, visitorLock);
+            settings.pool.queue(task.hash, task);
+            taskHashes ~= task.hash;
         }
         auto remainingSet = new ModuleSet;
         auto currentSet = new ModuleSet; // loop breaker
@@ -314,7 +315,20 @@ class BuildSettings
         remainingModules = remainingSet.array;
     }
 
-    [settings.objectCache.waitpid(pid) for pid in pids];
+    mut int[] pids;
+    mut string[] objFiles;
+    mut string[] intermediateFiles;
+    auto hash = new Hash;
+    hash.addl(__GENERATION__);
+    for (hashStr in taskHashes) {
+        auto task = settings.pool.wait(hashStr).instanceOf(CompilationTask);
+        auto compilation = task.compilation;
+        objFiles ~= compilation.objFile;
+        options.linkerArgs ~= ["-l$lib" for lib in compilation.extraLibs];
+        intermediateFiles ~= compilation.srcFile;
+        with (compilation.hash.state) hash.apply(add, mult);
+        task.waitDone;
+    }
 
     return (objFiles, intermediateFiles, module_, hash);
 }
@@ -323,13 +337,15 @@ class ParserHelperImpl : ParserHelper
 {
     BuildSettings settings;
 
-    this(this.settings) { }
+    int llvmMajor;
+
+    this(this.settings, this.llvmMajor) { }
 
     override void proxyCall(ASTModule astModule, string function_, MacroState macroState)
     {
-        print("# stageM");
+        print("# stageM $function_");
         // ignore pragma(lib) in macro (what are you doing)
-        auto dummyOptions = new Options;
+        auto dummyOptions = new Options(llvmMajor);
         auto result = buildAstModule(astModule, this.settings, [], dummyOptions);
         string objFiles = [join "" " " ~ a for a in result.objFiles];
 
@@ -548,6 +564,7 @@ Options:
 \t-m32\tTarget a 32-bit system.
 \t-macro-m32\tGenerate macros for a 32-bit system.
 \t-x\tBypass the object cache.
+\t-j[num]\tUse threads to build in parallel. WARNING: known bugs!
 
 Instead of specifying a file, the compiler can be called like:
 
@@ -577,12 +594,15 @@ class Options
     string[] versions, macroVersions;
     string runningCompilerVersion;
     string requestedCompilerVersion;
+    int llvmMajor;
+    int threads;
 
-    this() {
-        this.backend = new LLVMBackend();
+    this(this.llvmMajor) {
+        this.backend = new LLVMBackend(llvmMajor);
         this.macroBackend = this.backend;
         this.caching = true;
         this.generation = __GENERATION__;
+        this.threads = 0;
     }
 
     string[] parseArgs(string executable, string[] args) {
@@ -668,6 +688,9 @@ class Options
                 assert(i + 1 < args.length);
                 this.intermediateListFile = args[i + 1];
                 i += 1;
+            } else if (string num <- arg.startsWith("-j")) {
+                if (num.length == 0) this.threads = 4;
+                else this.threads = num.atoi;
             } else {
                 remArgs ~= arg;
             }
@@ -733,18 +756,22 @@ void buildBinary(Options options, string mainFile, string execPath, Package[] pa
     neat_runtime_system("mkdir -p .obj");
     createBuilderScripts;
 
+    auto pool = new ThreadPool(options.threads);
+    auto workPool = new WorkPool(pool, options.threads);
     auto builtins = builtinSymbols(options);
     auto defaultImports = [builtins];
-    auto modParseConfig = new ModuleParserConfig(packages, defaultImports, new ASTModuleCache);
-    auto compiler = new CompilerImpl(defaultImports, modParseConfig, options.cFlags);
-    auto objectCache = new ObjectCache;
-    auto settings = new BuildSettings(compiler, objectCache, options.backend,
+    auto modParseConfig = new ModuleParserConfig(packages, defaultImports);
+    auto compiler = new CompilerImpl(
+        defaultImports, modParseConfig, options.cFlags, workPool);
+    auto settings = new BuildSettings(compiler, options.backend,
         x86_32=options.x86_32, caching=options.caching, versions=options.allVersions,
-        platformFlags=options.platformFlags, optimize=options.optimize, forMacro=false);
-    auto macroSettings = new BuildSettings(compiler, objectCache, options.macroBackend,
+        platformFlags=options.platformFlags, optimize=options.optimize, forMacro=false,
+        pool=workPool);
+    auto macroSettings = new BuildSettings(compiler, options.macroBackend,
         x86_32=options.macro_x86_32, caching=options.caching, versions=options.allMacroVersions,
-        platformFlags=options.macroPlatformFlags, optimize=false, forMacro=true);
-    auto helper = new ParserHelperImpl(macroSettings);
+        platformFlags=options.macroPlatformFlags, optimize=false, forMacro=true,
+        pool=workPool);
+    auto helper = new ParserHelperImpl(macroSettings, options.llvmMajor);
     // FIXME break reference loop
     compiler.helper = helper;
     mut CompilationVisitor[] compilationVisitors;
@@ -834,11 +861,12 @@ long long int compiler_hash_mult() { return $(mult)LL; }
 
 void main(mut string[] args)
 {
+    auto llvmMajor = getLLVMMajor;
     string executable = args[0];
     args = args[1 .. $];
     string[] allArgs = args;
     string execPath = "/proc/self/exe".realpath.dirname;
-    auto options = new Options;
+    auto options = new Options(llvmMajor);
     // TODO make configurable somehow? commandline arg?
     options.parseConfig(execPath ~ "/neat.ini");
     args = options.parseArgs(executable, args);
@@ -956,4 +984,13 @@ set -e
 # llc -O3 --filetype=obj --relocation-model=pic \$1.opt.bc -o=\$2
 llvm-as \$1 -o=\$2
 ");
+}
+
+int getLLVMMajor() {
+    import std.file : readText;
+    import std.process : system;
+
+    system("mkdir -p .obj; llvm-config --version > .obj/llvm-version");
+
+    return ".obj/llvm-version".readText.split(".")[0].atoi;
 }

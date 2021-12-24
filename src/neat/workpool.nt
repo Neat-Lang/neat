@@ -1,0 +1,110 @@
+module neat.workpool;
+
+macro import neat.macros.listcomprehension;
+
+import neat.base;
+import std.thread;
+
+/*
+ * Threadpool for pure tasks identified by a string.
+ * Any task is started at most once.
+ */
+class WorkPool : WorkPoolBase
+{
+    TaskEntry[] tasks;
+
+    Mutex mutex;
+
+    ThreadPool pool;
+
+    int threads;
+
+    this(this.pool, this.threads) {
+        this.mutex = new Mutex;
+    }
+
+    // Start task running if it isn't running yet.
+    override void queue(string id, ITask task) {
+        mutex.lock;
+        if ([any a.id == id for a in tasks]) {
+            mutex.unlock;
+            return;
+        }
+        auto entry = new TaskEntry(id, task);
+        tasks ~= entry;
+        mutex.unlock;
+        if (threads > 0) pool.addTask(entry);
+        else entry.run;
+    }
+
+    override ITask wait(string id) {
+        mutex.lock;
+        int offs = [first cast(int) i for i, a in tasks
+            where a.id == id
+            else -1];
+        assert(offs != -1);
+        auto task = tasks[offs];
+        mutex.unlock;
+        task.wait;
+        return task.task;
+    }
+}
+
+private class TaskEntry : Task
+{
+    string id;
+
+    ITask task;
+
+    (:pending | :running | :done) state;
+
+    Mutex mutex;
+
+    CondVar condvar;
+
+    this(this.id, this.task) {
+        this.mutex = new Mutex;
+        this.condvar = new CondVar(this.mutex);
+        this.state = :pending;
+    }
+
+    override void run() {
+        this.mutex.lock;
+        if (started) {
+            // sniped by wait()
+            this.mutex.unlock;
+            return;
+        }
+        runImpl;
+        this.mutex.unlock;
+    }
+
+    void wait() {
+        this.mutex.lock;
+        if (:pending <- this.state) runImpl;
+        // TODO while (:running <- this.state)
+        else while (true) {
+            if (:running <- this.state) this.condvar.wait;
+            else break;
+        }
+        this.mutex.unlock;
+    }
+
+    void runImpl() {
+        this.state = :running;
+        this.mutex.unlock;
+
+        this.task.run;
+
+        this.mutex.lock;
+        this.state = :done;
+        this.condvar.broadcast;
+    }
+
+    bool started() {
+        return state.case(
+            (:pending): false,
+            (:running): true,
+            (:done): true);
+    }
+}

@@ -29,16 +29,18 @@ class CompilerImpl : CompilerBase
 
     ModuleParserConfig modParseConfig;
 
-    (string key, Module mod)[] modules;
+    Mutex mutex;
 
-    this(this.defaultImports, this.modParseConfig, this.cFlags) { }
+    this(this.defaultImports, this.modParseConfig, this.cFlags,
+        this.workPool) {
+        this.mutex = new Mutex;
+    }
 
     CachedRuntimeFunction[] cachedRuntimeFunctions;
 
     // break reference cycles to avoid leaks
     void clear() {
         this.cachedRuntimeFunctions = [];
-        this.modules = [];
         this.defaultImports = [];
     }
 
@@ -601,7 +603,7 @@ class CompilerImpl : CompilerBase
     {
         Module compile(ASTModule astMod) {
             auto context = makeContext(this, context.platform, null, astMod.macroState);
-            return compileModule(context, astMod, addDefaultImports=false);
+            return .compileModule(context, astMod, addDefaultImports=false);
         }
         auto defaultMods = [compile(mod) for mod in this.defaultImports];
         [module_.addImport(mod, public_=false, []) for mod in defaultMods];
@@ -621,13 +623,16 @@ class CompilerImpl : CompilerBase
         for (param in params) {
             mangledName ~= "_" ~ param.type.mangle;
         }
+        this.mutex.lock;
         for (entry in cachedRuntimeFunctions) {
             if (entry.fun.name == mangledName && entry.platformIdent == context.platform.ident) {
                 auto usingMod = findParent!Module(context.namespace);
                 usingMod.addImport(entry.rtMod, public_=false, []);
+                this.mutex.unlock;
                 return entry.fun;
             }
         }
+        this.mutex.unlock;
 
         Parameter parameter(string name, Type type) {
             return Parameter(false, name, false, type);
@@ -657,7 +662,9 @@ class CompilerImpl : CompilerBase
         auto usingMod = findParent!Module(context.namespace);
         usingMod.addImport(rtMod, public_=false, []);
 
+        this.mutex.lock;
         cachedRuntimeFunctions ~= CachedRuntimeFunction(fun, rtMod, context.platform.ident);
+        this.mutex.unlock;
         // run AFTER module was added to cache, to break dependency loop for recursive types
         rtMod.compile(context);
 
@@ -688,14 +695,6 @@ class CompilerImpl : CompilerBase
                 loc.fail("silently discarding failure type");
             }
         }
-    }
-
-    override ModuleBase findModule(string key) {
-        return [first a.mod for a in this.modules where a.key == key else null];
-    }
-
-    override void addModule(string key, ModuleBase module_) {
-        this.modules ~= (key, module_.instanceOf(Module).notNull);
     }
 }
 

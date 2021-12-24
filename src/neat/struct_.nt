@@ -12,6 +12,7 @@ import neat.parser;
 import neat.parser_base;
 import neat.statements;
 import neat.types;
+import std.thread;
 
 class Struct : Type
 {
@@ -31,13 +32,16 @@ class Struct : Type
 
     Hash preHash;
 
-    (BackendStructType type, Platform platform) backendCache;
+    Mutex mutex;
+
+    private (BackendStructType type, Platform platform) backendCache;
 
     this(this.name, this.members, this.loc, string manglePrefix) {
         this.mangledName = manglePrefix ~ "_struct_" ~ this.name;
         this.zeroInitializable = [
             all member.type.zeroInitializable for member in this.members];
         this.validMethods = this.methods.length;
+        this.mutex = new Mutex;
     }
 
     override bool same(Type other) {
@@ -49,15 +53,19 @@ class Struct : Type
 
     override BackendStructType emit(Platform platform)
     {
+        this.mutex.lock;
         if (!backendCache.type || backendCache.platform !is platform) {
-            backendCache.platform = platform;
             auto memberTypes = new BackendType[](this.members.length);
             for (i, member in this.members)
             {
                 memberTypes[i] = member.type.emit(platform);
             }
+            backendCache.platform = platform;
             backendCache.type = new BackendStructType(memberTypes);
+            // FIXME figure out why references go to zero
+            neat_runtime_refcount_inc("workaround", &(cast(size_t*) backendCache.type)[1]);
         }
+        this.mutex.unlock;
         return backendCache.type;
     }
 

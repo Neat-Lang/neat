@@ -31,6 +31,7 @@ import neat.types;
 import neat.unittest_;
 import neat.vectors;
 import neat.with_;
+import std.thread;
 
 // TODO clear all this up
 class DefineClassIntf : FinishedSymbol
@@ -3513,10 +3514,12 @@ nullable ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalCo
     auto loc = parser.loc;
     if (auto import_ = parseImportStatement(parser, lexicalContext)) {
         loc.assert2s(!import_.isMacroImport, "can't import macro in function");
-        auto importedModule = lexicalContext.resolveImport(import_)
-            .instanceOf(ASTModule).notNull;
+        auto task = new ImportTask(lexicalContext, import_);
+        auto pool = lexicalContext.compiler.workPool;
+        auto id = import_.repr;
 
-        return new ASTImport(import_, importedModule);
+        pool.queue(id, task);
+        return new ASTImport(import_, (pool, id));
     }
     if (auto aliasDecl = parseAliasDecl(parser, lexicalContext)) {
         return aliasDecl;
@@ -3614,6 +3617,7 @@ class ASTModule : ASTModuleBase
 
     this(this.loc, this.name, this.pak, this.macroState, this.parent) {
         if (this.parent) this.depth = this.parent.depth + 1;
+        this.mangledName = mangleModuleName(this.name, this.pak, this.depth);
     }
 
     void addAliasDecl(string name, Protection protection, ASTSymbol target)
@@ -3774,8 +3778,6 @@ extern(C) size_t poly_hash_whole_string(string s);
 class Module : ModuleBase
 {
     Loc loc;
-
-    string mangledName;
 
     // whenever macro state changes, we begin a new submodule
     // when this happens, this member references the previous module.
@@ -4144,17 +4146,51 @@ class ImportNamespace : Namespace
     }
 }
 
+class AstCompileTask : ITask
+{
+    ASTModule astModule;
+    (:none | Module) result;
+    Context context;
+
+    this(this.astModule, this.context) {
+        this.result = :none;
+    }
+
+    Module module_() {
+        if (Module m <- result) return m;
+        assert(false);
+    }
+
+    override void run() {
+        this.result = compileModule(context, astModule, true);
+    }
+}
+
 // Classes do double duty for both module-level and statement-level imports
 class ASTImport : ASTDeclaration
 {
     ASTImportStatement statement;
 
-    ASTModule module_;
+    // running in the background
+    (WorkPoolBase pool, string id | ASTModule) moduleSource;
 
-    this(this.statement, this.module_) { }
+    ASTModule module_() {
+        return this.moduleSource.case(
+            (WorkPoolBase pool, string id):
+                pool.wait(id).instanceOf(ImportTask).module_,
+            ASTModule mod: mod);
+    }
+
+    this(this.statement, this.moduleSource) { }
 
     override Context compile(Context context) {
-        auto module_ = compileModule(context, this.module_, true);
+        auto astModule_ = this.module_;
+        auto id = "compile ast $(astModule_.mangledName)";
+        auto task = new AstCompileTask(astModule_, context);
+
+        context.compiler.workPool.queue(id, task);
+        auto module_ = context.compiler.workPool.wait(id)
+            .instanceOf(AstCompileTask).module_;
         auto namespace = new ImportNamespace(context.namespace, module_, this.statement.symbols);
         auto contextModule = findParent!Module(context.namespace);
 
@@ -4172,6 +4208,29 @@ class ASTImport : ASTDeclaration
         return quoter.compilerCall("astImport", [
             importStatement,
             mod], __HERE__);
+    }
+}
+
+class ImportTask : ITask
+{
+    LexicalContext lexicalContext;
+
+    ASTImportStatement import_;
+
+    (ASTModule | :none) result;
+
+    this(this.lexicalContext, this.import_) {
+        this.result = :none;
+    }
+
+    ASTModule module_() {
+        if (ASTModule mod <- result) return mod;
+        assert(false);
+    }
+
+    override void run() {
+        this.result = lexicalContext.resolveImport(import_)
+            .instanceOf(ASTModule).notNull;
     }
 }
 
@@ -4231,31 +4290,13 @@ nullable ASTImportStatement parseImportStatement(Parser parser, LexicalContext l
     return new ASTImportStatement(target, isMacroImport, symbols, parser.loc);
 }
 
-class ASTModuleCache
-{
-    (string path, ASTModule mod)[] modules;
-    this() { }
-    nullable ASTModule find(string path) {
-        return [first a.mod for a in this.modules where a.path == path else null];
-    }
-    void add(string path, ASTModule mod) {
-        this.modules ~= (path, mod);
-    }
-}
-
-string astModuleKey(string base, ASTModule mod) {
-    return "$(base)_$(mod.pak.name)_$(mod.name)_d$(mod.depth)";
-}
-
 class ModuleParserConfig
 {
     Package[] packages;
 
     ASTModule[] defaultImports;
 
-    ASTModuleCache astCache;
-
-    this(this.packages, this.defaultImports, this.astCache) { }
+    this(this.packages, this.defaultImports) { }
 }
 
 nullable ASTModule parseMacroContinuation(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule astModule,
@@ -4288,14 +4329,23 @@ Package selectPackage(Package[] packages, string name, Loc loc)
     return result.notNull;
 }
 
+class LexicalContextImpl : LexicalContext
+{
+    ParserHelper helper;
+
+    ModuleParserConfig config;
+
+    this(this.compiler, this.pak, this.macroState, this.helper, this.config) { }
+
+    override ASTModuleBase resolveImport(ASTImportStatement importStmt) {
+        return .resolveImport(compiler, pak.name, importStmt, helper, config);
+    }
+}
+
 ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule module_,
     ModuleParserConfig config)
 {
-    ASTModuleBase resolveImport(ASTImportStatement import_) {
-        return .resolveImport(compiler, module_.pak.name, import_, helper, config);
-    }
-
-    mut LexicalContext lexicalContext = new LexicalContext(compiler, module_.pak, module_.macroState, &resolveImport);
+    mut LexicalContext lexicalContext = new LexicalContextImpl(compiler, module_.pak, module_.macroState, helper, config);
 
     while (!parser.eof)
     {
@@ -4310,18 +4360,23 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
             module_.entries ~= ASTModuleEntry(protection, symbol);
         }
         if (auto import_ = parseImportStatement(parser, lexicalContext)) {
-            auto importedModule = lexicalContext.resolveImport(import_)
-                .instanceOf(ASTModule).notNull;
+            auto task = new ImportTask(lexicalContext, import_);
+            auto pool = compiler.workPool;
+            auto id = import_.repr;
+
+            pool.queue(id, task);
+
             if (import_.isMacroImport)
             {
                 module_.macroState = module_.macroState.dup;
-                lexicalContext = new LexicalContext(compiler, module_.pak, module_.macroState, &resolveImport);
+                lexicalContext = new LexicalContextImpl(compiler, module_.pak, module_.macroState, helper, config);
 
-                lexicalContext.macroState.addImport(importedModule.macroState);
+                lexicalContext.macroState.addImport(
+                    pool.wait(id).instanceOf(ImportTask).module_.macroState);
             }
             else
             {
-                add(new ASTImport(import_, importedModule));
+                add(new ASTImport(import_, (pool, id)));
             }
             continue;
         }
@@ -4380,24 +4435,27 @@ ASTModule resolveImport(CompilerBase compiler, string pak, ASTImportStatement im
 
 Module compileModule(Context context, ASTModule astModule, bool addDefaultImports)
 {
-    string moduleKey = astModuleKey(context.platform.ident, astModule);
-    // TODO
-    // if (Module mod = context.compiler.findModule(moduleKey)?.instanceOf(Module))
-    if (auto mod = context.compiler.findModule(moduleKey))
-        return mod.instanceOf(Module).notNull;
-
     mut nullable Module parent = null;
     if (auto astParent = astModule.parent)
     {
         parent = compileModule(context, astParent, addDefaultImports);
     }
 
-    string mangledName = mangleModuleName(astModule.name, astModule.pak, astModule.depth);
-    Module module_ = new Module(astModule.loc, astModule.name, mangledName, parent);
+    Module module_ = new Module(astModule.loc, astModule.name, astModule.mangledName, parent);
     auto context = context.withNamespace(module_);
 
     if (addDefaultImports) {
         context.compiler.addDefaultImports(context, module_);
+    }
+
+    // Handle all imports in parallel.
+    for (entry in astModule.entries) {
+        if (ASTImport import_ <- entry.symbol) {
+            auto id = "compile ast $(import_.module_.mangledName)";
+            auto task = new AstCompileTask(import_.module_, context);
+
+            context.compiler.workPool.queue(id, task);
+        }
     }
 
     for (entry in astModule.entries) {
@@ -4406,7 +4464,10 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
         entry.symbol.case {
             ASTImport import_:
             {
-                auto importedModule = compileModule(context, import_.module_, true);
+                auto id = "compile ast $(import_.module_.mangledName)";
+                auto importedModule = context.compiler.workPool.wait(id)
+                    .instanceOf(AstCompileTask).module_;
+
                 bool public_ = entry.protection == Protection.public_;
 
                 module_.addImport(
@@ -4461,14 +4522,12 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
     }
     module_.compile(context);
 
-    context.compiler.addModule(moduleKey, module_);
     return module_;
 }
 
 ASTModule getModule(CompilerBase compiler, mut string filename, mut nullable Package pak, bool search,
     ParserHelper helper, ModuleParserConfig config, Loc loc)
 {
-    auto macroState = new MacroState;
     mut string path = filename;
     if (search) {
         assert2s(!!pak, "search, but no package");
@@ -4484,27 +4543,45 @@ ASTModule getModule(CompilerBase compiler, mut string filename, mut nullable Pac
     }
     assert(!!pak);
     auto pak = pak.notNull;
-    if (auto mod = config.astCache.find(path)) return mod;
+    // FIXME the workpool queueing here is 100% redundant with the ImportTask queueing, p sure
+    compiler.workPool.queue(path, new ParseAstModuleTask(compiler, filename, path, pak, helper, config, loc));
+    return compiler.workPool.wait(path).instanceOf(ParseAstModuleTask).module_;
+}
 
-    string code = read(path);
-    // do not count references on the file source - it will end
-    // up with lots of small inc/decs to fragments that we never free anyway
-    (cast(size_t*) &code)[2] = 0;
-    Parser parser = new Parser(path, code);
+class ParseAstModuleTask : ITask
+{
+    CompilerBase compiler;
+    string filename;
+    string path;
+    Package pak;
+    ParserHelper helper;
+    ModuleParserConfig config;
+    Loc loc;
+    (ASTModule | :none) result;
+    this(this.compiler, this.filename, this.path, this.pak, this.helper, this.config, this.loc) {
+        this.result = :none;
+    }
+    ASTModule module_() {
+        if (ASTModule mod <- result) return mod;
+        assert(false);
+    }
+    override void run() {
+        string code = read(path);
+        // do not count references on the file source - it will end
+        // up with lots of small inc/decs to fragments that we never free anyway
+        (cast(size_t*) &code)[2] = 0;
+        Parser parser = new Parser(path, code);
 
-    auto locAtModule = parser.loc;
-    parser.expect("module");
-    string modname = parseIdentifier2(parser, ".", allowKeywords=false);
-    parser.expect(";");
+        auto locAtModule = parser.loc;
+        parser.expect("module");
+        string modname = parseIdentifier2(parser, ".", allowKeywords=false);
+        parser.expect(";");
 
-    import std.string : endsWith;
+        import std.string : endsWith;
 
-    locAtModule.assert2s2(filename.endsWith(modname.moduleToFile), filename, ": module doesn't match filename");
+        locAtModule.assert2s2(filename.endsWith(modname.moduleToFile), filename, ": module doesn't match filename");
 
-    ASTModule baseModule = new ASTModule(locAtModule, modname, pak, new MacroState, null);
-    ASTModule module_ = parseModuleBody(compiler, parser, helper, baseModule, config);
-
-    config.astCache.add(path, module_);
-
-    return module_;
+        ASTModule baseModule = new ASTModule(locAtModule, modname, pak, new MacroState, null);
+        result = parseModuleBody(compiler, parser, helper, baseModule, config);
+    }
 }

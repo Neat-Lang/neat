@@ -33,9 +33,14 @@ struct String string_alloc(size_t length) {
     return (struct String) { length, memory + sizeof(size_t) * 3, memory };
 }
 
+void neat_runtime_lock_stdout(void);
+void neat_runtime_unlock_stdout(void);
+
 void print(struct String str) {
+    neat_runtime_lock_stdout();
     printf("%.*s\n", (int) str.length, str.ptr);
     fflush(stdout);
+    neat_runtime_unlock_stdout();
 }
 
 void assert(int test) {

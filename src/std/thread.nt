@@ -1,18 +1,66 @@
 module std.thread;
 
+macro import neat.macros.assert;
+
 import c.pthread;
 
 pragma(lib, "pthread");
 
-extern(C) void assert(bool);
-
 class Mutex
 {
     pthread_mutex_t mutex;
+    bool isLocked;
 
-    this() { pthread_mutex_init(&mutex, null); }
-    void lock() { pthread_mutex_lock(&mutex); }
-    void unlock() { pthread_mutex_unlock(&mutex); }
+    this() {
+        pthread_mutex_init(&mutex, null);
+        isLocked = false;
+    }
+    void lock() {
+        pthread_mutex_lock(&mutex);
+        isLocked = true;
+    }
+    LockGuard locked() {
+        return LockGuard(this);
+    }
+    void unlock() {
+        isLocked = false;
+        pthread_mutex_unlock(&mutex);
+    }
+}
+
+struct LockGuard
+{
+    Mutex mutex;
+    void onEnter() {
+        mutex.lock;
+    }
+    void onExit() {
+        mutex.unlock;
+    }
+}
+
+unittest
+{
+    auto mutex = new Mutex;
+
+    assert(!mutex.isLocked);
+    with (mutex.locked) {
+        assert(mutex.isLocked);
+    }
+    assert(!mutex.isLocked);
+}
+
+unittest
+{
+    auto mutex = new Mutex;
+
+    void returnTest() {
+        with (mutex.locked) {
+            return;
+        }
+    }
+    returnTest;
+    assert(!mutex.isLocked);
 }
 
 class CondVar
@@ -22,7 +70,12 @@ class CondVar
     Mutex mutex;
 
     this(this.mutex) { pthread_cond_init(&cond, null); }
-    void wait() { pthread_cond_wait(&cond, &this.mutex.mutex); }
+    void wait() {
+        assert(mutex.isLocked);
+        mutex.isLocked = false;
+        pthread_cond_wait(&cond, &this.mutex.mutex);
+        mutex.isLocked = true;
+    }
     void signal() { pthread_cond_signal(&cond); }
     void broadcast() { pthread_cond_broadcast(&cond); }
 }

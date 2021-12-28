@@ -5,16 +5,30 @@ import neat.base;
 import neat.parser;
 import neat.parser_base;
 
-class WithNamespace : DeclarationHolder
+class WithNamespace : DeclarationHolder, Unwindable
 {
     // This can't work!
     // When you do with() { void nested() { accessWithMember; } }, then the
     // lookup will try to access a nonlocal register.
     // We need to localize the reference in the stackframe,
     // by declaring it as an anonymous variable.
+    // edit 12-28-021: don't we have a thing for looking up delayed-resolved values now?
+    // LatentSymbol/LateSymbol or sth?
+    // But I think it still doesn't work cause the temporary won't show up in the stackframe,
+    // so we still need to go over a temporary variable.
     Reference temporary;
 
-    this(this.parent, this.temporary) { this.isContextScope = parent.isContextScope; }
+    Loc loc;
+
+    this(this.parent, this.temporary, this.loc) { this.isContextScope = parent.isContextScope; }
+
+    override nullable Statement unwind(Context context) {
+        if (auto exit = temporary.type.accessMember(
+                this.loc, context, temporary, "onExit", Protection.private_)) {
+            return context.compiler.exprStatement(exit.beExpressionImplCall(context, this.loc));
+        }
+        return null;
+    }
 
     override Reference accessDecl(CompilerBase compiler)
     {
@@ -46,9 +60,21 @@ class ASTWithStatement : ASTStatement
 
         nullable Statement do_(Reference temp)
         {
-            auto subContext = context.withNamespace(new WithNamespace(context.namespace, temp));
+            mut nullable Statement prefix, suffix;
+            if (auto enter = temp.type.accessMember(
+                this.loc, context, temp, "onEnter", Protection.private_)) {
+                prefix = context.compiler.exprStatement(enter.beExpressionImplCall(context, this.loc));
+            }
+            if (auto exit = temp.type.accessMember(
+                this.loc, context, temp, "onExit", Protection.private_)) {
+                suffix = context.compiler.exprStatement(exit.beExpressionImplCall(context, this.loc));
+            }
+
+            auto subContext = context.withNamespace(new WithNamespace(context.namespace, temp, this.loc));
             auto subStmtPair = this.stmt.compile(subContext);
-            return subStmtPair.statement;
+            auto stmt = subStmtPair.statement;
+
+            return context.compiler.(that.sequence(that.sequence2(prefix, stmt), suffix));
         }
         auto stmt = context.compiler.consumeTemporaryStmt(context, expr, &do_).notNull;
 

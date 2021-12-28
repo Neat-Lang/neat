@@ -25,26 +25,27 @@ class WorkPool : WorkPoolBase
 
     // Start task running if it isn't running yet.
     override void queue(string id, ITask task) {
-        mutex.lock;
-        if ([any a.id == id for a in tasks]) {
-            mutex.unlock;
-            return;
+        mut uninitialized TaskEntry entry;
+        with (mutex.locked) {
+            if ([any a.id == id for a in tasks]) {
+                return;
+            }
+            entry = new TaskEntry(id, task);
+            tasks ~= entry;
         }
-        auto entry = new TaskEntry(id, task);
-        tasks ~= entry;
-        mutex.unlock;
         if (threads > 0) pool.addTask(entry);
         else entry.run;
     }
 
     override ITask wait(string id) {
-        mutex.lock;
-        int offs = [first cast(int) i for i, a in tasks
-            where a.id == id
-            else -1];
-        assert(offs != -1);
-        auto task = tasks[offs];
-        mutex.unlock;
+        mut uninitialized TaskEntry task;
+        with (mutex.locked) {
+            int offs = [first cast(int) i for i, a in tasks
+                where a.id == id
+                else -1];
+            assert(offs != -1);
+            task = tasks[offs];
+        }
         task.wait;
         return task.task;
     }
@@ -69,34 +70,31 @@ private class TaskEntry : Task
     }
 
     override void run() {
-        this.mutex.lock;
-        if (started) {
-            // sniped by wait()
-            this.mutex.unlock;
-            return;
+        with (mutex.locked) {
+            if (started) {
+                // sniped by wait()
+                return;
+            }
+            runImpl;
         }
-        runImpl;
-        this.mutex.unlock;
     }
 
     void wait() {
-        this.mutex.lock;
-        if (:pending <- this.state) runImpl;
-        // TODO while (:running <- this.state)
-        else while (true) {
-            if (:running <- this.state) this.condvar.wait;
-            else break;
+        with (mutex.locked) {
+            if (:pending <- this.state) runImpl;
+            // TODO while (:running <- this.state)
+            else while (true) {
+                if (:running <- this.state) this.condvar.wait;
+                else return;
+            }
         }
-        this.mutex.unlock;
     }
 
     void runImpl() {
         this.state = :running;
-        this.mutex.unlock;
-
-        this.task.run;
-
-        this.mutex.lock;
+        with (mutex.unlocked) {
+            this.task.run;
+        }
         this.state = :done;
         this.condvar.broadcast;
     }

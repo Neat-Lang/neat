@@ -22,6 +22,9 @@ class Mutex
     LockGuard locked() {
         return LockGuard(this);
     }
+    UnlockGuard unlocked() {
+        return UnlockGuard(this);
+    }
     void unlock() {
         isLocked = false;
         pthread_mutex_unlock(&mutex);
@@ -36,6 +39,17 @@ struct LockGuard
     }
     void onExit() {
         mutex.unlock;
+    }
+}
+
+struct UnlockGuard
+{
+    Mutex mutex;
+    void onEnter() {
+        mutex.unlock;
+    }
+    void onExit() {
+        mutex.lock;
     }
 }
 
@@ -92,28 +106,26 @@ template Waitable(T)
             this.signal = new CondVar(this.mutex);
         }
         void set(T value) {
-            mutex.lock;
-            this.value = value;
-            signal.broadcast;
-            mutex.unlock;
+            with (mutex.locked) {
+                this.value = value;
+                signal.broadcast;
+            }
         }
         void update(T delegate(T) action) {
-            mutex.lock;
-            this.value = action(this.value);
-            signal.broadcast;
-            mutex.unlock;
+            with (mutex.locked) {
+                this.value = action(this.value);
+                signal.broadcast;
+            }
         }
         void waitFor(bool delegate(T) condition) {
             T id(T value) { return value; }
             waitReact(condition, &id);
         }
         void waitReact(bool delegate(T) condition, T delegate(T) react) {
-            mutex.lock;
-            while (true) {
+            with (mutex.locked) while (true) {
                 if (condition(this.value)) {
                     this.value = react(this.value);
                     signal.broadcast;
-                    mutex.unlock;
                     return;
                 }
                 signal.wait;
@@ -184,28 +196,29 @@ class ThreadPool
         }
     }
     void waitComplete(void delegate(float) progress) {
-        this.mutex.lock;
-        int tasks = this.queuedTasks;
-        this.queuedTasks = 0;
-        this.mutex.unlock;
+        mut int tasks;
+        with (this.mutex.locked) {
+            tasks = this.queuedTasks;
+            this.queuedTasks = 0;
+        }
         for (i in 0 .. tasks) {
             this.doneTasks.acquire;
             progress((cast(int) i + 1) * 1.0f / tasks);
         }
     }
     void addTask(Task task) {
-        mutex.lock;
-        tasks ~= task;
-        this.queuedTasks += 1;
-        mutex.unlock;
+        with (mutex.locked) {
+            tasks ~= task;
+            this.queuedTasks += 1;
+        }
         this.waitingTasks.release;
     }
     private Task getTask()  {
         this.waitingTasks.acquire;
-        mutex.lock;
-        auto ret = tasks[$ - 1];
-        tasks = tasks[0 .. $ - 1];
-        mutex.unlock;
-        return ret;
+        with (mutex.locked) {
+            auto ret = tasks[$ - 1];
+            tasks = tasks[0 .. $ - 1];
+            return ret;
+        }
     }
 }

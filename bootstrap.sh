@@ -537,6 +537,8 @@ at_revision '2b4d60dfb08c45d805aede5d0e6bcbd07a50af34' 'rebuild neat' 'build/nea
 at_revision 'cef694ae13f81bf985d2af05b26864d3d2f07b7e' 'rebuild neat' 'build/neat'
 # lock/unlock, neat_runtime_refcount_inc in instanceof, _set in new
 at_revision 'f069670f9a7c74372d59d490540493aa2f23842f' 'rebuild neat' 'build/neat'
+# onEnter/onExit
+at_revision 'c0b47f306e732262ccc45e143964ae7a8f3dabed' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

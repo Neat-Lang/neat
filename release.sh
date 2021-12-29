@@ -21,7 +21,6 @@ EOT
 chmod +x $TARGET/build.sh
 cat > $TARGET/neat.ini <<EOT
 -syspackage compiler:src
--package root:.:compiler
 -backend=c
 -macro-backend=c
 EOT

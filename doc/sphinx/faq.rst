@@ -67,4 +67,18 @@ Frequently Asked Questions
   So I guess come and try out Neat if you wanna play with some features like
   lambda values or format strings to see how they work in practice.
 
+Project Layout
+==============
+
+* Q: What's up with `bootstrap.sh`?
+* A: Neat was self-hosting from an early point on, and features were usually immediately
+  used in the compiler.
+  To make this easier, each version of Neat depends on a previous git commit that can build it.
+  These commits are listed in `bootstrap.sh`: each commit is checked out and built with the previous version,
+  all the way back to the D-based initial bootstrap version.
+  Note that while this way, you can build a Neat compiler "from nothing", this is exceedingly slow,
+  up to several hours. It is strongly recommended to download tagged builds from Github.
+  However, every bootstrap build is cached, so successive calls to `./bootstrap.sh` should be
+  reasonably fast.
+
 .. _D: https://www.dlang.org/

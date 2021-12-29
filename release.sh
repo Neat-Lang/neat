@@ -15,7 +15,7 @@ cp -R src/ $TARGET
 cp $(cat build/intermediates.txt) $TARGET/intermediate/
 cat > $TARGET/build.sh <<EOT
 #!/usr/bin/env bash
-CFLAGS="\${CFLAGS} -Ofast -fno-strict-aliasing"
+CFLAGS="\${CFLAGS} -Ofast -fno-strict-aliasing -pthread"
 gcc -fpic -rdynamic intermediate/* src/runtime.c -o neat -ldl \$CFLAGS
 EOT
 chmod +x $TARGET/build.sh

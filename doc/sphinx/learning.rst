@@ -239,8 +239,8 @@ If test
 
 If a condition is true, execute one statement, else the other::
 
-    if (2 == 2)
-        print("4");
+    if (2 + 2 == 4)
+        print("2 + 2 = 4");
     else {
         print("sanity has deserted us");
     }

@@ -337,15 +337,13 @@ class ParserHelperImpl : ParserHelper
 {
     BuildSettings settings;
 
-    int llvmMajor;
-
-    this(this.settings, this.llvmMajor) { }
+    this(this.settings) { }
 
     override void proxyCall(ASTModule astModule, string function_, MacroState macroState)
     {
         print("# stageM $function_");
         // ignore pragma(lib) in macro (what are you doing)
-        auto dummyOptions = new Options(llvmMajor);
+        auto dummyOptions = new Options;
         auto result = buildAstModule(astModule, this.settings, [], dummyOptions);
         string objFiles = [join "" " " ~ a for a in result.objFiles];
 
@@ -584,7 +582,7 @@ class Options
     bool caching;
     bool x86_32, macro_x86_32;
     string intermediateListFile;
-    Backend backend, macroBackend;
+    nullable Backend backend, macroBackend;
     int generation;
     string umlFile;
     bool unittest_;
@@ -594,12 +592,9 @@ class Options
     string[] versions, macroVersions;
     string runningCompilerVersion;
     string requestedCompilerVersion;
-    int llvmMajor;
     int threads;
 
-    this(this.llvmMajor) {
-        this.backend = new LLVMBackend(llvmMajor);
-        this.macroBackend = this.backend;
+    this() {
         this.caching = true;
         this.generation = __GENERATION__;
         this.threads = 0;
@@ -698,6 +693,17 @@ class Options
         return remArgs;
     }
 
+    void addDefaults() {
+        mut int llvmMajor;
+        if (!this.backend || !this.macroBackend) llvmMajor = .getLLVMMajor;
+        if (!this.backend) {
+            this.backend = new LLVMBackend(llvmMajor);
+        }
+        if (!this.macroBackend) {
+            this.macroBackend = new LLVMBackend(llvmMajor);
+        }
+    }
+
     string[] allVersions() {
         return ["generation$(i+1)" for i in 0 .. this.generation] ~ this.versions;
     }
@@ -763,15 +769,15 @@ void buildBinary(Options options, string mainFile, string execPath, Package[] pa
     auto modParseConfig = new ModuleParserConfig(packages, defaultImports);
     auto compiler = new CompilerImpl(
         defaultImports, modParseConfig, options.cFlags, workPool);
-    auto settings = new BuildSettings(compiler, options.backend,
+    auto settings = new BuildSettings(compiler, options.backend.notNull,
         x86_32=options.x86_32, caching=options.caching, versions=options.allVersions,
         platformFlags=options.platformFlags, optimize=options.optimize, forMacro=false,
         pool=workPool);
-    auto macroSettings = new BuildSettings(compiler, options.macroBackend,
+    auto macroSettings = new BuildSettings(compiler, options.macroBackend.notNull,
         x86_32=options.macro_x86_32, caching=options.caching, versions=options.allMacroVersions,
         platformFlags=options.macroPlatformFlags, optimize=false, forMacro=true,
         pool=workPool);
-    auto helper = new ParserHelperImpl(macroSettings, options.llvmMajor);
+    auto helper = new ParserHelperImpl(macroSettings);
     // FIXME break reference loop
     compiler.helper = helper;
     mut CompilationVisitor[] compilationVisitors;
@@ -861,15 +867,15 @@ long long int compiler_hash_mult() { return $(mult)LL; }
 
 void main(mut string[] args)
 {
-    auto llvmMajor = getLLVMMajor;
     string executable = args[0];
     args = args[1 .. $];
     string[] allArgs = args;
     string execPath = "/proc/self/exe".realpath.dirname;
-    auto options = new Options(llvmMajor);
+    auto options = new Options;
     // TODO make configurable somehow? commandline arg?
     options.parseConfig(execPath ~ "/neat.ini");
     args = options.parseArgs(executable, args);
+    options.addDefaults;
 
     /**
      * Must be done first to ensure we allow some degree of forward compat.

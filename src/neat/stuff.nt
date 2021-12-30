@@ -3515,14 +3515,15 @@ nullable ASTSymbol parseDestroy(Parser parser, LexicalContext lexicalContext)
 
 nullable ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalContext) {
     auto loc = parser.loc;
-    if (auto import_ = parseImportStatement(parser, lexicalContext)) {
-        loc.assert2s(!import_.isMacroImport, "can't import macro in function");
-        auto task = new ImportTask(lexicalContext, import_);
+    if (auto importStmt = parseImportStatement(parser, lexicalContext)) {
+        loc.assert2s(!importStmt.isMacroImport, "can't import macro in function");
         auto pool = lexicalContext.compiler.workPool;
-        auto id = import_.repr(lexicalContext.pak.name);
+        auto id = importStmt.repr(lexicalContext.pak.name);
+        auto task = new ImportTask(lexicalContext, importStmt);
+        auto import_ = new ASTImport(importStmt, (pool, id, task));
 
         pool.queue(id, task);
-        return new ASTImport(import_, (pool, id));
+        return import_;
     }
     if (auto aliasDecl = parseAliasDecl(parser, lexicalContext)) {
         return aliasDecl;
@@ -3588,13 +3589,22 @@ class ModuleEntry
     this(this.name, this.value) { }
 }
 
+class ASTVersion
+{
+    string name;
+
+    ASTModuleEntry[] then, else_;
+
+    this(this.name, this.then, this.else_) { }
+}
+
 struct ASTModuleEntry
 {
     Protection protection;
 
     (ASTImport | ASTSymbol | ASTExternFunction | ASTExternVariable
         | ASTDeclaration | ASTUnitTest
-        | ASTPragma
+        | ASTPragma | ASTVersion
     ) symbol;
 }
 
@@ -4175,13 +4185,18 @@ class ASTImport : ASTDeclaration
     ASTImportStatement statement;
 
     // running in the background
-    (WorkPoolBase pool, string id | ASTModule) moduleSource;
+    (WorkPoolBase pool, string id, ImportTask task | ASTModule) moduleSource;
 
     ASTModule module_() {
-        return this.moduleSource.case(
-            (WorkPoolBase pool, string id):
-                pool.wait(id).instanceOf(ImportTask).module_,
-            ASTModule mod: mod);
+        this.moduleSource.case {
+            (WorkPoolBase pool, string id, ImportTask task): {
+                // if the task was not prequeued (ie. an import in a version()),
+                // queue it now.
+                pool.queue(id, task);
+                return pool.wait(id).instanceOf(ImportTask).module_;
+            }
+            ASTModule mod: return mod;
+        }
     }
 
     this(this.statement, this.moduleSource) { }
@@ -4232,7 +4247,7 @@ class ImportTask : ITask
     }
 
     override void run() {
-        this.result = lexicalContext.resolveImport(import_)
+        this.result = this.lexicalContext.resolveImport(import_)
             .instanceOf(ASTModule).notNull;
     }
 }
@@ -4345,6 +4360,100 @@ class LexicalContextImpl : LexicalContext
     }
 }
 
+nullable ASTVersion parseModuleVersion(Parser parser, LexicalContext lexicalContext)
+{
+    if (parser.accept("version")) {
+        mut ASTModuleEntry[] then, else_;
+        parser.expect("(");
+        string versionStr = parser.parseIdentifier;
+        parser.expect(")");
+        if (parser.accept("{")) {
+            while (!parser.accept("}")) {
+                then ~= parser.parseModuleEntry(lexicalContext, false);
+            }
+        } else {
+            then ~= parser.parseModuleEntry(lexicalContext, false);
+        }
+        if (parser.accept("else")) {
+            if (parser.accept("{")) {
+                while (!parser.accept("}")) {
+                    else_ ~= parser.parseModuleEntry(lexicalContext, false);
+                }
+            } else {
+                else_ ~= parser.parseModuleEntry(lexicalContext, false);
+            }
+        }
+        return new ASTVersion(versionStr, then, else_);
+    }
+    return null;
+}
+
+ASTModuleEntry parseModuleEntry(Parser parser, LexicalContext lexicalContext, bool toplevel)
+{
+    mut (Protection | :none) protection = :none;
+    if (parser.accept("public")) {
+        protection = Protection.public_;
+    } else if (parser.accept("private")) {
+        protection = Protection.private_;
+    }
+    Protection getProtection() {
+        return protection.case(
+            Protection p: p,
+            (:none): Protection.public_);
+    }
+
+    if (auto importStmt = parseImportStatement(parser, lexicalContext)) {
+        if (!toplevel && importStmt.isMacroImport)
+        {
+            parser.fail("macro import not allowed here");
+        }
+
+        auto pool = lexicalContext.compiler.workPool;
+        auto id = importStmt.repr(lexicalContext.pak.name);
+        auto task = new ImportTask(lexicalContext, importStmt);
+        auto import_ = new ASTImport(importStmt, (pool, id, task));
+
+        if (toplevel) pool.queue(id, task);
+
+        return ASTModuleEntry(getProtection, import_);
+    }
+    if (auto sym = parseTemplateContents(parser, lexicalContext)) {
+        return ASTModuleEntry(getProtection, sym);
+    }
+    if (ASTDeclaration decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
+        return ASTModuleEntry(getProtection, decl);
+    }
+    parseExtern(parser, lexicalContext).case {
+        ASTExternFunction fun: {
+            return ASTModuleEntry(getProtection, fun);
+        }
+        ASTExternVariable var: {
+            return ASTModuleEntry(getProtection, var);
+        }
+        (:none): {}
+    }
+    if (ASTUnitTest ut = parseUnitTest(parser, lexicalContext)) {
+        return ASTModuleEntry(getProtection, ut);
+    }
+    if (ASTPragma pragma_ = parsePragma(parser, lexicalContext)) {
+        return ASTModuleEntry(getProtection, pragma_);
+    }
+    if (ASTVersion version_ = parseModuleVersion(parser, lexicalContext)) {
+        if (Protection p <- protection) {
+            string repr(Protection p) {
+                if (p == Protection.public_) return "public";
+                if (p == Protection.private_) return "private";
+                if (p == Protection.protected_) return "protected";
+                assert(false);
+            }
+            parser.fail("unsupported '$(p.repr)' qualifier on 'version' block");
+        }
+        return ASTModuleEntry(Protection.public_, version_);
+    }
+
+    parser.fail("couldn't parse function or struct");
+}
+
 ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule module_,
     ModuleParserConfig config)
 {
@@ -4352,68 +4461,26 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
 
     while (!parser.eof)
     {
-        mut Protection protection = Protection.public_;
-        if (parser.accept("public")) {
-            protection = Protection.public_;
-        } else if (parser.accept("private")) {
-            protection = Protection.private_;
-        }
-        // Hack. :(
-        void add(typeof(({ mut uninitialized ASTModuleEntry e; e; }).symbol) symbol) {
-            module_.entries ~= ASTModuleEntry(protection, symbol);
-        }
-        if (auto import_ = parseImportStatement(parser, lexicalContext)) {
-            auto task = new ImportTask(lexicalContext, import_);
-            auto pool = compiler.workPool;
-            auto id = import_.repr(lexicalContext.pak.name);
+        if (ASTModule submod = parseMacroContinuation(compiler, parser, helper, module_, config))
+            return submod;
 
-            pool.queue(id, task);
+        auto entry = parseModuleEntry(parser, lexicalContext, true);
 
-            if (import_.isMacroImport)
+        if (ASTImport import_ <- entry.symbol) {
+            if (import_.statement.isMacroImport)
             {
+                auto id = import_.statement.repr(lexicalContext.pak.name);
+
                 module_.macroState = module_.macroState.dup;
                 lexicalContext = new LexicalContextImpl(compiler, module_.pak, module_.macroState, helper, config);
 
                 lexicalContext.macroState.addImport(
-                    pool.wait(id).instanceOf(ImportTask).module_.macroState);
-            }
-            else
-            {
-                add(new ASTImport(import_, (pool, id)));
-            }
-            continue;
-        }
-        if (auto sym = parseTemplateContents(parser, lexicalContext)) {
-            add(sym);
-            continue;
-        }
-        if (ASTDeclaration decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
-            add(decl);
-            continue;
-        }
-        parseExtern(parser, lexicalContext).case {
-            ASTExternFunction fun: {
-                add(fun);
+                    lexicalContext.compiler.workPool.wait(id)
+                        .instanceOf(ImportTask).module_.macroState);
                 continue;
             }
-            ASTExternVariable var: {
-                add(var);
-                continue;
-            }
-            (:none): {}
         }
-        if (ASTModule submod = parseMacroContinuation(compiler, parser, helper, module_, config))
-            return submod;
-        if (ASTUnitTest ut = parseUnitTest(parser, lexicalContext)) {
-            add(ut);
-            continue;
-        }
-        if (ASTPragma pragma_ = parsePragma(parser, lexicalContext)) {
-            add(pragma_);
-            continue;
-        }
-
-        parser.fail("couldn't parse function or struct");
+        module_.entries ~= entry;
     }
     assert(parser.level == 0);
     return module_;
@@ -4451,23 +4518,25 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
         context.compiler.addDefaultImports(context, module_);
     }
 
-    // Handle all imports in parallel.
+    // Handle all (toplevel) imports in parallel.
     for (entry in astModule.entries) {
         if (ASTImport import_ <- entry.symbol) {
             auto id = "compile ast $(import_.module_.mangledName)";
             auto task = new AstCompileTask(import_.module_, context);
-
             context.compiler.workPool.queue(id, task);
         }
     }
 
-    for (entry in astModule.entries) {
-        // TODO lazily resolve members only once they're looked up
-        // (allows compilation in any order)
+    void handleEntry(ASTModuleEntry entry)
+    {
         entry.symbol.case {
             ASTImport import_:
             {
+                // requeue in case it was in a version()
                 auto id = "compile ast $(import_.module_.mangledName)";
+                auto task = new AstCompileTask(import_.module_, context);
+                context.compiler.workPool.queue(id, task);
+
                 auto importedModule = context.compiler.workPool.wait(id)
                     .instanceOf(AstCompileTask).module_;
 
@@ -4521,8 +4590,18 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
                 module_.add("", entry.protection, ut);
             ASTPragma pragma_:
                 module_.track(pragma_.compile(context));
+            ASTVersion version_: {
+                if ([any a == version_.name for a in context.platform.versions]) {
+                    [handleEntry(entry) for entry in version_.then];
+                } else {
+                    [handleEntry(entry) for entry in version_.else_];
+                }
+            }
         }
     }
+
+    [handleEntry(entry) for entry in astModule.entries];
+
     module_.compile(context);
 
     return module_;

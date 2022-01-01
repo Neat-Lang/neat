@@ -6,6 +6,9 @@ macro import neat.macros.listcomprehension;
 
 import backend.base;
 import c_header("llvm-c/Core.h");
+import c_header("llvm-c/BitWriter.h");
+import c_header("llvm-c/Target.h");
+import c_header("llvm-c/TargetMachine.h");
 
 pragma(lib, "LLVM");
 
@@ -85,10 +88,14 @@ bool passByMemory(BackendType type, Platform platform) {
 class LLVMBackend : Backend {
     LLVMContextRef context;
     this() {
-        this.context = LLVMContextCreate;
+        LLVMInitializeX86TargetInfo;
+        LLVMInitializeX86Target;
+        LLVMInitializeX86TargetMC;
+        LLVMInitializeX86AsmParser;
+        LLVMInitializeX86AsmPrinter;
     }
     override LLVMBackendModule createModule(Platform platform, BackendLocation loc, bool forMacro) {
-        return new LLVMBackendModule(platform, loc, forMacro, this.context);
+        return new LLVMBackendModule(platform, loc, forMacro);
     }
     override void hash(Hash hash) {
         hash.adds("LLVM");
@@ -131,7 +138,9 @@ class LLVMBackendModule : BackendModule {
 
     LLVMModuleRef module_;
 
-    this(this.platform, BackendLocation loc, this.forMacro, this.context) {
+    this(this.platform, BackendLocation loc, this.forMacro) {
+        this.context = LLVMContextCreate;
+
         auto comps = split(loc.file, "/");
         auto dir = join(comps[0 .. $ - 1], "/");
         auto filename = comps[$ - 1];
@@ -158,7 +167,28 @@ class LLVMBackendModule : BackendModule {
     }
 
     void writeOutput(string file) {
-        LLVMPrintModuleToFile(this.module_, file.toStringz, null);
+        import std.string : cToString, endsWith;
+
+        if (file.endsWith(".bc")) {
+            // LLVMPrintModuleToFile(this.module_, (file ~ ".ll").toStringz, null);
+            LLVMWriteBitcodeToFile(this.module_, file.toStringz);
+            return;
+        }
+        LLVMTargetRef target;
+        char* triple = "x86_64-pc-linux-gnu";
+        char* error;
+        bool succ = LLVMGetTargetFromTriple(triple, &target, &error) == 0;
+        assert(succ);
+        auto machine = LLVMCreateTargetMachine(
+            target, triple, "generic", LLVMGetHostCPUFeatures(), LLVMCodeGenLevelNone, LLVMRelocPIC, LLVMCodeModelDefault);
+        auto datalayout = LLVMCreateTargetDataLayout(machine);
+        auto datalayoutStr = LLVMCopyStringRepOfTargetData(datalayout);
+        LLVMSetDataLayout(this.module_, datalayoutStr);
+        bool succ = LLVMTargetMachineEmitToFile(machine, this.module_, file.toStringz, LLVMObjectFile, &error) == 0;
+        if (!succ) {
+            print("compilation failed: $(cToString(error))");
+            assert(false);
+        }
     }
 
     LLVMTypeRef translate(BackendType type, bool returnType) {
@@ -313,9 +343,6 @@ class LLVMBackendModule : BackendModule {
 
 extern(C) bool neat_runtime_symbol_defined_in_main(string symbol);
 
-struct Reg { int id; }
-struct Arg { int id; }
-
 struct RegDefine
 {
     int reg;
@@ -358,6 +385,7 @@ class LLVMBackendFunction : BackendFunction {
     int regId;
     int blockId;
     string debugSubProgram;
+    string curLabel;
 
     // correct for sret, byvalue
     LLVMValueRef[] llArgs;
@@ -387,6 +415,7 @@ class LLVMBackendFunction : BackendFunction {
         }
 
         this.regId = 1;
+        this.blockId = 1;
         this.builder = LLVMCreateBuilderInContext(this.mod.context);
         this.entryBuilder = LLVMCreateBuilderInContext(this.mod.context);
 
@@ -437,6 +466,7 @@ class LLVMBackendFunction : BackendFunction {
         return "Label" ~ itoa(this.blockId);
     }
     override void setLabel(string label) {
+        curLabel = label;
         LLVMPositionBuilderAtEnd(builder, llLabel(label));
     }
     override int arg(int index) {

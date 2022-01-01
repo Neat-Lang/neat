@@ -121,17 +121,15 @@ BackgroundCompilation emitModule(
     int build(string src, string obj) {
         import std.string : join;
 
+        assert(!backendModuleLLVM);
+
         mut string exec;
         mut string[] args;
-        if (backendModuleLLVM) {
-            if (settings.optimize) { exec = "sh"; args = [".obj/llvmBuildOpt.sh", src, obj]; }
-            else { exec = "sh"; args = [".obj/llvmBuild.sh", src, obj]; }
-            assert(!settings.x86_32);
-        } else {
-            if (settings.optimize) { exec = "gcc"; args = ["-c", "-fpic", "-O3", src, "-o", obj]; }
-            else { exec = "gcc"; args = ["-c", "-fpic", src, "-o", obj]; }
-            if (settings.x86_32) args ~= "-m32";
-        }
+
+        if (settings.optimize) { exec = "gcc"; args = ["-c", "-fpic", "-O3", src, "-o", obj]; }
+        else { exec = "gcc"; args = ["-c", "-fpic", src, "-o", obj]; }
+        if (settings.x86_32) args ~= "-m32";
+
         string cmd = exec ~ " " ~ args.join(" ");
         int pid = neat_runtime_execbg(exec, args);
         print("\$ $cmd [&$pid]");
@@ -155,7 +153,7 @@ BackgroundCompilation emitModule(
 
     mut string srcFile;
     if (backendModuleLLVM) {
-        srcFile = ".obj/$(compress(removeSlashes(module_.mangle))).ll";
+        srcFile = objFile;
     } else {
         assert(!!backendModuleC);
         srcFile = ".obj/$(compress(removeSlashes(module_.mangle))).c";
@@ -176,10 +174,8 @@ BackgroundCompilation emitModule(
 
     mut int pid;
     if (backendModuleLLVM) {
-        {
-            backendModuleLLVM.writeOutput(srcFile);
-        }
-        pid = build(srcFile, objFile);
+        backendModuleLLVM.writeOutput(srcFile);
+        pid = 0;
     } else {
         assert(!!backendModuleC);
         {
@@ -604,7 +600,7 @@ class Options
 
     string[] parseArgs(string executable, string[] args) {
         (string | fail :notFound) startsWith(string haystack, string needle) {
-            if (needle.length < haystack.length && haystack[0 .. needle.length] == needle) {
+            if (needle.length <= haystack.length && haystack[0 .. needle.length] == needle) {
                 return haystack[needle.length .. $];
             }
             return :notFound;
@@ -760,7 +756,6 @@ void buildBinary(Options options, string mainFile, string execPath, Package[] pa
         print("  '" ~ pkg.name ~ "' at " ~ pkg.path ~ ": deps " ~ [join ", " "'" ~ a.name ~ "'" for a in pkg.deps]);
     }*/
     neat_runtime_system("mkdir -p .obj");
-    createBuilderScripts;
 
     auto pool = new ThreadPool(options.threads);
     auto workPool = new WorkPool(pool, options.threads);
@@ -989,28 +984,4 @@ void main(mut string[] args)
     if (!options.output.length) options.output = args[0].withoutExtension;
 
     buildBinary(options, mainFile, execPath=execPath, packages);
-}
-
-void createBuilderScripts() {
-    write(".obj/llvmBuild.sh", "#!/usr/bin/env sh
-set -e
-llc \$1 --filetype=obj --relocation-model=pic -o=\$2
-");
-    // -Oz
-    // disable -memcpyopt due to https://bugs.llvm.org/show_bug.cgi?id=48599
-    write(".obj/llvmBuildOpt.sh", "#!/usr/bin/env sh
-set -e
-# opt -O3 \$1 -o=\$1.opt.bc
-# llc -O3 --filetype=obj --relocation-model=pic \$1.opt.bc -o=\$2
-llvm-as \$1 -o=\$2
-");
-}
-
-int getLLVMMajor() {
-    import std.file : readText;
-    import std.process : system;
-
-    system("mkdir -p .obj; llvm-config --version > .obj/llvm-version");
-
-    return ".obj/llvm-version".readText.split(".")[0].atoi;
 }

@@ -3513,6 +3513,84 @@ nullable ASTSymbol parseDestroy(Parser parser, LexicalContext lexicalContext)
     return new ASTDestroy(target.notNull, loc);
 }
 
+class ASTStaticIfStatement : ASTStatement
+{
+    Loc loc;
+    ASTSymbol cond;
+    ASTStatement then;
+    ASTStatement else_;
+    this(this.loc, this.cond ,this.then, this.else_) { }
+    override StatementCompileResult compile(Context context) {
+        auto tern = staticTruthy(context, this.cond);
+
+        tern.case {
+            bool b: {
+                if (b) return this.then.compile(context);
+                else return this.else_.compile(context);
+            }
+            (:unknown): {
+                this.loc.fail("cannot statically evaluate condition: "
+                    ~ this.cond.repr);
+            }
+        }
+        assert(false);
+    }
+    override ASTSymbol quote(Quoter quoter) {
+        print("TODO quote ASTStaticIfStatement");
+        assert(false);
+    }
+}
+
+nullable ASTStaticIfStatement parseStaticIfStmt(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin;
+    parser.strip;
+    auto loc = parser.loc;
+    mut nullable ASTSymbol cond;
+    if (parser.acceptIdentifier("static") && parser.acceptIdentifier("if")) {
+        parser.commit;
+        parser.expect("(");
+        cond = parser.parseExpression(lexicalContext);
+        if (!cond) {
+            parser.fail("static if condition expected");
+        }
+        parser.expect(")");
+    } else if (parser.acceptIdentifier("version")) {
+        parser.commit;
+        parser.expect("(");
+        string versionStr = parser.parseIdentifier;
+        parser.expect(")");
+        auto versionSym = lexicalContext.compiler.astStringLiteral(versionStr, __HERE__);
+        cond = new ASTTrait(__HERE__, "versionSet", [versionSym]);
+    } else {
+        parser.revert;
+        return null;
+    }
+
+    mut ASTStatement[] then, else_;
+    if (parser.accept("{")) {
+        while (!parser.accept("}")) {
+            then ~= parser.parseStatement(lexicalContext);
+        }
+    } else {
+        then ~= parser.parseStatement(lexicalContext);
+    }
+    if (parser.accept("else")) {
+        if (parser.accept("{")) {
+            while (!parser.accept("}")) {
+                else_ ~= parser.parseStatement(lexicalContext);
+            }
+        } else {
+            else_ ~= parser.parseStatement(lexicalContext);
+        }
+    }
+    return new ASTStaticIfStatement(
+        loc,
+        cond.notNull,
+        new ASTSequenceStatement(then, __HERE__),
+        new ASTSequenceStatement(else_, __HERE__));
+}
+
 nullable ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalContext) {
     auto loc = parser.loc;
     if (auto importStmt = parseImportStatement(parser, lexicalContext)) {
@@ -3569,6 +3647,8 @@ ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
     if (ASTStatement stmt = parseWithStatement(parser, lexicalContext))
         return stmt;
     if (ASTStatement stmt = parseEitherCaseStmt(parser, lexicalContext))
+        return stmt;
+    if (ASTStatement stmt = parseStaticIfStmt(parser, lexicalContext))
         return stmt;
     {
         auto args = new ParseStatementArgs(parser, lexicalContext);

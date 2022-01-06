@@ -541,6 +541,8 @@ at_revision 'f069670f9a7c74372d59d490540493aa2f23842f' 'rebuild neat' 'build/nea
 at_revision 'c0b47f306e732262ccc45e143964ae7a8f3dabed' 'rebuild neat' 'build/neat'
 # fix: unittest mangling, template mangling, class same()
 at_revision 'e7c08a6eb9a787b23ebe5c18c6ce47e3572990a6' 'rebuild neat' 'build/neat'
+# static if, version() in functions; LLVM backend
+at_revision '8822b6189e84842002ba0428692be07a7dd01915' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

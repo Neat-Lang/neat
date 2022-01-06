@@ -16,7 +16,8 @@ then
     FLAGS=""
 fi
 
-FLAGS="${FLAGS} -I$(llvm-config --includedir) -L-L$(llvm-config --libdir)"
+FLAGS="${FLAGS} -I$(llvm-config --includedir) -L-L$(llvm-config --libdir) \
+    -version=LLVMBackend -macro-version=LLVMBackend"
 
 function checksum {
     # approximate hash: outright remove all 16-byte constants

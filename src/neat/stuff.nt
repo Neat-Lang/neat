@@ -87,62 +87,60 @@ nullable ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
             current = new ASTPointer(current, loc);
             continue;
         }
-        parser.begin;
-        string identifier = parser.parseIdentifier;
-        if (identifier == "function" || identifier == "delegate")
-        {
-            parser.expect("(");
-            mut ASTSymbol[] args;
-            while (!parser.accept(")"))
+        with (parser.transaction) {
+            string identifier = parser.parseIdentifier;
+            if (identifier == "function" || identifier == "delegate")
             {
-                if (args.length)
+                parser.expect("(");
+                mut ASTSymbol[] args;
+                while (!parser.accept(")"))
                 {
-                    if (!parser.accept(","))
+                    if (args.length)
                     {
-                        parser.fail("',' or ')' expected");
+                        if (!parser.accept(","))
+                        {
+                            parser.fail("',' or ')' expected");
+                        }
                     }
+                    ASTSymbol argType = parser.parseType(lexicalContext).notNull;
+
+                    args ~= argType;
                 }
-                ASTSymbol argType = parser.parseType(lexicalContext).notNull;
-
-                args ~= argType;
-            }
-            parser.commit;
-            if (identifier == "function")
-                current = new ASTFunctionPointer(current, args, loc);
-            else
-                current = new ASTNestedFunctionPointer(current, args, loc);
-            continue;
-        }
-        parser.revert;
-        parser.begin;
-        if (parser.accept("[")) {
-            if (parser.accept("]")) {
-                parser.commit;
-
-                current = new ASTArray(current, parser.loc);
+                commit;
+                if (identifier == "function")
+                    current = new ASTFunctionPointer(current, args, loc);
+                else
+                    current = new ASTNestedFunctionPointer(current, args, loc);
                 continue;
             }
-            // hashmap? might be assignment intro
-            auto keyType = parser.parseType(lexicalContext);
-            if (!keyType || !parser.accept("]")) {
-                parser.revert;
-                return null;
+        }
+        with (parser.transaction) {
+            if (parser.accept("[")) {
+                if (parser.accept("]")) {
+                    commit;
+
+                    current = new ASTArray(current, parser.loc);
+                    continue;
+                }
+                // hashmap? might be assignment intro
+                auto keyType = parser.parseType(lexicalContext);
+                if (!keyType || !parser.accept("]")) {
+                    return null;
+                }
+                commit;
+                current = new ASTHashMap(key=keyType.notNull, value=current, parser.loc);
+                continue;
             }
-            parser.commit;
-            current = new ASTHashMap(key=keyType.notNull, value=current, parser.loc);
-            continue;
+            if (parser.accept("[") && parser.accept("]"))
+            {
+            }
         }
-        if (parser.accept("[") && parser.accept("]"))
-        {
-        }
-        parser.revert;
         // what about templates that don't contain types? instead of duplicating this,
         // there should be a function to parse an ast symbol and that symbol should
         // be able to compile to a Type (Symbol).
         // But for now, templates only have types.
         // (this will also be needed to have things like Foo.Bar for nested types.)
-        {
-            parser.begin;
+        with (parser.transaction) {
             auto instanceLoc = parser.loc;
             // TODO better way to exclude all the negated operators
             if (parser.accept("!") && !parser.accept("=") && !acceptIdentifier(parser, "is"))
@@ -166,11 +164,10 @@ nullable ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
                 } else {
                     getTemplateArg;
                 }
-                parser.commit;
+                commit;
                 current = new ASTTemplateInstance(current, templateArgs, instanceLoc);
                 continue;
             }
-            parser.revert;
         }
         return current;
     }
@@ -183,11 +180,10 @@ nullable ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
  * - (int, int | int): (int and int) or int
  */
 nullable ASTSymbol parseTupleType(Parser parser, LexicalContext lexicalContext)
+with (parser.transaction)
 {
-    parser.begin;
     auto loc = parser.loc;
     if (!parser.accept("(")) {
-        parser.revert;
         return null;
     }
     mut ASTEitherDeclEntry[] declEntries;
@@ -217,7 +213,6 @@ nullable ASTSymbol parseTupleType(Parser parser, LexicalContext lexicalContext)
             else {
                 // be a bit lenient for (bla bla)
                 if (members.length == 1) {
-                    parser.revert;
                     return null;
                 }
                 loc.assert2s(false, "tuple: ',' or '|' expected");
@@ -232,7 +227,6 @@ nullable ASTSymbol parseTupleType(Parser parser, LexicalContext lexicalContext)
         if (!type) {
             // (bla bla) still
             if (members.length <= 1) {
-                parser.revert;
                 return null;
             }
             loc.assert2s(false, "tuple: type expected");
@@ -241,7 +235,7 @@ nullable ASTSymbol parseTupleType(Parser parser, LexicalContext lexicalContext)
         members ~= (name, loc, type.notNull);
     }
     flush;
-    parser.commit;
+    commit;
     if (declEntries.length == 1) return declEntries[0].symbol;
     return new ASTEitherDecl(declEntries);
 }
@@ -272,104 +266,65 @@ nullable ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
         return symbol;
 
     auto loc = parser.loc;
-    parser.begin;
+    with (parser.transaction) {
+        if (parser.acceptIdentifier("Vector") && parser.accept("(")) {
+            auto element = lexicalContext.compiler.parseType(parser, lexicalContext);
+            parser.assert_(!!element, "element type expected");
+            parser.expect(",");
+            auto count = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+            parser.assert_(count && count.instanceOf(ASTIntLiteral), "integer expected");
+            parser.expect(")");
+            commit;
+            return new ASTVectorType(loc, element.notNull, count.instanceOf(ASTIntLiteral).value);
+        }
 
-    if (parser.acceptIdentifier("Vector") && parser.accept("(")) {
-        auto element = lexicalContext.compiler.parseType(parser, lexicalContext);
-        parser.assert_(!!element, "element type expected");
-        parser.expect(",");
-        auto count = lexicalContext.compiler.parseExpression(parser, lexicalContext);
-        parser.assert_(count && count.instanceOf(ASTIntLiteral), "integer expected");
-        parser.expect(")");
-        parser.commit;
-        return new ASTVectorType(loc, element.notNull, count.instanceOf(ASTIntLiteral).value);
-    }
+        if (parser.accept("typeof"))
+        {
+            parser.expect("(");
+            auto expr = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+            if (!expr) parser.fail("expression expected");
+            parser.expect(")");
+            commit;
+            return new ASTTypeof(expr.notNull, loc);
+        }
 
-    if (parser.accept("typeof"))
-    {
-        parser.expect("(");
-        auto expr = lexicalContext.compiler.parseExpression(parser, lexicalContext);
-        if (!expr) parser.fail("expression expected");
-        parser.expect(")");
-        parser.commit;
-        return new ASTTypeof(expr.notNull, loc);
-    }
-
-    {
         string symbolIdentifier = parser.parseIdentifier2(":", allowKeywords=false);
         if (symbolIdentifier.startsWith(":")) {
-            parser.commit;
+            commit;
             return new ASTSymbolIdentifier(symbolIdentifier[1 .. $]);
         }
-        parser.revert;
-        parser.begin;
     }
+    with (parser.transaction) {
+        string identifier = parser.parseIdentifier;
 
-    string identifier = parser.parseIdentifier;
+        if (!identifier.length)
+        {
+            return null;
+        }
+        commit;
 
-    if (!identifier.length)
-    {
-        parser.revert;
-        return null;
+        auto loc = __HERE__;
+        if (identifier == "long")
+            return once new ASTBasicType("long", loc);
+        if (identifier == "int")
+            return once new ASTBasicType("int", loc);
+        if (identifier == "short")
+            return once new ASTBasicType("short", loc);
+        if (identifier == "char")
+            return once new ASTBasicType("char", loc);
+        if (identifier == "ubyte")
+            return once new ASTBasicType("ubyte", loc);
+        if (identifier == "bool")
+            return once new ASTBasicType("bool", loc);
+        if (identifier == "void")
+            return once new ASTBasicType("void", loc);
+        if (identifier == "float")
+            return once new ASTBasicType("float", loc);
+        if (identifier == "double")
+            return once new ASTBasicType("double", loc);
+
+        return lexicalContext.compiler.astIdentifier(identifier, parser.loc);
     }
-
-    auto loc = __HERE__;
-    if (identifier == "long")
-    {
-        parser.commit;
-        return once new ASTBasicType("long", loc);
-    }
-
-    if (identifier == "int")
-    {
-        parser.commit;
-        return once new ASTBasicType("int", loc);
-    }
-
-    if (identifier == "short")
-    {
-        parser.commit;
-        return once new ASTBasicType("short", loc);
-    }
-
-    if (identifier == "char")
-    {
-        parser.commit;
-        return once new ASTBasicType("char", loc);
-    }
-
-    if (identifier == "ubyte")
-    {
-        parser.commit;
-        return once new ASTBasicType("ubyte", loc);
-    }
-
-    if (identifier == "bool")
-    {
-        parser.commit;
-        return once new ASTBasicType("bool", loc);
-    }
-
-    if (identifier == "void")
-    {
-        parser.commit;
-        return once new ASTBasicType("void", loc);
-    }
-
-    if (identifier == "float")
-    {
-        parser.commit;
-        return once new ASTBasicType("float", loc);
-    }
-
-    if (identifier == "double")
-    {
-        parser.commit;
-        return once new ASTBasicType("double", loc);
-    }
-
-    parser.commit;
-    return lexicalContext.compiler.astIdentifier(identifier, parser.loc);
 }
 
 class FuncPtrCall : Expression
@@ -838,12 +793,13 @@ ASTArgument[] parseArgumentList(Parser parser, LexicalContext lexicalContext)
         if (parser.accept(")")) break;
 
         mut string name;
-        parser.begin;
-        string n = parser.parseIdentifier;
-        if (n.length > 0 && parser.acceptButNot("=", "==")) {
-            name = n;
-            parser.commit;
-        } else parser.revert;
+        with (parser.transaction) {
+            string n = parser.parseIdentifier;
+            if (n.length > 0 && parser.acceptButNot("=", "==")) {
+                commit;
+                name = n;
+            }
+        }
         ASTSymbol arg = parser.parseExpression(lexicalContext).notNull;
         args ~= ASTArgument(arg, name);
     }
@@ -851,15 +807,12 @@ ASTArgument[] parseArgumentList(Parser parser, LexicalContext lexicalContext)
 }
 
 nullable ASTCall parseCall(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
+with (parser.transaction)
 {
-    parser.begin;
     if (!parser.accept("("))
-    {
-        parser.revert;
         return null;
-    }
     mut ASTArgument[] args = parser.parseArgumentList(lexicalContext);
-    parser.commit;
+    commit;
     return new ASTCall(base, args, parser.loc);
 }
 
@@ -974,19 +927,16 @@ class ASTArraySlice : ASTSymbol
 }
 
 nullable ASTSymbol parseIndex(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
+with (parser.transaction)
 {
     auto loc = parser.loc;
-    parser.begin;
     if (!parser.accept("["))
-    {
-        parser.revert;
         return null;
-    }
     nullable ASTSymbol index = parseExpression(parser, lexicalContext);
     loc.assert2s(!!index, "index expected");
     auto index = index.notNull;
     parser.expect("]");
-    parser.commit;
+    commit;
     if (auto iota = index.instanceOf(ASTIota)) {
         return new ASTArraySlice(base, iota.from, iota.to, loc);
     }

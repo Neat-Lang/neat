@@ -548,6 +548,8 @@ at_revision '75c9ce8f18fee2b30e99b6d907b69dbe891a8652' 'rebuild neat' 'build/nea
 # allow quoting var extract decls, allow eithers to be strict subtypes
 # case() fix, case(return) fix
 at_revision '7ea3509178928aecc1c9629a4318849ca56fe3b0' 'rebuild neat' 'build/neat'
+# begin explicit error return transition
+at_revision 'aac87f968c52e6fe137b817b24107ccfa760f3f5' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

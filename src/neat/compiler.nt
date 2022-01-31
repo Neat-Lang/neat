@@ -3,6 +3,7 @@ module neat.compiler;
 macro import neat.macros.assert;
 macro import neat.macros.listcomprehension;
 macro import neat.macros.once;
+macro import neat.macros.retfail;
 
 import backend.base;
 import neat.array;
@@ -45,27 +46,27 @@ class CompilerImpl : CompilerBase
     }
 
     // parser
-    override nullable ASTSymbol parseExpression(Parser parser, LexicalContext lexicalContext)
+    override (nullable ASTSymbol | fail Error) parseExpression(Parser parser, LexicalContext lexicalContext)
     {
         return .parseExpression(parser, lexicalContext);
     }
 
-    override nullable ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
+    override (nullable ASTSymbol | fail Error) parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
     {
         return .parseExpressionLeaf(parser, lexicalContext);
     }
 
-    override ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
+    override (ASTStatement | fail Error) parseStatement(Parser parser, LexicalContext lexicalContext)
     {
         return .parseStatement(parser, lexicalContext);
     }
 
-    override nullable ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalContext)
+    override (nullable ASTDeclaration | fail Error) parseDeclaration(Parser parser, LexicalContext lexicalContext)
     {
         return .parseDeclaration(parser, lexicalContext);
     }
 
-    override nullable ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
+    override (nullable ASTSymbol | fail Error) parseType(Parser parser, LexicalContext lexicalContext)
     {
         return .parseType(parser, lexicalContext);
     }
@@ -273,7 +274,10 @@ class CompilerImpl : CompilerBase
 
     override ASTModuleBase resolveImport(string pak, ASTImportStatement import_, Loc loc)
     {
-        return .resolveImport(this, pak, import_, this.helper, this.modParseConfig);
+        .resolveImport(this, pak, import_, this.helper, this.modParseConfig).case {
+            ASTModule mod: return mod;
+            Error error: assert(false);
+        }
     }
 
     // expressions and statements
@@ -294,13 +298,13 @@ class CompilerImpl : CompilerBase
         return new StackFrame(type);
     }
 
-    override nullable Expression plainCall(Context context, Symbol sym, Expression[] args, Loc loc,
+    override (nullable Expression | fail Error) plainCall(Context context, Symbol sym, Expression[] args, Loc loc,
         bool isImplCall)
     {
         return .plainCall(context, sym, args, loc, isImplCall);
     }
 
-    override nullable Expression call(Context context, ASTSymbol target, ASTArgument[] args, Loc loc,
+    override (nullable Expression | fail Error) call(Context context, ASTSymbol target, ASTArgument[] args, Loc loc,
         bool isImplCall)
     {
         if (isImplCall && !target.instanceOf(ASTSymbolHelper).symbol.previewCanCallImplicit)
@@ -314,7 +318,7 @@ class CompilerImpl : CompilerBase
         assert(false);
     }
 
-    override Expression binaryOp(string op, Context context, Expression left, Expression right, Loc loc)
+    override (Expression | fail Error) binaryOp(string op, Context context, Expression left, Expression right, Loc loc)
     {
         if (op == "~")
         {
@@ -348,7 +352,8 @@ class CompilerImpl : CompilerBase
         return new WrapExpression(before, value, after);
     }
 
-    override Expression consume(Context context, Expression expr, Expression delegate(Expression) dg)
+    override (Expression | fail Error) consume(
+        Context context, Expression expr, (Expression | fail Error) delegate(Expression) dg)
     {
         if (expr.info.ownership != Ownership.gifted)
         {
@@ -358,7 +363,7 @@ class CompilerImpl : CompilerBase
         auto temp = new PairedTemporary(type, Ownership.owned);
         auto assign = new InitializeTemporaryStatement(temp, expr);
         auto cleanup = type.endLifetime(context, temp);
-        auto result = dg(temp);
+        auto result = retfail dg(temp);
         return wrap(assign, result, cleanup);
     }
 
@@ -376,14 +381,16 @@ class CompilerImpl : CompilerBase
         return sequence(assign, sequence(result, cleanup));
     }
 
-    override nullable Expression consumeTemporary(
+    override (nullable Expression | fail Error) consumeTemporary(
         Context context, bool allowRefReturn, bool mayUnwind, Expression expr,
-        nullable Expression delegate(Reference) dg)
+        (nullable Expression | fail Error) delegate(Reference) dg)
     {
         auto type = expr.type;
         // "owned" by consumeTemporary()
         auto temp = new PairedTemporary(type, Ownership.owned);
+        // TODO this is trash, remove auto picking null
         auto result <- dg(temp);
+        auto result <- result;
 
         mut bool doCleanup;
         if (expr.info.ownership == Ownership.gifted) doCleanup = true;
@@ -392,7 +399,7 @@ class CompilerImpl : CompilerBase
         // if `dg()` may not unwind, it doesn't matter that expr is borrowed
         // since we never hit the unwind cleanup on our "owned" temp.
         if (mayUnwind && expr.info.ownership == Ownership.borrowed) {
-            auto copyInto = type.copyInto(context, temp, expr);
+            auto copyInto = retfail type.copyInto(context, temp, expr);
             if (copyInto) {
                 assign = sequence(new UninitializeTemporaryStatement(temp), copyInto);
                 doCleanup = true;
@@ -407,8 +414,8 @@ class CompilerImpl : CompilerBase
         return wrap(assign, result, cleanup);
     }
 
-    override nullable Statement consumeTemporaryStmt(Context context, Expression expr,
-        nullable Statement delegate(Reference) dg)
+    override (nullable Statement | fail Error) consumeTemporaryStmt(Context context, Expression expr,
+        (nullable Statement | fail Error) delegate(Reference) dg)
     {
         auto type = expr.type;
         /**
@@ -422,7 +429,9 @@ class CompilerImpl : CompilerBase
             tempOwnership = Ownership.borrowed;
 
         auto temp = new PairedTemporary(type, tempOwnership);
+        // trash!
         auto result <- dg(temp);
+        auto result <- result;
 
         Statement assign = new InitializeTemporaryStatement(temp, expr);
         mut nullable Statement cleanup;
@@ -432,21 +441,22 @@ class CompilerImpl : CompilerBase
         return .sequence(.sequence(assign, result), cleanup);
     }
 
-    override nullable Symbol accessMember(Context context, Symbol base, string member, Loc loc, bool allowUndefined)
+    override (nullable Symbol | fail Error) accessMember(Context context, Symbol base, string member, Loc loc, bool allowUndefined)
     {
         return .accessMember(context, base, member, loc, allowUndefined);
     }
 
-    override nullable Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc loc, bool allowUndefined)
+    override (nullable Symbol | fail Error) accessMemberWithLifetime(
+        Context context, Symbol base, string member, Loc loc, bool allowUndefined)
     {
-        return .accessMemberWithLifetime(context, base, member, loc, allowUndefined);
+        return retfail .accessMemberWithLifetime(context, base, member, loc, allowUndefined);
     }
 
     override Reference structMemberReference(Reference base, int index) {
         return new StructMemberReference(base, index);
     }
 
-    override nullable Symbol lookup(Context context, Loc loc, string name)
+    override (nullable Symbol | fail Error) lookup(Context context, Loc loc, string name)
     {
         auto frame = new ReferenceExpression(new StackFrame(new Void));
 
@@ -503,7 +513,7 @@ class CompilerImpl : CompilerBase
         return new ExprStatement(test);
     }
 
-    override Statement unwindScope(Context context, Namespace target, Statement next)
+    override (Statement | fail Error) unwindScope(Context context, Namespace target, Statement next)
     {
         return .unwindScope(context, target, next);
     }
@@ -518,13 +528,13 @@ class CompilerImpl : CompilerBase
         return new VariableDeclaration(parent, name, type, info, hidden);
     }
 
-    override Statement move(Context context, Reference target, Expression source)
+    override (Statement | fail Error) move(Context context, Reference target, Expression source)
     {
         return .move(context, target, source);
     }
 
-    override nullable Expression exprWithScratchspace(
-        Type type, bool temporary, nullable Statement delegate(Reference) callback)
+    override (nullable Expression | fail Error) exprWithScratchspace(
+        Type type, bool temporary, (nullable Statement | fail Error) delegate(Reference) callback)
     {
         mut uninitialized Ownership tempOwnership;
         if (temporary) tempOwnership = Ownership.gifted;
@@ -532,11 +542,14 @@ class CompilerImpl : CompilerBase
 
         auto temp = new PairedTemporary(type, tempOwnership);
         auto initialize = new UninitializeTemporaryStatement(temp);
+        // trash!!
         auto stmt <- callback(temp);
+        auto stmt <- stmt;
         return wrap(sequence(initialize, stmt), temp, null);
     }
 
-    override nullable Statement stmtWithTemporary(Expression value, nullable Statement delegate(Reference) callback)
+    override (nullable Statement | fail Error) stmtWithTemporary(
+        Expression value, (nullable Statement | fail Error) delegate(Reference) callback)
     {
         mut uninitialized Ownership tempOwnership;
         if (value.info.ownership == Ownership.gifted) tempOwnership = Ownership.gifted;
@@ -544,11 +557,14 @@ class CompilerImpl : CompilerBase
 
         auto temp = new PairedTemporary(value.type, tempOwnership);
         auto start = new InitializeTemporaryStatement(temp, value);
+        // trash!!!
         auto stmt <- callback(temp);
+        auto stmt <- stmt;
         return new SequenceStatement([start, stmt]);
     }
 
-    override nullable Expression exprWithTemporary(Expression value, nullable Expression delegate(Reference) callback)
+    override (nullable Expression | fail Error) exprWithTemporary(
+        Expression value, (nullable Expression | fail Error) delegate(Reference) callback)
     {
         // TODO: the way gifted works here is almost certainly wrong,
         // cause the Reference can be read multiple times - that's
@@ -559,39 +575,46 @@ class CompilerImpl : CompilerBase
 
         auto temp = new PairedTemporary(value.type, tempOwnership);
         auto start = new InitializeTemporaryStatement(temp, value);
+        // garbage!
         auto expr <- callback(temp);
+        auto expr <- expr;
         return new StatementExpression(start, expr, false);
     }
 
-    override nullable Statement stmtWithTemporaryExpr(Expression value, nullable Statement delegate(Expression) callback)
+    override (nullable Statement | fail Error) stmtWithTemporaryExpr(
+        Expression value, (nullable Statement | fail Error) delegate(Expression) callback)
     {
         // TODO: does endLifetime *really* need to take a Reference?
         // cause that's the only reason we need to stmtWithTemporary here.
         if (value.info.ownership == Ownership.gifted) {
-            nullable Statement do_(Reference ref_) {
+            (nullable Statement | fail Error) do_(Reference ref_) {
                 return callback(ref_);
             }
             return stmtWithTemporary(value, &do_);
         }
         auto temp = new PairedTemporaryExpr(value.type, value.info.ownership);
         auto start = new InitializeTemporaryExprStatement(temp, value);
+        // utterly disgusting!!
         auto stmt <- callback(temp);
+        auto stmt <- stmt;
         return new SequenceStatement([start, stmt]);
     }
 
-    override nullable Expression exprWithTemporaryExpr(
-        Expression value, nullable Expression delegate(Expression) callback)
+    override (nullable Expression | fail Error) exprWithTemporaryExpr(
+        Expression value, (nullable Expression | fail Error) delegate(Expression) callback)
     {
         // see above
         if (value.info.ownership == Ownership.gifted) {
-            nullable Expression do_(Reference ref_) {
+            (nullable Expression | fail Error) do_(Reference ref_) {
                 return callback(ref_);
             }
             return exprWithTemporary(value, &do_);
         }
         auto temp = new PairedTemporaryExpr(value.type, value.info.ownership);
         auto start = new InitializeTemporaryExprStatement(temp, value);
+        // running out of invective!!
         auto expr <- callback(temp);
+        auto expr <- expr;
         return new StatementExpression(start, expr, false);
     }
 
@@ -605,13 +628,13 @@ class CompilerImpl : CompilerBase
         return new StatementExpression(statement, expression, false);
     }
 
-    override void addDefaultImports(Context context, ModuleBase module_)
+    override (void | fail Error) addDefaultImports(Context context, ModuleBase module_)
     {
-        Module compile(ASTModule astMod) {
+        (Module | fail Error) compile(ASTModule astMod) {
             auto context = makeContext(this, context.platform, null, astMod.macroState);
             return .compileModule(context, astMod, addDefaultImports=false);
         }
-        auto defaultMods = [compile(mod) for mod in this.defaultImports];
+        auto defaultMods = [retfail compile(mod) for mod in this.defaultImports];
         [module_.addImport(mod, public_=false, []) for mod in defaultMods];
     }
 
@@ -663,7 +686,10 @@ class CompilerImpl : CompilerBase
 
         fun.parent = rtMod;
         rtMod.track(fun);
-        addDefaultImports(context, rtMod);
+        addDefaultImports(context, rtMod).case {
+            void: {}
+            Error err: assert(false);
+        }
         auto usingMod = findParent!Module(context.namespace);
         usingMod.addImport(rtMod, public_=false, []);
 
@@ -671,7 +697,10 @@ class CompilerImpl : CompilerBase
             cachedRuntimeFunctions ~= CachedRuntimeFunction(fun, rtMod, context.platform.ident);
         }
         // run AFTER module was added to cache, to break dependency loop for recursive types
-        rtMod.compile(context);
+        rtMod.compile(context).case {
+            void: {}
+            Error err: assert(false);
+        }
 
         return fun;
     }

@@ -1,0 +1,112 @@
+module neat.macros.retfail;
+
+macro import neat.macros.quasiquoting;
+import package(compiler).neat.base;
+import package(compiler).neat.parser;
+import package(compiler).neat.parser_base;
+
+class LocStackExpr : ASTSymbol
+{
+    ASTSymbol next;
+
+    Loc loc;
+
+    this(this.next, this.loc) { }
+
+    version (generation89) {
+        override (Symbol | fail Error) compile(Context context) {
+            context.pushErrorLoc(this.loc);
+            auto ret = next.compile(context);
+            context.popErrorLoc;
+            return ret;
+        }
+    } else {
+        override Symbol compile(Context context) {
+            context.pushErrorLoc(this.loc);
+            auto ret = next.compile(context);
+            context.popErrorLoc;
+            return ret;
+        }
+    }
+}
+
+/**
+ * if (ASTStatement stmt = retfail parseReturn(parser, lexicalContext))
+ *     return stmt;
+ * if (ASTStatement stmt = parseReturn(parser, lexicalContext).retfail)
+ */
+class ParseReturnFail : Macro
+{
+    this() { }
+    override void apply(MacroArgs args) {
+        if (auto args = args.instanceOf(ParseExpressionBaseArgs)) {
+            args.symbol = this.parseExpression(args.parser, args.lexicalContext);
+        }
+        if (auto args = args.instanceOf(ParsePropertyArgs)) {
+            args.result = this.parseProperty(args.parser, args.lexicalContext, args.left);
+        }
+    }
+
+    version (generation89) {
+        (nullable ASTSymbol | fail Error) parseExpression(Parser parser, LexicalContext context)
+        {
+            auto loc = parser.loc;
+            if (!parser.acceptIdentifier("retfail"))
+                return null;
+            auto next <- context.compiler.parseExpressionLeaf(parser, context);
+            parser.assert_(!!next, "retfail expects expression");
+            auto next = next.notNull;
+            return new LocStackExpr(
+                context.compiler.$expr ({ auto val <- $next; val; }),
+                loc);
+        }
+
+        (nullable ASTSymbol | fail Error) parseProperty(Parser parser, LexicalContext context, ASTSymbol left)
+        {
+            auto loc = parser.loc;
+            parser.begin;
+            if (!parser.accept(".") || !parser.acceptIdentifier("retfail")) {
+                parser.revert;
+                return null;
+            }
+            parser.commit;
+            return new LocStackExpr(
+                context.compiler.$expr ({ auto val <- $left; val; }),
+                loc);
+        }
+    } else {
+        nullable ASTSymbol parseExpression(Parser parser, LexicalContext context)
+        {
+            auto loc = parser.loc;
+            if (!parser.acceptIdentifier("retfail"))
+                return null;
+            auto next = context.compiler.parseExpressionLeaf(parser, context);
+            parser.assert_(!!next, "retfail expects expression");
+            auto next = next.notNull;
+            return new LocStackExpr(
+                context.compiler.$expr ({ auto val <- $next; val; }),
+                loc);
+        }
+
+        nullable ASTSymbol parseProperty(Parser parser, LexicalContext context, ASTSymbol left)
+        {
+            auto loc = parser.loc;
+            parser.begin;
+            if (!parser.accept(".") || !parser.acceptIdentifier("retfail")) {
+                parser.revert;
+                return null;
+            }
+            parser.commit;
+            return new LocStackExpr(
+                context.compiler.$expr ({ auto val <- $left; val; }),
+                loc);
+        }
+    }
+}
+
+void returnFailMacro(MacroState macroState)
+{
+    macroState.addMacro(new ParseReturnFail);
+}
+
+macro(returnFailMacro);

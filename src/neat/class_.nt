@@ -3,6 +3,7 @@ module neat.class_;
 macro import neat.macros.listcomprehension;
 macro import neat.macros.once;
 macro import neat.macros.quasiquoting;
+macro import neat.macros.retfail;
 
 import backend.base;
 import helpers;
@@ -71,12 +72,12 @@ class ClassNamespace : Namespace
 
     this(this.parent, this.class_) { this.isContextScope = true; }
 
-    override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression thisPtr)
+    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc, nullable Expression thisPtr)
     {
         if (auto thisPtr = thisPtr) {
             auto thisPtr = new PointerCast(this.class_, thisPtr);
 
-            if (auto result = context.compiler.accessMemberWithLifetime(
+            if (auto result = retfail context.compiler.accessMemberWithLifetime(
                     context, thisPtr, name, loc, true))
                 return result;
         }
@@ -126,6 +127,8 @@ class Class
 
     string vtableSymbol;
 
+    (void | fail Error) result;
+
     string mangledName;
 
     Hash cachedHash;
@@ -162,11 +165,11 @@ class Class
             this.cachedHash.applyHash(this.superClass.cachedHash);
     }
 
-    void resolve(Context context)
+    (void | fail Error) resolve(Context context)
     {
         // TODO compilation stage enum
-        if (this.vtableSymbol != "") return;
-        this.decl.compile2(context, this);
+        if (this.vtableSymbol != "") return this.result;
+        this.result = this.decl.compile2(context, this);
     }
 
     void initDataStruct(Context context)
@@ -521,12 +524,15 @@ class ClassType : Type
 
     override nullable Expression truthy(Context context, Expression value, Loc loc)
     {
-        Expression do_(Expression value) {
+        (Expression | fail Error) do_(Expression value) {
             Type voidp = once new Pointer(new Void);
 
             return .truthy(context, new PointerCast(voidp, value), loc);
         }
-        return context.compiler.consume(context, value, &do_);
+        context.compiler.consume(context, value, &do_).case {
+            Expression expr: return expr;
+            Error err: assert(false);
+        }
     }
 
     override Protection protectionAt(Namespace namespace)
@@ -543,7 +549,7 @@ class ClassType : Type
         return Protection.public_;
     }
 
-    override nullable Symbol accessMember(
+    override (nullable Symbol | fail Error) accessMember(
         Loc loc, Context context, nullable Expression baseExpr, string member, Protection protection)
     {
         bool allowed(Protection symbol) {
@@ -630,10 +636,10 @@ class ClassType : Type
         hash.applyHash(this.class_.cachedHash);
     }
 
-    override nullable Statement copyInto(Context context, Reference target, Expression source)
+    override (nullable Statement | fail Error) copyInto(Context context, Reference target, Expression source)
     {
         mut Context context = context;
-        nullable Statement do_(Expression source) {
+        (nullable Statement | fail Error) do_(Expression source) {
             auto sizeT = context.nativeWordType;
             auto refCountIncFun = once new FunctionDeclaration(
                 "neat_runtime_refcount_inc", new Void, [
@@ -654,7 +660,7 @@ class ClassType : Type
                 neat_runtime_refcount_inc(inc_name, &(cast(size_t*) this)[1]);
             };
             auto assign = context.compiler.assignStatement(target, source);
-            return context.compiler.sequence(incref.compile(context).statement, assign);
+            return context.compiler.sequence((retfail incref.compile(context)).statement, assign);
         }
         return context.compiler.stmtWithTemporaryExpr(source, &do_);
     }
@@ -697,10 +703,14 @@ class ClassType : Type
                     free(this);
                 }
             };
-        return context.compiler.sequence(initTemp, stmt.compile(context).statement);
+        stmt.compile(context).case {
+            StatementCompileResult res:
+                return context.compiler.sequence(initTemp, res.statement);
+            Error err: assert(false);
+        }
     }
 
-    override nullable Expression binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
+    override (nullable Expression | fail Error) binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
     {
         if (op == "==") {
             mut auto rhs = rhs;
@@ -747,6 +757,8 @@ class Intf
     // TODO eventually string name will go in here for .classinfo.name
     string classInfoSymbol;
 
+    (void | fail Error) result;
+
     string mangledName;
 
     PolyHashState mangledHash;
@@ -771,11 +783,11 @@ class Intf
         return recurse(this);
     }
 
-    void resolve(Context context)
+    (void | fail Error) resolve(Context context)
     {
         // TODO compilation stage enum
-        if (this.classInfoSymbol != "") return;
-        this.decl.compile2(context, this);
+        if (this.classInfoSymbol != "") return result;
+        this.result = this.decl.compile2(context, this);
     }
 
     Struct intfVtableStructCache;
@@ -907,15 +919,18 @@ class IntfType : Type
 
     override nullable Expression truthy(Context context, Expression value, Loc loc)
     {
-        Expression do_(Expression value) {
+        (Expression | fail Error) do_(Expression value) {
             Type voidp = once new Pointer(new Void);
 
             return .truthy(context, new PointerCast(voidp, value), loc);
         }
-        return context.compiler.consume(context, value, &do_);
+        context.compiler.consume(context, value, &do_).case {
+            Expression expr: return expr;
+            Error err: assert(false);
+        }
     }
 
-    override nullable Symbol accessMember(
+    override (nullable Symbol | fail Error) accessMember(
         Loc loc, Context context, nullable Expression baseExpr, string member, Protection _)
     {
         bool nameMatches(typeof(this.intf.vtable[0]) entry) {
@@ -1001,10 +1016,10 @@ class IntfType : Type
         hash.apply(intf.mangledHash.add, intf.mangledHash.mult);
     }
 
-    override nullable Statement copyInto(Context context, Reference target, Expression source)
+    override (nullable Statement | fail Error) copyInto(Context context, Reference target, Expression source)
     {
         mut Context context = context;
-        nullable Statement do_(Expression source) {
+        (nullable Statement | fail Error) do_(Expression source) {
             auto sizeT = context.nativeWordType;
             auto refCountIncFun = once new FunctionDeclaration(
                 "neat_runtime_refcount_inc", new Void, [
@@ -1027,7 +1042,7 @@ class IntfType : Type
                 neat_runtime_refcount_inc(inc_name, &(cast(size_t*) object)[1]);
             };
             auto assign = context.compiler.assignStatement(target, source);
-            return context.compiler.sequence(incref.compile(context).statement, assign);
+            return context.compiler.sequence((retfail incref.compile(context)).statement, assign);
         }
         return context.compiler.stmtWithTemporaryExpr(source, &do_);
     }
@@ -1074,10 +1089,14 @@ class IntfType : Type
                     free(object);
                 }
             };
-        return context.compiler.sequence(initTemp, stmt.compile(context).statement);
+        stmt.compile(context).case {
+            StatementCompileResult res:
+                return context.compiler.sequence(initTemp, res.statement);
+            Error err: assert(false);
+        }
     }
 
-    override nullable Expression binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
+    override (nullable Expression | fail Error) binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
     {
         if (op == "==") {
             mut auto rhs = rhs;
@@ -1184,7 +1203,10 @@ class IntfMethodSymbol : LateSymbol
             auto baseOffset = **cast(size_t**) $astBaseExpr;
             &(cast(char*) $astBaseExpr)[-baseOffset];
         });
-        return astObjectPtr.compile(context).beExpression;
+        astObjectPtr.compile(context).case {
+            Symbol sym: return sym.beExpression;
+            Error err: assert(false);
+        }
     }
 }
 
@@ -1246,12 +1268,12 @@ class ASTClassDecl : ASTSymbol
     this(this.name, this.supers, this.final_, this.abstract_,
          this.members, this.macroState, this.loc) { }
 
-    override ClassType compile(Context context)
+    override (ClassType | fail Error) compile(Context context)
     {
         mut nullable Class superClass = null;
         mut Intf[] superIntfs = [];
         for (i, super_ in this.supers) {
-            nullable Symbol superObj = context.namespace.lookup(super_, context, loc, null);
+            nullable Symbol superObj <- context.namespace.lookup(super_, context, loc, null);
             this.loc.assert2s(!!superObj, "super class/intf not found: $super_");
             auto superClassTest = superObj.instanceOf(ClassType);
             if (i == 0 && superClassTest) {
@@ -1268,7 +1290,7 @@ class ASTClassDecl : ASTSymbol
             zeroInitializable=false);
     }
 
-    void compile2(Context context, Class target)
+    (void | fail Error) compile2(Context context, Class target)
     {
         auto classType = new ClassType(target, zeroInitializable=false);
         auto classScope = context.compiler.symbolAlias(context.namespace, target.name, classType);
@@ -1278,10 +1300,10 @@ class ASTClassDecl : ASTSymbol
         // Do those later; they need fields resolved for this.field assignments.
         mut (ASTClassDeclMethod method, Context context)[] lateMemberMethods;
 
-        void walk(ASTClassEntry entry) {
+        (void | fail Error) walk(ASTClassEntry entry) {
             entry.case {
                 ASTClassDeclMember member: {
-                    auto type = beType(member.loc, member.type.compile(currentContext));
+                    auto type = beType(member.loc, retfail member.type.compile(currentContext));
                     memberFields ~= (member.name, member.protection, type);
                 }
                 ASTClassDeclMethod method: {
@@ -1292,13 +1314,13 @@ class ASTClassDecl : ASTSymbol
                  * because version blocks *don't* open a scope.
                  */
                 ASTDeclaration astDecl: {
-                    currentContext = astDecl.compile(currentContext);
+                    currentContext = retfail astDecl.compile(currentContext);
                 }
                 ASTClassVersionBlock ver: {
                     if ([any a == ver.name for a in context.platform.versions]) {
-                        [walk(entry) for entry in ver.then];
+                        [retfail walk(entry) for entry in ver.then];
                     } else {
-                        [walk(entry) for entry in ver.else_];
+                        [retfail walk(entry) for entry in ver.else_];
                     }
                 }
             }
@@ -1334,7 +1356,10 @@ class ASTClassDecl : ASTSymbol
                     }
                     ASTParameter param:
                         methodParams[k] = Parameter(
-                            false, param.name, param.mutable, beType(param.loc, param.type.compile(methodContext)));
+                            false,
+                            param.name,
+                            param.mutable,
+                            beType(param.loc, retfail param.type.compile(methodContext)));
                 }
             }
 
@@ -1347,7 +1372,7 @@ class ASTClassDecl : ASTSymbol
                 method.override_,
                 method.abstract_,
                 method.name,
-                beType(method.loc, method.ret.compile(methodContext)),
+                beType(method.loc, retfail method.ret.compile(methodContext)),
                 methodParams,
                 method.body_,
                 this.macroState,
@@ -1384,13 +1409,13 @@ class ASTIntfDecl : ASTSymbol
 
     this(this.name, this.superIntfs, this.members, this.macroState, this.loc) { }
 
-    override IntfType compile(Context context)
+    override (IntfType | fail Error) compile(Context context)
     {
         mut Intf[] superIntfs = [];
         if (this.superIntfs.length > 0)
         {
             for (superIntf in this.superIntfs) {
-                nullable Symbol superIntfSym = context.namespace.lookup(superIntf, context, loc, null);
+                nullable Symbol superIntfSym <- context.namespace.lookup(superIntf, context, loc, null);
                 this.loc.assert2s(!!superIntfSym, "super interface not found: " ~ superIntf);
                 auto superIntf = superIntfSym.instanceOf(IntfType);
                 this.loc.assert2s(!!superIntf, "super interface is not an interface");
@@ -1402,7 +1427,7 @@ class ASTIntfDecl : ASTSymbol
             zeroInitializable=false);
     }
 
-    void compile2(Context context, Intf target)
+    (void | fail Error) compile2(Context context, Intf target)
     {
         auto intfType = new IntfType(target, zeroInitializable=false);
         auto intfScope = context.compiler.symbolAlias(context.namespace, target.name, intfType);
@@ -1415,17 +1440,20 @@ class ASTIntfDecl : ASTSymbol
                     auto methodParams = new Parameter[](method.params.length);
                     for (k, param in method.params) {
                         methodParams[k] = Parameter(
-                            false, param.name, param.mutable, beType(param.loc, param.type.compile(currentContext)));
+                            false,
+                            param.name,
+                            param.mutable,
+                            beType(param.loc, retfail param.type.compile(currentContext)));
                     }
 
                     target.methods ~= new IntfMethod(
                         intfType,
                         method.name,
-                        beType(method.loc, method.ret.compile(currentContext)),
+                        beType(method.loc, retfail method.ret.compile(currentContext)),
                         methodParams);
                 }
                 ASTDeclaration astDecl: {
-                    currentContext = astDecl.compile(currentContext);
+                    currentContext = retfail astDecl.compile(currentContext);
                 }
             }
         }
@@ -1436,7 +1464,7 @@ class ASTIntfDecl : ASTSymbol
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTIntfDecl'!"); assert(false); }
 }
 
-nullable ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContext)
+(nullable ASTClassDecl | fail Error) parseClassDecl(Parser parser, LexicalContext lexicalContext)
 {
     mut bool classAbstract = false;
     mut bool classFinal = false;
@@ -1476,14 +1504,16 @@ nullable ASTClassDecl parseClassDecl(Parser parser, LexicalContext lexicalContex
     mut ASTClassEntry[] members;
     parser.expect("{");
     while (!parser.accept("}")) {
-        members ~= parseClassEntry(parser, lexicalContext);
+        // FIXME parseClassEntry(parser, lexicalContext).return(Error)?
+        auto e <- parseClassEntry(parser, lexicalContext);
+        members ~= e;
     }
     return new ASTClassDecl(
         name, supers, classFinal, classAbstract,
         members, lexicalContext.macroState, loc);
 }
 
-ASTClassEntry[] parseClassEntry(Parser parser, LexicalContext lexicalContext)
+(ASTClassEntry[] | fail Error) parseClassEntry(Parser parser, LexicalContext lexicalContext)
 {
     if (parser.accept("version")) {
         mut ASTClassEntry[] then, else_;
@@ -1492,18 +1522,23 @@ ASTClassEntry[] parseClassEntry(Parser parser, LexicalContext lexicalContext)
         parser.expect(")");
         if (parser.accept("{")) {
             while (!parser.accept("}")) {
-                then ~= parser.parseClassEntry(lexicalContext);
+                // FIXME
+                auto e <- parser.parseClassEntry(lexicalContext);
+                then ~= e;
             }
         } else {
-            then ~= parser.parseClassEntry(lexicalContext);
+            auto e <- parser.parseClassEntry(lexicalContext);
+            then ~= e;
         }
         if (parser.accept("else")) {
             if (parser.accept("{")) {
                 while (!parser.accept("}")) {
-                    else_ ~= parser.parseClassEntry(lexicalContext);
+                    auto e <- parser.parseClassEntry(lexicalContext);
+                    else_ ~= e;
                 }
             } else {
-                else_ ~= parser.parseClassEntry(lexicalContext);
+                auto e <- parser.parseClassEntry(lexicalContext);
+                else_ ~= e;
             }
         }
         // FIXME explicitly type hinted literal
@@ -1546,7 +1581,7 @@ ASTClassEntry[] parseClassEntry(Parser parser, LexicalContext lexicalContext)
         break;
     }
 
-    if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
+    if (auto decl = retfail lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
         // TODO return [ASTClassEntry: decl];
         ASTClassEntry entry = decl;
         return [entry];
@@ -1560,15 +1595,17 @@ ASTClassEntry[] parseClassEntry(Parser parser, LexicalContext lexicalContext)
     }
     else
     {
-        retType = lexicalContext.compiler.parseType(parser, lexicalContext);
+        // FIXME
+        auto t <- lexicalContext.compiler.parseType(parser, lexicalContext);
+        retType = t;
         parser.assert_(!!retType, "expected member type");
         memberName = parseIdentifier(parser);
         parser.assert_(memberName.length > 0, "expected member name");
     }
     if (parser.accept("(")) // method
     {
-        auto params = parseParamList(parser, lexicalContext);
-        ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext);
+        auto params <- parseParamList(parser, lexicalContext);
+        ASTStatement stmt <- lexicalContext.compiler.parseStatement(parser, lexicalContext);
         ASTClassEntry entry = ASTClassDeclMethod(
             loc, protection, override_, abstract_, memberName, retType.notNull, params, stmt);
         return [entry];
@@ -1593,7 +1630,7 @@ ASTClassEntry[] parseClassEntry(Parser parser, LexicalContext lexicalContext)
     }
 }
 
-nullable ASTIntfDecl parseIntfDecl(Parser parser, LexicalContext lexicalContext)
+(nullable ASTIntfDecl | fail Error) parseIntfDecl(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     parser.strip;
@@ -1624,17 +1661,17 @@ nullable ASTIntfDecl parseIntfDecl(Parser parser, LexicalContext lexicalContext)
 
         auto loc = parser.loc;
 
-        if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
+        if (auto decl = retfail lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
             members ~= decl;
             continue;
         }
 
-        nullable ASTSymbol retType = lexicalContext.compiler.parseType(parser, lexicalContext);
+        nullable ASTSymbol retType <- lexicalContext.compiler.parseType(parser, lexicalContext);
         parser.assert_(!!retType, "expected member type");
         string memberName = parseIdentifier(parser);
         parser.assert_(memberName.length > 0, "expected member name");
         parser.expect("(");
-        auto params = parseParamList(parser, lexicalContext);
+        auto params <- parseParamList(parser, lexicalContext);
         parser.expect(";");
         parser.loc.assert2s(
             [all a.case(ASTParameter: true, ASTThisAssignment: false) for a in params],
@@ -1756,15 +1793,15 @@ class ASTInstanceOf : ASTSymbol
 
     this(this.base, this.target, this.loc) { }
 
-    override Symbol compile(Context context)
+    override (Symbol | fail Error) compile(Context context)
     {
-        Expression base = beExpression3(context, this.base.compile(context), loc);
+        Expression base = retfail beExpression3(context, retfail this.base.compile(context), loc);
         auto type = base.type;
         loc.assert2s(
             type.instanceOf(ClassType) || type.instanceOf(IntfType),
             "Base of instanceOf must be class or interface.");
-        nullable Expression do_(Expression base) {
-            auto targetSym = target.compile(context);
+        (nullable Expression | fail Error) do_(Expression base) {
+            auto targetSym = retfail target.compile(context);
             nullable ClassType targetClass = targetSym.instanceOf(ClassType);
             nullable IntfType targetIntf = targetSym.instanceOf(IntfType);
             loc.assert2s(targetClass || targetIntf, "Target of instanceOf must be class or interface.");
@@ -1797,25 +1834,26 @@ class ASTInstanceOf : ASTSymbol
                     auto fn = (*cast($astTarget function(void*, void*)**) object)[0];
                     fn(object, $astClassInfo);
                 });
-                return instanceOfExpr.compile(context).beExpression;
+                return (retfail instanceOfExpr.compile(context)).beExpression;
             }
 
             // must exist.
-            Symbol instanceOf = context.compiler.accessMember(
-                    context, base, "__instanceof", loc, false)
+            Symbol instanceOf = (retfail context.compiler.accessMember(
+                    context, base, "__instanceof", loc, false))
                 .notNull;
             auto astInstanceOf = new ASTSymbolHelper(instanceOf);
             return new PointerCast(target, context.compiler.call(
                     context, astInstanceOf, [ASTArgument(astClassInfo, "")], loc, false)
-                .notNull);
+                .retfail.notNull);
         }
-        return context.compiler.exprWithTemporaryExpr(base, &do_).notNull;
+        return context.compiler.exprWithTemporaryExpr(base, &do_)
+            .case(nullable Expression expr: expr.notNull, Error err: err);
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTInstanceOf'"); assert(false); }
 }
 
-nullable ASTSymbol parseInstanceOf(Parser parser, LexicalContext lexicalContext, ASTSymbol left)
+(nullable ASTSymbol | fail Error) parseInstanceOf(Parser parser, LexicalContext lexicalContext, ASTSymbol left)
 {
     parser.begin;
     if (!(parser.accept(".") && parser.accept("instanceOf")))
@@ -1824,10 +1862,10 @@ nullable ASTSymbol parseInstanceOf(Parser parser, LexicalContext lexicalContext,
         return null;
     }
     parser.expect("(");
-    ASTSymbol type = lexicalContext.compiler.parseType(parser, lexicalContext).notNull;
+    nullable ASTSymbol type <- lexicalContext.compiler.parseType(parser, lexicalContext);
     parser.expect(")");
     parser.commit;
-    return new ASTInstanceOf(left, type, parser.loc);
+    return new ASTInstanceOf(left, type.notNull, parser.loc);
 }
 
 class ASTNewExpression : ASTSymbol
@@ -1840,35 +1878,38 @@ class ASTNewExpression : ASTSymbol
 
     this(this.type, this.astArgs, this.loc) { }
 
-    override Symbol compile(Context context)
+    override (Symbol | fail Error) compile(Context context)
     {
-        Type type = beType(this.loc, this.type.compile(context));
+        Type type = beType(this.loc, retfail this.type.compile(context));
 
         if (auto classType = type.instanceOf(ClassType)) {
             Expression classptr = new NewClassExpression(classType);
 
             this.loc.assert2s2(!!classType, "expected new <class>, not %s", type.repr);
 
-            nullable Expression do_(Expression classptr) {
+            (nullable Expression | fail Error) do_(Expression classptr) {
                 // don't clean up classptr after constructor call, we're continuing its lifetime
-                nullable Symbol ctor = context.compiler.accessMember(
+                nullable Symbol ctor = retfail context.compiler.accessMember(
                     context, new IgnoreLifetimeExpr(classptr), "__ctor", this.loc, false);
                 assert(!!ctor);
                 auto astCtor = new ASTSymbolHelper(ctor.notNull);
                 auto ctorCall = context.compiler.exprStatement(
                         context.compiler.call(context, astCtor, this.astArgs, this.loc, false)
-                    .notNull);
+                    .retfail.notNull);
 
                 return context.compiler.statementExpression(ctorCall, classptr);
             }
-            return context.compiler.exprWithTemporaryExpr(classptr, &do_).notNull;
+             return (retfail context.compiler.exprWithTemporaryExpr(classptr, &do_)).notNull;
         }
         if (auto arrayType = type.instanceOf(Array)) {
             this.loc.assert2s(this.astArgs.length == 1, "expected one argument to loc");
 
             Type sizeT = context.nativeWordType;
             auto length = expectImplicitConvertTo(
-                context, beExpression3(context, this.astArgs[0].sym.compile(context), this.loc), sizeT, this.loc);
+                context,
+                retfail beExpression3(context, retfail this.astArgs[0].sym.compile(context), this.loc),
+                sizeT,
+                this.loc);
             return new ArrayAllocation(arrayType.elementType, length);
         }
         this.loc.assert2s2(false, "don't know how to allocate ", type.repr);
@@ -1893,7 +1934,7 @@ class Super : Symbol
 
     this(this.classType) { }
 
-    Symbol lookup(Context context, string name, Loc loc) {
+    (Symbol | fail Error) lookup(Context context, string name, Loc loc) {
         auto superClass = this.classType.class_.superClass.notNull;
         bool matches(typeof(this.classType.class_.vtable[0]) entry) {
             return entry.case(
@@ -1905,6 +1946,7 @@ class Super : Symbol
         // TODO lookup() that handles the stackframe thing
         auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
         auto baseExpr = context.namespace.lookup("this", context, loc, stackframe)
+            .retfail
             .instanceOf(Expression)
             .notNull;
         return new ClassMethodSymbol(superClass, baseExpr, methodOffset, staticLookup=true);
@@ -1920,7 +1962,7 @@ class ASTSuper : ASTSymbol
 
     this(this.loc) { }
 
-    override Symbol compile(Context context) {
+    override (Symbol | fail Error) compile(Context context) {
         auto classNs = findParent!ClassNamespace(context.namespace);
         loc.assert2s(!!classNs, "'super' may only appear in class");
         loc.assert2s(!!classNs.class_.superClass, "'super' may only appear in class that has parent class");
@@ -1947,8 +1989,8 @@ class ASTNullable : ASTSymbol
 
     this(this.loc, this.next, this.nullify) { }
 
-    override Symbol compile(Context context) {
-        auto next = beType(this.loc, this.next.compile(context));
+    override (Symbol | fail Error) compile(Context context) {
+        auto next = beType(this.loc, retfail this.next.compile(context));
         if (nullify) {
             if (auto classType = next.instanceOf(ClassType))
                 return classType.makeNullable;

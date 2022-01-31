@@ -545,6 +545,9 @@ at_revision 'e7c08a6eb9a787b23ebe5c18c6ce47e3572990a6' 'rebuild neat' 'build/nea
 at_revision '8822b6189e84842002ba0428692be07a7dd01915' 'rebuild neat' 'build/neat'
 # struct destructor fix for private fields
 at_revision '75c9ce8f18fee2b30e99b6d907b69dbe891a8652' 'rebuild neat' 'build/neat'
+# allow quoting var extract decls, allow eithers to be strict subtypes
+# case() fix, case(return) fix
+at_revision '7ea3509178928aecc1c9629a4318849ca56fe3b0' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

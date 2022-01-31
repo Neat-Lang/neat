@@ -1,6 +1,7 @@
 module neat.vectors;
 
 macro import neat.macros.listcomprehension;
+macro import neat.macros.retfail;
 
 import backend.base;
 import helpers;
@@ -19,9 +20,9 @@ class ASTVectorType : ASTSymbol
 
     this(this.loc, this.elementType, this.count) { }
 
-    override Symbol compile(Context context)
+    override (Type | fail Error) compile(Context context)
     {
-        return new VectorType(beType(this.loc, this.elementType.compile(context)), count);
+        return new VectorType(beType(this.loc, retfail this.elementType.compile(context)), count);
     }
 }
 
@@ -135,11 +136,11 @@ class VectorType : Type
         hash.addl(length);
     }
 
-    override nullable Symbol accessMember(
+    override (nullable Symbol | fail Error) accessMember(
         Loc loc, Context context, nullable Expression base, string field, Protection _)
     {
         // TODO part of type? third parameter?
-        nullable Expression do_(Expression base) {
+        (nullable Expression | fail Error) do_(Expression base) {
             string coords1 = "uv", coords2 = "xyzw", coords3 = "rgba";
             mut Expression[] members;
             int indexIn(char ch, string str) {
@@ -163,7 +164,7 @@ class VectorType : Type
         return null;
     }
 
-    override nullable Expression binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
+    override (nullable Expression | fail Error) binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
     {
         auto lhsVectorType = lhs.type.instanceOf(VectorType);
         auto rhsVectorType = rhs.type.instanceOf(VectorType);
@@ -187,14 +188,14 @@ class VectorType : Type
             for (i in 0 .. lhsVectorType.length) {
                 auto leftMember = new VectorMember(lhs, cast(int) i);
                 auto rightMember = getRightConverted(leftMember.type, cast(int) i);
-                auto test = context.compiler.binaryOp(op, context, leftMember, rightMember, loc);
+                auto test = retfail context.compiler.binaryOp(op, context, leftMember, rightMember, loc);
                 if (auto left = andList) andList = new BoolAnd(left, test);
                 else andList = test;
             }
             return andList;
         }
-        nullable Expression do1(Expression lhs) {
-            nullable Expression do2(Expression rhs) {
+        (nullable Expression | fail Error) do1(Expression lhs) {
+            (nullable Expression | fail Error) do2(Expression rhs) {
                 Expression getRight(int index) {
                     if (rhsVectorType) return new VectorMember(rhs, index);
                     return rhs;
@@ -210,7 +211,7 @@ class VectorType : Type
                 for (i in 0 .. lhsVectorType.length) {
                     auto leftMember = new VectorMember(lhs, cast(int) i);
                     auto rightMember = getRightConverted(leftMember.type, cast(int) i);
-                    members ~= context.compiler.binaryOp(op, context, leftMember, rightMember, loc);
+                    members ~= retfail context.compiler.binaryOp(op, context, leftMember, rightMember, loc);
                 }
                 return mkVector(context, loc, members);
             }
@@ -219,21 +220,21 @@ class VectorType : Type
         return context.compiler.exprWithTemporaryExpr(lhs, &do1);
     }
 
-    override nullable Expression call(Context context, Loc loc, ASTArgument[] args)
+    override (nullable Expression | fail Error) call(Context context, Loc loc, ASTArgument[] args)
     {
         loc.assert2s(args.length == this.length || args.length == 1, "invalid number of args for vector constructor");
 
         // TODO arg name validation
         auto args = [
-            beExpression3(context, arg.sym.compile(context), loc)
+            retfail beExpression3(context, retfail arg.sym.compile(context), loc)
             for arg in args];
 
         // TODO a better way to generically construct types backed by BackendStructType
         if (args.length == 1) {
             auto result = new PairedTemporary(this, Ownership.gifted);
             mut Statement initialize = new UninitializeTemporaryStatement(result);
-            nullable Expression do1(Expression arg) {
-                Expression do2(Expression arg) {
+            (nullable Expression | fail Error) do1(Expression arg) {
+                (Expression | fail Error) do2(Expression arg) {
                     auto arg = expectImplicitConvertTo(context, arg, elementType, loc);
                     for (i in 0 .. this.length) {
                         auto field = new VectorMemberReference(result, cast(int) i);
@@ -252,13 +253,13 @@ class VectorType : Type
     }
 
     // consumes "args"
-    Expression mkVector(Context context, Loc loc, Expression[] args) {
+    (Expression | fail Error) mkVector(Context context, Loc loc, Expression[] args) {
         auto result = new PairedTemporary(this, Ownership.gifted);
         mut Statement initialize = new UninitializeTemporaryStatement(result);
         for (i in 0 .. this.length) {
             auto arg = expectImplicitConvertTo(context, args[i], elementType, loc);
             auto field = new VectorMemberReference(result, cast(int) i);
-            auto stmt = context.compiler.move(context, field, arg);
+            auto stmt = retfail context.compiler.move(context, field, arg);
 
             initialize = context.compiler.sequence(initialize, stmt);
         }

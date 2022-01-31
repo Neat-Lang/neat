@@ -1,6 +1,7 @@
 module neat.macros.hash;
 
 macro import neat.macros.quasiquoting;
+macro import neat.macros.retfail;
 
 import package(compiler).helpers;
 import package(compiler).neat.base;
@@ -16,46 +17,93 @@ class StringHashMacro : Macro
 
     this() { }
 
-    override void apply(MacroArgs args) {
-        auto callMacroArgs = args.instanceOf(CallMacroArgs);
-        if (!callMacroArgs) return;
-        auto context = callMacroArgs.context;
-        auto astMember = callMacroArgs.target.instanceOf(ASTMemberBase);
-        if (!astMember || astMember.member != "adds") return;
-
-        // auto isHashMethod = callMacroArgs.target.compile(context).same(
-        //   (compiler.$expr (new Hash).adds).compile(context));
-        auto classMethodPtr = callMacroArgs.target.compile(context).instanceOf(ClassMethodPtr);
-        if (!classMethodPtr) return;
-        auto type = classMethodPtr.thisValue.type;
-        // TODO look up Hash with fqn path
-        if (!this.hashType) {
-            auto hashType = findParent!ModuleBase(context.namespace).lookup("Hash", context, __HERE__, null);
-            if (!hashType || !hashType.instanceOf(Type)) return;
-            this.hashType = hashType.instanceOf(Type);
+    version (generation89) {
+        override void apply(MacroArgs args) {
+            auto callMacroArgs = args.instanceOf(CallMacroArgs);
+            if (!callMacroArgs) return;
+            callMacroArgs.transformed = applyActual(callMacroArgs.notNull);
         }
-        Type notNullHashType() {
-            if (auto type = this.hashType) return type;
+
+        (nullable Expression | fail Error) applyActual(CallMacroArgs callMacroArgs) {
+            auto context = callMacroArgs.context;
+            auto astMember = callMacroArgs.target.instanceOf(ASTMemberBase);
+            if (!astMember || astMember.member != "adds") return null;
+
+            // auto isHashMethod = callMacroArgs.target.compile(context).same(
+            //   (compiler.$expr (new Hash).adds).compile(context));
+            auto classMethodPtr = callMacroArgs.target.compile(context).retfail.instanceOf(ClassMethodPtr);
+            if (!classMethodPtr) return null;
+            auto type = classMethodPtr.thisValue.type;
+            // TODO look up Hash with fqn path
+            if (!this.hashType) {
+                auto hashType <- findParent!ModuleBase(context.namespace).lookup("Hash", context, __HERE__, null);
+                if (!hashType || !hashType.instanceOf(Type)) return null;
+                this.hashType = hashType.instanceOf(Type);
+            }
+            Type notNullHashType() {
+                if (auto type = this.hashType) return type;
+                assert(false);
+            }
+            auto isHash = type.same(notNullHashType);
+            if (!isHash) return null;
+            // it's a Hash.adds() call.
+            assert(callMacroArgs.args.length == 1);
+            auto str = callMacroArgs.args[0].sym.compile(context).retfail.instanceOf(StringLiteralBase);
+            if (!str) return null; // variable call
+            return optimizeStringCall(astMember.base, str.text, context, callMacroArgs.loc);
+        }
+
+        (Expression | fail Error) optimizeStringCall(ASTSymbol base, string str, Context context, Loc loc) {
+            auto state = poly_hash_string(str);
+            auto add = context.compiler.astLongLiteral(state.add, loc);
+            auto mult = context.compiler.astLongLiteral(state.mult, loc);
+
+            if (auto expr = (context.compiler.$expr $base.apply($add, $mult)).compile(context).retfail.instanceOf(Expression))
+                return expr;
             assert(false);
         }
-        auto isHash = type.same(notNullHashType);
-        if (!isHash) return;
-        // it's a Hash.adds() call.
-        assert(callMacroArgs.args.length == 1);
-        auto str = callMacroArgs.args[0].sym.compile(context).instanceOf(StringLiteralBase);
-        if (!str) return; // variable call
-        callMacroArgs.transformed
-            = optimizeStringCall(astMember.base, str.text, context, callMacroArgs.loc);
-    }
+    } else {
+        override void apply(MacroArgs args) {
+            auto callMacroArgs = args.instanceOf(CallMacroArgs);
+            if (!callMacroArgs) return;
+            auto context = callMacroArgs.context;
+            auto astMember = callMacroArgs.target.instanceOf(ASTMemberBase);
+            if (!astMember || astMember.member != "adds") return;
 
-    Expression optimizeStringCall(ASTSymbol base, string str, Context context, Loc loc) {
-        auto state = poly_hash_string(str);
-        auto add = context.compiler.astLongLiteral(state.add, loc);
-        auto mult = context.compiler.astLongLiteral(state.mult, loc);
+            // auto isHashMethod = callMacroArgs.target.compile(context).same(
+            //   (compiler.$expr (new Hash).adds).compile(context));
+            auto classMethodPtr = callMacroArgs.target.compile(context).instanceOf(ClassMethodPtr);
+            if (!classMethodPtr) return;
+            auto type = classMethodPtr.thisValue.type;
+            // TODO look up Hash with fqn path
+            if (!this.hashType) {
+                auto hashType = findParent!ModuleBase(context.namespace).lookup("Hash", context, __HERE__, null);
+                if (!hashType || !hashType.instanceOf(Type)) return;
+                this.hashType = hashType.instanceOf(Type);
+            }
+            Type notNullHashType() {
+                if (auto type = this.hashType) return type;
+                assert(false);
+            }
+            auto isHash = type.same(notNullHashType);
+            if (!isHash) return;
+            // it's a Hash.adds() call.
+            assert(callMacroArgs.args.length == 1);
+            auto str = callMacroArgs.args[0].sym.compile(context).instanceOf(StringLiteralBase);
+            if (!str) return; // variable call
+            callMacroArgs.transformed
+                = optimizeStringCall(astMember.base, str.text, context, callMacroArgs.loc);
+        }
 
-        if (auto expr = (context.compiler.$expr $base.apply($add, $mult)).compile(context).instanceOf(Expression))
-            return expr;
-        assert(false);
+        Expression optimizeStringCall(ASTSymbol base, string str, Context context, Loc loc) {
+            auto state = poly_hash_string(str);
+            auto add = context.compiler.astLongLiteral(state.add, loc);
+            auto mult = context.compiler.astLongLiteral(state.mult, loc);
+
+            if (auto expr = (context.compiler.$expr $base.apply($add, $mult)).compile(context).instanceOf(Expression))
+                return expr;
+            assert(false);
+        }
     }
 }
 

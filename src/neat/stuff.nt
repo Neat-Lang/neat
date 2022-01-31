@@ -5,6 +5,7 @@ macro import neat.macros.hash;
 macro import neat.macros.listcomprehension;
 macro import neat.macros.once;
 macro import neat.macros.quasiquoting;
+macro import neat.macros.retfail;
 
 import backend.base;
 import helpers;
@@ -76,9 +77,10 @@ class DefineClassIntf : FinishedSymbol
     }
 }
 
-nullable ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
+(nullable ASTSymbol | fail Error) parseType(Parser parser, LexicalContext lexicalContext)
 {
-    mut auto current <- parser.parseLeafType(lexicalContext);
+    nullable ASTSymbol current <- parser.parseLeafType(lexicalContext);
+    mut ASTSymbol current <- current;
     while (true)
     {
         auto loc = parser.loc;
@@ -99,12 +101,12 @@ nullable ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
                     {
                         if (!parser.accept(","))
                         {
-                            parser.fail("',' or ')' expected");
+                            void <- parser.fail2("',' or ')' expected");
                         }
                     }
-                    ASTSymbol argType = parser.parseType(lexicalContext).notNull;
+                    auto argType <- parser.parseType(lexicalContext);
 
-                    args ~= argType;
+                    args ~= argType.notNull;
                 }
                 commit;
                 if (identifier == "function")
@@ -123,7 +125,7 @@ nullable ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
                     continue;
                 }
                 // hashmap? might be assignment intro
-                auto keyType = parser.parseType(lexicalContext);
+                auto keyType <- parser.parseType(lexicalContext);
                 if (!keyType || !parser.accept("]")) {
                     return null;
                 }
@@ -146,8 +148,8 @@ nullable ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
             if (parser.accept("!") && !parser.accept("=") && !acceptIdentifier(parser, "is"))
             {
                 mut ASTSymbol[] templateArgs;
-                void getTemplateArg() {
-                    auto templateArg = parser.parseType(lexicalContext);
+                (void | fail Error) getTemplateArg() {
+                    auto templateArg <- parser.parseType(lexicalContext);
                     parser.assert_(!!templateArg, "template argument expected");
                     templateArgs ~= templateArg.notNull;
                 }
@@ -155,14 +157,14 @@ nullable ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
                 if (parser.accept("(")) {
                     // ( [a [, a]*]? )
                     if (!parser.accept(")")) {
-                        getTemplateArg;
+                        void <- getTemplateArg;
                         while (!parser.accept(")")) {
                             parser.expect(",");
-                            getTemplateArg;
+                            void <- getTemplateArg;
                         }
                     }
                 } else {
-                    getTemplateArg;
+                    void <- getTemplateArg;
                 }
                 commit;
                 current = new ASTTemplateInstance(current, templateArgs, instanceLoc);
@@ -179,7 +181,7 @@ nullable ASTSymbol parseType(Parser parser, LexicalContext lexicalContext)
  * - (int | float): int or float
  * - (int, int | int): (int and int) or int
  */
-nullable ASTSymbol parseTupleType(Parser parser, LexicalContext lexicalContext)
+(nullable ASTSymbol | fail Error) parseTupleType(Parser parser, LexicalContext lexicalContext)
 with (parser.transaction)
 {
     auto loc = parser.loc;
@@ -223,7 +225,7 @@ with (parser.transaction)
             }
         }
         auto loc = parser.loc;
-        auto type = parser.parseType(lexicalContext);
+        auto type <- parser.parseType(lexicalContext);
         if (!type) {
             // (bla bla) still
             if (members.length <= 1) {
@@ -240,19 +242,19 @@ with (parser.transaction)
     return new ASTEitherDecl(declEntries);
 }
 
-nullable ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
+(nullable ASTSymbol | fail Error) parseLeafType(Parser parser, LexicalContext lexicalContext)
 {
     import std.string : startsWith;
 
     // FIXME parser.startLoc
     auto loc = parser.loc;
     if (parser.acceptIdentifier("nullable")) {
-        auto next = parseLeafType(parser, lexicalContext).notNull;
-        return new ASTNullable(loc, next, true);
+        auto next <- parseLeafType(parser, lexicalContext);
+        return new ASTNullable(loc, next.notNull, true);
     }
     if (parser.acceptIdentifier("nonnullable")) {
-        auto next = parseLeafType(parser, lexicalContext).notNull;
-        return new ASTNullable(loc, next, false);
+        auto next <- parseLeafType(parser, lexicalContext);
+        return new ASTNullable(loc, next.notNull, false);
     }
 
     {
@@ -262,16 +264,16 @@ nullable ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
     }
 
     // must be before any () parsing for types we may add.
-    if (auto symbol = parser.parseTupleType(lexicalContext))
-        return symbol;
+    auto symbol <- parser.parseTupleType(lexicalContext);
+    if (auto symbol = symbol) return symbol;
 
     auto loc = parser.loc;
     with (parser.transaction) {
         if (parser.acceptIdentifier("Vector") && parser.accept("(")) {
-            auto element = lexicalContext.compiler.parseType(parser, lexicalContext);
+            auto element <- lexicalContext.compiler.parseType(parser, lexicalContext);
             parser.assert_(!!element, "element type expected");
             parser.expect(",");
-            auto count = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+            auto count = retfail lexicalContext.compiler.parseExpression(parser, lexicalContext);
             parser.assert_(count && count.instanceOf(ASTIntLiteral), "integer expected");
             parser.expect(")");
             commit;
@@ -281,7 +283,7 @@ nullable ASTSymbol parseLeafType(Parser parser, LexicalContext lexicalContext)
         if (parser.accept("typeof"))
         {
             parser.expect("(");
-            auto expr = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+            auto expr <- lexicalContext.compiler.parseExpression(parser, lexicalContext);
             if (!expr) parser.fail("expression expected");
             parser.expect(")");
             commit;
@@ -444,7 +446,7 @@ class DelegateFuncPtr : Expression
 /**
  * "Plain" call without lifetime handling.
  */
-nullable Expression plainCall(Context context, Symbol target, mut Expression[] args, Loc loc, bool isImplCall)
+(nullable Expression | fail Error) plainCall(Context context, Symbol target, mut Expression[] args, Loc loc, bool isImplCall)
 {
     if (auto fundecl = target.instanceOf(FunctionDeclaration))
     {
@@ -464,14 +466,14 @@ nullable Expression plainCall(Context context, Symbol target, mut Expression[] a
         } else {
             loc.fail("function reference or funcptr expected? but is '$(method.funcPtr.type.repr)'");
         }
-        nullable Expression doPtr(Expression thisPtr) {
+        (nullable Expression | fail Error) doPtr(Expression thisPtr) {
             auto voidp = once new Pointer(new Void);
             mut Expression[] combinedArgs;
             combinedArgs ~= new PointerCast(voidp, thisPtr);
             combinedArgs ~= args;
             return new FuncPtrCall(method.funcPtr, combinedArgs, loc);
         }
-        nullable Expression doRef(Reference thisValue) {
+        (nullable Expression | fail Error) doRef(Reference thisValue) {
             return doPtr(context.compiler.reference(thisValue));
         }
         if (method.valueIsPtr) {
@@ -585,41 +587,42 @@ class WrapReference : Reference
     }
 }
 
-nullable Expression call(Context context, ASTSymbol astTarget, ASTArgument[] astArgs, Loc loc, bool autoCall) {
+(nullable Expression | fail Error) call(Context context, ASTSymbol astTarget, ASTArgument[] astArgs, Loc loc, bool autoCall) {
     if (!context.namespace) return null;
     if (!autoCall) {
         auto callMacroArgs = once new CallMacroArgs;
         callMacroArgs.set(astTarget, astArgs, context, loc);
         context.macroState.applyMacro(callMacroArgs);
-        if (auto transformed = callMacroArgs.transformed) return transformed;
+        auto transformed <- callMacroArgs.transformed;
+        if (auto transformed = transformed) return transformed;
 
         /// Direct implementation of `foo.bar(baz)`.
         /// Reduces need for `LateSymbol`.
         if (auto memberAccess = astTarget.instanceOf(ASTMemberBase)) {
-            auto base = memberAccess.base.compile(context);
+            auto base = retfail memberAccess.base.compile(context);
             if (auto type = base.instanceOf(Type)) {
                 auto protection = type.protectionAt(context.namespace.notNull);
-                if (auto ret = type.callMember(
+                if (auto ret = retfail type.callMember(
                         context, null, memberAccess.member, astArgs, protection, memberAccess.loc))
                     return ret;
-            } else if (auto baseExpr = base.isExpressionImplCall(context, loc)) {
+            } else if (auto baseExpr = retfail base.isExpressionImplCall(context, loc)) {
                 auto protection = baseExpr.type.protectionAt(context.namespace.notNull);
-                if (auto ret = baseExpr.type.callMember(
+                if (auto ret = retfail baseExpr.type.callMember(
                         context, baseExpr, memberAccess.member, astArgs, protection, memberAccess.loc))
                     return ret;
             }
         }
     }
 
-    mut auto target = astTarget.compile(context);
+    mut auto target = retfail astTarget.compile(context);
 
     if (!autoCall) {
         if (auto type_ = target.instanceOf(Type)) {
-            if (auto ret = type_.call(context, loc, astArgs))
+            if (auto ret = retfail type_.call(context, loc, astArgs))
                 return ret;
         }
         if (auto expr = target.instanceOf(Expression)) {
-            if (auto ret = expr.type.callExpr(context, loc, expr, astArgs))
+            if (auto ret = retfail expr.type.callExpr(context, loc, expr, astArgs))
                 return ret;
         }
     }
@@ -635,7 +638,7 @@ nullable Expression call(Context context, ASTSymbol astTarget, ASTArgument[] ast
     }
 
     auto args = [
-        beExpression3(context, arg.sym.compile(context), loc)
+        retfail beExpression3(context, retfail arg.sym.compile(context), loc)
         for arg in astArgs];
 
     if (auto templ = target.instanceOf(ScopeBoundTemplateDecl)) {
@@ -645,7 +648,7 @@ nullable Expression call(Context context, ASTSymbol astTarget, ASTArgument[] ast
         auto repackagedArgs = [
             ASTArgument(new ASTSymbolHelper(arg), astArgs[i].name)
             for i, arg in args];
-        auto instance = templ.instantiate(context, loc, types);
+        auto instance = retfail templ.instantiate(context, loc, types);
 
         return call(context, new ASTSymbolHelper(instance), repackagedArgs, loc, autoCall);
     }
@@ -671,7 +674,7 @@ nullable Expression call(Context context, ASTSymbol astTarget, ASTArgument[] ast
 
     if (auto lateSym = target.instanceOf(LateSymbol)) {
         // completely bypass plainCall with a FuncPtrCall
-        nullable Expression do1(Expression baseExpr) {
+        (nullable Expression | fail Error) do1(Expression baseExpr) {
             auto funcPtr = lateSym.resolve(context, baseExpr);
             mut Expression[] args = args;
             if (auto funcPtr = funcPtr.type.instanceOf(FunctionPointer)) {
@@ -686,11 +689,11 @@ nullable Expression call(Context context, ASTSymbol astTarget, ASTArgument[] ast
             combinedArgs ~= args;
             return new FuncPtrCall(funcPtr, combinedArgs, loc);
         }
-        Expression do2(Expression baseExpr)
+        (Expression | fail Error) do2(Expression baseExpr)
         {
-            return context.compiler.exprWithTemporaryExpr(baseExpr, &do1).notNull;
+            return context.compiler.exprWithTemporaryExpr(baseExpr, &do1).retfail.notNull;
         }
-        auto fpCall = context.compiler.consume(context, lateSym.baseExpr, &do2);
+        auto fpCall = retfail context.compiler.consume(context, lateSym.baseExpr, &do2);
 
         return new WrapExpression(pre, fpCall, post);
     }
@@ -713,7 +716,7 @@ nullable Expression call(Context context, ASTSymbol astTarget, ASTArgument[] ast
             doRef(tempThis);
         }
     }
-    if (auto callResult = plainCall(context, target, args, loc, autoCall))
+    if (auto callResult = retfail plainCall(context, target, args, loc, autoCall))
         return new WrapExpression(pre, callResult, post);
     return null;
 }
@@ -738,7 +741,7 @@ class ASTCall : ASTSymbol
 
     this(this.target, this.args, this.loc) { }
 
-    override Expression compile(Context context)
+    override (Expression | fail Error) compile(Context context)
     {
         // FIXME this goes better in call()
         if (auto astMemberAccess = this.target.instanceOf(ASTMember))
@@ -749,12 +752,12 @@ class ASTCall : ASTSymbol
              * Check if "foo" has a property "bar".
              * If not, call bar(foo, baz) instead.
              */
-            auto base = astMemberAccess.base.compile(context).isExpressionImplCall(context, this.loc);
+            auto base <- astMemberAccess.base.compile(context).retfail.isExpressionImplCall(context, this.loc);
             if (base) {
-                auto member = accessMember(context, base, astMemberAccess.member, astMemberAccess.loc, true);
+                auto member = retfail accessMember(context, base, astMemberAccess.member, astMemberAccess.loc, true);
                 if (!member) {
                     auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
-                    auto callable = context.namespace.lookup(astMemberAccess.member, context, this.loc, stackframe);
+                    auto callable <- context.namespace.lookup(astMemberAccess.member, context, this.loc, stackframe);
                     // if `foo` has no `bar` but there is a `bar` symbol:
                     if (callable) {
                         // rewrite foo.bar(baz) to bar(foo, baz)
@@ -766,7 +769,7 @@ class ASTCall : ASTSymbol
             }
         }
 
-        return call(context, this.target, this.args, this.loc, false).notNull;
+        return call(context, this.target, this.args, this.loc, false).retfail.notNull;
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -782,7 +785,7 @@ class ASTCall : ASTSymbol
     }
 }
 
-ASTArgument[] parseArgumentList(Parser parser, LexicalContext lexicalContext)
+(ASTArgument[] | fail Error) parseArgumentList(Parser parser, LexicalContext lexicalContext)
 {
     mut ASTArgument[] args;
     while (!parser.accept(")"))
@@ -800,18 +803,18 @@ ASTArgument[] parseArgumentList(Parser parser, LexicalContext lexicalContext)
                 name = n;
             }
         }
-        ASTSymbol arg = parser.parseExpression(lexicalContext).notNull;
-        args ~= ASTArgument(arg, name);
+        nullable ASTSymbol arg <- parser.parseExpression(lexicalContext);
+        args ~= ASTArgument(arg.notNull, name);
     }
     return args;
 }
 
-nullable ASTCall parseCall(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
+(nullable ASTCall | fail Error) parseCall(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
 with (parser.transaction)
 {
     if (!parser.accept("("))
         return null;
-    mut ASTArgument[] args = parser.parseArgumentList(lexicalContext);
+    mut ASTArgument[] args <- parser.parseArgumentList(lexicalContext);
     commit;
     return new ASTCall(base, args, parser.loc);
 }
@@ -826,12 +829,12 @@ class ASTIndexAccess : ASTSymbol
 
     this(this.base, this.index, this.loc) { }
 
-    override Expression compile(Context context)
+    override (Expression | fail Error) compile(Context context)
     {
-        auto base = beExpression3(context, this.base.compile(context), this.loc);
+        auto base <- beExpression3(context, retfail this.base.compile(context), this.loc);
         bool saveIndexValue = base.info.ownership == Ownership.gifted;
 
-        nullable Expression do_(Reference base) {
+        (nullable Expression | fail Error) do_(Reference base) {
             mut uninitialized Expression indexExpr;
             mut uninitialized Expression ptrBase;
 
@@ -840,14 +843,14 @@ class ASTIndexAccess : ASTSymbol
                 auto context = context.withNamespace(
                     context.compiler.exprAlias(context.namespace, "__array", base));
 
-                indexExpr = beExpression3(context, this.index.compile(context), this.loc);
+                indexExpr = retfail beExpression3(context, retfail this.index.compile(context), this.loc);
                 // TODO bounds check
                 ptrBase = new ArrayPointer(array_.elementType, base);
             } else if (type.instanceOf(Pointer)) {
-                indexExpr = beExpression3(context, this.index.compile(context), this.loc);
+                indexExpr = retfail beExpression3(context, retfail this.index.compile(context), this.loc);
                 ptrBase = base;
             } else {
-                indexExpr = beExpression3(context, this.index.compile(context), this.loc);
+                indexExpr = retfail beExpression3(context, retfail this.index.compile(context), this.loc);
                 if (auto result = type.index(context, base, indexExpr, this.loc)) {
                     return result;
                 } else {
@@ -864,17 +867,17 @@ class ASTIndexAccess : ASTSymbol
                 // This is a very silly idiom.
                 auto temp = new PairedTemporary(deref.type, Ownership.gifted);
                 auto init = new UninitializeTemporaryStatement(temp);
-                Statement copyDeref() {
-                    if (auto stmt = deref.type.copyInto(context, temp, deref))
+                (Statement | fail Error) copyDeref() {
+                    if (auto stmt = retfail deref.type.copyInto(context, temp, deref))
                         return stmt;
                     return new AssignStatement(temp, deref);
                 }
-                return context.compiler.wrap(sequence(init, copyDeref), temp, null);
+                return context.compiler.wrap(sequence(init, retfail copyDeref), temp, null);
             }
             return deref;
         }
-        return context.compiler.consumeTemporary(
-                context, allowRefReturn=!saveIndexValue, mayUnwind=false, base, &do_)
+        return (retfail context.compiler.consumeTemporary(
+                context, allowRefReturn=!saveIndexValue, mayUnwind=false, base, &do_))
             .notNull;
     }
 
@@ -895,12 +898,12 @@ class ASTArraySlice : ASTSymbol
 
     this(this.array, this.lower, this.upper, this.loc) { }
 
-    override Symbol compile(Context context)
+    override (Symbol | fail Error) compile(Context context)
     {
         Type sizeT = context.nativeWordType;
-        auto array = beExpression3(context, this.array.compile(context), this.loc);
+        auto array <- beExpression3(context, retfail this.array.compile(context), this.loc);
 
-        nullable Expression do_(Reference array)
+        (nullable Expression | fail Error) do_(Reference array)
         {
             auto context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "__array", array));
@@ -908,14 +911,14 @@ class ASTArraySlice : ASTSymbol
             return new ArraySlice(
                 array,
                 expectImplicitConvertTo(
-                    context, beExpression3(context, this.lower.compile(context), this.loc), sizeT, this.loc),
+                    context, retfail beExpression3(context, retfail this.lower.compile(context), this.loc), sizeT, this.loc),
                 expectImplicitConvertTo(
-                    context, beExpression3(context, this.upper.compile(context), this.loc), sizeT, this.loc),
+                    context, retfail beExpression3(context, retfail this.upper.compile(context), this.loc), sizeT, this.loc),
                 this.loc);
         }
         return context.compiler.consumeTemporary(
                 context, false, false, array, &do_)
-            .notNull;
+            .retfail.notNull;
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -926,13 +929,13 @@ class ASTArraySlice : ASTSymbol
     }
 }
 
-nullable ASTSymbol parseIndex(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
+(nullable ASTSymbol | fail Error) parseIndex(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
 with (parser.transaction)
 {
     auto loc = parser.loc;
     if (!parser.accept("["))
         return null;
-    nullable ASTSymbol index = parseExpression(parser, lexicalContext);
+    nullable ASTSymbol index <- parseExpression(parser, lexicalContext);
     loc.assert2s(!!index, "index expected");
     auto index = index.notNull;
     parser.expect("]");
@@ -943,7 +946,7 @@ with (parser.transaction)
     return new ASTIndexAccess(base, index, parser.loc);
 }
 
-nullable Symbol accessMemberWithLifetime(Context context, Symbol base, string member, Loc loc, bool allowUndefined)
+(nullable Symbol | fail Error) accessMemberWithLifetime(Context context, Symbol base, string member, Loc loc, bool allowUndefined)
 {
     if (base.instanceOf(Type))
     {
@@ -953,7 +956,7 @@ nullable Symbol accessMemberWithLifetime(Context context, Symbol base, string me
     {
         return super_.lookup(context, member, loc);
     }
-    Expression baseExpr = beExpression3(context, base, loc);
+    Expression baseExpr <- beExpression3(context, base, loc);
     Type baseType = baseExpr.type;
 
     if (baseType.instanceOf(Pointer)) {
@@ -963,29 +966,29 @@ nullable Symbol accessMemberWithLifetime(Context context, Symbol base, string me
 
     // speculative lookup :-(
     // TODO exprWithTemporary that handles symbol returns
-    auto ret = accessMember(context, baseExpr, member, loc, allowUndefined);
+    auto ret = retfail accessMember(context, baseExpr, member, loc, allowUndefined);
     if (!ret || !ret.instanceOf(Expression)) return ret;
     /**
      * - temporize lhs
      * - copyInto member
      * - destroy lhs
      */
-    nullable Expression do_(Reference baseExpr) {
-        auto ret = accessMember(
-                context, baseExpr, member, loc, allowUndefined)
+    (nullable Expression | fail Error) do_(Reference baseExpr) {
+        auto ret = (retfail accessMember(
+                context, baseExpr, member, loc, allowUndefined))
             .instanceOf(Expression)
             .notNull;
         auto tempRet = new PairedTemporary(ret.type, Ownership.gifted); // temporary since we copyInto
         auto initTemp = new UninitializeTemporaryStatement(tempRet);
-        Statement copyTemp() {
-            if (auto stmt = ret.type.copyInto(context, tempRet, ret))
+        (Statement | fail Error) copyTemp() {
+            if (auto stmt = retfail ret.type.copyInto(context, tempRet, ret))
                 return stmt;
             return new AssignStatement(tempRet, ret);
         }
 
         nullable Statement endLifetime = baseType.endLifetime(context, baseExpr);
 
-        return new WrapExpression(sequence(initTemp, copyTemp), tempRet, endLifetime);
+        return new WrapExpression(sequence(initTemp, retfail copyTemp), tempRet, endLifetime);
     }
     // SHIT
     // we need a reference on the lhs for assignments
@@ -996,13 +999,13 @@ nullable Symbol accessMemberWithLifetime(Context context, Symbol base, string me
 
     // if lhs is nontemp, just use StructReference
     if (baseExpr.info.ownership != Ownership.gifted) {
-        return accessMember(context, baseExpr, member, loc, allowUndefined)
+        return (retfail accessMember(context, baseExpr, member, loc, allowUndefined))
             .instanceOf(Expression);
     }
     return context.compiler.exprWithTemporary(baseExpr, &do_);
 }
 
-nullable Symbol accessMember(Context context, Symbol base, string member, Loc loc, bool allowUndefined) {
+(nullable Symbol | fail Error) accessMember(Context context, Symbol base, string member, Loc loc, bool allowUndefined) {
     if (!context.namespace) return null;
     if (auto type = base.instanceOf(Type)) {
         auto protection = type.protectionAt(context.namespace.notNull);
@@ -1010,14 +1013,14 @@ nullable Symbol accessMember(Context context, Symbol base, string member, Loc lo
     }
 
     loc.assert2s(!!base.instanceOf(Expression), "expected expression for member access");
-    mut Expression baseExpr = beExpression3(context, base, loc);
+    mut Expression baseExpr <- beExpression3(context, base, loc);
 
     while (baseExpr.type.instanceOf(Pointer)) {
         baseExpr = new Dereference(baseExpr);
     }
 
     auto protection = baseExpr.type.protectionAt(context.namespace.notNull);
-    if (auto field = baseExpr.type.accessMember(loc, context, baseExpr, member, protection))
+    if (auto field = retfail baseExpr.type.accessMember(loc, context, baseExpr, member, protection))
         return field;
 
     if (allowUndefined) return null;
@@ -1026,16 +1029,16 @@ nullable Symbol accessMember(Context context, Symbol base, string member, Loc lo
 
 class ASTMember : ASTMemberBase
 {
-    override Symbol compile(Context context)
+    override (Symbol | fail Error) compile(Context context)
     {
         // UFCS part two
         // support `foo.bar` as implicit `bar(foo)` if `foo` has no member `bar`
         // TODO merge with ASTCall UFCS code (they should be the same)
-        if (auto base = this.base.compile(context).isExpressionImplCall(context, this.loc)) {
-            auto member = accessMember(context, base, this.member, this.loc, true);
+        if (auto base = this.base.compile(context).retfail.isExpressionImplCall(context, this.loc).retfail) {
+            auto member = retfail accessMember(context, base, this.member, this.loc, true);
             if (!member) {
                 auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
-                auto callable = context.namespace.lookup(this.member, context, this.loc, stackframe);
+                auto callable <- context.namespace.lookup(this.member, context, this.loc, stackframe);
                 // if `foo` has no `bar` but there is a `bar` symbol:
                 if (callable) {
                     auto target = new ASTIdentifier(this.member, false, this.loc);
@@ -1046,7 +1049,8 @@ class ASTMember : ASTMemberBase
             }
         }
 
-        if (auto ret = accessMemberWithLifetime(context, this.base.compile(context), this.member, this.loc, false))
+        if (auto ret = retfail accessMemberWithLifetime(
+            context, retfail this.base.compile(context), this.member, this.loc, false))
         {
             return ret;
         }
@@ -1084,16 +1088,15 @@ class ASTParenPropertyExpression : ASTSymbol
 
     this(this.base, this.prop, this.loc) { }
 
-    override Symbol compile(Context context) {
-        auto baseExpr = this.base.compile(context).beExpressionImplCall(context, this.loc);
-        Expression do2(Expression baseExpr) {
-            nullable Expression do1(Expression baseExpr) {
+    override (Symbol | fail Error) compile(Context context) {
+        auto baseExpr <- this.base.compile(context).retfail.beExpressionImplCall(context, this.loc);
+        (Expression | fail Error) do2(Expression baseExpr) {
+            (nullable Expression | fail Error) do1(Expression baseExpr) {
                 auto context = context.withNamespace(
                     context.compiler.exprAlias(context.namespace, "that", baseExpr));
-                return this.prop.compile(context).beExpressionImplCall(context, this.loc);
+                return this.prop.compile(context).retfail.beExpressionImplCall(context, this.loc);
             }
-            // FIXME this should be <-
-            if (auto ret = context.compiler.exprWithTemporaryExpr(baseExpr, &do1)) return ret;
+            if (auto ret = retfail context.compiler.exprWithTemporaryExpr(baseExpr, &do1)) return ret;
             assert(false);
         }
         return context.compiler.consume(context, baseExpr, &do2);
@@ -1112,7 +1115,7 @@ class ASTParenPropertyExpression : ASTSymbol
     }
 }
 
-nullable ASTParenPropertyExpression parseParenPropertyExpression(
+(nullable ASTParenPropertyExpression | fail Error) parseParenPropertyExpression(
     Parser parser, LexicalContext lexicalContext, ASTSymbol base
 ) {
     parser.begin;
@@ -1122,7 +1125,7 @@ nullable ASTParenPropertyExpression parseParenPropertyExpression(
         parser.revert;
         return null;
     }
-    auto sym = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+    auto sym <- lexicalContext.compiler.parseExpression(parser, lexicalContext);
     if (!sym) parser.fail("expression expected");
     auto sym <- sym;
     if (!parser.accept(")")) parser.fail("closing parenthesis expected");
@@ -1130,11 +1133,12 @@ nullable ASTParenPropertyExpression parseParenPropertyExpression(
     return new ASTParenPropertyExpression(base, sym, loc);
 }
 
-ASTSymbol parseProperties(Parser parser, LexicalContext lexicalContext, mut ASTSymbol current)
+(ASTSymbol | fail Error) parseProperties(Parser parser, LexicalContext lexicalContext, mut ASTSymbol current)
 {
     while (true)
     {
-        if (ASTSymbol instanceOf = parser.parseInstanceOf(lexicalContext, current))
+        auto instanceOf <- parser.parseInstanceOf(lexicalContext, current);
+        if (ASTSymbol instanceOf = instanceOf)
         {
             current = instanceOf;
             continue;
@@ -1142,23 +1146,26 @@ ASTSymbol parseProperties(Parser parser, LexicalContext lexicalContext, mut ASTS
         auto macroArgs = new ParsePropertyArgs(parser, lexicalContext, current);
 
         lexicalContext.macroState.applyMacro(macroArgs);
-        if (ASTSymbol result = macroArgs.result)
+        auto result <- macroArgs.result;
+        if (ASTSymbol result = result)
         {
             current = result;
             continue;
         }
 
-        if (ASTSymbol caseExpr = parser.parseEitherCaseExpr(lexicalContext, current))
+        auto caseExpr <- parser.parseEitherCaseExpr(lexicalContext, current);
+        if (ASTSymbol caseExpr = caseExpr)
         {
             current = caseExpr;
             continue;
         }
-        if (ASTSymbol call = parser.parseCall(lexicalContext, current))
+        auto call <- parser.parseCall(lexicalContext, current);
+        if (ASTSymbol call = call)
         {
             current = call;
             continue;
         }
-        if (ASTSymbol prop = parser.parseParenPropertyExpression(lexicalContext, current))
+        if (ASTSymbol prop = retfail parser.parseParenPropertyExpression(lexicalContext, current))
         {
             current = prop;
             continue;
@@ -1168,12 +1175,14 @@ ASTSymbol parseProperties(Parser parser, LexicalContext lexicalContext, mut ASTS
             current = memberAccess;
             continue;
         }
-        if (ASTSymbol indexAccess = parser.parseIndex(lexicalContext, current))
+        auto indexAccess <- parser.parseIndex(lexicalContext, current);
+        if (ASTSymbol indexAccess = indexAccess)
         {
             current = indexAccess;
             continue;
         }
-        if (ASTSymbol templateInstance = parser.parseTemplateInstantiation(lexicalContext, current))
+        auto templateInstance <- parser.parseTemplateInstantiation(lexicalContext, current);
+        if (ASTSymbol templateInstance = templateInstance)
         {
             current = templateInstance;
             continue;
@@ -1190,9 +1199,9 @@ class ASTDereference : ASTSymbol
 
     this(this.base, this.loc) { }
 
-    override Symbol compile(Context context)
+    override (Symbol | fail Error) compile(Context context)
     {
-        return new Dereference(beExpression(this.base.compile(context)));
+        return new Dereference(this.base.compile(context).retfail.beExpression);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -1209,36 +1218,36 @@ class ASTReference : ASTSymbol
 
     this(this.base, this.loc) { }
 
-    override Expression compile(Context context)
+    override (Expression | fail Error) compile(Context context)
     {
-        auto base = this.base.compile(context);
+        auto base = retfail this.base.compile(context);
         // &function
         if (Function fun = base.instanceOf(Function))
             return new FunctionReference(fun);
         if (LateSymbol lateSym = base.instanceOf(LateSymbol)) {
-            nullable Expression do1(Expression baseExpr) {
+            (nullable Expression | fail Error) do1(Expression baseExpr) {
                 auto funcPtr = lateSym.resolve(context, baseExpr);
                 auto voidp = once new Pointer(new Void);
                 auto contextPtr = lateSym.patchContext(context, new PointerCast(voidp, baseExpr));
                 return new DelegateExpr(funcPtr, contextPtr);
             }
-            Expression do2(Expression baseExpr)
+            (Expression | fail Error) do2(Expression baseExpr)
             {
-                return context.compiler.exprWithTemporaryExpr(baseExpr, &do1).notNull;
+                return context.compiler.exprWithTemporaryExpr(baseExpr, &do1).retfail.notNull;
             }
             return context.compiler.consume(context, lateSym.baseExpr, &do2);
         }
         if (auto nestfn = base.instanceOf(ClassMethodPtr)) {
-            nullable Expression doExpr(Expression thisPtr) {
+            (nullable Expression | fail Error) doExpr(Expression thisPtr) {
                 return new DelegateExpr(nestfn.funcPtr, thisPtr);
             }
-            nullable Expression doRef(Reference thisValue) {
+            (nullable Expression | fail Error) doRef(Reference thisValue) {
                 return doExpr(context.compiler.reference(thisValue));
             }
             if (nestfn.valueIsPtr) {
-                return context.compiler.exprWithTemporaryExpr(nestfn.thisValue, &doExpr).notNull;
+                return context.compiler.exprWithTemporaryExpr(nestfn.thisValue, &doExpr).retfail.notNull;
             } else {
-                return context.compiler.exprWithTemporary(nestfn.thisValue, &doRef).notNull;
+                return context.compiler.exprWithTemporary(nestfn.thisValue, &doRef).retfail.notNull;
             }
         }
         Expression baseExpression = beExpression2(base, this.loc);
@@ -1268,14 +1277,14 @@ class Lambda : Type
         return once (new Pointer(new Void)).emit(platform);
     }
 
-    override nullable Expression callExpr(Context context, Loc loc, Expression base, ASTArgument[] args)
+    override (nullable Expression | fail Error) callExpr(Context context, Loc loc, Expression base, ASTArgument[] args)
     {
         // Reconstruct a ScopeBoundTemplateDecl using `base`
         auto scopeTempl = new ScopeBoundTemplateDecl(this.decl, base);
         // Instantiate with `args`' types
         Expression[] argExprs = [
-            arg.sym.compile(context).beExpressionImplCall(context, loc) for arg in args];
-        auto instance = scopeTempl.instantiate(context, loc, [arg.type for arg in argExprs]);
+            arg.sym.compile(context).retfail.beExpressionImplCall(context, loc).retfail for arg in args];
+        auto instance = retfail scopeTempl.instantiate(context, loc, [arg.type for arg in argExprs]);
         // call(`args`)
         return .call(context, new ASTSymbolHelper(instance), args, loc, autoCall=true);
     }
@@ -1341,7 +1350,7 @@ class ASTLambdaExpr : ASTSymbol
 
     this(this.paramName, this.value, this.macroState, this.loc) { }
 
-    override Symbol compile(Context context) {
+    override (Symbol | fail Error) compile(Context context) {
         /**
          * ({
          *     template lambda__(T) {
@@ -1375,7 +1384,7 @@ class ASTLambdaExpr : ASTSymbol
     }
 }
 
-nullable ASTSymbol parseLambdaExpression(Parser parser, LexicalContext lexicalContext)
+(nullable ASTSymbol | fail Error) parseLambdaExpression(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
     parser.begin;
@@ -1385,36 +1394,37 @@ nullable ASTSymbol parseLambdaExpression(Parser parser, LexicalContext lexicalCo
         return null;
     }
     parser.commit;
-    auto expr = parser.parseExpression(lexicalContext);
+    auto expr <- parser.parseExpression(lexicalContext);
     loc.assert2s(!!expr, "lambda expression expected");
     return new ASTLambdaExpr(arg, expr.notNull, lexicalContext.macroState, loc);
 }
 
-nullable ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
+(nullable ASTSymbol | fail Error) parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
     if (parser.accept("*"))
     {
-        ASTSymbol next = parseExpressionLeaf(parser, lexicalContext).notNull;
+        nullable ASTSymbol next <- parseExpressionLeaf(parser, lexicalContext);
 
-        return new ASTDereference(next, loc);
+        return new ASTDereference(next.notNull, loc);
     }
     if (parser.accept("&"))
     {
-        ASTSymbol next = parseExpressionLeaf(parser, lexicalContext).notNull;
+        nullable ASTSymbol next <- parseExpressionLeaf(parser, lexicalContext);
 
-        return new ASTReference(next, loc);
+        return new ASTReference(next.notNull, loc);
     }
     if (parser.acceptIdentifier("new"))
     {
-        auto type = parser.parseType(lexicalContext);
+        auto type <- parser.parseType(lexicalContext);
         if (!type) {
             parser.fail("type expected");
         }
         mut ASTArgument[] args;
         if (parser.accept("("))
         {
-            args = parseArgumentList(parser, lexicalContext);
+            auto a <- parseArgumentList(parser, lexicalContext);
+            args = a;
         }
 
         return new ASTNewExpression(type.notNull, args, loc);
@@ -1423,11 +1433,11 @@ nullable ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalCont
     {
         parser.expect("(");
         parser.begin;
-        mut nullable ASTSymbol sym = lexicalContext.compiler.parseType(parser, lexicalContext);
+        mut nullable ASTSymbol sym <- lexicalContext.compiler.parseType(parser, lexicalContext);
         if (!sym || !parser.accept(")")) {
             parser.revert;
             parser.begin;
-            sym = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+            sym = retfail lexicalContext.compiler.parseExpression(parser, lexicalContext);
             if (!sym) parser.fail("expression expected");
             parser.expect(")");
         }
@@ -1438,44 +1448,44 @@ nullable ASTSymbol parseExpressionLeaf(Parser parser, LexicalContext lexicalCont
     if (parser.acceptIdentifier("cast"))
     {
         parser.expect("(");
-        nullable ASTSymbol target = parser.parseType(lexicalContext);
+        nullable ASTSymbol target <- parser.parseType(lexicalContext);
         if (!target) {
             parser.fail("type expected");
         }
         parser.expect(")");
-        ASTSymbol value = parseExpressionLeaf(parser, lexicalContext).notNull;
+        nullable ASTSymbol value <- parseExpressionLeaf(parser, lexicalContext);
 
-        return new ASTCastExpr(target.notNull, value, loc);
+        return new ASTCastExpr(target.notNull, value.notNull, loc);
     }
-    if (auto trait = parser.parseTrait(lexicalContext)) {
+    if (auto trait = retfail parser.parseTrait(lexicalContext)) {
         return trait;
     }
-    if (auto lambda = parser.parseLambdaExpression(lexicalContext)) {
+    if (auto lambda = retfail parser.parseLambdaExpression(lexicalContext)) {
         return lambda;
     }
-    if (auto tuple = parser.parseTupleExpression(lexicalContext))
+    if (auto tuple = retfail parser.parseTupleExpression(lexicalContext))
     {
         return tuple;
     }
     if (parser.accept("!"))
     {
-        ASTSymbol next = parser.parseExpressionLeaf(lexicalContext).notNull;
+        nullable ASTSymbol next <- parser.parseExpressionLeaf(lexicalContext);
 
-        return new ASTNegation(next, loc);
+        return new ASTNegation(next.notNull, loc);
     }
     if (parser.acceptButNot("-", "--"))
     {
-        nullable ASTSymbol next = parser.parseExpressionLeaf(lexicalContext);
+        nullable ASTSymbol next <- parser.parseExpressionLeaf(lexicalContext);
 
         loc.assert2s(!!next, "expression expected for negation");
         return new ASTBinaryOp("-", new ASTIntLiteral(0, loc), next.notNull, loc);
     }
-    if (ASTSymbol expr = parser.parseExpressionIncDec(lexicalContext))
+    if (ASTSymbol expr = parser.parseExpressionIncDec(lexicalContext).retfail)
         return parseProperties(parser, lexicalContext, expr);
     return null;
 }
 
-ASTSymbol parseStringLiteral(Parser parser, LexicalContext lexicalContext, string endMarker)
+(ASTSymbol | fail Error) parseStringLiteral(Parser parser, LexicalContext lexicalContext, string endMarker)
 {
     auto loc = parser.loc;
     mut string current;
@@ -1530,7 +1540,7 @@ ASTSymbol parseStringLiteral(Parser parser, LexicalContext lexicalContext, strin
         } else if (ch == "\$") {
             flush;
             if (parser.accept("(")) {
-                nullable ASTSymbol expr = parser.parseExpression(lexicalContext);
+                nullable ASTSymbol expr <- parser.parseExpression(lexicalContext);
                 loc.assert2s(!!expr, "Expression expected.");
                 parser.expect(")");
                 parts ~= expr.notNull;
@@ -1569,13 +1579,13 @@ class ASTPrePostIncDec : ASTSymbol
 
     this(this.loc, this.op, this.target) { }
 
-    override Symbol compile(Context context) {
-        auto target = target.compile(context).beExpressionImplCall(context, loc);
+    override (Symbol | fail Error) compile(Context context) {
+        auto target <- target.compile(context).retfail.beExpressionImplCall(context, loc);
         loc.assert2s5(
             !!target.instanceOf(Reference),
             "cannot ", op.when.case((:pre): "pre", (:post): "post"), "-",
             op.what.case((:inc): "inc", (:dec): "dec"), "rement non-reference target");
-        nullable Expression do_(Expression refptr) {
+        (nullable Expression | fail Error) do_(Expression refptr) {
             auto context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "ref_", context.compiler.dereference(refptr)));
 
@@ -1587,10 +1597,10 @@ class ASTPrePostIncDec : ASTSymbol
                 (:post): op.what.case(
                     (:inc): context.compiler.$expr ({ auto ret = ref_; ref_ += 1; ret; }),
                     (:dec): context.compiler.$expr ({ auto ret = ref_; ref_ -= 1; ret; })))
-                .compile(context).beExpression;
+                .compile(context).retfail.beExpression;
         }
         auto refptr = context.compiler.reference(target.instanceOf(Reference).notNull);
-        return context.compiler.exprWithTemporaryExpr(refptr, &do_).notNull;
+        return context.compiler.exprWithTemporaryExpr(refptr, &do_).retfail.notNull;
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTPreOp'!"); assert(false); }
@@ -1600,15 +1610,15 @@ class ASTPrePostIncDec : ASTSymbol
     }
 }
 
-nullable ASTSymbol parseExpressionIncDec(Parser parser, LexicalContext lexicalContext)
+(nullable ASTSymbol | fail Error) parseExpressionIncDec(Parser parser, LexicalContext lexicalContext)
 {
     mut (:inc | :dec | :none) pre = :none, post = :none;
     auto loc1 = parser.loc;
     if (parser.accept("++")) pre = :inc;
     else if (parser.accept("--")) pre = :dec;
-    // TODO?
-    // ASTSymbol ret <- parseExpressionBase(parser, lexicalContext);
-    mut auto ret <- parseExpressionBase(parser, lexicalContext);
+    nullable ASTSymbol ret <- parseExpressionBase(parser, lexicalContext);
+    if (!ret) return null;
+    mut auto ret = ret.notNull;
     auto loc2 = parser.loc;
     if (parser.accept("++")) post = :inc;
     else if (parser.accept("--")) post = :dec;
@@ -1637,16 +1647,17 @@ ASTSymbol hereExpr(Loc loc, LexicalContext lexicalContext)
             ], __HERE__);
 }
 
-nullable ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalContext)
+(nullable ASTSymbol | fail Error) parseExpressionBase(Parser parser, LexicalContext lexicalContext)
 {
     {
         auto args = new ParseExpressionBaseArgs(parser, lexicalContext);
         lexicalContext.macroState.applyMacro(args);
-        if (ASTSymbol ret = args.symbol) return ret;
+        auto ret <- args.symbol;
+        if (ASTSymbol ret = ret) return ret;
     }
     {
-        if (ASTSymbol destroy_ = parseDestroy(parser, lexicalContext))
-            return destroy_;
+        auto destroy_ <- parseDestroy(parser, lexicalContext);
+        if (auto destroy_ = destroy_) return destroy_;
     }
     parser.begin;
     parser.strip;
@@ -1693,25 +1704,23 @@ nullable ASTSymbol parseExpressionBase(Parser parser, LexicalContext lexicalCont
     {
         return parseStringLiteral(parser, lexicalContext, "\"");
     }
-    if (auto statementExpr = parseStatementExpr(parser, lexicalContext))
+    if (auto statementExpr = retfail parseStatementExpr(parser, lexicalContext))
         return statementExpr;
     if (parser.accept("("))
     {
-        ASTSymbol result = parseExpression(parser, lexicalContext).notNull;
+        nullable ASTSymbol result <- parseExpression(parser, lexicalContext);
 
         parser.expect(")");
+        return result.notNull;
+    }
+    if (auto result = retfail parseArrayLiteral(parser, lexicalContext))
         return result;
-    }
-    {
-        if (auto result = parseArrayLiteral(parser, lexicalContext))
-            return result;
-    }
     return null;
     /*parser.fail("Base expression expected.");
     assert(false);*/
 }
 
-ASTSymbol parseBitAnd(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
+(ASTSymbol | fail Error) parseBitAnd(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
 {
     while (true)
     {
@@ -1719,7 +1728,7 @@ ASTSymbol parseBitAnd(Parser parser, LexicalContext lexicalContext, mut ASTSymbo
         if (parser.acceptButNot("&", "&&"))
         {
             parser.commit;
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("&", left, right, parser.loc);
         }
@@ -1731,7 +1740,7 @@ ASTSymbol parseBitAnd(Parser parser, LexicalContext lexicalContext, mut ASTSymbo
     }
 }
 
-ASTSymbol parseBitXor(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
+(ASTSymbol | fail Error) parseBitXor(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
 {
     while (true)
     {
@@ -1739,7 +1748,7 @@ ASTSymbol parseBitXor(Parser parser, LexicalContext lexicalContext, mut ASTSymbo
         if (parser.accept("^"))
         {
             parser.commit;
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("^", left, right, parser.loc);
         }
@@ -1751,7 +1760,7 @@ ASTSymbol parseBitXor(Parser parser, LexicalContext lexicalContext, mut ASTSymbo
     }
 }
 
-ASTSymbol parseBitOr(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
+(ASTSymbol | fail Error) parseBitOr(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
 {
     while (true)
     {
@@ -1759,7 +1768,7 @@ ASTSymbol parseBitOr(Parser parser, LexicalContext lexicalContext, mut ASTSymbol
         if (parser.acceptButNot("|", "||"))
         {
             parser.commit;
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("|", left, right, parser.loc);
         }
@@ -1771,25 +1780,25 @@ ASTSymbol parseBitOr(Parser parser, LexicalContext lexicalContext, mut ASTSymbol
     }
 }
 
-ASTSymbol parseBitShift(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
+(ASTSymbol | fail Error) parseBitShift(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
 {
     while (true)
     {
         if (parser.accept("<<"))
         {
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("<<", left, right, parser.loc);
         }
         else if (parser.accept(">>>"))
         {
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp(">>>", left, right, parser.loc);
         }
         else if (parser.accept(">>"))
         {
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp(">>", left, right, parser.loc);
         }
@@ -1797,25 +1806,25 @@ ASTSymbol parseBitShift(Parser parser, LexicalContext lexicalContext, mut ASTSym
     }
 }
 
-ASTSymbol parseAddSubCat(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
+(ASTSymbol | fail Error) parseAddSubCat(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
 {
     while (true)
     {
-        if (parser.accept("+"))
+        if (parser.acceptButNot("+", "++"))
         {
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("+", left, right, parser.loc);
         }
-        else if (parser.accept("-"))
+        else if (parser.acceptButNot("-", "--"))
         {
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("-", left, right, parser.loc);
         }
         else if (parser.accept("~"))
         {
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("~", left, right, parser.loc);
         }
@@ -1823,25 +1832,25 @@ ASTSymbol parseAddSubCat(Parser parser, LexicalContext lexicalContext, mut ASTSy
     }
 }
 
-ASTSymbol parseMulDiv(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
+(ASTSymbol | fail Error) parseMulDiv(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
 {
     while (true)
     {
         if (parser.accept("*"))
         {
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("*", left, right, parser.loc);
         }
         else if (parser.accept("/"))
         {
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("/", left, right, parser.loc);
         }
         else if (parser.accept("%"))
         {
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("%", left, right, parser.loc);
         }
@@ -1849,26 +1858,26 @@ ASTSymbol parseMulDiv(Parser parser, LexicalContext lexicalContext, mut ASTSymbo
     }
 }
 
-ASTSymbol parseBoolAnd(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
+(ASTSymbol | fail Error) parseBoolAnd(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
 {
     while (true)
     {
         if (parser.accept("&&"))
         {
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("&&", left, right, parser.loc);
         } else return left;
     }
 }
 
-ASTSymbol parseBoolOr(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
+(ASTSymbol | fail Error) parseBoolOr(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int myLevel)
 {
     while (true)
     {
         if (parser.accept("||"))
         {
-            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+            ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
             left = new ASTBinaryOp("||", left, right, parser.loc);
         } else return left;
@@ -1886,11 +1895,11 @@ class ASTIota : ASTSymbol
 
     this(this.from, this.to, this.loc) { }
 
-    override Expression compile(Context context)
+    override (Expression | fail Error) compile(Context context)
     {
         auto iotaValue = context.compiler.$expr ({ import package(compiler).std.range.iota : Iota; Iota($from, $to); });
 
-        return iotaValue.compile(context).beExpression;
+        return iotaValue.compile(context).retfail.beExpression;
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -1900,96 +1909,100 @@ class ASTIota : ASTSymbol
     }
 }
 
-ASTSymbol parseIota(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
+(ASTSymbol | fail Error) parseIota(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
     if (parser.accept(".."))
     {
-        ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+        ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTIota(left, right, parser.loc);
     }
     return left;
 }
 
-ASTSymbol parseComparison(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
+(ASTSymbol | fail Error) parseComparison(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
     if (parser.accept("=="))
     {
-        ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+        ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTBinaryOp("==", left, right, parser.loc);
     }
     if (parser.accept("!=")) // same as !(a == b)
     {
-        ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+        ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTNegation(new ASTBinaryOp("==", left, right, parser.loc), parser.loc);
     }
     if (parser.accept("is"))
     {
-        ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+        ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTBinaryOp("is", left, right, parser.loc);
     }
     if (parser.accept("!is"))
     {
-        ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+        ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTNegation(new ASTBinaryOp("is", left, right, parser.loc), parser.loc);
     }
     if (parser.accept(">="))
     {
-        ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+        ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTBinaryOp(">=", left, right, parser.loc);
     }
     if (parser.acceptButNot(">", ">>"))
     {
-        ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+        ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTBinaryOp(">", left, right, parser.loc);
     }
     if (parser.accept("<="))
     {
-        ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+        ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTBinaryOp("<=", left, right, parser.loc);
     }
     if (parser.acceptButNot("<", "<<"))
     {
-        ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1);
+        ASTSymbol right <- expectArithmetic(parser, lexicalContext, myLevel + 1);
 
         return new ASTBinaryOp("<", left, right, parser.loc);
     }
     return left;
 }
 
-ASTSymbol parseArithmetic(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int level)
+(ASTSymbol | fail Error) parseArithmetic(Parser parser, LexicalContext lexicalContext, mut ASTSymbol left, int level)
 {
-    if (level <= 9) left = parseBitAnd(parser, lexicalContext, left, 9);
-    if (level <= 8) left = parseBitXor(parser, lexicalContext, left, 8);
-    if (level <= 7) left = parseBitOr(parser, lexicalContext, left, 7);
-    if (level <= 6) left = parseMulDiv(parser, lexicalContext, left, 6);
-    if (level <= 5) left = parseAddSubCat(parser, lexicalContext, left, 5);
-    if (level <= 4) left = parseBitShift(parser, lexicalContext, left, 4);
-    if (level <= 3) left = parseIota(parser, lexicalContext, left, 3);
-    if (level <= 2) left = parseComparison(parser, lexicalContext, left, 2);
-    if (level <= 1) left = parseBoolAnd(parser, lexicalContext, left, 1);
-    if (level <= 0) left = parseBoolOr(parser, lexicalContext, left, 0);
+    // FIXME
+    if (level <= 9) { auto e <- parseBitAnd(parser, lexicalContext, left, 9); left = e; }
+    if (level <= 8) { auto e <- parseBitXor(parser, lexicalContext, left, 8); left = e; }
+    if (level <= 7) { auto e <- parseBitOr(parser, lexicalContext, left, 7); left = e; }
+    if (level <= 6) { auto e <- parseMulDiv(parser, lexicalContext, left, 6); left = e; }
+    if (level <= 5) { auto e <- parseAddSubCat(parser, lexicalContext, left, 5); left = e; }
+    if (level <= 4) { auto e <- parseBitShift(parser, lexicalContext, left, 4); left = e; }
+    if (level <= 3) { auto e <- parseIota(parser, lexicalContext, left, 3); left = e; }
+    if (level <= 2) { auto e <- parseComparison(parser, lexicalContext, left, 2); left = e; }
+    if (level <= 1) { auto e <- parseBoolAnd(parser, lexicalContext, left, 1); left = e; }
+    if (level <= 0) { auto e <- parseBoolOr(parser, lexicalContext, left, 0); left = e; }
     return left;
 }
 
-ASTSymbol expectArithmetic(Parser parser, LexicalContext lexicalContext, int level)
-{
-    auto leaf = parseExpressionLeaf(parser, lexicalContext).notNull;
-
-    return parseArithmetic(parser, lexicalContext, leaf, level);
-}
-
-nullable ASTSymbol parseExpression(Parser parser, LexicalContext lexicalContext)
+(ASTSymbol | fail Error) expectArithmetic(Parser parser, LexicalContext lexicalContext, int level)
 {
     auto leaf <- parseExpressionLeaf(parser, lexicalContext);
-    return parseArithmetic(parser, lexicalContext, leaf, 0);
+    void <- parser.assert2(!!leaf, "Expression leaf expected");
+
+    return parseArithmetic(parser, lexicalContext, leaf.notNull, level);
+}
+
+(nullable ASTSymbol | fail Error) parseExpression(Parser parser, LexicalContext lexicalContext)
+{
+    auto leaf <- parseExpressionLeaf(parser, lexicalContext);
+    if (auto leaf = leaf)
+        return parseArithmetic(parser, lexicalContext, leaf, 0);
+    return null;
 }
 
 class ASTReturnStatement : ASTStatement
@@ -2000,9 +2013,9 @@ class ASTReturnStatement : ASTStatement
 
     this(this.value, this.loc) { }
 
-    override StatementCompileResult compile(Context context)
+    override (StatementCompileResult | fail Error) compile(Context context)
     {
-        mut Expression expr = beExpression3(context, this.value.compile(context), this.loc);
+        mut Expression expr <- beExpression3(context, retfail this.value.compile(context), this.loc);
         Type ret = findParent!FunctionScope(context.namespace).ret;
         expr = expectImplicitConvertTo(context, expr, ret, this.loc);
 
@@ -2015,16 +2028,16 @@ class ASTReturnStatement : ASTStatement
          */
         auto temp = new PairedTemporary(ret, Ownership.owned);
         auto init = new UninitializeTemporaryStatement(temp);
-        Statement escapeValueStmt()
+        (Statement | fail Error) escapeValueStmt()
         {
             if (expr.info.ownership == Ownership.gifted || expr.info.ownership == Ownership.global)
                 return new AssignStatement(temp, expr);
-            if (auto copyInto = ret.copyInto(context, temp, expr))
+            if (auto copyInto = retfail ret.copyInto(context, temp, expr))
                 return copyInto;
             return new AssignStatement(temp, expr);
         }
-        mut Statement returnStmt = sequence(init, escapeValueStmt);
-        returnStmt = unwindScope(context, findParent!FunctionScope(context.namespace), returnStmt);
+        mut Statement returnStmt = sequence(init, retfail escapeValueStmt);
+        returnStmt = retfail unwindScope(context, findParent!FunctionScope(context.namespace), returnStmt);
         returnStmt = sequence(returnStmt, new ReturnStatement(temp));
         // no need for stack cleanup after a return.
 
@@ -2043,7 +2056,7 @@ class ASTVoidExpression : ASTSymbol
 
     this(this.loc) { }
 
-    override Expression compile(Context context) { return once new VoidExpression; }
+    override (Expression | fail Error) compile(Context context) { return once new VoidExpression; }
 
     override ASTSymbol quote(Quoter quoter) {
         ASTSymbol[] args;
@@ -2062,7 +2075,7 @@ class VoidExpression : Expression
     override void hash(Hash hash) { hash.adds("VoidExpression"); }
 }
 
-nullable ASTReturnStatement parseReturn(Parser parser, LexicalContext lexicalContext)
+(nullable ASTReturnStatement | fail Error) parseReturn(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     string identifier = parser.parseIdentifier;
@@ -2078,20 +2091,21 @@ nullable ASTReturnStatement parseReturn(Parser parser, LexicalContext lexicalCon
     }
     else
     {
-        expr = parseExpression(parser, lexicalContext).notNull;
+        auto e <- parseExpression(parser, lexicalContext);
+        expr = e.notNull;
         parser.expect(";");
     }
     parser.commit;
     return new ASTReturnStatement(expr, parser.loc);
 }
 
-Statement unwindScope(Context context, nullable Namespace target, Statement body_)
+(Statement | fail Error) unwindScope(Context context, nullable Namespace target, Statement body_)
 {
     mut Statement result = body_;
     mut nullable Namespace current = context.namespace;
     while (current && current !is target) {
         if (auto unwindable = current.instanceOf(Unwindable)) {
-            result = sequence(result, unwindable.unwind(context));
+            result = sequence(result, retfail unwindable.unwind(context));
         }
         if (auto declHolder = current.instanceOf(DeclarationHolder)) {
             auto var = declHolder.accessDecl(context.compiler);
@@ -2107,14 +2121,14 @@ Statement unwindScope(Context context, nullable Namespace target, Statement body
     return result;
 }
 
-(Expression test, Expression value) pickEither(
+(Expression test, Expression value | fail Error) pickEither(
     Context context, Either either, Expression source, Type extractType, Loc loc)
 {
     if (auto extractEither = extractType.instanceOf(Either))
         return pickEitherTuple(context, either, source, extractEither, loc);
     int eithermember = [first cast(int) i for i, a in either.types where a.type.same(extractType) else -1];
     loc.assert2s(eithermember != -1, "type $(extractType.repr) not in sumtype $(either.repr)");
-    auto test = context.compiler.binaryOp(
+    auto test = retfail context.compiler.binaryOp(
         "==", context, new EitherType(source), new IntLiteral(eithermember + 1), __HERE__);
     auto value = new EitherMember(source, eithermember);
     return (test, value);
@@ -2130,7 +2144,7 @@ Statement unwindScope(Context context, nullable Namespace target, Statement body
  *   - on success, init the result and set the bool to true
  * - return (bool, result)
  */
-(Expression test, Expression value) pickEitherTuple(
+(Expression test, Expression value | fail Error) pickEitherTuple(
     Context context, Either either, Expression source, Either extractEither, Loc loc)
 {
     auto result = new PairedTemporary(extractEither, source.info.ownership);
@@ -2144,7 +2158,7 @@ Statement unwindScope(Context context, nullable Namespace target, Statement body
         int eithermember = [first cast(int) i for i, a in either.types where a.type.same(extractType) else -1];
         loc.assert2s(eithermember != -1, "sumtype $(extractType.repr) not in source $(either.repr)");
         auto cmpTypeId = new IntLiteral(eithermember + 1);
-        auto test = context.compiler.binaryOp("==", context, sourceTypeId, cmpTypeId, __HERE__);
+        auto test = retfail context.compiler.binaryOp("==", context, sourceTypeId, cmpTypeId, __HERE__);
 
         auto extractValue = new EitherMember(source, eithermember);
         auto repacked = new EitherExpr(extractEither, extractValue, cast(int) i);
@@ -2202,7 +2216,7 @@ class ASTIfStatement : ASTStatement
 
     this(this.test, this.then, this.else_, this.loc) { }
 
-    override StatementCompileResult compile(Context context)
+    override (StatementCompileResult | fail Error) compile(Context context)
     {
         mut nullable Statement prelude; // var decl statement
         mut nullable Expression test;
@@ -2210,10 +2224,11 @@ class ASTIfStatement : ASTStatement
         mut auto testSucceedsContext = context;
         this.test.case {
             ASTSymbol symbol: {
-                test = beExpression3(context, symbol.compile(context), this.loc);
+                // TODO pick assignment
+                test = retfail beExpression3(context, retfail symbol.compile(context), this.loc);
             }
             ASTVarDeclStatement vardecl: {
-                auto initial = vardecl.initial.compile(context).beExpressionImplCall(context, vardecl.loc);
+                auto initial <- vardecl.initial.compile(context).retfail.beExpressionImplCall(context, vardecl.loc);
 
                 // `if (Foo var = some nullable Foo)`:
                 //   - cache `some`, test for nullness, then declare Foo var.
@@ -2233,26 +2248,30 @@ class ASTIfStatement : ASTStatement
                         type=new ASTSymbolHelper(notNullableType),
                         initial=new ASTSymbolHelper(new PointerCast(notNullableType, tempInitial)),
                         vardecl.loc);
-                    auto pair = actualVarDecl.compile(context);
+                    auto pair = retfail actualVarDecl.compile(context);
                     epilog = pair.statement;
                     testSucceedsContext = pair.context;
                 } else {
-                    auto pair = vardecl.compile(context);
+                    auto pair = retfail vardecl.compile(context);
                     prelude = pair.statement;
                     testSucceedsContext = pair.context;
                     auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
                     auto var = testSucceedsContext.namespace.lookup(
                             vardecl.name, context, this.loc, stackframe)
+                        .retfail
                         .notNull
                         .beExpression;
                     // TODO lookup() that handles the stackframe thing
-                    test = beExpression3(context, var, this.loc);
+                    test = retfail beExpression3(context, var, this.loc);
                 }
             }
             ASTVarExtractDeclStatement extractdecl: {
                 // validate source is Either
                 // TODO extract interface
-                auto source = extractdecl.source.compile(context).beExpressionImplCall(context, extractdecl.loc);
+                auto source = extractdecl.source.compile(context)
+                    .retfail
+                    .beExpressionImplCall(context, extractdecl.loc)
+                    .retfail;
                 auto sourceType = source.type.instanceOf(Either);
                 extractdecl.loc.assert2s(!!sourceType, "source of <- decl must be sumtype, not $(source.type.repr)");
                 auto sourceType = sourceType.notNull;
@@ -2264,10 +2283,10 @@ class ASTIfStatement : ASTStatement
                 if (extractdecl.infer) {
                     extractType = typeWithoutFail(sourceType);
                 } else {
-                    extractType = beType(extractdecl.loc, extractdecl.type.compile(context));
+                    extractType = beType(extractdecl.loc, retfail extractdecl.type.compile(context));
                 }
 
-                auto ret = pickEither(context, sourceType, tempSource, extractType, extractdecl.loc);
+                auto ret = retfail pickEither(context, sourceType, tempSource, extractType, extractdecl.loc);
                 prelude = initTemp;
                 test = ret.test;
 
@@ -2275,17 +2294,17 @@ class ASTIfStatement : ASTStatement
                     extractdecl.name, mutable=extractdecl.mutable, infer=false, uninitialized=false,
                     type=new ASTSymbolHelper(extractType), initial=new ASTSymbolHelper(ret.value),
                     extractdecl.loc);
-                auto pair = actualVarDecl.compile(context);
+                auto pair = retfail actualVarDecl.compile(context);
                 epilog = pair.statement;
                 testSucceedsContext = pair.context;
             }
         }
-        auto thenPair = this.then.compile(testSucceedsContext);
-        Statement then = unwindScope(thenPair.context, context.namespace, thenPair.statement);
+        auto thenPair = retfail this.then.compile(testSucceedsContext);
+        Statement then = retfail unwindScope(thenPair.context, context.namespace, thenPair.statement);
         mut nullable Statement else_;
         if (this.else_) {
-            auto elsePair = this.else_.compile(context);
-            else_ = unwindScope(elsePair.context, context.namespace, elsePair.statement);
+            auto elsePair = retfail this.else_.compile(context);
+            else_ = retfail unwindScope(elsePair.context, context.namespace, elsePair.statement);
         }
 
         auto test = truthy(context, test.notNull, this.loc);
@@ -2314,7 +2333,7 @@ class ASTIfStatement : ASTStatement
     }
 }
 
-nullable ASTIfStatement parseIf(Parser parser, LexicalContext lexicalContext)
+(nullable ASTIfStatement | fail Error) parseIf(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     string identifier = parser.parseIdentifier;
@@ -2325,17 +2344,23 @@ nullable ASTIfStatement parseIf(Parser parser, LexicalContext lexicalContext)
     }
     mut uninitialized (ASTSymbol | ASTVarDeclStatement | ASTVarExtractDeclStatement) test;
     parser.expect("(");
-    if (auto vardecl = parseVarDecl(parser, lexicalContext, requireInitializer=true))
+    auto vardecl <- parseVarDecl(parser, lexicalContext, requireInitializer=true);
+    if (auto vardecl = vardecl)
         test = vardecl;
-    else if (auto varextractdecl = parseVarExtractDecl(parser, lexicalContext))
-        test = varextractdecl;
-    else test = parseExpression(parser, lexicalContext).notNull;
+    else {
+        auto varextractdecl <- parseVarExtractDecl(parser, lexicalContext);
+        if (auto varextractdecl = varextractdecl) test = varextractdecl;
+        else {
+            auto e <- parseExpression(parser, lexicalContext);
+            test = e.notNull;
+        }
+    }
     parser.expect(")");
-    ASTStatement thenStmt = parseStatement(parser, lexicalContext);
+    ASTStatement thenStmt = retfail parseStatement(parser, lexicalContext);
     mut nullable ASTStatement elseStatement;
     if (parser.accept("else"))
     {
-        elseStatement = parseStatement(parser, lexicalContext);
+        elseStatement = retfail parseStatement(parser, lexicalContext);
     }
     parser.commit;
     return new ASTIfStatement(test, thenStmt, elseStatement, parser.loc);
@@ -2370,18 +2395,18 @@ class ASTScopeStatement : ASTStatement
 
     this(this.statements, this.loc) { }
 
-    override StatementCompileResult compile(Context context)
+    override (StatementCompileResult | fail Error) compile(Context context)
     {
         auto statements = new Statement[](this.statements.length);
         mut auto subContext = context;
         for (i, statement in this.statements) {
-            auto pair = statement.compile(subContext);
+            auto pair <- statement.compile(subContext);
 
             subContext = pair.context;
             statements[i] = pair.statement;
         }
         return StatementCompileResult(
-            unwindScope(subContext, context.namespace, new SequenceStatement(statements)),
+            retfail unwindScope(subContext, context.namespace, new SequenceStatement(statements)),
             context); // scope ends here
     }
 
@@ -2402,12 +2427,12 @@ class ASTSequenceStatement : ASTStatement
 
     this(this.statements, this.loc) { }
 
-    override StatementCompileResult compile(Context context)
+    override (StatementCompileResult | fail Error) compile(Context context)
     {
         auto statements = new Statement[](this.statements.length);
         mut auto subContext = context;
         for (i, statement in this.statements) {
-            auto pair = statement.compile(subContext);
+            auto pair <- statement.compile(subContext);
 
             subContext = pair.context;
             statements[i] = pair.statement;
@@ -2423,7 +2448,7 @@ class ASTSequenceStatement : ASTStatement
     }
 }
 
-nullable ASTScopeStatement parseScope(Parser parser, LexicalContext lexicalContext)
+(nullable ASTScopeStatement | fail Error) parseScope(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
     if (!parser.accept("{"))
@@ -2433,17 +2458,18 @@ nullable ASTScopeStatement parseScope(Parser parser, LexicalContext lexicalConte
     mut ASTStatement[] statements;
     while (!parser.accept("}"))
     {
-        ASTStatement stmt = parseStatement(parser, lexicalContext);
+        ASTStatement stmt = retfail parseStatement(parser, lexicalContext);
 
         statements ~= stmt;
     }
     return new ASTScopeStatement(statements, loc);
 }
 
-nullable ASTAssignStatement parseAssignment(Parser parser, LexicalContext lexicalContext)
+(nullable ASTAssignStatement | fail Error) parseAssignment(
+    Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
-    nullable ASTSymbol lhs = parseExpressionLeaf(parser, lexicalContext);
+    nullable ASTSymbol lhs <- parseExpressionLeaf(parser, lexicalContext);
     if (!lhs) {
         parser.revert;
         return null;
@@ -2463,7 +2489,7 @@ nullable ASTAssignStatement parseAssignment(Parser parser, LexicalContext lexica
         parser.revert;
         return null;
     }
-    mut nullable ASTSymbol expr = parseExpression(parser, lexicalContext);
+    nullable ASTSymbol expr <- parseExpression(parser, lexicalContext);
     if (!expr) {
         parser.fail("expression expected");
     }
@@ -2486,22 +2512,22 @@ class ASTAssignStatement : ASTStatement
 
     this(this.target, this.value, this.loc) {}
 
-    override StatementCompileResult compile(Context context)
+    override (StatementCompileResult | fail Error) compile(Context context)
     {
-        mut Expression value = this.value.compile(context).beExpressionImplCall(context, this.loc);
+        mut Expression value <- this.value.compile(context).retfail.beExpressionImplCall(context, this.loc);
 
         // `a[b] = c` special handling
         if (auto astIndex = target.instanceOf(ASTIndexAccess))
         {
-            auto base = astIndex.base.compile(context).beExpressionImplCall(context, astIndex.loc);
-            auto index = astIndex.index.compile(context).beExpressionImplCall(context, astIndex.loc);
+            auto base <- astIndex.base.compile(context).retfail.beExpressionImplCall(context, astIndex.loc);
+            auto index <- astIndex.index.compile(context).retfail.beExpressionImplCall(context, astIndex.loc);
             if (auto assignment = base.type.indexAssignment(context, base, index, value, this.loc))
                 return StatementCompileResult(assignment, context);
         }
 
         auto compiler = context.compiler;
 
-        Symbol target = this.target.compile(context);
+        Symbol target <- this.target.compile(context);
         nullable Reference targetref = target.instanceOf(Reference);
         this.loc.assert2s(!!targetref, "target of assignment must be a reference");
         this.loc.assert2s(targetref.info.mutable, "target of assignment must be mutable");
@@ -2538,12 +2564,12 @@ class ASTAssignStatement : ASTStatement
          * But man, what an ugly-ass dataflow...
          */
 
-        nullable Statement do1(Expression tmpValue) {
-            nullable Statement do2(Expression tmpLhsPtr) {
+        (nullable Statement | fail Error) do1(Expression tmpValue) {
+            (nullable Statement | fail Error) do2(Expression tmpLhsPtr) {
                 auto tmpLhs = compiler.dereference(tmpLhsPtr);
 
-                nullable Statement do3(Reference oldLhs) {
-                    auto reassign = compiler.move(context, tmpLhs, tmpValue);
+                (nullable Statement | fail Error) do3(Reference oldLhs) {
+                    auto reassign = retfail compiler.move(context, tmpLhs, tmpValue);
                     auto cleanup = oldLhs.type.endLifetime(context, oldLhs);
 
                     return sequence(reassign, cleanup);
@@ -2553,7 +2579,7 @@ class ASTAssignStatement : ASTStatement
             return compiler.stmtWithTemporaryExpr(compiler.reference(targetref), &do2);
         }
         return StatementCompileResult(
-            compiler.stmtWithTemporaryExpr(value, &do1).notNull,
+            compiler.stmtWithTemporaryExpr(value, &do1).retfail.notNull,
             context);
     }
 
@@ -2562,9 +2588,11 @@ class ASTAssignStatement : ASTStatement
     }
 }
 
-nullable ASTAssignStatement parseAssignStatement(Parser parser, LexicalContext lexicalContext)
+(nullable ASTAssignStatement | fail Error) parseAssignStatement(
+    Parser parser, LexicalContext lexicalContext)
 {
-    if (auto ret = parseAssignment(parser, lexicalContext))
+    auto ret <- parseAssignment(parser, lexicalContext);
+    if (ret)
     {
         parser.expect(";");
         return ret;
@@ -2597,13 +2625,13 @@ class ASTVarDeclStatement : ASTStatement
         assert(!uninitialized || !initial);
     }
 
-    override StatementCompileResult compile(Context context)
+    override (StatementCompileResult | fail Error) compile(Context context)
     {
         mut nullable Type type;
-        if (this.type) type = beType(this.loc, this.type.compile(context));
+        if (this.type) type = beType(this.loc, retfail this.type.compile(context));
         if (this.initial)
         {
-            mut auto initial = beExpression3(context, this.initial.compile(context), this.loc);
+            mut auto initial <- beExpression3(context, retfail this.initial.compile(context), this.loc);
             if (this.infer) {
                 assert(!type);
                 type = initial.type;
@@ -2629,7 +2657,7 @@ class ASTVarDeclStatement : ASTStatement
                 context.namespace, this.name, type, ExprInfo(mutable, Ownership.owned), false);
 
             return StatementCompileResult(
-                move(context, decl.accessDecl(context.compiler), initial),
+                retfail move(context, decl.accessDecl(context.compiler), initial),
                 context.withNamespace(decl));
         }
         else if (this.uninitialized)
@@ -2691,7 +2719,7 @@ class ASTVarDeclStatement : ASTStatement
     }
 }
 
-nullable ASTVarDeclStatement parseVarInitialization(
+(nullable ASTVarDeclStatement | fail Error) parseVarInitialization(
     Parser parser, LexicalContext lexicalContext, bool infer, bool mutable, bool uninitialized,
     nullable ASTSymbol type, string operator, bool requireInitializer)
 {
@@ -2701,7 +2729,8 @@ nullable ASTVarDeclStatement parseVarInitialization(
     // <- is not as ambiguous as =
     if ((infer || operator == "<-") && parser.accept(operator))
     {
-        initial = parseExpression(parser, lexicalContext);
+        auto e <- parseExpression(parser, lexicalContext);
+        initial = e;
         if (!initial) parser.fail("variable initializer expected");
     }
     else
@@ -2718,11 +2747,13 @@ nullable ASTVarDeclStatement parseVarInitialization(
                 parser.revert;
                 return null;
             }
-            initial = parseExpression(parser, lexicalContext);
+            auto e <- parseExpression(parser, lexicalContext);
+            initial = e;
             if (!initial) parser.fail("variable initializer expected");
         }
         else if (parser.accept(operator)) {
-            initial = parseExpression(parser, lexicalContext);
+            auto e <- parseExpression(parser, lexicalContext);
+            initial = e;
             if (!initial) parser.fail("variable initializer expected");
         } else {
             // FIXME this is very hacky
@@ -2742,7 +2773,8 @@ nullable ASTVarDeclStatement parseVarInitialization(
     return new ASTVarDeclStatement(name, mutable, infer, uninitialized=uninitialized, type, initial, parser.loc);
 }
 
-nullable ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalContext, bool requireInitializer)
+(nullable ASTVarDeclStatement | fail Error) parseVarDecl(
+    Parser parser, LexicalContext lexicalContext, bool requireInitializer)
 {
     parser.begin;
     mut bool infer = false;
@@ -2754,7 +2786,8 @@ nullable ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalC
     if (acceptIdentifier(parser, "auto")) {
         infer = true;
     } else {
-        type = parser.parseType(lexicalContext);
+        auto t <- parser.parseType(lexicalContext);
+        type = t;
         if (!type)
         {
             if (mutable) infer = true;
@@ -2764,7 +2797,7 @@ nullable ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalC
             }
         }
     }
-    auto decl = parseVarInitialization(
+    auto decl <- parseVarInitialization(
         parser, lexicalContext, infer, mutable, uninitialized, type, "=", requireInitializer);
     if (!decl) {
         parser.revert;
@@ -2775,7 +2808,7 @@ nullable ASTVarDeclStatement parseVarDecl(Parser parser, LexicalContext lexicalC
 }
 
 // TODO merge with parseVarDecl
-nullable ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
+(nullable ASTStatement | fail Error) parseMultiVarDecl(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto loc = parser.loc;
@@ -2788,7 +2821,14 @@ nullable ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalCon
     if (acceptIdentifier(parser, "auto")) {
         infer = true;
     } else {
-        type = parser.parseType(lexicalContext);
+        /**
+         * TODO
+         * if (auto t <- parser.parseType(lexicalContext))
+         *   type = t;
+         * else (null) { parser.revert; return null; }
+         */
+        auto t <- parser.parseType(lexicalContext);
+        type = t;
         if (!type)
         {
             parser.revert;
@@ -2798,16 +2838,20 @@ nullable ASTStatement parseMultiVarDecl(Parser parser, LexicalContext lexicalCon
     mut ASTStatement[] decls;
     while (true) {
         if (decls.length) parser.expect(",");
-        if (auto decl = parseVarInitialization(parser, lexicalContext, infer, mutable, uninitialized, type, "=", false)) {
+        auto decl <- parseVarInitialization(parser, lexicalContext, infer, mutable, uninitialized, type, "=", false);
+        if (auto decl = decl) {
             decls ~= decl;
-        } else if (auto decl2 = parseVarInitialization(
-            parser, lexicalContext, infer, mutable, uninitialized, type, "<-", false))
-        {
-            decls ~= extractFromVarDecl(decl2);
         } else {
-            parser.assert_(decls.length == 0, "couldn't parse continuing variable declaration");
-            parser.revert;
-            return null;
+            auto decl2 <- parseVarInitialization(
+                parser, lexicalContext, infer, mutable, uninitialized, type, "<-", false);
+            if (auto decl2 = decl2)
+            {
+                decls ~= extractFromVarDecl(decl2);
+            } else {
+                parser.assert_(decls.length == 0, "couldn't parse continuing variable declaration");
+                parser.revert;
+                return null;
+            }
         }
         if (parser.accept(";")) break;
     }
@@ -2839,12 +2883,13 @@ class ASTVarExtractDeclStatement : ASTStatement
         assert(infer == !type);
     }
 
-    override StatementCompileResult compile(Context context)
+    override (StatementCompileResult | fail Error) compile(Context context)
     {
-        auto source = this.source.compile(context).beExpressionImplCall(context, this.loc);
+        auto source <- this.source.compile(context).retfail.beExpressionImplCall(context, this.loc);
         nullable Either sourceType = source.type.instanceOf(Either);
         if (!sourceType) {
             // either can also turn nullables into non-nullables
+            // TODO do we really want that? really?
             if (context.compiler.isClassType(source.type) && source.type.zeroInitializable) {
                 return compileObjectDenullFallback(context, source);
             }
@@ -2853,7 +2898,7 @@ class ASTVarExtractDeclStatement : ASTStatement
         auto sourceType = sourceType.notNull;
 
         mut uninitialized Type type;
-        if (this.type) type = beType(this.loc, this.type.compile(context));
+        if (this.type) type = beType(this.loc, retfail this.type.compile(context));
         else type = typeWithoutFail(sourceType);
 
         bool inTargetType(Type source) {
@@ -2887,16 +2932,16 @@ class ASTVarExtractDeclStatement : ASTStatement
         }
 
         auto switch_ = new ASTEitherCaseExpr(this.loc, this.source, cases);
-        auto switchExpr = switch_.compile(context).beExpression;
+        auto switchExpr = switch_.compile(context).retfail.beExpression;
 
         return StatementCompileResult(
-            move(context, decl.accessDecl(context.compiler), switchExpr),
+            retfail move(context, decl.accessDecl(context.compiler), switchExpr),
             context.withNamespace(decl));
     }
 
-    StatementCompileResult compileObjectDenullFallback(Context context, Expression source) {
+    (StatementCompileResult | fail Error) compileObjectDenullFallback(Context context, Expression source) {
         mut uninitialized Type type;
-        if (this.type) type = beType(this.loc, this.type.compile(context));
+        if (this.type) type = beType(this.loc, retfail this.type.compile(context));
         else type = source.type.makeNotNullable;
         assert(type.same(source.type.makeNotNullable));
 
@@ -2912,7 +2957,7 @@ class ASTVarExtractDeclStatement : ASTStatement
             context.namespace, this.name, type, ExprInfo(mutable=this.mutable, Ownership.owned), false);
 
         return StatementCompileResult(
-            move(context, decl.accessDecl(context.compiler), initial.compile(context).beExpression),
+            retfail move(context, decl.accessDecl(context.compiler), initial.compile(context).retfail.beExpression),
             context.withNamespace(decl));
     }
 
@@ -2956,7 +3001,7 @@ ASTVarExtractDeclStatement extractFromVarDecl(ASTVarDeclStatement decl)
         source=decl.initial.notNull, loc=decl.loc);
 }
 
-nullable ASTVarExtractDeclStatement parseVarExtractDecl(Parser parser, LexicalContext lexicalContext)
+(nullable ASTVarExtractDeclStatement | fail Error) parseVarExtractDecl(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     mut bool infer = false;
@@ -2967,7 +3012,8 @@ nullable ASTVarExtractDeclStatement parseVarExtractDecl(Parser parser, LexicalCo
     if (acceptIdentifier(parser, "auto")) {
         infer = true;
     } else {
-        type = parser.parseType(lexicalContext);
+        auto t <- parser.parseType(lexicalContext);
+        type = t;
         if (!type)
         {
             if (mutable) infer = true;
@@ -2977,7 +3023,7 @@ nullable ASTVarExtractDeclStatement parseVarExtractDecl(Parser parser, LexicalCo
             }
         }
     }
-    auto decl = parseVarInitialization(
+    auto decl <- parseVarInitialization(
         parser, lexicalContext, infer, mutable, uninitialized=false, type, "<-", requireInitializer=true);
     if (!decl) {
         parser.revert;
@@ -2993,9 +3039,9 @@ class ASTNestedFunctionDeclStatement : ASTStatement
 
     this(this.fun) { }
 
-    override StatementCompileResult compile(Context context)
+    override (StatementCompileResult | fail Error) compile(Context context)
     {
-        auto fun = this.fun.compile(context);
+        auto fun = retfail this.fun.compile(context);
         auto latent = fun.instanceOf(LatentNestedFunction);
 
         assert(!!latent);
@@ -3011,9 +3057,10 @@ class ASTNestedFunctionDeclStatement : ASTStatement
     }
 }
 
-nullable ASTNestedFunctionDeclStatement parseNestedFunctionDecl(Parser parser, LexicalContext lexicalContext)
+(nullable ASTNestedFunctionDeclStatement | fail Error) parseNestedFunctionDecl(
+    Parser parser, LexicalContext lexicalContext)
 {
-    if (auto fun_ = parseFunction(parser, lexicalContext))
+    if (auto fun_ = retfail parseFunction(parser, lexicalContext))
         return new ASTNestedFunctionDeclStatement(fun_);
     return null;
 }
@@ -3028,13 +3075,15 @@ class ASTWhile : ASTStatement
 
     this(this.cond, this.body_, this.loc) { }
 
-    override StatementCompileResult compile(Context context)
+    override (StatementCompileResult | fail Error) compile(Context context)
     {
         auto label = context.getLabel;
         auto loopContext = context.withNamespace(new LabelLoopScope(label, context.namespace));
-        auto condExpr = truthy(context, beExpression3(context, this.cond.compile(loopContext), this.loc), this.loc);
-        auto bodyPair = this.body_.compile(loopContext);
-        auto bodyStmt = unwindScope(bodyPair.context, context.namespace, bodyPair.statement);
+        auto condExpr = truthy(context,
+            retfail beExpression3(context,
+                retfail this.cond.compile(loopContext), this.loc), this.loc);
+        auto bodyPair = retfail this.body_.compile(loopContext);
+        auto bodyStmt = retfail unwindScope(bodyPair.context, context.namespace, bodyPair.statement);
 
         return StatementCompileResult(
             new Loop(label, null, condExpr, bodyStmt, null),
@@ -3044,25 +3093,26 @@ class ASTWhile : ASTStatement
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTWhileStatement'"); assert(false); }
 }
 
-nullable ASTWhile parseWhile(Parser parser, LexicalContext lexicalContext)
+(nullable ASTWhile | fail Error) parseWhile(Parser parser, LexicalContext lexicalContext)
 {
     if (!acceptIdentifier(parser, "while"))
     {
         return null;
     }
     parser.expect("(");
-    ASTSymbol cond = parseExpression(parser, lexicalContext).notNull;
+    nullable ASTSymbol cond <- parseExpression(parser, lexicalContext);
     parser.expect(")");
-    ASTStatement body_ = parseStatement(parser, lexicalContext);
+    ASTStatement body_ = retfail parseStatement(parser, lexicalContext);
 
-    return new ASTWhile(cond, body_, parser.loc);
+    return new ASTWhile(cond.notNull, body_, parser.loc);
 }
 
-nullable ASTExprStatement parseExprStatement(Parser parser, LexicalContext lexicalContext)
+(nullable ASTExprStatement | fail Error) parseExprStatement(
+    Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto loc = parser.loc;
-    nullable ASTSymbol value = parseExpression(parser, lexicalContext);
+    nullable ASTSymbol value <- parseExpression(parser, lexicalContext);
     if (!value)
     {
         parser.revert;
@@ -3088,35 +3138,35 @@ class ASTStatementExpression : ASTSymbol
         assert(!!expr);
     }
 
-    override Expression compile(Context context) {
+    override (Expression | fail Error) compile(Context context) {
         mut Context context = context;
         auto baseNamespace = context.namespace;
         auto statements = new Statement[](this.statements.length);
         for (i, statement in this.statements) {
-            auto result = statement.compile(context);
+            auto result = retfail statement.compile(context);
 
             statements[i] = result.statement;
             context = result.context;
         }
-        auto resultValue = beExpression3(context, this.expr.compile(context), loc);
+        auto resultValue <- beExpression3(context, retfail this.expr.compile(context), loc);
         auto resultType = resultValue.type;
 
         // as ASTReturn
         auto temp = new PairedTemporary(resultType, Ownership.owned);
         auto init = new UninitializeTemporaryStatement(temp);
 
-        Statement assignEscapeValue() {
+        (Statement | fail Error) assignEscapeValue() {
             if (resultValue.info.ownership == Ownership.gifted)
                 return new AssignStatement(temp, resultValue);
-            if (auto stmt = resultType.copyInto(context, temp, resultValue))
+            if (auto stmt = retfail resultType.copyInto(context, temp, resultValue))
                 return stmt;
             return new AssignStatement(temp, resultValue);
         }
-        auto initAndCopy = sequence(init, assignEscapeValue);
+        auto initAndCopy = sequence(init, retfail assignEscapeValue);
 
         auto sequence = new SequenceStatement(statements ~ initAndCopy);
         // unwind variables declared in the ({ })
-        auto stmtExpr = unwindScope(context, baseNamespace, sequence);
+        auto stmtExpr = retfail unwindScope(context, baseNamespace, sequence);
 
         return new StatementExpression(stmtExpr, temp, true);
     }
@@ -3136,13 +3186,13 @@ class ASTStatementExpression : ASTSymbol
 
 // ({ ...; ...; })
 // value of last expression is value of statement expression
-nullable ASTStatementExpression parseStatementExpr(Parser parser, LexicalContext lexicalContext)
+(nullable ASTStatementExpression | fail Error) parseStatementExpr(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
     if (!parser.accept("({")) return null;
     mut ASTStatement[] statements;
     while (!parser.accept("})")) {
-        statements ~= parseStatement(parser, lexicalContext);
+        statements ~= retfail parseStatement(parser, lexicalContext);
     }
     if (statements.length == 0) parser.fail("expected at least one statement");
 
@@ -3166,17 +3216,17 @@ class ASTForLoop : ASTStatement
 
     this(this.declareLoopVar, this.condition, this.step, this.body_, this.loc) { }
 
-    override StatementCompileResult compile(Context context)
+    override (StatementCompileResult | fail Error) compile(Context context)
     {
-        auto declPair = this.declareLoopVar.compile(context);
+        auto declPair = retfail this.declareLoopVar.compile(context);
         auto forScope = declPair.context;
-        Expression condition = beExpression3(context, this.condition.compile(forScope), this.loc);
-        auto stepPair = this.step.compile(forScope);
+        Expression condition <- beExpression3(context, retfail this.condition.compile(forScope), this.loc);
+        auto stepPair = retfail this.step.compile(forScope);
 
         string label = context.getLabel;
         Namespace declScope = new LabelLoopScope(label, forScope.namespace);
         Context breakContScope = forScope.withNamespace(declScope);
-        auto bodyPair = this.body_.compile(breakContScope);
+        auto bodyPair = retfail this.body_.compile(breakContScope);
 
         return StatementCompileResult(
             new Loop(label, declPair.statement, condition, bodyPair.statement, stepPair.statement),
@@ -3192,7 +3242,7 @@ class ASTForLoop : ASTStatement
     }
 }
 
-nullable ASTForLoop parseFor(Parser parser, LexicalContext lexicalContext)
+(nullable ASTForLoop | fail Error) parseFor(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
     if (!acceptIdentifier(parser, "for"))
@@ -3200,18 +3250,18 @@ nullable ASTForLoop parseFor(Parser parser, LexicalContext lexicalContext)
         return null;
     }
     parser.expect("(");
-    nullable ASTVarDeclStatement varDecl = parseVarDecl(parser, lexicalContext, requireInitializer=false);
+    nullable ASTVarDeclStatement varDecl <- parseVarDecl(parser, lexicalContext, requireInitializer=false);
     if (!varDecl) {
         parser.fail("loop declaration expected");
     }
     parser.expect(";");
-    ASTSymbol condition = parseExpression(parser, lexicalContext).notNull;
+    nullable ASTSymbol condition <- parseExpression(parser, lexicalContext);
     parser.expect(";");
-    ASTStatement step = parseAssignment(parser, lexicalContext);
+    nullable ASTAssignStatement step <- parseAssignment(parser, lexicalContext);
     parser.expect(")");
-    ASTStatement body_ = parseStatement(parser, lexicalContext);
+    ASTStatement body_ = retfail parseStatement(parser, lexicalContext);
 
-    return new ASTForLoop(varDecl.notNull, condition, step, body_, loc);
+    return new ASTForLoop(varDecl.notNull, condition.notNull, step.notNull, body_, loc);
 }
 
 class ASTStatementStatement : ASTStatement
@@ -3222,7 +3272,7 @@ class ASTStatementStatement : ASTStatement
 
     this(this.loc, this.variable) { }
 
-    override StatementCompileResult compile(Context context) {
+    override (StatementCompileResult | fail Error) compile(Context context) {
         this.loc.fail("\$stmt used outside quasiquote");
     }
 
@@ -3244,7 +3294,7 @@ nullable ASTStatementStatement parseStatementStatement(Parser parser, LexicalCon
     return new ASTStatementStatement(loc, variable);
 }
 
-(ExtForVarDecl | fail :fail) parseExtForVarDecl(Parser parser, LexicalContext lexicalContext)
+(ExtForVarDecl | fail :fail | fail Error) parseExtForVarDecl(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     if (parser.acceptIdentifier("auto")) {
@@ -3274,7 +3324,7 @@ nullable ASTStatementStatement parseStatementStatement(Parser parser, LexicalCon
         parser.begin;
     }
     // (int i in 0..10)
-    auto type = parser.parseType(lexicalContext);
+    auto type <- parser.parseType(lexicalContext);
     if (!type) {
         parser.revert;
         return :fail;
@@ -3304,9 +3354,9 @@ class ASTExtForLoop : ASTStatement
 
     this(this.source, this.var1, this.var2, this.body_, this.loc) { }
 
-    override StatementCompileResult compile(Context context)
+    override (StatementCompileResult | fail Error) compile(Context context)
     {
-        auto source = this.source.compile(context).beExpressionImplCall(context, loc);
+        auto source <- this.source.compile(context).retfail.beExpressionImplCall(context, loc);
         auto compiler = context.compiler;
         auto astSource = new ASTSymbolHelper(source);
 
@@ -3394,7 +3444,7 @@ class ASTExtForLoop : ASTStatement
 }
 
 // This is a placeholder for proper range semantics.
-nullable ASTStatement parseExtFor(Parser parser, LexicalContext lexicalContext)
+(nullable ASTStatement | fail Error) parseExtFor(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto loc = parser.loc;
@@ -3411,6 +3461,7 @@ nullable ASTStatement parseExtFor(Parser parser, LexicalContext lexicalContext)
             parser.revert;
             return null;
         }
+        Error e: { parser.revert; return e; }
         ExtForVarDecl decl: {
             match1decl = decl;
         }
@@ -3423,6 +3474,7 @@ nullable ASTStatement parseExtFor(Parser parser, LexicalContext lexicalContext)
                 parser.revert;
                 return null;
             }
+            Error e: { parser.revert; return e; }
             ExtForVarDecl decl: {
                 match2decl = decl;
             }
@@ -3435,12 +3487,12 @@ nullable ASTStatement parseExtFor(Parser parser, LexicalContext lexicalContext)
         parser.revert;
         return null;
     }
-    auto source = parseExpression(parser, lexicalContext);
+    auto source <- parseExpression(parser, lexicalContext);
     if (!source) parser.fail("expression expected");
     auto source = source.notNull;
     // array loop, for (i, k in array)
     parser.expect(")");
-    auto body_ = parseStatement(parser, lexicalContext);
+    auto body_ = retfail parseStatement(parser, lexicalContext);
     parser.commit;
 
     if (keyValueLoop) {
@@ -3457,8 +3509,8 @@ class ASTDestroy : ASTSymbol
 
     this(this.target, this.loc) { }
 
-    override Expression compile(Context context) {
-        auto expr = beExpression3(context, this.target.compile(context), loc);
+    override (Expression | fail Error) compile(Context context) {
+        auto expr <- beExpression3(context, retfail this.target.compile(context), loc);
         auto stmt = destroy(context, expr);
         if (!stmt) return once new VoidExpression;
         return new StatementExpression(stmt, once new VoidExpression, false);
@@ -3470,13 +3522,13 @@ class ASTDestroy : ASTSymbol
 }
 
 // manually end lifetime of a value
-nullable ASTSymbol parseDestroy(Parser parser, LexicalContext lexicalContext)
+(nullable ASTSymbol | fail Error) parseDestroy(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
     if (!acceptIdentifier(parser, "__destroy"))
         return null;
     parser.expect("(");
-    nullable ASTSymbol target = parseExpression(parser, lexicalContext);
+    nullable ASTSymbol target <- parseExpression(parser, lexicalContext);
     if (!target) parser.fail("expression expected");
     parser.expect(")");
 
@@ -3490,7 +3542,7 @@ class ASTStaticIfStatement : ASTStatement
     ASTStatement then;
     ASTStatement else_;
     this(this.loc, this.cond ,this.then, this.else_) { }
-    override StatementCompileResult compile(Context context) {
+    override (StatementCompileResult | fail Error) compile(Context context) {
         auto tern = staticTruthy(context, this.cond);
 
         tern.case {
@@ -3502,6 +3554,7 @@ class ASTStaticIfStatement : ASTStatement
                 this.loc.fail("cannot statically evaluate condition: "
                     ~ this.cond.repr);
             }
+            Error err: return err;
         }
         assert(false);
     }
@@ -3511,7 +3564,8 @@ class ASTStaticIfStatement : ASTStatement
     }
 }
 
-nullable ASTStaticIfStatement parseStaticIfStmt(Parser parser, LexicalContext lexicalContext)
+(nullable ASTStaticIfStatement | fail Error) parseStaticIfStmt(
+    Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     parser.strip;
@@ -3520,10 +3574,11 @@ nullable ASTStaticIfStatement parseStaticIfStmt(Parser parser, LexicalContext le
     if (parser.acceptIdentifier("static") && parser.acceptIdentifier("if")) {
         parser.commit;
         parser.expect("(");
-        cond = parser.parseExpression(lexicalContext);
-        if (!cond) {
+        auto e <- parser.parseExpression(lexicalContext);
+        if (!e) {
             parser.fail("static if condition expected");
         }
+        cond = e;
         parser.expect(")");
     } else if (parser.acceptIdentifier("version")) {
         parser.commit;
@@ -3540,18 +3595,18 @@ nullable ASTStaticIfStatement parseStaticIfStmt(Parser parser, LexicalContext le
     mut ASTStatement[] then, else_;
     if (parser.accept("{")) {
         while (!parser.accept("}")) {
-            then ~= parser.parseStatement(lexicalContext);
+            then ~= retfail parser.parseStatement(lexicalContext);
         }
     } else {
-        then ~= parser.parseStatement(lexicalContext);
+        then ~= retfail parser.parseStatement(lexicalContext);
     }
     if (parser.accept("else")) {
         if (parser.accept("{")) {
             while (!parser.accept("}")) {
-                else_ ~= parser.parseStatement(lexicalContext);
+                else_ ~= retfail parser.parseStatement(lexicalContext);
             }
         } else {
-            else_ ~= parser.parseStatement(lexicalContext);
+            else_ ~= retfail parser.parseStatement(lexicalContext);
         }
     }
     return new ASTStaticIfStatement(
@@ -3561,9 +3616,10 @@ nullable ASTStaticIfStatement parseStaticIfStmt(Parser parser, LexicalContext le
         new ASTSequenceStatement(else_, __HERE__));
 }
 
-nullable ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalContext) {
+(nullable ASTDeclaration | fail Error) parseDeclaration(Parser parser, LexicalContext lexicalContext) {
     auto loc = parser.loc;
-    if (auto importStmt = parseImportStatement(parser, lexicalContext)) {
+    auto importStmt <- parseImportStatement(parser, lexicalContext);
+    if (auto importStmt = importStmt) {
         loc.assert2s(!importStmt.isMacroImport, "can't import macro in function");
         auto pool = lexicalContext.compiler.workPool;
         auto id = importStmt.repr(lexicalContext.pak.name);
@@ -3573,59 +3629,69 @@ nullable ASTDeclaration parseDeclaration(Parser parser, LexicalContext lexicalCo
         pool.queue(id, task);
         return import_;
     }
-    if (auto aliasDecl = parseAliasDecl(parser, lexicalContext)) {
+    /**
+     * TODO
+     * return parseAliasDecl(parser, lexicalContext)
+     *   .match(null: parseStructDecl(parser, lexicalContext))
+     *   .match(null: parseTemplateDecl(parser, lexicalContext));
+     */
+    auto aliasDecl <- parseAliasDecl(parser, lexicalContext);
+    if (auto aliasDecl = aliasDecl) {
         return aliasDecl;
     }
-    if (auto structDecl = parseStructDecl(parser, lexicalContext)) {
+    auto structDecl <- parseStructDecl(parser, lexicalContext);
+    if (auto structDecl = structDecl) {
         return structDecl;
     }
-    if (auto templateDecl = parseTemplateDecl(parser, lexicalContext)) {
+    auto templateDecl <- parseTemplateDecl(parser, lexicalContext);
+    if (auto templateDecl = templateDecl) {
         return templateDecl;
     }
     return null;
 }
 
-ASTStatement parseStatement(Parser parser, LexicalContext lexicalContext)
+(ASTStatement | fail Error) parseStatement(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
-    if (ASTStatement stmt = parseReturn(parser, lexicalContext))
+    if (ASTStatement stmt = retfail parseReturn(parser, lexicalContext))
         return stmt;
-    if (ASTStatement stmt = parseIf(parser, lexicalContext))
+    if (ASTStatement stmt = retfail parseIf(parser, lexicalContext))
         return stmt;
     if (ASTStatement stmt = parseBreakCont(parser, lexicalContext))
         return stmt;
-    if (ASTStatement stmt = parseWhile(parser, lexicalContext))
+    if (ASTStatement stmt = retfail parseWhile(parser, lexicalContext))
         return stmt;
-    if (ASTStatement stmt = parseExtFor(parser, lexicalContext))
+    if (ASTStatement stmt = retfail parseExtFor(parser, lexicalContext))
         return stmt;
-    if (ASTStatement stmt = parseFor(parser, lexicalContext))
+    if (ASTStatement stmt = retfail parseFor(parser, lexicalContext))
         return stmt;
-    if (ASTStatement stmt = parseScope(parser, lexicalContext))
+    if (ASTStatement stmt = retfail parseScope(parser, lexicalContext))
         return stmt;
     // FIXME why did this work?!
     // if (ASTStatement decl = parseDeclaration(parser, lexicalContext))
-    if (ASTDeclaration decl = parseDeclaration(parser, lexicalContext))
+    if (ASTDeclaration decl = retfail parseDeclaration(parser, lexicalContext))
         return new ASTDeclarationStatement(decl);
-    if (ASTStatement stmt = parseNestedFunctionDecl(parser, lexicalContext))
+    if (ASTStatement stmt = retfail parseNestedFunctionDecl(parser, lexicalContext))
         return stmt;
     if (ASTStatement stmt = parseStatementStatement(parser, lexicalContext))
         return stmt;
-    if (ASTStatement stmt = parseMultiVarDecl(parser, lexicalContext))
+    if (ASTStatement stmt = retfail parseMultiVarDecl(parser, lexicalContext))
         return stmt;
-    if (ASTStatement stmt = parseAssignStatement(parser, lexicalContext))
+    if (ASTStatement stmt = retfail parseAssignStatement(parser, lexicalContext))
         return stmt;
-    if (ASTStatement stmt = parseWithStatement(parser, lexicalContext))
+    if (ASTStatement stmt = retfail parseWithStatement(parser, lexicalContext))
         return stmt;
-    if (ASTStatement stmt = parseEitherCaseStmt(parser, lexicalContext))
+    if (ASTStatement stmt = retfail parseEitherCaseStmt(parser, lexicalContext))
         return stmt;
-    if (ASTStatement stmt = parseStaticIfStmt(parser, lexicalContext))
+    if (ASTStatement stmt = retfail parseStaticIfStmt(parser, lexicalContext))
         return stmt;
     {
         auto args = new ParseStatementArgs(parser, lexicalContext);
         lexicalContext.macroState.applyMacro(args);
-        if (ASTStatement ret = args.statement) return ret;
+        auto ret <- args.statement;
+        if (ASTStatement ret = ret) return ret;
     }
-    if (ASTStatement stmt = parseExprStatement(parser, lexicalContext))
+    if (ASTStatement stmt = retfail parseExprStatement(parser, lexicalContext))
         return stmt;
     parser.fail("statement expected");
 }
@@ -3734,9 +3800,9 @@ class NotYetResolvedSymbol : PendingSymbol
 
     this(this.resolver, this.index, this.loc) { }
 
-    override Symbol resolve() {
+    override (Symbol | fail Error) resolve() {
         auto entry = resolver.entries[index];
-        if (auto resolution = entry.resolution) {
+        if (auto resolution = retfail entry.resolution) {
             return resolution;
         }
         loc.fail("Dependency cycle while resolving $(entry.name).");
@@ -3751,7 +3817,7 @@ struct ResolvingModuleEntry
 
     bool resolving;
 
-    nullable Symbol resolution;
+    (nullable Symbol | fail Error) resolution;
 
     (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStruct | ASTAliasDecl | ASTUnitTest | Nothing) symbol;
 }
@@ -3780,7 +3846,7 @@ class Resolver
         entries[hit].resolution = symbol;
     }
 
-    nullable Symbol lookup(Context context, Loc loc, string name, Protection protection)
+    (nullable Symbol | fail Error) lookup(Context context, Loc loc, string name, Protection protection)
     {
         bool allowed(Protection entry) {
             if (protection == Protection.public_)
@@ -3797,7 +3863,7 @@ class Resolver
         }
         resolve(context, loc, hit);
 
-        mut nullable Symbol ret = this.entries[hit].resolution;
+        mut nullable Symbol ret = retfail this.entries[hit].resolution;
         if (!ret) return null;
         if (auto latent = ret.instanceOf(LatentSymbol)) {
             // we're at global scope; no frame pointer will be applied.
@@ -3808,7 +3874,7 @@ class Resolver
 
     void resolve(Context context, Loc loc, int i)
     {
-        if (!this.entries[i].resolution) {
+        if (this.entries[i].resolution.case(Error err: true, nullable Symbol sym: !sym)) {
             if (this.entries[i].resolving)
             {
                 loc.fail("Dependency cycle while resolving $(this.entries[i].name).");
@@ -3817,7 +3883,9 @@ class Resolver
             this.entries[i].resolution = this.entries[i].symbol.case(
                 // TODO compile function statement immediately too
                 ASTFunction fun: fun.compile(context)
-                    .instanceOf(FunctionDeclaration).notNull,
+                    .case(
+                        Symbol sym: sym.instanceOf(FunctionDeclaration).notNull,
+                        Error err: err),
                 ASTUnitTest ut: ut.compile(context),
                 ASTClassDecl decl: decl.compile(context),
                 ASTIntfDecl decl: decl.compile(context),
@@ -3909,30 +3977,30 @@ class Module : ModuleBase
         [import_.mod.walkModules(cb) for import_ in imports];
     }
 
-    override void compile(Context context)
+    override (void | fail Error) compile(Context context)
     {
         auto compiler = context.compiler, platform = context.platform;
 
         this.resolver.resolveAll(context);
 
-        void walkSymbols(void delegate((Symbol | FinishedSymbol)) dg) {
+        (void | fail Error) walkSymbols((void | fail Error) delegate((Symbol | FinishedSymbol)) dg) {
             for (entry in this.resolver.entries) {
-                dg(entry.resolution.notNull);
+                void <- dg(entry.resolution.retfail.notNull);
             }
             // must be a regular for loop so we can add entries during iteration
             for (mut int i = 0; i < this.anonymousEntries.length; i += 1) {
-                dg(anonymousEntries[i]);
+                void <- dg(anonymousEntries[i]);
             }
         }
 
-        void resolveClassIntf((Symbol | FinishedSymbol) sym) {
+        (void | fail Error) resolveClassIntf((Symbol | FinishedSymbol) sym) {
             sym.case {
                 Symbol sym: {
                     if (auto classType = sym.instanceOf(ClassType)) {
-                        classType.class_.resolve(context);
+                        void <- classType.class_.resolve(context);
                     }
                     if (auto intfType = sym.instanceOf(IntfType)) {
-                        intfType.intf.resolve(context);
+                        void <- intfType.intf.resolve(context);
                     }
                 }
                 FinishedSymbol sym: { }
@@ -3940,11 +4008,11 @@ class Module : ModuleBase
         }
 
         assert(finishedSymbols.length == 0);
-        void compileSymbol((Symbol | FinishedSymbol) symbol) {
+        (void | fail Error) compileSymbol((Symbol | FinishedSymbol) symbol) {
             symbol.case {
                 Symbol symbol: {
                     if (Function fun = symbol.instanceOf(Function)) {
-                        finishedSymbols ~= fun.compile(compiler, platform);
+                        finishedSymbols ~= retfail fun.compile(compiler, platform);
                     }
                     if (IntfType intfType = symbol.instanceOf(IntfType)) {
                         finishedSymbols ~= new DefineClassIntf(intfType.intf);
@@ -3952,11 +4020,11 @@ class Module : ModuleBase
                     if (ClassType classType = symbol.instanceOf(ClassType)) {
                         finishedSymbols ~= new DefineClassIntf(classType.class_);
                         for (method in classType.class_.methods)
-                            finishedSymbols ~= method.compile(compiler, platform);
+                            finishedSymbols ~= retfail method.compile(compiler, platform);
                     }
                     if (Struct struct_ = symbol.instanceOf(Struct)) {
                         for (method in struct_.methods)
-                            finishedSymbols ~= method.instanceOf(StructMethod).compile(compiler, platform);
+                            finishedSymbols ~= retfail method.instanceOf(StructMethod).compile(compiler, platform);
                     }
                 }
                 FinishedSymbol symbol:
@@ -3970,8 +4038,8 @@ class Module : ModuleBase
          * It's written by just poking things until it works.
          * Work out a saner way.
          */
-        walkSymbols(&resolveClassIntf);
-        walkSymbols(&compileSymbol);
+        void <- walkSymbols(&resolveClassIntf);
+        void <- walkSymbols(&compileSymbol);
     }
 
     void emit(Generator generator)
@@ -3985,10 +4053,10 @@ class Module : ModuleBase
     }
 
     // TODO merge import search with lookup()
-    nullable Symbol lookupPublic(Context context, Loc loc, string name)
+    (nullable Symbol | fail Error) lookupPublic(Context context, Loc loc, string name)
     {
         // not counting imports (non-transitive)
-        auto ret = this.resolver.lookup(context, loc, name, Protection.public_);
+        auto ret = retfail this.resolver.lookup(context, loc, name, Protection.public_);
         if (ret) return ret;
         // transitive public import search
         for (import_ in this.imports) {
@@ -3999,19 +4067,21 @@ class Module : ModuleBase
             auto importMod = import_.mod;
             assert(!!importMod);
             if (!import_.symbols.length || [any a == name for a in import_.symbols]) {
-                if (Symbol entry = importMod.lookupPublic(context, loc, name))
+                if (Symbol entry = retfail importMod.lookupPublic(context, loc, name))
                     return entry;
             }
         }
         return null;
     }
 
-    override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression frame)
+    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc, nullable Expression frame)
     {
         if (!!frame) { print("error: lookup with frame propagated to Module"); assert(false); }
 
-        if (auto symbol = this.resolver.lookup(context, loc, name, Protection.private_))
-            return symbol;
+        this.resolver.lookup(context, loc, name, Protection.private_).case {
+            nullable Symbol sym: if (sym) return sym;
+            Error error: assert(false);
+        }
         for (import_ in this.imports) {
             // FIXME !=
             if (import_.visibility.case((:inert): true, (:private_): false, (:public_): false))
@@ -4019,8 +4089,8 @@ class Module : ModuleBase
             auto importMod = import_.mod;
             assert(!!importMod);
             if (!import_.symbols.length || [any a == name for a in import_.symbols]) {
-                if (Symbol entry = importMod.lookupPublic(context, loc, name))
-                    return entry;
+                auto sym <- importMod.lookupPublic(context, loc, name);
+                if (sym) return sym;
             }
         }
         assert(!this.parent);
@@ -4032,7 +4102,7 @@ class Module : ModuleBase
 
 abstract class ParserHelper
 {
-    abstract void proxyCall(ASTModule astModule, string function_, MacroState macroState)
+    abstract (void | fail Error) proxyCall(ASTModule astModule, string function_, MacroState macroState)
     {
         assert(false);
     }
@@ -4067,9 +4137,9 @@ class ASTExternVariable
 
     this(this.type, this.name) { }
 
-    ExternCVariable compile(Context context)
+    (ExternCVariable | fail Error) compile(Context context)
     {
-        return new ExternCVariable(beType(this.loc, this.type.compile(context)), this.name);
+        return new ExternCVariable(beType(this.loc, retfail this.type.compile(context)), this.name);
     }
 }
 
@@ -4087,13 +4157,13 @@ class ASTExternFunction
 
     this(this.name, this.ret, this.params, this.variadic, this.retLoc) { }
 
-    FunctionDeclaration compile(Context context)
+    (FunctionDeclaration | fail Error) compile(Context context)
     {
         auto params = [
-            Parameter(false, param.name, false, beType(param.loc, param.type.compile(context)))
+            Parameter(false, param.name, false, beType(param.loc, retfail param.type.compile(context)))
             for param in this.params];
 
-        auto decl = new FunctionDeclaration(this.name, beType(this.retLoc, this.ret.compile(context)), params);
+        auto decl = new FunctionDeclaration(this.name, beType(this.retLoc, retfail this.ret.compile(context)), params);
         decl.variadic = this.variadic;
 
         return decl;
@@ -4108,7 +4178,7 @@ class ASTExternFunction
     }
 }
 
-(ASTExternFunction | ASTExternVariable | :none) parseExtern(Parser parser, LexicalContext lexicalContext)
+(ASTExternFunction | ASTExternVariable | :none | fail Error) parseExtern(Parser parser, LexicalContext lexicalContext)
 {
     if (parser.accept("extern"))
     {
@@ -4116,11 +4186,11 @@ class ASTExternFunction
         parser.expect("C");
         parser.expect(")");
         auto retLoc = parser.loc;
-        ASTSymbol type = parser.parseType(lexicalContext).notNull;
+        auto type = parser.parseType(lexicalContext).retfail.notNull;
         string name = parser.parseIdentifier;
         if (!name.length) parser.fail("identifier expected");
         if (parser.accept("(")) {
-            auto params = parseIdentifierList(parser, lexicalContext, variadics=true);
+            auto params <- parseIdentifierList(parser, lexicalContext, variadics=true);
             parser.expect(";");
             return new ASTExternFunction(name, type, params=params.params, variadic=params.variadic, retLoc);
         } else {
@@ -4199,11 +4269,10 @@ class ImportNamespace : Namespace
         this.isContextScope = this.parent.isContextScope;
     }
 
-    override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression frame) {
+    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc, nullable Expression frame) {
         if (!symbols.length || [any symbol == name for symbol in symbols]) {
-            if (auto ret = module_.lookupPublic(context, loc, name)) {
-                return ret;
-            }
+            auto sym <- module_.lookupPublic(context, loc, name);
+            if (sym) return sym;
         }
         return this.parent.lookup(name, context, loc, frame);
     }
@@ -4212,20 +4281,28 @@ class ImportNamespace : Namespace
 class AstCompileTask : ITask
 {
     ASTModule astModule;
-    (:none | Module) result;
+    (:none | Module | Error) result;
     Context context;
 
     this(this.astModule, this.context) {
         this.result = :none;
     }
 
-    Module module_() {
-        if (Module m <- result) return m;
-        assert(false);
+    (Module | fail Error) module_() {
+        result.case {
+            Module m: return m;
+            Error error: return error;
+            (:none): assert(false);
+        }
     }
 
     override void run() {
         this.result = compileModule(context, astModule, true);
+        this.result.case {
+            Module m: m.mangledName;
+            Error error: {}
+            (:none): {}
+        }
     }
 }
 
@@ -4237,13 +4314,13 @@ class ASTImport : ASTDeclaration
     // running in the background
     (WorkPoolBase pool, string id, ImportTask task | ASTModule) moduleSource;
 
-    ASTModule module_() {
+    (ASTModule | fail Error) module_() {
         this.moduleSource.case {
             (WorkPoolBase pool, string id, ImportTask task): {
                 // if the task was not prequeued (ie. an import in a version()),
                 // queue it now.
                 pool.queue(id, task);
-                return pool.wait(id).instanceOf(ImportTask).module_;
+                return pool.wait(id).instanceOf(ImportTask).notNull.module_;
             }
             ASTModule mod: return mod;
         }
@@ -4251,13 +4328,13 @@ class ASTImport : ASTDeclaration
 
     this(this.statement, this.moduleSource) { }
 
-    override Context compile(Context context) {
-        auto astModule_ = this.module_;
+    override (Context | fail Error) compile(Context context) {
+        auto astModule_ = retfail this.module_;
         auto id = "compile platform $(context.platform.ident) ast $(astModule_.mangledName)";
         auto task = new AstCompileTask(astModule_, context);
 
         context.compiler.workPool.queue(id, task);
-        auto module_ = context.compiler.workPool.wait(id)
+        auto module_ = retfail context.compiler.workPool.wait(id)
             .instanceOf(AstCompileTask).module_;
         auto namespace = new ImportNamespace(context.namespace, module_, this.statement.symbols);
         auto contextModule = findParent!Module(context.namespace);
@@ -4269,8 +4346,14 @@ class ASTImport : ASTDeclaration
 
     override ASTSymbol quote(Quoter quoter) {
         auto importStatement = this.statement.quote(quoter);
+        string name() {
+            this.module_.case {
+                ASTModule mod: return mod.pak.name;
+                Error error: assert(false);
+            }
+        }
         auto mod = quoter.compilerCall("resolveImport", [
-            quoter.compiler.astStringLiteral(this.module_.pak.name, __HERE__),
+            quoter.compiler.astStringLiteral(name, __HERE__),
             importStatement], __HERE__);
 
         return quoter.compilerCall("astImport", [
@@ -4285,24 +4368,28 @@ class ImportTask : ITask
 
     ASTImportStatement import_;
 
-    (ASTModule | :none) result;
+    (ASTModule | :none | Error) result;
 
     this(this.lexicalContext, this.import_) {
         this.result = :none;
     }
 
-    ASTModule module_() {
-        if (ASTModule mod <- result) return mod;
-        assert(false);
+    (ASTModule | fail Error) module_() {
+        result.case {
+            ASTModule mod: return mod;
+            Error err: return err;
+            (:none): assert(false);
+        }
     }
 
     override void run() {
-        this.result = this.lexicalContext.resolveImport(import_)
-            .instanceOf(ASTModule).notNull;
+        this.result = this.lexicalContext.resolveImport(import_).case(
+            ASTModuleBase base: base.instanceOf(ASTModule).notNull,
+            Error err: err);
     }
 }
 
-nullable ASTImportStatement parseImportStatement(Parser parser, LexicalContext lexicalContext)
+(nullable ASTImportStatement | fail Error) parseImportStatement(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     bool isMacroImport = acceptIdentifier(parser, "macro");
@@ -4317,7 +4404,7 @@ nullable ASTImportStatement parseImportStatement(Parser parser, LexicalContext l
 
     auto macroArgs = new ParseImportArgs(parser, lexicalContext);
     lexicalContext.macroState.applyMacro(macroArgs);
-    if (macroArgs.done) target = (:macro_, macroArgs.module_.notNull);
+    if (macroArgs.done) target = (:macro_, macroArgs.module_.retfail.notNull);
     else {
         mut string pak;
         if (acceptIdentifier(parser, "package"))
@@ -4367,7 +4454,7 @@ class ModuleParserConfig
     this(this.packages, this.defaultImports) { }
 }
 
-nullable ASTModule parseMacroContinuation(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule astModule,
+(nullable ASTModule | fail Error) parseMacroContinuation(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule astModule,
     ModuleParserConfig config)
 {
     parser.begin;
@@ -4383,7 +4470,7 @@ nullable ASTModule parseMacroContinuation(CompilerBase compiler, Parser parser, 
 
     auto newMacroState = astModule.macroState.dup;
 
-    helper.proxyCall(astModule, identifier, newMacroState);
+    void <- helper.proxyCall(astModule, identifier, newMacroState);
 
     auto subModule = new ASTModule(astModule.loc, astModule.name, astModule.pak, newMacroState, astModule);
 
@@ -4405,12 +4492,12 @@ class LexicalContextImpl : LexicalContext
 
     this(this.compiler, this.pak, this.macroState, this.helper, this.config) { }
 
-    override ASTModuleBase resolveImport(ASTImportStatement importStmt) {
+    override (ASTModuleBase | fail Error) resolveImport(ASTImportStatement importStmt) {
         return .resolveImport(compiler, pak.name, importStmt, helper, config);
     }
 }
 
-nullable ASTVersion parseModuleVersion(Parser parser, LexicalContext lexicalContext)
+(nullable ASTVersion | fail Error) parseModuleVersion(Parser parser, LexicalContext lexicalContext)
 {
     if (parser.accept("version")) {
         mut ASTModuleEntry[] then, else_;
@@ -4419,18 +4506,18 @@ nullable ASTVersion parseModuleVersion(Parser parser, LexicalContext lexicalCont
         parser.expect(")");
         if (parser.accept("{")) {
             while (!parser.accept("}")) {
-                then ~= parser.parseModuleEntry(lexicalContext, false);
+                then ~= retfail parser.parseModuleEntry(lexicalContext, false);
             }
         } else {
-            then ~= parser.parseModuleEntry(lexicalContext, false);
+            then ~= retfail parser.parseModuleEntry(lexicalContext, false);
         }
         if (parser.accept("else")) {
             if (parser.accept("{")) {
                 while (!parser.accept("}")) {
-                    else_ ~= parser.parseModuleEntry(lexicalContext, false);
+                    else_ ~= retfail parser.parseModuleEntry(lexicalContext, false);
                 }
             } else {
-                else_ ~= parser.parseModuleEntry(lexicalContext, false);
+                else_ ~= retfail parser.parseModuleEntry(lexicalContext, false);
             }
         }
         return new ASTVersion(versionStr, then, else_);
@@ -4438,7 +4525,7 @@ nullable ASTVersion parseModuleVersion(Parser parser, LexicalContext lexicalCont
     return null;
 }
 
-ASTModuleEntry parseModuleEntry(Parser parser, LexicalContext lexicalContext, bool toplevel)
+(ASTModuleEntry | fail Error) parseModuleEntry(Parser parser, LexicalContext lexicalContext, bool toplevel)
 {
     mut (Protection | :none) protection = :none;
     if (parser.accept("public")) {
@@ -4452,7 +4539,7 @@ ASTModuleEntry parseModuleEntry(Parser parser, LexicalContext lexicalContext, bo
             (:none): Protection.public_);
     }
 
-    if (auto importStmt = parseImportStatement(parser, lexicalContext)) {
+    if (auto importStmt = parseImportStatement(parser, lexicalContext).retfail) {
         if (!toplevel && importStmt.isMacroImport)
         {
             parser.fail("macro import not allowed here");
@@ -4467,10 +4554,10 @@ ASTModuleEntry parseModuleEntry(Parser parser, LexicalContext lexicalContext, bo
 
         return ASTModuleEntry(getProtection, import_);
     }
-    if (auto sym = parseTemplateContents(parser, lexicalContext)) {
+    if (auto sym = retfail parseTemplateContents(parser, lexicalContext)) {
         return ASTModuleEntry(getProtection, sym);
     }
-    if (ASTDeclaration decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
+    if (auto decl = retfail lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
         return ASTModuleEntry(getProtection, decl);
     }
     parseExtern(parser, lexicalContext).case {
@@ -4481,14 +4568,15 @@ ASTModuleEntry parseModuleEntry(Parser parser, LexicalContext lexicalContext, bo
             return ASTModuleEntry(getProtection, var);
         }
         (:none): {}
+        Error err: return err;
     }
-    if (ASTUnitTest ut = parseUnitTest(parser, lexicalContext)) {
+    if (ASTUnitTest ut = retfail parseUnitTest(parser, lexicalContext)) {
         return ASTModuleEntry(getProtection, ut);
     }
-    if (ASTPragma pragma_ = parsePragma(parser, lexicalContext)) {
+    if (ASTPragma pragma_ = retfail parsePragma(parser, lexicalContext)) {
         return ASTModuleEntry(getProtection, pragma_);
     }
-    if (ASTVersion version_ = parseModuleVersion(parser, lexicalContext)) {
+    if (ASTVersion version_ = retfail parseModuleVersion(parser, lexicalContext)) {
         if (Protection p <- protection) {
             string repr(Protection p) {
                 if (p == Protection.public_) return "public";
@@ -4504,17 +4592,17 @@ ASTModuleEntry parseModuleEntry(Parser parser, LexicalContext lexicalContext, bo
     parser.fail("couldn't parse function or struct");
 }
 
-ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule module_,
+(ASTModule | fail Error) parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule module_,
     ModuleParserConfig config)
 {
     mut LexicalContext lexicalContext = new LexicalContextImpl(compiler, module_.pak, module_.macroState, helper, config);
 
     while (!parser.eof)
     {
-        if (ASTModule submod = parseMacroContinuation(compiler, parser, helper, module_, config))
+        if (ASTModule submod = retfail parseMacroContinuation(compiler, parser, helper, module_, config))
             return submod;
 
-        auto entry = parseModuleEntry(parser, lexicalContext, true);
+        auto entry = retfail parseModuleEntry(parser, lexicalContext, true);
 
         if (ASTImport import_ <- entry.symbol) {
             if (import_.statement.isMacroImport)
@@ -4526,7 +4614,7 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
 
                 lexicalContext.macroState.addImport(
                     lexicalContext.compiler.workPool.wait(id)
-                        .instanceOf(ImportTask).module_.macroState);
+                        .instanceOf(ImportTask).module_.retfail.macroState);
                 continue;
             }
         }
@@ -4536,7 +4624,7 @@ ASTModule parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper hel
     return module_;
 }
 
-ASTModule resolveImport(CompilerBase compiler, string pak, ASTImportStatement import_, ParserHelper helper,
+(ASTModule | fail Error) resolveImport(CompilerBase compiler, string pak, ASTImportStatement import_, ParserHelper helper,
     ModuleParserConfig config)
 {
     (string name, string pak) target = import_.target.case(
@@ -4553,41 +4641,42 @@ ASTModule resolveImport(CompilerBase compiler, string pak, ASTImportStatement im
         compiler, moduleToFile(target.name), pak, true, helper, config, import_.loc);
 }
 
-Module compileModule(Context context, ASTModule astModule, bool addDefaultImports)
+(Module | fail Error) compileModule(Context context, ASTModule astModule, bool addDefaultImports)
 {
     mut nullable Module parent = null;
     if (auto astParent = astModule.parent)
     {
-        parent = compileModule(context, astParent, addDefaultImports);
+        parent = retfail compileModule(context, astParent, addDefaultImports);
     }
 
     Module module_ = new Module(astModule.loc, astModule.name, astModule.mangledName, parent);
     auto context = context.withNamespace(module_);
 
     if (addDefaultImports) {
-        context.compiler.addDefaultImports(context, module_);
+        void <- context.compiler.addDefaultImports(context, module_);
     }
 
     // Handle all (toplevel) imports in parallel.
     for (entry in astModule.entries) {
         if (ASTImport import_ <- entry.symbol) {
-            auto id = "compile platform $(context.platform.ident) ast $(import_.module_.mangledName)";
-            auto task = new AstCompileTask(import_.module_, context);
+            auto mod = retfail import_.module_;
+            auto id = "compile platform $(context.platform.ident) ast $(mod.mangledName)";
+            auto task = new AstCompileTask(mod, context);
             context.compiler.workPool.queue(id, task);
         }
     }
 
-    void handleEntry(ASTModuleEntry entry)
+    (void | fail Error) handleEntry(ASTModuleEntry entry)
     {
         entry.symbol.case {
-            ASTImport import_:
-            {
+            ASTImport import_: {
                 // requeue in case it was in a version()
-                auto id = "compile platform $(context.platform.ident) ast $(import_.module_.mangledName)";
-                auto task = new AstCompileTask(import_.module_, context);
+                auto mod = retfail import_.module_;
+                auto id = "compile platform $(context.platform.ident) ast $(mod.mangledName)";
+                auto task = new AstCompileTask(mod, context);
                 context.compiler.workPool.queue(id, task);
 
-                auto importedModule = context.compiler.workPool.wait(id)
+                auto importedModule = retfail context.compiler.workPool.wait(id)
                     .instanceOf(AstCompileTask).module_;
 
                 bool public_ = entry.protection == Protection.public_;
@@ -4599,7 +4688,7 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
                 if (auto structDecl = astDecl.instanceOf(ASTStructDecl)) {
                     module_.add(structDecl.struct_.name, entry.protection, structDecl.struct_);
                 } else if (auto aliasDecl = astDecl.instanceOf(ASTAliasDecl)) {
-                    module_.register(aliasDecl.name, entry.protection, aliasDecl.target.compile(context));
+                    module_.register(aliasDecl.name, entry.protection, retfail aliasDecl.target.compile(context));
                 } else if (auto templateDecl = astDecl.instanceOf(ASTTemplateDecl)) {
                     module_.register(templateDecl.name, entry.protection, templateDecl.compileSymbol(context));
                 } else {
@@ -4616,7 +4705,7 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
                     module_.add(intfDecl.name, entry.protection, intfDecl);
                 }
                 else if (auto enumDecl = symbol.instanceOf(ASTEnumDecl)) {
-                    module_.register(enumDecl.name, entry.protection, enumDecl.compile(context));
+                    module_.register(enumDecl.name, entry.protection, retfail enumDecl.compile(context));
                 }
                 else if (auto aliasDecl = symbol.instanceOf(ASTAliasDecl)) {
                     module_.add(aliasDecl.name, entry.protection, aliasDecl);
@@ -4633,31 +4722,31 @@ Module compileModule(Context context, ASTModule astModule, bool addDefaultImport
                 }
             }
             ASTExternFunction extern_:
-                module_.register(extern_.name, entry.protection, extern_.compile(context));
+                module_.register(extern_.name, entry.protection, retfail extern_.compile(context));
             ASTExternVariable extern_:
-                module_.register(extern_.name, entry.protection, extern_.compile(context));
+                module_.register(extern_.name, entry.protection, retfail extern_.compile(context));
             ASTUnitTest ut:
                 module_.add("", entry.protection, ut);
             ASTPragma pragma_:
                 module_.track(pragma_.compile(context));
             ASTVersion version_: {
                 if ([any a == version_.name for a in context.platform.versions]) {
-                    [handleEntry(entry) for entry in version_.then];
+                    [retfail handleEntry(entry) for entry in version_.then];
                 } else {
-                    [handleEntry(entry) for entry in version_.else_];
+                    [retfail handleEntry(entry) for entry in version_.else_];
                 }
             }
         }
     }
 
-    [handleEntry(entry) for entry in astModule.entries];
+    [retfail handleEntry(entry) for entry in astModule.entries];
 
-    module_.compile(context);
+    void <- module_.compile(context);
 
     return module_;
 }
 
-ASTModule getModule(CompilerBase compiler, mut string filename, mut nullable Package pak, bool search,
+(ASTModule | fail Error) getModule(CompilerBase compiler, mut string filename, mut nullable Package pak, bool search,
     ParserHelper helper, ModuleParserConfig config, Loc loc)
 {
     mut string path = filename;
@@ -4689,13 +4778,16 @@ class ParseAstModuleTask : ITask
     ParserHelper helper;
     ModuleParserConfig config;
     Loc loc;
-    (ASTModule | :none) result;
+    (ASTModule | :none | Error) result;
     this(this.compiler, this.filename, this.path, this.pak, this.helper, this.config, this.loc) {
         this.result = :none;
     }
-    ASTModule module_() {
-        if (ASTModule mod <- result) return mod;
-        assert(false);
+    (ASTModule | fail Error) module_() {
+        result.case {
+            ASTModule mod: return mod;
+            (:none): assert(false);
+            Error err: return err;
+        }
     }
     override void run() {
         string code = read(path);

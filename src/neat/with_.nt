@@ -1,5 +1,7 @@
 module neat.with_;
 
+macro import neat.macros.retfail;
+
 import helpers;
 import neat.base;
 import neat.parser;
@@ -22,10 +24,10 @@ class WithNamespace : DeclarationHolder, Unwindable
 
     this(this.parent, this.temporary, this.loc) { this.isContextScope = parent.isContextScope; }
 
-    override nullable Statement unwind(Context context) {
-        if (auto exit = temporary.type.accessMember(
+    override (nullable Statement | fail Error) unwind(Context context) {
+        if (auto exit = retfail temporary.type.accessMember(
                 this.loc, context, temporary, "onExit", Protection.private_)) {
-            return context.compiler.exprStatement(exit.beExpressionImplCall(context, this.loc));
+            return context.compiler.exprStatement(retfail exit.beExpressionImplCall(context, this.loc));
         }
         return null;
     }
@@ -35,9 +37,9 @@ class WithNamespace : DeclarationHolder, Unwindable
         return temporary;
     }
 
-    override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression frame)
+    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc, nullable Expression frame)
     {
-        auto member = context.compiler.accessMemberWithLifetime(context, temporary, name, loc, true);
+        auto member <- context.compiler.accessMemberWithLifetime(context, temporary, name, loc, true);
         if (member) return member;
         if (this.parent) return this.parent.lookup(name, context, loc, frame);
         return null;
@@ -54,29 +56,29 @@ class ASTWithStatement : ASTStatement
 
     this(this.expr, this.stmt, this.loc) { }
 
-    override StatementCompileResult compile(Context context)
+    override (StatementCompileResult | fail Error) compile(Context context)
     {
-        Expression expr = beExpression3(context, this.expr.compile(context), this.loc);
+        Expression expr = retfail beExpression3(context, retfail this.expr.compile(context), this.loc);
 
-        nullable Statement do_(Reference temp)
+        (nullable Statement | fail Error) do_(Reference temp)
         {
             mut nullable Statement prefix, suffix;
-            if (auto enter = temp.type.accessMember(
+            if (auto enter = retfail temp.type.accessMember(
                 this.loc, context, temp, "onEnter", Protection.private_)) {
-                prefix = context.compiler.exprStatement(enter.beExpressionImplCall(context, this.loc));
+                prefix = context.compiler.exprStatement(retfail enter.beExpressionImplCall(context, this.loc));
             }
-            if (auto exit = temp.type.accessMember(
+            if (auto exit = retfail temp.type.accessMember(
                 this.loc, context, temp, "onExit", Protection.private_)) {
-                suffix = context.compiler.exprStatement(exit.beExpressionImplCall(context, this.loc));
+                suffix = context.compiler.exprStatement(retfail exit.beExpressionImplCall(context, this.loc));
             }
 
             auto subContext = context.withNamespace(new WithNamespace(context.namespace, temp, this.loc));
-            auto subStmtPair = this.stmt.compile(subContext);
+            auto subStmtPair = retfail this.stmt.compile(subContext);
             auto stmt = subStmtPair.statement;
 
             return context.compiler.(that.sequence(that.sequence2(prefix, stmt), suffix));
         }
-        auto stmt = context.compiler.consumeTemporaryStmt(context, expr, &do_).notNull;
+         auto stmt = (retfail context.compiler.consumeTemporaryStmt(context, expr, &do_)).notNull;
 
         return StatementCompileResult(stmt, context);
     }
@@ -87,7 +89,7 @@ class ASTWithStatement : ASTStatement
     }
 }
 
-nullable ASTStatement parseWithStatement(Parser parser, LexicalContext lexicalContext)
+(nullable ASTStatement | fail Error) parseWithStatement(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
     if (!acceptIdentifier(parser, "with"))
@@ -95,10 +97,10 @@ nullable ASTStatement parseWithStatement(Parser parser, LexicalContext lexicalCo
         return null;
     }
     parser.expect("(");
-    auto subExpr = lexicalContext.compiler.parseExpression(parser, lexicalContext);
+    auto subExpr <- lexicalContext.compiler.parseExpression(parser, lexicalContext);
     parser.assert_(!!subExpr, "with expression expected");
     parser.expect(")");
-    auto body_ = lexicalContext.compiler.parseStatement(parser, lexicalContext);
+    auto body_ <- lexicalContext.compiler.parseStatement(parser, lexicalContext);
 
     return new ASTWithStatement(subExpr.notNull, body_, loc);
 }

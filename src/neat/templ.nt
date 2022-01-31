@@ -1,6 +1,7 @@
 module neat.templ;
 
 macro import neat.macros.listcomprehension;
+macro import neat.macros.retfail;
 
 import neat.base;
 import neat.class_;
@@ -9,7 +10,7 @@ import neat.function_;
 import neat.parser;
 import std.thread;
 
-nullable ASTSymbol parseTemplateInstantiation(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
+(nullable ASTSymbol | fail Error) parseTemplateInstantiation(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
 {
     parser.begin;
     auto instanceLoc = parser.loc;
@@ -19,8 +20,8 @@ nullable ASTSymbol parseTemplateInstantiation(Parser parser, LexicalContext lexi
         return null;
     }
     mut ASTSymbol[] templateArgs;
-    void getTemplateArg() {
-        auto templateArg = lexicalContext.compiler.parseType(parser, lexicalContext);
+    (void | fail Error) getTemplateArg() {
+        auto templateArg <- lexicalContext.compiler.parseType(parser, lexicalContext);
         parser.assert_(!!templateArg, "template argument expected");
         templateArgs ~= templateArg.notNull;
     }
@@ -28,14 +29,14 @@ nullable ASTSymbol parseTemplateInstantiation(Parser parser, LexicalContext lexi
     if (parser.accept("(")) {
         // ( [a [, a]*]? )
         if (!parser.accept(")")) {
-            getTemplateArg;
+            void <- getTemplateArg;
             while (!parser.accept(")")) {
                 parser.expect(",");
-                getTemplateArg;
+                void <- getTemplateArg;
             }
         }
     } else {
-        getTemplateArg;
+        void <- getTemplateArg;
     }
     parser.commit;
     return new ASTTemplateInstance(base, templateArgs, instanceLoc);
@@ -51,11 +52,11 @@ class ASTTemplateInstance : ASTSymbol
 
     this(this.templateDecl, this.types, this.loc) { }
 
-    override Symbol compile(Context context)
+    override (Symbol | fail Error) compile(Context context)
     {
-        auto symbol = this.templateDecl.compile(context);
+        auto symbol = retfail this.templateDecl.compile(context);
         // TODO LocRange in ASTSymbol
-        auto types = [beType(this.loc, type.compile(context)) for type in this.types];
+        auto types = [beType(this.loc, retfail type.compile(context)) for type in this.types];
         auto templDecl = symbol.instanceOf(ScopeBoundTemplateDecl);
 
         loc.assert2s(!!templDecl, "cannot instantiate non-template");
@@ -74,7 +75,7 @@ class TemplateInstantiationNamespace : Namespace
 
     this(this.parent, this.parameterNames, this.parameterTypes) { this.isContextScope = false; }
 
-    override nullable Symbol lookup(string name, Context context, Loc loc, nullable Expression frame) {
+    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc, nullable Expression frame) {
         for (i, parameterName in parameterNames) {
             if (name == parameterName) return parameterTypes[i];
         }
@@ -98,7 +99,7 @@ class ScopeBoundTemplateDecl : Symbol
 
     this(this.latent, this.frame) { }
 
-    Symbol instantiate(Context context, Loc loc, Type[] parameters)
+    (Symbol | fail Error) instantiate(Context context, Loc loc, Type[] parameters)
     {
         context.pushErrorLoc(loc);
         auto ret = this.latent.getInstance(context, loc, parameters, this.frame);
@@ -136,7 +137,7 @@ class TemplateDecl : LatentSymbol
         return this.mangle == other.mangle; // hax
     }
 
-    Symbol getInstance(mut Context context, Loc loc, Type[] parameters, nullable Expression frame)
+    (Symbol | fail Error) getInstance(mut Context context, Loc loc, Type[] parameters, nullable Expression frame)
     {
         loc.assert2s(parameters.length == this.decl.typeParameterNames.length,
             "Unexpected number of parameters to template: " ~
@@ -163,7 +164,7 @@ class TemplateDecl : LatentSymbol
         }
         context = context.withNamespace(new TemplateInstantiationNamespace(
             this.parent, this.decl.typeParameterNames, parameters));
-        Symbol value = this.decl.content.compile(context);
+        Symbol value = retfail this.decl.content.compile(context);
 
         /*
          * Emit instance into new module.
@@ -188,7 +189,7 @@ class TemplateDecl : LatentSymbol
         module_.track(resolvedValue);
 
         // after append, to break recursion loops
-        module_.compile(context);
+        void <- module_.compile(context);
 
         contextModule.addModuleDependency(module_);
         return resolvedValue;
@@ -209,7 +210,7 @@ class ASTTemplateDecl : ASTDeclaration
         return new TemplateDecl(context.namespace, this);
     }
 
-    override Context compile(Context context) {
+    override (Context | fail Error) compile(Context context) {
         return context.withNamespace(new SymbolAlias(context.namespace, this.name, compileSymbol(context)));
     }
 
@@ -218,7 +219,7 @@ class ASTTemplateDecl : ASTDeclaration
     override string repr() { return "template $name"; }
 }
 
-nullable ASTTemplateDecl parseTemplateDecl(Parser parser, LexicalContext lexicalContext)
+(nullable ASTTemplateDecl | fail Error) parseTemplateDecl(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
     if (!acceptIdentifier(parser, "template"))
@@ -245,7 +246,7 @@ nullable ASTTemplateDecl parseTemplateDecl(Parser parser, LexicalContext lexical
     mut uninitialized ASTSymbol member;
     parser.strip;
     auto contentLoc = parser.loc;
-    nullable ASTSymbol member = parseTemplateContents(parser, lexicalContext);
+    nullable ASTSymbol member <- parseTemplateContents(parser, lexicalContext);
     if (!member) {
         contentLoc.fail("template member expected");
     }
@@ -256,15 +257,18 @@ nullable ASTTemplateDecl parseTemplateDecl(Parser parser, LexicalContext lexical
 
 // parse "the sort of thing that can appear in a `template`"
 // TODO better name for this category. Maybe it really is parseDeclaration?
-nullable ASTSymbol parseTemplateContents(Parser parser, LexicalContext lexicalContext) {
-    if (ASTClassDecl classDecl = parseClassDecl(parser, lexicalContext)) {
+(nullable ASTSymbol | fail Error) parseTemplateContents(Parser parser, LexicalContext lexicalContext) {
+    // FIXME
+    auto classDecl <- parseClassDecl(parser, lexicalContext);
+    if (ASTClassDecl classDecl = classDecl) {
         return classDecl;
     }
-    if (ASTIntfDecl intfDecl = parseIntfDecl(parser, lexicalContext)) {
+    auto intfDecl <- parseIntfDecl(parser, lexicalContext);
+    if (ASTIntfDecl intfDecl = intfDecl) {
         return intfDecl;
     }
     parser.begin;
-    if (ASTDeclaration decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
+    if (ASTDeclaration decl = retfail lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
         // FIXME figure out how to converge ASTDeclaration and ASTSymbol
         // imports and structs are only "sort of" the same thing - maybe make
         // an ASTTypeDeclaration that can wrap an ASTSymbol?
@@ -276,7 +280,8 @@ nullable ASTSymbol parseTemplateContents(Parser parser, LexicalContext lexicalCo
         return null;
     }
     parser.revert;
-    if (ASTFunction fun = parseFunction(parser, lexicalContext)) {
+    auto fun <- parseFunction(parser, lexicalContext);
+    if (ASTFunction fun = fun) {
         return fun;
     }
     if (ASTEnumDecl enumDecl = parseEnumDecl(parser, lexicalContext)) {

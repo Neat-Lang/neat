@@ -1,6 +1,7 @@
 module neat.either;
 
 macro import neat.macros.quasiquoting;
+macro import neat.macros.retfail;
 
 import backend.base;
 import helpers;
@@ -36,13 +37,13 @@ class ASTEitherDecl : ASTSymbol
 
     this(this.partTypes) { }
 
-    override Type compile(Context context)
+    override (Type | fail Error) compile(Context context)
     {
         auto partTypes = new (bool fail, Type)[](this.partTypes.length);
         for (i, partType in this.partTypes) {
             partTypes[i] = (
                 partType.fail,
-                beType(partType.loc, partType.symbol.compile(context)));
+                beType(partType.loc, retfail partType.symbol.compile(context)));
         }
 
         return new Either(partTypes);
@@ -258,14 +259,14 @@ class Either : Type
             auto member = new EitherMember(source, i);
             auto converted <- context.compiler.implicitConvertTo(context, member, targetType);
         }
-        nullable Expression do1(Expression source) {
-            nullable Statement do2(Reference target) {
+        (nullable Expression | fail Error) do1(Expression source) {
+            (nullable Statement | fail Error) do2(Reference target) {
                 mut nullable Statement ifTree = null;
                 auto sourceType = new EitherType(source);
                 for (int i, type in this.types) {
                     auto member = new EitherMember(source, i);
                     auto converted <- context.compiler.implicitConvertTo(context, member, targetType);
-                    Expression test = context.compiler.binaryOp(
+                    Expression test = retfail context.compiler.binaryOp(
                         "==", context, sourceType, context.compiler.intLiteral(i + 1), __HERE__);
                     Statement assign = context.compiler.assignStatement(target, converted);
                     ifTree = context.compiler.ifStatement(test, assign, ifTree);
@@ -275,7 +276,9 @@ class Either : Type
             // TODO settle ownership
             return context.compiler.exprWithScratchspace(targetType, false, &do2);
         }
-        return context.compiler.exprWithTemporaryExpr(source, &do1);
+        if (auto ret <- context.compiler.exprWithTemporaryExpr(source, &do1))
+            return ret;
+        assert(false);
     }
 
     override bool same(Type type) {
@@ -315,9 +318,9 @@ class Either : Type
     /**
      * Called to create a copy of an expression in a target.
      */
-    override nullable Statement copyInto(Context context, Reference target, Expression source)
+    override (nullable Statement | fail Error) copyInto(Context context, Reference target, Expression source)
     {
-        nullable Statement do_(Expression source) {
+        (nullable Statement | fail Error) do_(Expression source) {
             auto sourceType = new EitherType(source);
             auto targetType = new EitherTypeReference(target);
             auto typeAssignment = context.compiler.assignStatement(targetType, sourceType);
@@ -327,21 +330,23 @@ class Either : Type
                 auto targetMember = new EitherReference(target, i);
                 auto sourceMember = new EitherMember(source, i);
 
-                Statement copy() {
-                    if (auto copyInto = entry.type.copyInto(context, targetMember, sourceMember))
+                (Statement | fail Error) copy() {
+                    if (auto copyInto = retfail entry.type.copyInto(context, targetMember, sourceMember))
                         return copyInto;
                     return context.compiler.assignStatement(targetMember, sourceMember);
                 }
-                Expression test = context.compiler.binaryOp(
+                Expression test = retfail context.compiler.binaryOp(
                     "==", context, sourceType, context.compiler.intLiteral(i + 1), __HERE__);
-                ifTree = context.compiler.ifStatement(test, copy, ifTree);
+                ifTree = context.compiler.ifStatement(test, retfail copy, ifTree);
             }
             if (auto ifTree = ifTree)
                 return context.compiler.sequenceStatement([typeAssignment, ifTree]);
             return null; // no copyInto for any member
         }
         // TODO tmpize `target`
-        return context.compiler.stmtWithTemporaryExpr(source, &do_);
+        if (auto ret <- context.compiler.stmtWithTemporaryExpr(source, &do_))
+            return ret;
+        assert(false);
     }
 
     /**
@@ -349,7 +354,7 @@ class Either : Type
      */
     override nullable Statement endLifetime(Context context, Reference reference)
     {
-        nullable Statement do_(Expression refPtr) {
+        (nullable Statement | fail Error) do_(Expression refPtr) {
             auto reference = context.compiler.dereference(refPtr);
             auto valueType = new EitherType(reference);
 
@@ -359,7 +364,7 @@ class Either : Type
 
                 if (auto destroy = entry.type.endLifetime(context, member))
                 {
-                    Expression test = context.compiler.binaryOp(
+                    Expression test = retfail context.compiler.binaryOp(
                         "==", context, valueType, context.compiler.intLiteral(i + 1), __HERE__);
                     ifTree = context.compiler.ifStatement(test, destroy, ifTree);
                 }
@@ -367,12 +372,14 @@ class Either : Type
 
             return ifTree;
         }
-        return context.compiler.stmtWithTemporaryExpr(
+        if (auto ret <- context.compiler.stmtWithTemporaryExpr(
             context.compiler.reference(reference),
-            &do_);
+            &do_))
+            return ret;
+        assert(false);
     }
 
-    override nullable Expression binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
+    override (nullable Expression | fail Error) binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
     {
         if (op == "==") {
             mut auto rhs = rhs;
@@ -382,8 +389,8 @@ class Either : Type
                 return null;
             }
 
-            nullable Expression do1(Expression lhs) {
-                nullable Expression do2(Expression rhs) {
+            (nullable Expression | fail Error) do1(Expression lhs) {
+                (nullable Expression | fail Error) do2(Expression rhs) {
                     auto lhsType = new EitherType(lhs);
                     auto rhsType = new EitherType(rhs);
                     auto typeEq = context.compiler.astBinaryOp(
@@ -402,7 +409,7 @@ class Either : Type
                     auto eqTest = new ASTEitherCaseExpr(__HERE__, new ASTSymbolHelper(lhs), eqCases);
                     auto combinedExpr = context.compiler.astBinaryOp("&&", typeEq, eqTest, __HERE__);
 
-                    return combinedExpr.compile(context).beExpression;
+                    return (retfail combinedExpr.compile(context)).beExpression;
                 }
                 return context.compiler.exprWithTemporaryExpr(rhs, &do2);
             }
@@ -439,18 +446,16 @@ class ASTEitherCaseExpr : ASTSymbol
 
     this(this.loc, this.base, this.cases) { }
 
-    override Expression compile(Context context) {
-        auto baseExpr = base.compile(context).beExpressionImplCall(context, loc);
+    override (Expression | fail Error) compile(Context context) {
+        auto baseExpr = base.compile(context).retfail.beExpressionImplCall(context, loc).retfail;
 
-        nullable Expression do_(Expression baseExpr) {
+        (nullable Expression | fail Error) do_(Expression baseExpr) {
             return compileBaseExpr(context, baseExpr);
         }
-        return context.compiler.exprWithTemporaryExpr(baseExpr, &do_).notNull;
+        return context.compiler.exprWithTemporaryExpr(baseExpr, &do_).retfail.notNull;
     }
 
-    Expression compileBaseExpr(Context context, Expression baseExpr) {
-        // FIXME
-        // loc.assert2s(baseExpr.info.ownership != Ownership.gifted, "TODO: Either base expr must not be gifted");
+    (Expression | fail Error) compileBaseExpr(Context context, Expression baseExpr) {
         auto either = baseExpr.type.instanceOf(Either);
 
         loc.assert2s(!!either, "Expected Either for case expression");
@@ -468,14 +473,14 @@ class ASTEitherCaseExpr : ASTSymbol
         for (case_ in this.cases) {
             if (case_.return_) continue;
 
-            auto caseType = beType(loc, case_.type.compile(context));
+            auto caseType = beType(loc, retfail case_.type.compile(context));
             auto caseLoc = case_.loc;
 
             auto namespace = context.compiler.variableDeclaration(
                 context.namespace, case_.identifier, caseType, ExprInfo(mutable=false, Ownership.borrowed), false);
             auto subContext = context.withNamespace(namespace);
 
-            Expression expr = case_.expr.compile(subContext).beExpressionImplCall(context, caseLoc);
+            Expression expr = case_.expr.compile(subContext).retfail.beExpressionImplCall(context, caseLoc).retfail;
             mergeType(caseLoc, expr);
         }
 
@@ -496,7 +501,7 @@ class ASTEitherCaseExpr : ASTSymbol
 
         for (case_ in this.cases) {
             auto caseLoc = case_.loc;
-            Type type = beType(caseLoc, case_.type.compile(resultContext));
+            Type type = beType(caseLoc, retfail case_.type.compile(resultContext));
 
             mut int matched = -1;
             for (int k, eitherType in either.types) {
@@ -513,8 +518,8 @@ class ASTEitherCaseExpr : ASTSymbol
             // FIXME rename to accessDecl
             Reference variable = namespace.accessDecl2(context.compiler);
             Statement assignment = context.compiler.assignStatement(variable, new EitherMember(baseExpr, matched));
-            Expression userExpr = case_.expr.compile(resultContext.withNamespace(namespace))
-                .beExpressionImplCall(context, caseLoc);
+            Expression userExpr = case_.expr.compile(resultContext.withNamespace(namespace)).retfail
+                .beExpressionImplCall(context, caseLoc).retfail;
             Statement userStmt() {
                 if (case_.return_) {
                     Type ret = findParent!FunctionScopeBase(context.namespace).ret;
@@ -526,7 +531,7 @@ class ASTEitherCaseExpr : ASTSymbol
                 }
             }
             Statement then = context.compiler.sequenceStatement([assignment, userStmt]);
-            Expression test = context.compiler.binaryOp(
+            Expression test = retfail context.compiler.binaryOp(
                 "==", context, new EitherType(baseExpr), context.compiler.intLiteral(matched + 1), loc);
 
             ifTree = context.compiler.ifStatement(test, then, ifTree);
@@ -562,7 +567,7 @@ class ASTEitherCaseExpr : ASTSymbol
     }
 }
 
-nullable ASTSymbol parseEitherCaseExpr(Parser parser, LexicalContext lexicalContext, ASTSymbol current)
+(nullable ASTSymbol | fail Error) parseEitherCaseExpr(Parser parser, LexicalContext lexicalContext, ASTSymbol current)
 {
     parser.begin();
     if (!(parser.accept(".") && acceptIdentifier(parser, "case") && parser.accept("(")))
@@ -576,13 +581,14 @@ nullable ASTSymbol parseEitherCaseExpr(Parser parser, LexicalContext lexicalCont
     while (!parser.accept(")"))
     {
         if (cases.length) parser.expect(",");
-        nullable ASTSymbol type = lexicalContext.compiler.parseType(parser, lexicalContext);
+        nullable ASTSymbol type <- lexicalContext.compiler.parseType(parser, lexicalContext);
         parser.assert_(!!type, "case type expected");
         string identifier = parseIdentifier(parser);
         parser.expect(":");
         bool return_ = parser.acceptIdentifier("return");
         auto loc = parser.loc;
-        ASTSymbol expr = lexicalContext.compiler.parseExpression(parser, lexicalContext).notNull;
+        ASTSymbol expr = lexicalContext.compiler.parseExpression(parser, lexicalContext)
+            .retfail.notNull;
         cases ~= ASTEitherCaseExprCase(loc, type.notNull, identifier, return_, expr);
     }
     return new ASTEitherCaseExpr(parser.loc, current, cases);
@@ -616,8 +622,8 @@ class ASTEitherCaseStmt : ASTStatement
 
     this(this.loc, this.base, this.cases) { }
 
-    override StatementCompileResult compile(Context context) {
-        auto baseExpr = base.compile(context).beExpressionImplCall(context, loc);
+    override (StatementCompileResult | fail Error) compile(Context context) {
+        auto baseExpr = base.compile(context).retfail.beExpressionImplCall(context, loc).retfail;
         // FIXME
         // loc.assert2s(baseExpr.info.ownership != Ownership.gifted, "TODO: Either base expr must not be gifted");
         auto baseType = baseExpr.type;
@@ -625,11 +631,11 @@ class ASTEitherCaseStmt : ASTStatement
 
         loc.assert2s(!!either, "Expected Either for case expression");
 
-        nullable Statement do_(Expression baseExpr) {
+        (nullable Statement | fail Error) do_(Expression baseExpr) {
             bool[] handled = new bool[](either.types.length);
             mut nullable Statement ifTree = null;
             for (case_ in this.cases) {
-                Type type = beType(case_.loc, case_.type.compile(context));
+                Type type = beType(case_.loc, retfail case_.type.compile(context));
 
                 mut int matched = -1;
                 for (int k, entry in either.types) {
@@ -647,9 +653,9 @@ class ASTEitherCaseStmt : ASTStatement
                     // FIXME rename to accessDecl
                     Reference variable = namespace.accessDecl2(context.compiler);
                     Statement assignment = assignStatement(variable, new EitherMember(baseExpr, matched));
-                    auto userStmtPair = case_.stmt.compile(context.withNamespace(namespace));
+                    auto userStmtPair = retfail case_.stmt.compile(context.withNamespace(namespace));
                     Statement then = sequenceStatement([assignment, userStmtPair.statement]);
-                    Expression test = binaryOp(
+                    Expression test = retfail binaryOp(
                         "==", context, new EitherType(baseExpr), intLiteral(matched + 1), this.loc);
 
                     ifTree = ifStatement(test, then, ifTree);
@@ -661,7 +667,7 @@ class ASTEitherCaseStmt : ASTStatement
             return ifTree;
         }
         return StatementCompileResult(
-            context.compiler.stmtWithTemporaryExpr(baseExpr, &do_).notNull,
+            (retfail context.compiler.stmtWithTemporaryExpr(baseExpr, &do_)).notNull,
             context);
     }
 
@@ -683,10 +689,10 @@ class ASTEitherCaseStmt : ASTStatement
     }
 }
 
-nullable ASTStatement parseEitherCaseStmt(Parser parser, LexicalContext lexicalContext)
+(nullable ASTStatement | fail Error) parseEitherCaseStmt(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin();
-    auto expr = lexicalContext.compiler.parseExpressionLeaf(parser, lexicalContext);
+    auto expr <- lexicalContext.compiler.parseExpressionLeaf(parser, lexicalContext);
     if (!expr) {
         parser.revert();
         return null;
@@ -701,13 +707,13 @@ nullable ASTStatement parseEitherCaseStmt(Parser parser, LexicalContext lexicalC
     mut ASTEitherCaseStmtCase[] cases;
     while (!parser.accept("}"))
     {
-        auto type = lexicalContext.compiler.parseType(parser, lexicalContext);
+        auto type <- lexicalContext.compiler.parseType(parser, lexicalContext);
         parser.assert_(!!type, "case type expected");
         // identifier can be empty
         string identifier = parseIdentifier(parser);
         parser.expect(":");
         auto loc = parser.loc;
-        ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext);
+        ASTStatement stmt <- lexicalContext.compiler.parseStatement(parser, lexicalContext);
         cases ~= ASTEitherCaseStmtCase(loc, type.notNull, identifier, stmt);
     }
     return new ASTEitherCaseStmt(parser.loc, member.base, cases);

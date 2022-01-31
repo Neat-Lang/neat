@@ -1,6 +1,7 @@
 module neat.macros.assert;
 
 macro import neat.macros.quasiquoting;
+macro import neat.macros.retfail;
 
 import package(compiler).helpers;
 import package(compiler).neat.array;
@@ -21,197 +22,393 @@ class ASTAssertion : ASTStatement
 
     this(this.test, this.exprText, this.loc) { }
 
-    Expression symbolTest(Context context, ASTSymbol sym) {
-        auto context = context.withNamespace(context.compiler.exprAlias(
-                context.namespace, "identName", context.compiler.stringLiteral(repr(sym))));
+    version (generation89) {
+        (Expression | fail Error) symbolTest(Context context, ASTSymbol sym) {
+            auto context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "identName", context.compiler.stringLiteral(repr(sym))));
 
-        return notNull!Expression((
-            context.compiler.$expr ({ import package(compiler).neat.runtime : itoa; identName ~ " = " ~ itoa(cast(int) $sym); })
-        ).compile(context).instanceOf(Expression));
-    }
-
-    nullable Expression binopTest(mut Context context, ASTBinaryOp binop) {
-        void set(string name, Symbol value) {
-            context = context.withNamespace(
-                context.compiler.exprAlias(context.namespace, name, value));
-        }
-        string leftStr = repr(binop.left), rightStr = repr(binop.right);
-        set("leftStr", context.compiler.stringLiteral(leftStr));
-        set("rightStr", context.compiler.stringLiteral(rightStr));
-        auto
-            left = binop.left.compile(context).instanceOf(Expression),
-            right = binop.right.compile(context).instanceOf(Expression);
-        if (!left || !right) return null;
-        set("left", left);
-        set("right", right);
-
-        if (binop.op == "&&") {
-            auto leftRecurse = dispatch(context, binop.left);
-            auto rightRecurse = dispatch(context, binop.right);
-            if (!leftRecurse || !rightRecurse) return null;
-            set("leftRecurse", leftRecurse);
-            set("rightRecurse", rightRecurse);
-
-            return (context.compiler.$expr ({
-                mut string ret;
-                if (!left) ret = leftStr ~ " failed, because " ~ leftRecurse;
-                else ret = rightStr ~ " failed, because " ~ rightRecurse;
-                ret;
-            })).compile(context).instanceOf(Expression);
-        }
-        if (binop.op == "||") {
-            auto leftRecurse = dispatch(context, binop.left);
-            auto rightRecurse = dispatch(context, binop.right);
-            if (!leftRecurse || !rightRecurse) return null;
-            set("leftRecurse", leftRecurse);
-            set("rightRecurse", rightRecurse);
-
-            return (context.compiler.$expr ({
-                mut string ret;
-                if (left) ret = rightStr ~ " failed, because " ~ rightRecurse;
-                else if (right) ret = leftStr ~ " failed, because " ~ leftRecurse;
-                else ret = leftStr ~ " failed (because " ~ leftRecurse ~ ") and "
-                    ~ rightStr ~ " failed (because " ~ rightRecurse ~ ")";
-                ret;
-            })).compile(context).instanceOf(Expression);
-        }
-        bool isString(Type type) {
-            if (auto arr = type.instanceOf(Array))
-                return !!arr.elementType.instanceOf(Character);
-            return false;
-        }
-        bool isIntCastable(Type type) {
-            return type.instanceOf(Integer) || type.instanceOf(Long)
-                || type.instanceOf(Character) || type.instanceOf(Short);
-        }
-        if (left.type.isIntCastable && right.type.isIntCastable) {
-            if (right.instanceOf(IntLiteral)) {
-                return (context.compiler.$expr ({
-                    import package(compiler).neat.runtime : itoa;
-                    leftStr ~ " = " ~ itoa(cast(int) left);
-                })).compile(context).instanceOf(Expression);
-            }
             return (context.compiler.$expr ({
                 import package(compiler).neat.runtime : itoa;
-                leftStr ~ " = " ~ itoa(cast(int) left)
-                ~ " and " ~ rightStr ~ " = " ~ itoa(cast(int) right);
-            })).compile(context).instanceOf(Expression);
+                identName ~ " = " ~ itoa(cast(int) $sym);
+            })).compile(context).retfail.instanceOf(Expression).notNull;
         }
-        if (left.type.instanceOf(Float) && right.type.instanceOf(Float)) {
-            return (context.compiler.$expr ({
-                import package(compiler).neat.runtime : ftoa;
-                leftStr ~ " = " ~ ftoa(left)
-                ~ " and " ~ rightStr ~ " = " ~ ftoa(right);
-            })).compile(context).instanceOf(Expression);
-        }
-        if (left.type.isString && right.type.isString) {
-            if (right.instanceOf(StringLiteral)) {
+
+        (nullable Expression | fail Error) binopTest(mut Context context, ASTBinaryOp binop) {
+            void set(string name, Symbol value) {
+                context = context.withNamespace(
+                    context.compiler.exprAlias(context.namespace, name, value));
+            }
+            string leftStr = repr(binop.left), rightStr = repr(binop.right);
+            set("leftStr", context.compiler.stringLiteral(leftStr));
+            set("rightStr", context.compiler.stringLiteral(rightStr));
+            auto
+                left = binop.left.compile(context).retfail.instanceOf(Expression),
+                right = binop.right.compile(context).retfail.instanceOf(Expression);
+            if (!left || !right) return null;
+            set("left", left);
+            set("right", right);
+
+            if (binop.op == "&&") {
+                auto leftRecurse <- dispatch(context, binop.left);
+                auto rightRecurse <- dispatch(context, binop.right);
+                if (!leftRecurse || !rightRecurse) return null;
+                set("leftRecurse", leftRecurse);
+                set("rightRecurse", rightRecurse);
+
+                return (context.compiler.$expr ({
+                    mut string ret;
+                    if (!left) ret = leftStr ~ " failed, because " ~ leftRecurse;
+                    else ret = rightStr ~ " failed, because " ~ rightRecurse;
+                    ret;
+                })).compile(context).retfail.instanceOf(Expression);
+            }
+            if (binop.op == "||") {
+                auto leftRecurse <- dispatch(context, binop.left);
+                auto rightRecurse <- dispatch(context, binop.right);
+                if (!leftRecurse || !rightRecurse) return null;
+                set("leftRecurse", leftRecurse);
+                set("rightRecurse", rightRecurse);
+
+                return (context.compiler.$expr ({
+                    mut string ret;
+                    if (left) ret = rightStr ~ " failed, because " ~ rightRecurse;
+                    else if (right) ret = leftStr ~ " failed, because " ~ leftRecurse;
+                    else ret = leftStr ~ " failed (because " ~ leftRecurse ~ ") and "
+                        ~ rightStr ~ " failed (because " ~ rightRecurse ~ ")";
+                    ret;
+                })).compile(context).retfail.instanceOf(Expression);
+            }
+            bool isString(Type type) {
+                if (auto arr = type.instanceOf(Array))
+                    return !!arr.elementType.instanceOf(Character);
+                return false;
+            }
+            bool isIntCastable(Type type) {
+                return type.instanceOf(Integer) || type.instanceOf(Long)
+                    || type.instanceOf(Character) || type.instanceOf(Short);
+            }
+            if (left.type.isIntCastable && right.type.isIntCastable) {
+                if (right.instanceOf(IntLiteral)) {
+                    return (context.compiler.$expr ({
+                        import package(compiler).neat.runtime : itoa;
+                        leftStr ~ " = " ~ itoa(cast(int) left);
+                    })).compile(context).retfail.instanceOf(Expression);
+                }
+                return (context.compiler.$expr ({
+                    import package(compiler).neat.runtime : itoa;
+                    leftStr ~ " = " ~ itoa(cast(int) left)
+                    ~ " and " ~ rightStr ~ " = " ~ itoa(cast(int) right);
+                })).compile(context).retfail.instanceOf(Expression);
+            }
+            if (left.type.instanceOf(Float) && right.type.instanceOf(Float)) {
+                return (context.compiler.$expr ({
+                    import package(compiler).neat.runtime : ftoa;
+                    leftStr ~ " = " ~ ftoa(left)
+                    ~ " and " ~ rightStr ~ " = " ~ ftoa(right);
+                })).compile(context).retfail.instanceOf(Expression);
+            }
+            if (left.type.isString && right.type.isString) {
+                if (right.instanceOf(StringLiteral)) {
+                    return (
+                        context.compiler.$expr leftStr ~ " = \"" ~ left ~ "\""
+                    ).compile(context).retfail.instanceOf(Expression);
+                }
                 return (
-                    context.compiler.$expr leftStr ~ " = \"" ~ left ~ "\""
+                    context.compiler.$expr
+                        leftStr ~ " = \"" ~ left ~ "\""
+                        ~ " and " ~ rightStr ~ " = \"" ~ right ~ "\""
+                ).compile(context).retfail.instanceOf(Expression);
+            }
+            return null;
+        }
+
+        (nullable Expression | fail Error) negTest(mut Context context, ASTNegation astNegation)
+        {
+            void set(string name, Symbol value) {
+                context = context.withNamespace(
+                    context.compiler.exprAlias(context.namespace, name, value));
+            }
+
+            auto nextRecurse <- dispatch(context, astNegation.next);
+            if (!nextRecurse) return null;
+            set("nextRecurse", nextRecurse);
+            string nextStr = repr(astNegation.next);
+            set("nextStr", context.compiler.stringLiteral(nextStr));
+
+            return (
+                context.compiler.$expr nextRecurse ~ " was true"
+            ).compile(context).retfail.instanceOf(Expression);
+        }
+
+        (nullable Expression | fail Error) dispatch(Context context, ASTSymbol sym) {
+            if (auto ident = sym.instanceOf(ASTIdentifier)) {
+                return symbolTest(context, ident);
+            }
+            if (auto member = sym.instanceOf(ASTMemberBase)) {
+                return symbolTest(context, member);
+            }
+            if (auto binop = sym.instanceOf(ASTBinaryOp)) {
+                return binopTest(context, binop);
+            }
+            if (auto neg = sym.instanceOf(ASTNegation)) {
+                return negTest(context, neg);
+            }
+            return null;
+        }
+
+        override (StatementCompileResult | fail Error) compile(Context context)
+        {
+            mut Context context = context;
+            auto printFun = new FunctionDeclaration(
+                "print", new Void, [Parameter(false, "str", false, new Array(new Character))]);
+            auto assertFun = new FunctionDeclaration(
+                "assert", new Void, [Parameter(false, "test", false, new Integer)]);
+
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "print", printFun));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "assert", assertFun));
+            string failedMsg = loc.location() ~ ": assertion failed: " ~ exprText ~ ", because ";
+            auto ifFailed <- dispatch(context, test);
+            if (auto ifFailed = ifFailed) {
+                context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "ifFailed", ifFailed));
+                context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "failedMsg", context.compiler.stringLiteral(failedMsg)));
+                auto assertTest = context.compiler.$stmt {
+                    if (!$test) {
+                        print(failedMsg ~ ifFailed);
+                        assert(false);
+                    }
+                };
+                auto assertTestStmt <- assertTest.compile(context);
+                return StatementCompileResult(assertTestStmt.statement, context);
+            }
+
+            // fallback: old impl
+            // TODO quasiquote this
+            auto test <- this.test.compile(context);
+            auto expr = beExpression2(test, this.loc);
+            auto texpr = context.compiler.truthy(context, expr, this.loc);
+            // FIXME
+            auto nexpr <- context.compiler.binaryOp(
+                // "==", context, texpr, new BoolLiteral(false), this.loc);
+                "==", context,
+                texpr,
+                (context.compiler.$expr false).compile(context).retfail.beExpression,
+                this.loc);
+
+            Expression failStr <- context.compiler.binaryOp(
+                    "~", context,
+                    context.compiler.stringLiteral(this.loc.location()),
+                    context.compiler.stringLiteral(": '" ~ this.exprText ~ "' was false"),
+                    this.loc);
+            Expression false_ = context.compiler.intLiteral(0);
+            Statement printSt = context.compiler.exprStatement(
+                context.compiler.plainCall(context, printFun, [failStr], this.loc, false).retfail.notNull);
+            Statement failSt = context.compiler.exprStatement(
+                context.compiler.plainCall(context, assertFun, [false_], this.loc, false).retfail.notNull);
+            // `if (!$expression) { print($assertLocStr ~ ": '" ~ $exprText ~ "' was false."); assert(false); }`
+            return StatementCompileResult(
+                context.compiler.ifStatement(
+                    nexpr,
+                    context.compiler.sequenceStatement([printSt, failSt]),
+                    null),
+                context);
+        }
+    } else {
+        Expression symbolTest(Context context, ASTSymbol sym) {
+            auto context = context.withNamespace(context.compiler.exprAlias(
+                    context.namespace, "identName", context.compiler.stringLiteral(repr(sym))));
+
+            return notNull!Expression((
+                context.compiler.$expr ({ import package(compiler).neat.runtime : itoa; identName ~ " = " ~ itoa(cast(int) $sym); })
+            ).compile(context).instanceOf(Expression));
+        }
+
+        nullable Expression binopTest(mut Context context, ASTBinaryOp binop) {
+            void set(string name, Symbol value) {
+                context = context.withNamespace(
+                    context.compiler.exprAlias(context.namespace, name, value));
+            }
+            string leftStr = repr(binop.left), rightStr = repr(binop.right);
+            set("leftStr", context.compiler.stringLiteral(leftStr));
+            set("rightStr", context.compiler.stringLiteral(rightStr));
+            auto
+                left = binop.left.compile(context).instanceOf(Expression),
+                right = binop.right.compile(context).instanceOf(Expression);
+            if (!left || !right) return null;
+            set("left", left);
+            set("right", right);
+
+            if (binop.op == "&&") {
+                auto leftRecurse = dispatch(context, binop.left);
+                auto rightRecurse = dispatch(context, binop.right);
+                if (!leftRecurse || !rightRecurse) return null;
+                set("leftRecurse", leftRecurse);
+                set("rightRecurse", rightRecurse);
+
+                return (context.compiler.$expr ({
+                    mut string ret;
+                    if (!left) ret = leftStr ~ " failed, because " ~ leftRecurse;
+                    else ret = rightStr ~ " failed, because " ~ rightRecurse;
+                    ret;
+                })).compile(context).instanceOf(Expression);
+            }
+            if (binop.op == "||") {
+                auto leftRecurse = dispatch(context, binop.left);
+                auto rightRecurse = dispatch(context, binop.right);
+                if (!leftRecurse || !rightRecurse) return null;
+                set("leftRecurse", leftRecurse);
+                set("rightRecurse", rightRecurse);
+
+                return (context.compiler.$expr ({
+                    mut string ret;
+                    if (left) ret = rightStr ~ " failed, because " ~ rightRecurse;
+                    else if (right) ret = leftStr ~ " failed, because " ~ leftRecurse;
+                    else ret = leftStr ~ " failed (because " ~ leftRecurse ~ ") and "
+                        ~ rightStr ~ " failed (because " ~ rightRecurse ~ ")";
+                    ret;
+                })).compile(context).instanceOf(Expression);
+            }
+            bool isString(Type type) {
+                if (auto arr = type.instanceOf(Array))
+                    return !!arr.elementType.instanceOf(Character);
+                return false;
+            }
+            bool isIntCastable(Type type) {
+                return type.instanceOf(Integer) || type.instanceOf(Long)
+                    || type.instanceOf(Character) || type.instanceOf(Short);
+            }
+            if (left.type.isIntCastable && right.type.isIntCastable) {
+                if (right.instanceOf(IntLiteral)) {
+                    return (context.compiler.$expr ({
+                        import package(compiler).neat.runtime : itoa;
+                        leftStr ~ " = " ~ itoa(cast(int) left);
+                    })).compile(context).instanceOf(Expression);
+                }
+                return (context.compiler.$expr ({
+                    import package(compiler).neat.runtime : itoa;
+                    leftStr ~ " = " ~ itoa(cast(int) left)
+                    ~ " and " ~ rightStr ~ " = " ~ itoa(cast(int) right);
+                })).compile(context).instanceOf(Expression);
+            }
+            if (left.type.instanceOf(Float) && right.type.instanceOf(Float)) {
+                return (context.compiler.$expr ({
+                    import package(compiler).neat.runtime : ftoa;
+                    leftStr ~ " = " ~ ftoa(left)
+                    ~ " and " ~ rightStr ~ " = " ~ ftoa(right);
+                })).compile(context).instanceOf(Expression);
+            }
+            if (left.type.isString && right.type.isString) {
+                if (right.instanceOf(StringLiteral)) {
+                    return (
+                        context.compiler.$expr leftStr ~ " = \"" ~ left ~ "\""
+                    ).compile(context).instanceOf(Expression);
+                }
+                return (
+                    context.compiler.$expr
+                        leftStr ~ " = \"" ~ left ~ "\""
+                        ~ " and " ~ rightStr ~ " = \"" ~ right ~ "\""
                 ).compile(context).instanceOf(Expression);
             }
+            return null;
+        }
+
+        nullable Expression negTest(mut Context context, ASTNegation astNegation)
+        {
+            void set(string name, Symbol value) {
+                context = context.withNamespace(
+                    context.compiler.exprAlias(context.namespace, name, value));
+            }
+
+            auto nextRecurse = dispatch(context, astNegation.next);
+            if (!nextRecurse) return null;
+            set("nextRecurse", nextRecurse);
+            string nextStr = repr(astNegation.next);
+            set("nextStr", context.compiler.stringLiteral(nextStr));
+
             return (
-                context.compiler.$expr
-                    leftStr ~ " = \"" ~ left ~ "\""
-                    ~ " and " ~ rightStr ~ " = \"" ~ right ~ "\""
+                context.compiler.$expr nextRecurse ~ " was true"
             ).compile(context).instanceOf(Expression);
         }
-        return null;
-    }
 
-    nullable Expression negTest(mut Context context, ASTNegation astNegation)
-    {
-        void set(string name, Symbol value) {
-            context = context.withNamespace(
-                context.compiler.exprAlias(context.namespace, name, value));
+        nullable Expression dispatch(Context context, ASTSymbol sym) {
+            if (auto ident = sym.instanceOf(ASTIdentifier))
+            {
+                return symbolTest(context, ident);
+            }
+            if (auto member = sym.instanceOf(ASTMemberBase))
+            {
+                return symbolTest(context, member);
+            }
+            if (auto binop = sym.instanceOf(ASTBinaryOp))
+            {
+                return binopTest(context, binop);
+            }
+            if (auto neg = sym.instanceOf(ASTNegation))
+            {
+                return negTest(context, neg);
+            }
+            return null;
         }
 
-        auto nextRecurse = dispatch(context, astNegation.next);
-        if (!nextRecurse) return null;
-        set("nextRecurse", nextRecurse);
-        string nextStr = repr(astNegation.next);
-        set("nextStr", context.compiler.stringLiteral(nextStr));
-
-        return (
-            context.compiler.$expr nextRecurse ~ " was true"
-        ).compile(context).instanceOf(Expression);
-    }
-
-    nullable Expression dispatch(Context context, ASTSymbol sym) {
-        if (auto ident = sym.instanceOf(ASTIdentifier))
+        override StatementCompileResult compile(Context context)
         {
-            return symbolTest(context, ident);
-        }
-        if (auto member = sym.instanceOf(ASTMemberBase))
-        {
-            return symbolTest(context, member);
-        }
-        if (auto binop = sym.instanceOf(ASTBinaryOp))
-        {
-            return binopTest(context, binop);
-        }
-        if (auto neg = sym.instanceOf(ASTNegation))
-        {
-            return negTest(context, neg);
-        }
-        return null;
-    }
+            mut Context context = context;
+            auto printFun = new FunctionDeclaration(
+                "print", new Void, [Parameter(false, "str", false, new Array(new Character))]);
+            auto assertFun = new FunctionDeclaration(
+                "assert", new Void, [Parameter(false, "test", false, new Integer)]);
 
-    override StatementCompileResult compile(Context context)
-    {
-        mut Context context = context;
-        auto printFun = new FunctionDeclaration(
-            "print", new Void, [Parameter(false, "str", false, new Array(new Character))]);
-        auto assertFun = new FunctionDeclaration(
-            "assert", new Void, [Parameter(false, "test", false, new Integer)]);
-
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "print", printFun));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "assert", assertFun));
-        string failedMsg = loc.location() ~ ": assertion failed: " ~ exprText ~ ", because ";
-        if (auto ifFailed = dispatch(context, test)) {
             context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "ifFailed", ifFailed));
+                        context.namespace, "print", printFun));
             context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "failedMsg", context.compiler.stringLiteral(failedMsg)));
-            auto assertTest = context.compiler.$stmt {
-                if (!$test) {
-                    print(failedMsg ~ ifFailed);
-                    assert(false);
-                }
-            };
-            auto assertTestStmt = assertTest.compile(context);
-            return StatementCompileResult(assertTestStmt.statement, context);
+                        context.namespace, "assert", assertFun));
+            string failedMsg = loc.location() ~ ": assertion failed: " ~ exprText ~ ", because ";
+            if (auto ifFailed = dispatch(context, test)) {
+                context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "ifFailed", ifFailed));
+                context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "failedMsg", context.compiler.stringLiteral(failedMsg)));
+                auto assertTest = context.compiler.$stmt {
+                    if (!$test) {
+                        print(failedMsg ~ ifFailed);
+                        assert(false);
+                    }
+                };
+                auto assertTestStmt = assertTest.compile(context);
+                return StatementCompileResult(assertTestStmt.statement, context);
+            }
+
+            // fallback: old impl
+            // TODO quasiquote this
+            auto test = this.test.compile(context);
+            auto expr = beExpression2(test, this.loc);
+            auto texpr = context.compiler.truthy(context, expr, this.loc);
+            // FIXME
+            auto nexpr = context.compiler.binaryOp(
+                // "==", context, texpr, new BoolLiteral(false), this.loc);
+                "==", context, texpr, (context.compiler.$expr false).compile(context).beExpression, this.loc);
+
+            Expression failStr = context.compiler.binaryOp(
+                    "~", context,
+                    context.compiler.stringLiteral(this.loc.location()),
+                    context.compiler.stringLiteral(": '" ~ this.exprText ~ "' was false"),
+                    this.loc);
+            Expression false_ = context.compiler.intLiteral(0);
+            Statement printSt = context.compiler.exprStatement(
+                notNull!Expression(context.compiler.plainCall(context, printFun, [failStr], this.loc, false)));
+            Statement failSt = context.compiler.exprStatement(
+                notNull!Expression(context.compiler.plainCall(context, assertFun, [false_], this.loc, false)));
+            // `if (!$expression) { print($assertLocStr ~ ": '" ~ $exprText ~ "' was false."); assert(false); }`
+            return StatementCompileResult(
+                context.compiler.ifStatement(
+                    nexpr,
+                    context.compiler.sequenceStatement([printSt, failSt]),
+                    null),
+                context);
         }
-
-        // fallback: old impl
-        // TODO quasiquote this
-        auto test = this.test.compile(context);
-        auto expr = beExpression2(test, this.loc);
-        auto texpr = context.compiler.truthy(context, expr, this.loc);
-        // FIXME
-        auto nexpr = context.compiler.binaryOp(
-            // "==", context, texpr, new BoolLiteral(false), this.loc);
-            "==", context, texpr, (context.compiler.$expr false).compile(context).beExpression, this.loc);
-
-        Expression failStr = context.compiler.binaryOp(
-                "~", context,
-                context.compiler.stringLiteral(this.loc.location()),
-                context.compiler.stringLiteral(": '" ~ this.exprText ~ "' was false"),
-                this.loc);
-        Expression false_ = context.compiler.intLiteral(0);
-        Statement printSt = context.compiler.exprStatement(
-            notNull!Expression(context.compiler.plainCall(context, printFun, [failStr], this.loc, false)));
-        Statement failSt = context.compiler.exprStatement(
-            notNull!Expression(context.compiler.plainCall(context, assertFun, [false_], this.loc, false)));
-        // `if (!$expression) { print($assertLocStr ~ ": '" ~ $exprText ~ "' was false."); assert(false); }`
-        return StatementCompileResult(
-            context.compiler.ifStatement(
-                nexpr,
-                context.compiler.sequenceStatement([printSt, failSt]),
-                null),
-            context);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -251,39 +448,66 @@ class ParseAssert : Macro
     this() { }
     override void apply(MacroArgs args) {
         if (auto args = args.instanceOf(ParseStatementArgs)) {
-            // FIXME
-            // args.statement = this.parse(args.parser, args.lexicalContext);
-            if (auto ret = this.parse(args.parser, args.lexicalContext))
-                args.statement = ret;
+            args.statement = this.parse(args.parser, args.lexicalContext);
         }
     }
 
-    nullable ASTStatement parse(Parser parser, LexicalContext context)
-    {
-        parser.begin();
-        parser.strip();
-        auto assertLoc = parser.loc();
-        if (!parser.accept("assert"))
+    version (generation89) {
+        (nullable ASTStatement | fail Error) parse(Parser parser, LexicalContext context)
         {
-            parser.revert();
-            return null;
+            parser.begin();
+            parser.strip();
+            auto assertLoc = parser.loc();
+            if (!parser.accept("assert"))
+            {
+                parser.revert();
+                return null;
+            }
+            if (!parser.accept("("))
+            {
+                parser.revert();
+                return null;
+            }
+            parser.commit();
+            auto exprStartLoc = parser.loc;
+            auto exprStart = parser.text;
+            auto expression = context.compiler.parseExpression(parser, context).retfail.notNull;
+            auto exprEnd = parser.text;
+            auto exprText = exprStart[0 .. exprStart.length - exprEnd.length];
+
+            parser.expect(")");
+            parser.expect(";");
+
+            return new ASTAssertion(expression, exprText, exprStartLoc);
         }
-        if (!parser.accept("("))
+    } else {
+        nullable ASTStatement parse(Parser parser, LexicalContext context)
         {
-            parser.revert();
-            return null;
+            parser.begin();
+            parser.strip();
+            auto assertLoc = parser.loc();
+            if (!parser.accept("assert"))
+            {
+                parser.revert();
+                return null;
+            }
+            if (!parser.accept("("))
+            {
+                parser.revert();
+                return null;
+            }
+            parser.commit();
+            auto exprStartLoc = parser.loc;
+            auto exprStart = parser.text;
+            auto expression = context.compiler.parseExpression(parser, context).retfail.notNull;
+            auto exprEnd = parser.text;
+            auto exprText = exprStart[0 .. exprStart.length - exprEnd.length];
+
+            parser.expect(")");
+            parser.expect(";");
+
+            return new ASTAssertion(expression, exprText, exprStartLoc);
         }
-        parser.commit();
-        auto exprStartLoc = parser.loc;
-        auto exprStart = parser.text;
-        auto expression = notNull!ASTSymbol(context.compiler.parseExpression(parser, context));
-        auto exprEnd = parser.text;
-        auto exprText = exprStart[0 .. exprStart.length - exprEnd.length];
-
-        parser.expect(")");
-        parser.expect(";");
-
-        return new ASTAssertion(expression, exprText, exprStartLoc);
     }
 }
 

@@ -1,6 +1,7 @@
 module neat.macros.once;
 
 macro import neat.macros.quasiquoting;
+macro import neat.macros.retfail;
 
 import package(compiler).helpers;
 import package(compiler).neat.base;
@@ -19,41 +20,80 @@ class ASTOnceExpression : ASTSymbol
 
     this(this.macro_, this.target, this.loc) { }
 
-    override Symbol compile(Context context)
-    {
-        mut Context context = context;
-        auto key = context.compiler.astIntLiteral(this.macro_.keyCounter, this.loc);
-        this.macro_.keyCounter += 1;
+    version (generation89) {
+        override (Symbol | fail Error) compile(Context context)
+        {
+            mut Context context = context;
+            auto key = context.compiler.astIntLiteral(this.macro_.keyCounter, this.loc);
+            this.macro_.keyCounter += 1;
 
-        auto cacheIsSet = new FunctionDeclaration(
-            "neat_runtime_cache_isset", new Integer, [
-                Parameter(false, "key", false, new Integer)]);
-        auto cacheSet = new FunctionDeclaration(
-            "neat_runtime_cache_set", new Void, [
-                Parameter(false, "key", false, new Integer),
-                Parameter(false, "ptr", false, new Pointer(new Void)),
-                Parameter(false, "free", false, new FunctionPointer(new Void, [Parameter.fromType(new Pointer(new Void))]))]);
-        auto cacheGet = new FunctionDeclaration(
-            "neat_runtime_cache_get", new Pointer(new Void), [
-                Parameter(false, "key", false, new Integer)]);
-        auto rtFree = genRtFree(context, target.compile(context).instanceOf(Expression).type);
+            auto cacheIsSet = new FunctionDeclaration(
+                "neat_runtime_cache_isset", new Integer, [
+                    Parameter(false, "key", false, new Integer)]);
+            auto cacheSet = new FunctionDeclaration(
+                "neat_runtime_cache_set", new Void, [
+                    Parameter(false, "key", false, new Integer),
+                    Parameter(false, "ptr", false, new Pointer(new Void)),
+                    Parameter(false, "free", false, new FunctionPointer(new Void, [Parameter.fromType(new Pointer(new Void))]))]);
+            auto cacheGet = new FunctionDeclaration(
+                "neat_runtime_cache_get", new Pointer(new Void), [
+                    Parameter(false, "key", false, new Integer)]);
+            auto rtFree = genRtFree(context, target.compile(context).retfail.instanceOf(Expression).type);
 
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "neat_runtime_cache_isset", cacheIsSet));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "neat_runtime_cache_set", cacheSet));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "neat_runtime_cache_get", cacheGet));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "rt_free", rtFree));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "neat_runtime_cache_isset", cacheIsSet));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "neat_runtime_cache_set", cacheSet));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "neat_runtime_cache_get", cacheGet));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "rt_free", rtFree));
 
-        return (context.compiler.$expr ({
-            if (!neat_runtime_cache_isset($key))
-            {
-                neat_runtime_cache_set($key, cast(void*) $target, &rt_free);
-            }
-            cast(typeof($target)) neat_runtime_cache_get($key);
-        })).compile(context);
+            return (context.compiler.$expr ({
+                if (!neat_runtime_cache_isset($key))
+                {
+                    neat_runtime_cache_set($key, cast(void*) $target, &rt_free);
+                }
+                cast(typeof($target)) neat_runtime_cache_get($key);
+            })).compile(context);
+        }
+    } else {
+        override Symbol compile(Context context)
+        {
+            mut Context context = context;
+            auto key = context.compiler.astIntLiteral(this.macro_.keyCounter, this.loc);
+            this.macro_.keyCounter += 1;
+
+            auto cacheIsSet = new FunctionDeclaration(
+                "neat_runtime_cache_isset", new Integer, [
+                    Parameter(false, "key", false, new Integer)]);
+            auto cacheSet = new FunctionDeclaration(
+                "neat_runtime_cache_set", new Void, [
+                    Parameter(false, "key", false, new Integer),
+                    Parameter(false, "ptr", false, new Pointer(new Void)),
+                    Parameter(false, "free", false, new FunctionPointer(new Void, [Parameter.fromType(new Pointer(new Void))]))]);
+            auto cacheGet = new FunctionDeclaration(
+                "neat_runtime_cache_get", new Pointer(new Void), [
+                    Parameter(false, "key", false, new Integer)]);
+            auto rtFree = genRtFree(context, target.compile(context).instanceOf(Expression).type);
+
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "neat_runtime_cache_isset", cacheIsSet));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "neat_runtime_cache_set", cacheSet));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "neat_runtime_cache_get", cacheGet));
+            context = context.withNamespace(context.compiler.exprAlias(
+                        context.namespace, "rt_free", rtFree));
+
+            return (context.compiler.$expr ({
+                if (!neat_runtime_cache_isset($key))
+                {
+                    neat_runtime_cache_set($key, cast(void*) $target, &rt_free);
+                }
+                cast(typeof($target)) neat_runtime_cache_get($key);
+            })).compile(context);
+        }
     }
 }
 
@@ -61,7 +101,11 @@ class FixedSymbolAlias : ASTSymbol
 {
     Symbol symbol;
     this(this.symbol) { }
-    override Symbol compile(Context context) { return this.symbol; }
+    version (generation89) {
+        override (Symbol | fail Error) compile(Context context) { return this.symbol; }
+    } else {
+        override Symbol compile(Context context) { return this.symbol; }
+    }
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'FixedSymbolAlias'"); assert(false); }
 }
 
@@ -84,24 +128,37 @@ class OnceMacro : Macro
 
     override void apply(MacroArgs args) {
         if (auto args = args.instanceOf(ParseExpressionBaseArgs)) {
-            if (auto ret = this.parse(args.parser, args.lexicalContext))
-                args.symbol = ret;
-            // FIXME
-            // args.symbol = this.parse(args.parser, args.lexicalContext);
+            args.symbol = this.parse(args.parser, args.lexicalContext);
         }
     }
 
-    nullable ASTSymbol parse(Parser parser, LexicalContext lexicalContext)
-    {
-        auto loc = parser.loc();
-        if (!acceptIdentifier(parser, "once"))
+    version (generation89) {
+        (nullable ASTSymbol | fail Error) parse(Parser parser, LexicalContext lexicalContext)
         {
-            return null;
+            auto loc = parser.loc();
+            if (!acceptIdentifier(parser, "once"))
+            {
+                return null;
+            }
+            if (auto expression = lexicalContext.compiler.parseExpression(parser, lexicalContext).retfail) {
+                return new ASTOnceExpression(this, expression, loc);
+            } else {
+                loc.fail("expression expected");
+            }
         }
-        if (auto expression = lexicalContext.compiler.parseExpression(parser, lexicalContext)) {
-            return new ASTOnceExpression(this, expression, loc);
-        } else {
-            loc.fail("expression expected");
+    } else {
+        nullable ASTSymbol parse(Parser parser, LexicalContext lexicalContext)
+        {
+            auto loc = parser.loc();
+            if (!acceptIdentifier(parser, "once"))
+            {
+                return null;
+            }
+            if (auto expression = lexicalContext.compiler.parseExpression(parser, lexicalContext)) {
+                return new ASTOnceExpression(this, expression, loc);
+            } else {
+                loc.fail("expression expected");
+            }
         }
     }
 }

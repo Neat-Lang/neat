@@ -1,6 +1,7 @@
 module main;
 
 macro import neat.macros.listcomprehension;
+macro import neat.macros.retfail;
 
 import backend.base;
 import backend.c;
@@ -292,11 +293,20 @@ class CompilationTask : ITask
     }
 }
 
-(string[] objFiles, string[] intermediateFiles, Module module_, Hash hash) buildAstModule(
+struct BuildResult
+{
+    string[] objFiles;
+    string[] intermediateFiles;
+    Module module_;
+    Hash hash;
+}
+
+
+(BuildResult | fail Error) buildAstModule(
     ASTModule astModule, BuildSettings settings, CompilationVisitor[] visitors, Options options)
 {
     auto context = makeContext(settings.compiler, settings.platform, null, astModule.macroState);
-    Module module_ = compileModule(context, astModule, addDefaultImports=true);
+    Module module_ <- compileModule(context, astModule, addDefaultImports=true);
 
     mut string[] taskHashes;
 
@@ -342,7 +352,7 @@ class CompilationTask : ITask
         task.waitDone;
     }
 
-    return (objFiles, intermediateFiles, module_, hash);
+    return BuildResult(objFiles, intermediateFiles, module_, hash);
 }
 
 class ParserHelperImpl : ParserHelper
@@ -351,12 +361,12 @@ class ParserHelperImpl : ParserHelper
 
     this(this.settings) { }
 
-    override void proxyCall(ASTModule astModule, string function_, MacroState macroState)
+    override (void | fail Error) proxyCall(ASTModule astModule, string function_, MacroState macroState)
     {
         print("# stageM $function_");
         // ignore pragma(lib) in macro (what are you doing)
         auto dummyOptions = new Options;
-        auto result = buildAstModule(astModule, this.settings, [], dummyOptions);
+        auto result <- buildAstModule(astModule, this.settings, [], dummyOptions);
         string objFiles = [join "" " " ~ a for a in result.objFiles];
 
         string baseCmd() {
@@ -371,7 +381,7 @@ class ParserHelperImpl : ParserHelper
         if (settings.x86_32) baseCmd ~= " -m32";
 
         auto simpleContext = makeContext(settings.compiler, settings.platform, null, new MacroState);
-        auto fun = result.module_.lookup(function_, simpleContext, __HERE__, null).instanceOf(Function);
+        auto fun = result.module_.lookup(function_, simpleContext, __HERE__, null).retfail.instanceOf(Function);
         string name = fun.mangle;
         (string soname, string cmd) soCmd() {
             string soname = ".obj/macro_$(name)_$(result.hash.text).so";
@@ -471,7 +481,7 @@ class ASTSizeT : ASTSymbol
 {
     this() { }
 
-    override Type compile(Context context) {
+    override (Type | fail Error) compile(Context context) {
         return context.nativeWordType;
     }
 
@@ -835,8 +845,12 @@ void buildBinary(Options options, string mainFile, string execPath, Package[] pa
         compilationVisitors ~= umlVisitor;
     }
 
-    auto astModule = getModule(compiler, mainFile, null, false, helper, modParseConfig, __HERE__);
-    auto result = buildAstModule(astModule, settings, compilationVisitors, options);
+    auto astModule = getModule(compiler, mainFile, null, false, helper, modParseConfig, __HERE__).case(
+        ASTModule mod: mod,
+        Error err: exitWithError!ASTModule(err));
+    auto result = buildAstModule(astModule, settings, compilationVisitors, options).case(
+        BuildResult result: result,
+        Error err: exitWithError!BuildResult(err));
     mut string fileArgs = [join "" " " ~ a for a in result.objFiles];
     string[] intermediateFiles = result.intermediateFiles;
 
@@ -1034,4 +1048,12 @@ void main(mut string[] args)
     if (!options.output.length) options.output = args[0].withoutExtension;
 
     buildBinary(options, mainFile, execPath=execPath, packages);
+}
+
+// TODO __bottom
+private template exitWithError(T) {
+    T exitWithError(Error err) {
+        print(err.loc.location ~ ": error: " ~ err.msg);
+        exit(1);
+    }
 }

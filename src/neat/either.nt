@@ -653,15 +653,15 @@ class ASTEitherCaseStmt : ASTStatement
                     // FIXME rename to accessDecl
                     Reference variable = namespace.accessDecl2(context.compiler);
                     Statement assignment = assignStatement(variable, new EitherMember(baseExpr, matched));
-                    auto userStmtPair = retfail case_.stmt.compile(context.withNamespace(namespace));
+                    auto userStmtPair <- case_.stmt.compile(context.withNamespace(namespace));
                     Statement then = sequenceStatement([assignment, userStmtPair.statement]);
-                    Expression test = retfail binaryOp(
+                    Expression test <- binaryOp(
                         "==", context, new EitherType(baseExpr), intLiteral(matched + 1), this.loc);
 
                     ifTree = ifStatement(test, then, ifTree);
                 }
             }
-            for (i, handled in handled) {
+            for (int i, handled in handled) with (context.compiler) {
                 loc.assert2s(handled, "Type " ~ either.types[i].type.repr() ~ " not handled!");
             }
             return ifTree;
@@ -689,6 +689,99 @@ class ASTEitherCaseStmt : ASTStatement
     }
 }
 
+class ASTEitherCaseStmt2 : ASTStatement
+{
+    Loc loc;
+
+    ASTSymbol base;
+
+    ASTEitherCaseStmtCase[] cases;
+
+    nullable ASTStatement default_;
+
+    this(this.loc, this.base, this.cases, this.default_) { }
+
+    override (StatementCompileResult | fail Error) compile(Context context) {
+        auto baseExpr = base.compile(context).retfail.beExpressionImplCall(context, loc).retfail;
+        // FIXME
+        // loc.assert2s(baseExpr.info.ownership != Ownership.gifted, "TODO: Either base expr must not be gifted");
+        auto baseType = baseExpr.type;
+        auto either = baseType.instanceOf(Either);
+
+        loc.assert2s(!!either, "Expected Either for case expression");
+
+        (nullable Statement | fail Error) do_(Expression baseExpr) {
+            bool[] handled = new bool[](either.types.length);
+            mut nullable Statement ifTree = null;
+            for (case_ in this.cases) {
+                Type type = beType(case_.loc, retfail case_.type.compile(context));
+
+                mut int matched = -1;
+                for (int k, entry in either.types) {
+                    if (type.same(entry.type)) {
+                        case_.loc.assert2s(matched == -1, "either type " ~ type.repr() ~ " matched twice");
+                        matched = k;
+                    }
+                }
+                case_.loc.assert2s(matched != -1, "Type is not listed in Either!");
+                handled[matched] = true;
+
+                with (context.compiler) {
+                    auto namespace = variableDeclaration(
+                        context.namespace, case_.identifier, type, ExprInfo(mutable=false, Ownership.borrowed), false);
+                    // FIXME rename to accessDecl
+                    Reference variable = namespace.accessDecl2(context.compiler);
+                    Statement assignment = assignStatement(variable, new EitherMember(baseExpr, matched));
+                    auto userStmtPair <- case_.stmt.compile(context.withNamespace(namespace));
+                    Statement then = sequenceStatement([assignment, userStmtPair.statement]);
+                    Expression test <- binaryOp(
+                        "==", context, new EitherType(baseExpr), intLiteral(matched + 1), this.loc);
+
+                    ifTree = ifStatement(test, then, ifTree);
+                }
+            }
+            for (int i, handled in handled) with (context.compiler) {
+                if (auto default_ = this.default_) {
+                    if (!handled) {
+                        auto defaultPair <- default_.compile(context);
+                        Expression test <- binaryOp(
+                            "==", context, new EitherType(baseExpr), intLiteral(i + 1), this.loc);
+                        ifTree = ifStatement(test, defaultPair.statement, ifTree);
+                    }
+                } else {
+                    loc.assert2s(handled, "Type " ~ either.types[i].type.repr() ~ " not handled!");
+                }
+            }
+            return ifTree;
+        }
+        return StatementCompileResult(
+            (retfail context.compiler.stmtWithTemporaryExpr(baseExpr, &do_)).notNull,
+            context);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        mut ASTSymbol[] quotedCases;
+        for (case_ in this.cases) {
+            quotedCases ~= quoter.compiler.astCall(
+                quoter.compiler.astIdentifier("ASTEitherCaseStmtCase", __HERE__), [
+                    quoter.quoteLoc(case_.loc),
+                    case_.type.quote(quoter),
+                    quoter.compiler.astStringLiteral(case_.identifier, __HERE__),
+                    case_.stmt.quote(quoter)], __HERE__);
+        }
+        ASTSymbol quote(nullable ASTStatement either) {
+            if (auto either = either) return either.quote(quoter);
+            else return quoter.compiler.astIdentifier("null", __HERE__);
+        }
+        return quoter.compiler.astNewExpression(
+            quoter.compiler.astIdentifier("ASTEitherCaseStmt2", __HERE__), [
+                quoter.quoteLoc(this.loc),
+                this.base.quote(quoter),
+                quoter.compiler.astArrayLiteral(quotedCases, __HERE__),
+                quote(this.default_)], __HERE__);
+    }
+}
+
 (nullable ASTStatement | fail Error) parseEitherCaseStmt(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin();
@@ -705,16 +798,49 @@ class ASTEitherCaseStmt : ASTStatement
     parser.commit();
 
     mut ASTEitherCaseStmtCase[] cases;
-    while (!parser.accept("}"))
-    {
+    mut nullable ASTStatement default_ = null;
+    while (!parser.accept("}")) {
+        if (parser.accept("default")) {
+            parser.expect(":");
+            if (default_) {
+                parser.fail("cannot have more than one default block");
+            }
+            auto stmt <- parseEitherBlock(parser, lexicalContext);
+            default_ = stmt;
+            continue;
+        }
+
         auto type <- lexicalContext.compiler.parseType(parser, lexicalContext);
         parser.assert_(!!type, "case type expected");
         // identifier can be empty
         string identifier = parseIdentifier(parser);
         parser.expect(":");
         auto loc = parser.loc;
-        ASTStatement stmt <- lexicalContext.compiler.parseStatement(parser, lexicalContext);
+        auto stmt <- parseEitherBlock(parser, lexicalContext);
         cases ~= ASTEitherCaseStmtCase(loc, type.notNull, identifier, stmt);
     }
-    return new ASTEitherCaseStmt(parser.loc, member.base, cases);
+    return new ASTEitherCaseStmt2(parser.loc, member.base, cases, default_);
+}
+
+(ASTStatement | fail Error) parseEitherBlock(Parser parser, LexicalContext lexicalContext)
+{
+    auto loc = parser.loc;
+    mut ASTStatement[] stmts;
+    while (true) {
+        parser.begin;
+        bool end = parser.accept("}");
+        parser.revert;
+        if (end) break;
+        // are we seeing a new block?
+        parser.begin;
+        // FIXME better to discard errors here?
+        auto type <- lexicalContext.compiler.parseType(parser, lexicalContext);
+        parseIdentifier(parser);
+        bool newBlock = parser.accept(":");
+        parser.revert;
+        if (newBlock) break;
+        ASTStatement stmt <- lexicalContext.compiler.parseStatement(parser, lexicalContext);
+        stmts ~= stmt;
+    }
+    return lexicalContext.compiler.astScope(stmts, loc);
 }

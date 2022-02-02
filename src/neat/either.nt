@@ -620,83 +620,6 @@ class ASTEitherCaseStmt : ASTStatement
 
     ASTEitherCaseStmtCase[] cases;
 
-    this(this.loc, this.base, this.cases) { }
-
-    override (StatementCompileResult | fail Error) compile(Context context) {
-        auto baseExpr = base.compile(context).retfail.beExpressionImplCall(context, loc).retfail;
-        // FIXME
-        // loc.assert2s(baseExpr.info.ownership != Ownership.gifted, "TODO: Either base expr must not be gifted");
-        auto baseType = baseExpr.type;
-        auto either = baseType.instanceOf(Either);
-
-        loc.assert2s(!!either, "Expected Either for case expression");
-
-        (nullable Statement | fail Error) do_(Expression baseExpr) {
-            bool[] handled = new bool[](either.types.length);
-            mut nullable Statement ifTree = null;
-            for (case_ in this.cases) {
-                Type type = beType(case_.loc, retfail case_.type.compile(context));
-
-                mut int matched = -1;
-                for (int k, entry in either.types) {
-                    if (type.same(entry.type)) {
-                        case_.loc.assert2s(matched == -1, "either type " ~ type.repr() ~ " matched twice");
-                        matched = k;
-                    }
-                }
-                case_.loc.assert2s(matched != -1, "Type is not listed in Either!");
-                handled[matched] = true;
-
-                with (context.compiler) {
-                    auto namespace = variableDeclaration(
-                        context.namespace, case_.identifier, type, ExprInfo(mutable=false, Ownership.borrowed), false);
-                    // FIXME rename to accessDecl
-                    Reference variable = namespace.accessDecl2(context.compiler);
-                    Statement assignment = assignStatement(variable, new EitherMember(baseExpr, matched));
-                    auto userStmtPair <- case_.stmt.compile(context.withNamespace(namespace));
-                    Statement then = sequenceStatement([assignment, userStmtPair.statement]);
-                    Expression test <- binaryOp(
-                        "==", context, new EitherType(baseExpr), intLiteral(matched + 1), this.loc);
-
-                    ifTree = ifStatement(test, then, ifTree);
-                }
-            }
-            for (int i, handled in handled) with (context.compiler) {
-                loc.assert2s(handled, "Type " ~ either.types[i].type.repr() ~ " not handled!");
-            }
-            return ifTree;
-        }
-        return StatementCompileResult(
-            (retfail context.compiler.stmtWithTemporaryExpr(baseExpr, &do_)).notNull,
-            context);
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        mut ASTSymbol[] quotedCases;
-        for (case_ in this.cases) {
-            quotedCases ~= quoter.compiler.astCall(
-                quoter.compiler.astIdentifier("ASTEitherCaseStmtCase", __HERE__), [
-                    quoter.quoteLoc(case_.loc),
-                    case_.type.quote(quoter),
-                    quoter.compiler.astStringLiteral(case_.identifier, __HERE__),
-                    case_.stmt.quote(quoter)], __HERE__);
-        }
-        return quoter.compiler.astNewExpression(
-            quoter.compiler.astIdentifier("ASTEitherCaseStmt", __HERE__), [
-                quoter.quoteLoc(this.loc),
-                this.base.quote(quoter),
-                quoter.compiler.astArrayLiteral(quotedCases, __HERE__)], __HERE__);
-    }
-}
-
-class ASTEitherCaseStmt2 : ASTStatement
-{
-    Loc loc;
-
-    ASTSymbol base;
-
-    ASTEitherCaseStmtCase[] cases;
-
     nullable ASTStatement default_;
 
     this(this.loc, this.base, this.cases, this.default_) { }
@@ -774,12 +697,17 @@ class ASTEitherCaseStmt2 : ASTStatement
             else return quoter.compiler.astIdentifier("null", __HERE__);
         }
         return quoter.compiler.astNewExpression(
-            quoter.compiler.astIdentifier("ASTEitherCaseStmt2", __HERE__), [
+            quoter.compiler.astIdentifier("ASTEitherCaseStmt", __HERE__), [
                 quoter.quoteLoc(this.loc),
                 this.base.quote(quoter),
                 quoter.compiler.astArrayLiteral(quotedCases, __HERE__),
                 quote(this.default_)], __HERE__);
     }
+}
+
+// TODO remove
+class ASTEitherCaseStmt2 : ASTEitherCaseStmt
+{
 }
 
 (nullable ASTStatement | fail Error) parseEitherCaseStmt(Parser parser, LexicalContext lexicalContext)
@@ -819,7 +747,7 @@ class ASTEitherCaseStmt2 : ASTStatement
         auto stmt <- parseEitherBlock(parser, lexicalContext);
         cases ~= ASTEitherCaseStmtCase(loc, type.notNull, identifier, stmt);
     }
-    return new ASTEitherCaseStmt2(parser.loc, member.base, cases, default_);
+    return new ASTEitherCaseStmt(parser.loc, member.base, cases, default_);
 }
 
 (ASTStatement | fail Error) parseEitherBlock(Parser parser, LexicalContext lexicalContext)

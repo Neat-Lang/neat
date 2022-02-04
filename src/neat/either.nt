@@ -6,6 +6,7 @@ macro import neat.macros.retfail;
 import backend.base;
 import helpers;
 import neat.base;
+import neat.expr;
 import neat.parser;
 import neat.hash;
 import neat.parser_base;
@@ -276,9 +277,10 @@ class Either : Type
             // TODO settle ownership
             return context.compiler.exprWithScratchspace(targetType, false, &do2);
         }
-        if (auto ret <- context.compiler.exprWithTemporaryExpr(source, &do1))
-            return ret;
-        assert(false);
+        context.compiler.exprWithTemporaryExpr(source, &do1).case {
+            nullable Expression expr: return expr;
+            Error: assert(false);
+        }
     }
 
     override bool same(Type type) {
@@ -372,11 +374,13 @@ class Either : Type
 
             return ifTree;
         }
-        if (auto ret <- context.compiler.stmtWithTemporaryExpr(
+        context.compiler.stmtWithTemporaryExpr(
             context.compiler.reference(reference),
-            &do_))
-            return ret;
-        assert(false);
+            &do_
+        ).case {
+            nullable Statement stmt: return stmt;
+            Error: assert(false);
+        }
     }
 
     override (nullable Expression | fail Error) binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
@@ -449,10 +453,10 @@ class ASTEitherCaseExpr : ASTSymbol
     override (Expression | fail Error) compile(Context context) {
         auto baseExpr = base.compile(context).retfail.beExpressionImplCall(context, loc).retfail;
 
-        (nullable Expression | fail Error) do_(Expression baseExpr) {
+        (Expression | fail Error) do_(Expression baseExpr) {
             return compileBaseExpr(context, baseExpr);
         }
-        return context.compiler.exprWithTemporaryExpr(baseExpr, &do_).retfail.notNull;
+        return context.compiler.consume(context, baseExpr, &do_);
     }
 
     (Expression | fail Error) compileBaseExpr(Context context, Expression baseExpr) {
@@ -477,7 +481,7 @@ class ASTEitherCaseExpr : ASTSymbol
             auto caseLoc = case_.loc;
 
             auto namespace = context.compiler.variableDeclaration(
-                context.namespace, case_.identifier, caseType, ExprInfo(mutable=false, Ownership.borrowed), false);
+                context.namespace, case_.identifier, caseType, ExprInfo(mutable=false, Ownership.owned), false);
             auto subContext = context.withNamespace(namespace);
 
             Expression expr = case_.expr.compile(subContext).retfail.beExpressionImplCall(context, caseLoc).retfail;
@@ -492,16 +496,14 @@ class ASTEitherCaseExpr : ASTSymbol
             for (type in resultTypes) members ~= (false, type);
             mergeType = new Either(members);
         }
-        auto resultNamespace = context.compiler.variableDeclaration(
-            context.namespace, "", mergeType, ExprInfo(mutable=false, Ownership.owned), true);
-        auto resultContext = context.withNamespace(resultNamespace);
-        // FIXME rename to accessDecl
-        Reference resultVar = resultNamespace.accessDecl2(context.compiler);
+        // as ASTReturn
+        auto resultVal = new PairedTemporary(mergeType, Ownership.gifted);
+        auto initResultVal = new UninitializeTemporaryStatement(resultVal);
         mut nullable Statement ifTree;
 
         for (case_ in this.cases) {
             auto caseLoc = case_.loc;
-            Type type = beType(caseLoc, retfail case_.type.compile(resultContext));
+            Type type = beType(caseLoc, retfail case_.type.compile(context));
 
             mut int matched = -1;
             for (int k, eitherType in either.types) {
@@ -513,24 +515,33 @@ class ASTEitherCaseExpr : ASTSymbol
             caseLoc.assert2s(matched != -1, "Type is not listed in Either!");
             handled[matched] = true;
 
+            mut Statement[] thenSteps;
+
             auto namespace = context.compiler.variableDeclaration(
-                resultContext.namespace, case_.identifier, type, ExprInfo(mutable=false, Ownership.borrowed), false);
+                context.namespace, case_.identifier, type, ExprInfo(mutable=false, Ownership.owned), false);
             // FIXME rename to accessDecl
             Reference variable = namespace.accessDecl2(context.compiler);
-            Statement assignment = context.compiler.assignStatement(variable, new EitherMember(baseExpr, matched));
-            Expression userExpr = case_.expr.compile(resultContext.withNamespace(namespace)).retfail
+            Statement assignment <- context.compiler.move(context, variable, new EitherMember(baseExpr, matched));
+            thenSteps ~= assignment;
+            Expression userExpr = case_.expr.compile(context.withNamespace(namespace)).retfail
                 .beExpressionImplCall(context, caseLoc).retfail;
-            Statement userStmt() {
+            (Statement | fail Error) userStmt() {
                 if (case_.return_) {
                     Type ret = findParent!FunctionScopeBase(context.namespace).ret;
                     auto userExpr = context.compiler.expectImplicitConvertTo(context, userExpr, ret, this.loc);
-                    return context.compiler.returnStatement(userExpr);
+                    return context.compiler.astReturn(new ASTSymbolHelper(userExpr), __HERE__).compile(context)
+                        .retfail.statement;
                 } else {
-                    Expression typeCorrectedUserExpr = context.compiler.expectImplicitConvertTo(context, userExpr, mergeType, caseLoc);
-                    return context.compiler.assignStatement(resultVar, typeCorrectedUserExpr);
+                    Expression expr = context.compiler.expectImplicitConvertTo(context, userExpr, mergeType, caseLoc);
+                    return context.compiler.move(context, resultVal, expr);
                 }
             }
-            Statement then = context.compiler.sequenceStatement([assignment, userStmt]);
+            auto userStmt <- userStmt;
+            thenSteps ~= userStmt;
+            if (auto destroy = variable.type.endLifetime(context, variable)) {
+                thenSteps ~= destroy;
+            }
+            Statement then = context.compiler.sequenceStatement(thenSteps);
             Expression test = retfail context.compiler.binaryOp(
                 "==", context, new EitherType(baseExpr), context.compiler.intLiteral(matched + 1), loc);
 
@@ -541,7 +552,8 @@ class ASTEitherCaseExpr : ASTSymbol
         }
         assert(!!ifTree);
 
-        return context.compiler.statementExpression(ifTree.notNull, resultVar);
+        return context.compiler.statementExpression(
+            context.compiler.sequenceStatement([initResultVal, ifTree.notNull]), resultVal);
     }
 
     override ASTSymbol quote(Quoter quoter) {

@@ -436,18 +436,22 @@ class LLVMBackendFunction : BackendFunction {
         }
     }
     LLVMValueRef llReg(int reg) {
-        if (auto def <- this.regDefines.get(reg)) {
-            return def.value;
+        this.regDefines.get(reg).case {
+            RegDefine def:
+                return def.value;
+            (:notFound):
+                print("unknown register $reg");
+                assert(false);
         }
-        print("unknown register $reg");
-        assert(false);
     }
     BackendType regType(int reg) {
-        if (auto def <- this.regDefines.get(reg)) {
-            return def.type;
+        this.regDefines.get(reg).case {
+            RegDefine def:
+                return def.type;
+            (:notFound):
+                print("unknown register $reg");
+                assert(false);
         }
-        print("unknown register $reg");
-        assert(false);
     }
     void defReg2(int reg, BackendType type, LLVMValueRef value) {
         this.regDefines.add(RegDefine(reg, type, value));
@@ -677,29 +681,34 @@ class LLVMBackendFunction : BackendFunction {
         return reg;
     }
     override int convert(int reg, BackendType to) {
-        if (auto def <- this.regDefines.get(reg)) {
-            auto from = def.type;
-            bool isInt(BackendType type) {
-                return !!type.instanceOf(BackendIntType);
+        RegDefine def() {
+            this.regDefines.get(reg).case {
+                RegDefine def: return def;
+                (:notFound): assert(false);
             }
-            bool isFloat(BackendType type) {
-                return type.instanceOf(BackendFloatType) || type.instanceOf(BackendDoubleType);
-            }
-            int target = this.nextReg;
-            auto llTo = this.mod.translate(to, false);
-            mut LLVMValueRef llTarget;
-            if (from.isInt && to.isFloat)
-                llTarget = LLVMBuildSIToFP(this.builder, llReg(reg), llTo, "reg$target".toStringz);
-            else if (from.isFloat && to.isInt)
-                llTarget = LLVMBuildFPToSI(this.builder, llReg(reg), llTo, "reg$target".toStringz);
-            else if (from.instanceOf(BackendFloatType) && to.instanceOf(BackendDoubleType))
-                llTarget = LLVMBuildFPExt(this.builder, llReg(reg), llTo, "reg$target".toStringz);
-            else if (from.instanceOf(BackendDoubleType) && to.instanceOf(BackendFloatType))
-                llTarget = LLVMBuildFPTrunc(this.builder, llReg(reg), llTo, "reg$target".toStringz);
-            else assert(false);
-            this.defReg2(target, to, llTarget);
-            return target;
-        } else assert(false);
+        }
+        auto def = def;
+        auto from = def.type;
+        bool isInt(BackendType type) {
+            return !!type.instanceOf(BackendIntType);
+        }
+        bool isFloat(BackendType type) {
+            return type.instanceOf(BackendFloatType) || type.instanceOf(BackendDoubleType);
+        }
+        int target = this.nextReg;
+        auto llTo = this.mod.translate(to, false);
+        mut LLVMValueRef llTarget;
+        if (from.isInt && to.isFloat)
+            llTarget = LLVMBuildSIToFP(this.builder, llReg(reg), llTo, "reg$target".toStringz);
+        else if (from.isFloat && to.isInt)
+            llTarget = LLVMBuildFPToSI(this.builder, llReg(reg), llTo, "reg$target".toStringz);
+        else if (from.instanceOf(BackendFloatType) && to.instanceOf(BackendDoubleType))
+            llTarget = LLVMBuildFPExt(this.builder, llReg(reg), llTo, "reg$target".toStringz);
+        else if (from.instanceOf(BackendDoubleType) && to.instanceOf(BackendFloatType))
+            llTarget = LLVMBuildFPTrunc(this.builder, llReg(reg), llTo, "reg$target".toStringz);
+        else assert(false);
+        this.defReg2(target, to, llTarget);
+        return target;
     }
     (BackendType[] params, int[] args) patchVariadicParams(BackendFunctionPointerType type, int[] args) {
         if (!type.variadic || type.params.length >= args.length)
@@ -708,20 +717,25 @@ class LLVMBackendFunction : BackendFunction {
         auto variadicArgs = args[type.params.length .. $];
         mut BackendType[] realParams = type.params;
         for (i, auto reg in variadicArgs) {
-            if (auto def <- this.regDefines.get(reg)) {
-                realParams ~= def.type;
-                // variadic floats are promoted to double
-                auto arg = args[type.params.length + i];
-                if (def.type.instanceOf(BackendFloatType)) {
-                    auto newArg = this.nextReg;
-                    auto llDouble = this.mod.translate(new BackendDoubleType, false);
-                    auto llNewArg = LLVMBuildFPExt(this.builder, llReg(arg), llDouble, "reg$newArg".toStringz);
-                    this.defReg2(newArg, new BackendDoubleType, llNewArg);
-                    realArgs ~= newArg;
-                } else {
-                    realArgs ~= arg;
+            RegDefine def() {
+                this.regDefines.get(reg).case {
+                    RegDefine def: return def;
+                    (:notFound): assert(false);
                 }
-            } else assert(false);
+            }
+            auto def = def;
+            realParams ~= def.type;
+            // variadic floats are promoted to double
+            auto arg = args[type.params.length + i];
+            if (def.type.instanceOf(BackendFloatType)) {
+                auto newArg = this.nextReg;
+                auto llDouble = this.mod.translate(new BackendDoubleType, false);
+                auto llNewArg = LLVMBuildFPExt(this.builder, llReg(arg), llDouble, "reg$newArg".toStringz);
+                this.defReg2(newArg, new BackendDoubleType, llNewArg);
+                realArgs ~= newArg;
+            } else {
+                realArgs ~= arg;
+            }
         }
         assert(realParams.length == args.length);
         return (realParams, realArgs);

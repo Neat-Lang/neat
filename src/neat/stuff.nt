@@ -2121,57 +2121,27 @@ class VoidExpression : Expression
     return result;
 }
 
-(Expression test, Expression value | fail Error) pickEither(
+(Expression | fail Error) pickEither(
     Context context, Either either, Expression source, Type extractType, Loc loc)
 {
-    if (auto extractEither = extractType.instanceOf(Either))
-        return pickEitherTuple(context, either, source, extractEither, loc);
-    int eithermember = [first cast(int) i for i, a in either.types where a.type.same(extractType) else -1];
-    loc.assert2s(eithermember != -1, "type $(extractType.repr) not in sumtype $(either.repr)");
-    auto test = retfail context.compiler.binaryOp(
-        "==", context, new EitherType(source), new IntLiteral(eithermember + 1), __HERE__);
-    auto value = new EitherMember(source, eithermember);
-    return (test, value);
-}
-
-/**
- * if the thing on the left of the pick operator is an either:
- *
- * - create a result temporary for it
- * - create a temporary bool (false)
- * - for each type in the either:
- *   - build an iftree with the source either
- *   - on success, init the result and set the bool to true
- * - return (bool, result)
- */
-(Expression test, Expression value | fail Error) pickEitherTuple(
-    Context context, Either either, Expression source, Either extractEither, Loc loc)
-{
-    auto result = new PairedTemporary(extractEither, source.info.ownership);
-    auto init = new UninitializeTemporaryStatement(result);
-    auto resBool = new PairedTemporary(new Integer, Ownership.global);
-    auto init2 = new InitializeTemporaryStatement(resBool, new IntLiteral(0)); // false
-    auto sourceTypeId = new EitherType(source);
-    mut nullable Statement iftree = null;
-    for (i, entry in extractEither.types) {
-        auto extractType = entry.type;
-        int eithermember = [first cast(int) i for i, a in either.types where a.type.same(extractType) else -1];
-        loc.assert2s(eithermember != -1, "sumtype $(extractType.repr) not in source $(either.repr)");
-        auto cmpTypeId = new IntLiteral(eithermember + 1);
-        auto test = retfail context.compiler.binaryOp("==", context, sourceTypeId, cmpTypeId, __HERE__);
-
-        auto extractValue = new EitherMember(source, eithermember);
-        auto repacked = new EitherExpr(extractEither, extractValue, cast(int) i);
-        auto setStmt = new AssignStatement(result, repacked);
-        auto setBoolStmt = new AssignStatement(resBool, new IntLiteral(1)); // true
-
-        iftree = context.compiler.ifStatement(test, sequence(setStmt, setBoolStmt), iftree);
+    mut ASTEitherCaseExprCase[] cases;
+    for (k, v in either.types) {
+        // return out all types that aren't the extract type
+        bool return_ = !v.type.same(extractType);
+        cases ~= ASTEitherCaseExprCase(
+            __HERE__,
+            new ASTSymbolHelper(v.type),
+            "a",
+            return_=return_,
+            expr=new ASTIdentifier("a", false, __HERE__));
     }
-    auto test = new StatementExpression(
-        sequence(sequence(init, init2), iftree),
-        resBool,
-        gifted=(source.info.ownership == Ownership.gifted));
-    return (test, result);
+
+    auto case_ = new ASTEitherCaseExpr(__HERE__, new ASTSymbolHelper(source), cases);
+
+    context.pushErrorLoc(loc);
+    auto ret = case_.compile(context);
+    context.popErrorLoc;
+    return ret;
 }
 
 private Type typeWithoutFail(Either source)
@@ -2266,6 +2236,7 @@ class ASTIfStatement : ASTStatement
                 }
             }
             ASTVarExtractDeclStatement extractdecl: {
+                // if (auto var <- expr) where expr is (nullable T, fail)
                 // validate source is Either
                 // TODO extract interface
                 auto source = extractdecl.source.compile(context)
@@ -2279,20 +2250,26 @@ class ASTIfStatement : ASTStatement
                 auto tempSource = new PairedTemporary(source.type, source.info.ownership);
                 auto initTemp = new InitializeTemporaryStatement(tempSource, source);
                 // check expected type
-                mut uninitialized Type extractType;
-                if (extractdecl.infer) {
-                    extractType = typeWithoutFail(sourceType);
-                } else {
-                    extractType = beType(extractdecl.loc, retfail extractdecl.type.compile(context));
+                auto remainingType = typeWithoutFail(sourceType);
+                mut Type testedType = remainingType;
+                if (remainingType.zeroInitializable && context.compiler.isClassType(remainingType)) {
+                    testedType = remainingType.makeNotNullable;
+                }
+                if (!extractdecl.infer) {
+                    auto declType = beType(extractdecl.loc, retfail extractdecl.type.compile(context));
+                    extractdecl.loc.assert2s(
+                        declType.same(testedType),
+                        "expected $(declType.repr), but got $(testedType.repr)");
                 }
 
-                auto ret = retfail pickEither(context, sourceType, tempSource, extractType, extractdecl.loc);
+                auto value <- pickEither(context, sourceType, tempSource, remainingType, extractdecl.loc);
                 prelude = initTemp;
-                test = ret.test;
+                test = new InfoExpression(value, ExprInfo(false, Ownership.global));
 
                 auto actualVarDecl = new ASTVarDeclStatement(
                     extractdecl.name, mutable=extractdecl.mutable, infer=false, uninitialized=false,
-                    type=new ASTSymbolHelper(extractType), initial=new ASTSymbolHelper(ret.value),
+                    type=new ASTSymbolHelper(testedType),
+                    initial=new ASTSymbolHelper(new PointerCast(testedType, value)),
                     extractdecl.loc);
                 auto pair = retfail actualVarDecl.compile(context);
                 epilog = pair.statement;
@@ -4581,14 +4558,17 @@ class LexicalContextImpl : LexicalContext
         return ASTModuleEntry(getProtection, pragma_);
     }
     if (ASTVersion version_ = retfail parseModuleVersion(parser, lexicalContext)) {
-        if (Protection p <- protection) {
-            string repr(Protection p) {
-                if (p == Protection.public_) return "public";
-                if (p == Protection.private_) return "private";
-                if (p == Protection.protected_) return "protected";
-                assert(false);
+        protection.case {
+            Protection p: {
+                string repr(Protection p) {
+                    if (p == Protection.public_) return "public";
+                    if (p == Protection.private_) return "private";
+                    if (p == Protection.protected_) return "protected";
+                    assert(false);
+                }
+                parser.fail("unsupported '$(p.repr)' qualifier on 'version' block");
             }
-            parser.fail("unsupported '$(p.repr)' qualifier on 'version' block");
+            (:none): {}
         }
         return ASTModuleEntry(Protection.public_, version_);
     }
@@ -4606,21 +4586,22 @@ class LexicalContextImpl : LexicalContext
         if (ASTModule submod = retfail parseMacroContinuation(compiler, parser, helper, module_, config))
             return submod;
 
-        auto entry = retfail parseModuleEntry(parser, lexicalContext, true);
+        auto entry <- parseModuleEntry(parser, lexicalContext, true);
 
-        if (ASTImport import_ <- entry.symbol) {
-            if (import_.statement.isMacroImport)
-            {
-                auto id = import_.statement.repr(lexicalContext.pak.name);
+        entry.symbol.case {
+            ASTImport import_:
+                if (import_.statement.isMacroImport) {
+                    auto id = import_.statement.repr(lexicalContext.pak.name);
 
-                module_.macroState = module_.macroState.dup;
-                lexicalContext = new LexicalContextImpl(compiler, module_.pak, module_.macroState, helper, config);
+                    module_.macroState = module_.macroState.dup;
+                    lexicalContext = new LexicalContextImpl(compiler, module_.pak, module_.macroState, helper, config);
 
-                lexicalContext.macroState.addImport(
-                    lexicalContext.compiler.workPool.wait(id)
-                        .instanceOf(ImportTask).module_.retfail.macroState);
-                continue;
-            }
+                    lexicalContext.macroState.addImport(
+                        lexicalContext.compiler.workPool.wait(id)
+                            .instanceOf(ImportTask).module_.retfail.macroState);
+                    continue;
+                }
+            default: {}
         }
         module_.entries ~= entry;
     }
@@ -4662,11 +4643,13 @@ class LexicalContextImpl : LexicalContext
 
     // Handle all (toplevel) imports in parallel.
     for (entry in astModule.entries) {
-        if (ASTImport import_ <- entry.symbol) {
-            auto mod = retfail import_.module_;
-            auto id = "compile platform $(context.platform.ident) ast $(mod.mangledName)";
-            auto task = new AstCompileTask(mod, context);
-            context.compiler.workPool.queue(id, task);
+        entry.symbol.case {
+            ASTImport import_:
+                auto mod = retfail import_.module_;
+                auto id = "compile platform $(context.platform.ident) ast $(mod.mangledName)";
+                auto task = new AstCompileTask(mod, context);
+                context.compiler.workPool.queue(id, task);
+            default: {}
         }
     }
 

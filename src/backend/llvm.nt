@@ -5,8 +5,9 @@ macro import neat.macros.cimport;
 macro import neat.macros.listcomprehension;
 
 import backend.base;
-import c_header("llvm-c/Core.h");
 import c_header("llvm-c/BitWriter.h");
+import c_header("llvm-c/Core.h");
+import c_header("llvm-c/DebugInfo.h");
 import c_header("llvm-c/Target.h");
 import c_header("llvm-c/TargetMachine.h");
 
@@ -129,14 +130,14 @@ class LLVMBackendModule : BackendModule {
     int literalId;
     BackendType[string] globals;
 
-    // DebugInfo[] debugInfos;
-    string compileUnit;
-
     bool forMacro;
 
     LLVMContextRef context;
 
     LLVMModuleRef module_;
+
+    LLVMDIBuilderRef dibuilder;
+    LLVMMetadataRef dicu;
 
     this(this.platform, BackendLocation loc, this.forMacro) {
         this.context = LLVMContextCreate;
@@ -146,22 +147,38 @@ class LLVMBackendModule : BackendModule {
         auto filename = comps[$ - 1];
 
         this.module_ = LLVMModuleCreateWithNameInContext(filename.toStringz, context);
+        this.dibuilder = LLVMCreateDIBuilder(this.module_);
+
+        auto verStr = "Debug Info Version";
+        LLVMAddModuleFlag(
+            this.module_, LLVMModuleFlagBehaviorWarning,
+            verStr.ptr, verStr.length,
+            LLVMValueAsMetadata(LLVMConstInt(LLVMInt32TypeInContext(this.context), 3, SignExtend=false)));
+        auto dwarfStr = "Dwarf Version";
+        LLVMAddModuleFlag(
+            this.module_, LLVMModuleFlagBehaviorWarning,
+            dwarfStr.ptr, dwarfStr.length,
+            LLVMValueAsMetadata(LLVMConstInt(LLVMInt32TypeInContext(this.context), 2, SignExtend=false)));
+        auto picLevel = "PIC Level";
+        LLVMAddModuleFlag(
+            this.module_, LLVMModuleFlagBehaviorWarning,
+            picLevel.ptr, picLevel.length,
+            LLVMValueAsMetadata(LLVMConstInt(LLVMInt32TypeInContext(this.context), 1, SignExtend=false)));
 
         LLVMSetTarget(module_, "x86_64-pc-linux-gnu");
-        /*this.output = new LineWriter;
-        this.output.print("target triple = \"x86_64-pc-linux-gnu\"");
-        this.output.print("declare i8* @llvm.stacksave()");
-        this.output.print("declare void @llvm.stackrestore(i8* %ptr)");
 
-        string debugFileKey = debugInfo("!DIFile(filename: \"" ~ filename ~ "\", directory: \"" ~ dir ~ "\")");
-        this.compileUnit = distinctDebugInfo(
-            "!DICompileUnit(language: DW_LANG_C99, file: " ~ debugFileKey ~ ", emissionKind: FullDebug)");
-        this.output.print("!llvm.dbg.cu = !{" ~ compileUnit ~ "}");
-
-        string dwarfVersion = this.debugInfo("!{i32 2, !\"Dwarf Version\", i32 2}");
-        string dbgVersion = this.debugInfo("!{i32 2, !\"Debug Info Version\", i32 3}");
-        string picLevel = this.debugInfo("!{i32 1, !\"PIC Level\", i32 2}");
-        this.output.print("!llvm.module.flags = !{" ~ dwarfVersion ~ ", " ~ dbgVersion ~ ", " ~ picLevel ~ "}");*/
+        auto file = LLVMDIBuilderCreateFile(
+            dibuilder,
+            filename.ptr, filename.length,
+            dir.ptr, dir.length);
+        this.dicu = LLVMDIBuilderCreateCompileUnit(
+            dibuilder,
+            LLVMDWARFSourceLanguageC,
+            file, "neat".ptr, 4,
+            false, null, 0,
+            0, null, 0,
+            LLVMDWARFEmissionFull, 0, false,
+            false, null, 0, null, 0);
 
         defineIntrinsics(this, platform);
     }
@@ -239,37 +256,12 @@ class LLVMBackendModule : BackendModule {
         this.globals[name] = type;
     }
 
-    /*string debugInfo_(bool distinct, string value) {
-        string insert() {
-            string key = "!" ~ ltoa(this.debugInfos.length);
-            if (distinct) this.debugInfos ~= DebugInfo(key, "distinct " ~ value);
-            else this.debugInfos ~= DebugInfo(key, value);
-            return key;
-        }
-        if (distinct) return insert;
-        return [first a.key for a in debugInfos where a.value == value else insert];
-    }*/
-
-    // string debugInfo(string value) { return debugInfo_(false, value); }
-    // string distinctDebugInfo(string value) { return debugInfo_(true, value); }
-
     override BackendFunction define(
         string name, string decoration, BackendType ret, BackendType[] args, BackendLocation loc)
     {
         this.globals[name] = new BackendFunctionPointerType(ret, args, variadic=false);
 
-        auto comps = split(loc.file, "/");
-        auto dir = join(comps[0 .. $ - 1], "/");
-        auto filename = comps[$ - 1];
-
-        /*auto debugFileKey = debugInfo("!DIFile(filename: \"" ~ filename ~ "\", directory: \"" ~ dir ~ "\")");
-        auto typeKey = debugInfo("!DISubroutineType(types: " ~ debugInfo("!{null}") ~ ")");
-        string subProgram = distinctDebugInfo(
-            "!DISubprogram(name: \"" ~ decoration ~ / *"\", linkageName: \"" ~ name ~ * /"\", " ~
-            "scope: " ~ debugFileKey ~ ", file: " ~ debugFileKey ~ ", line: " ~ ltoa(loc.line) ~ ", " ~
-            "type: " ~ typeKey ~ ", unit: " ~ this.compileUnit ~ ")");*/
-
-        return new LLVMBackendFunction(this, name, ret, args, /*subProgram*/"");
+        return new LLVMBackendFunction(this, name, ret, args, loc, decoration);
     }
 
     override void declareSymbolList(string name, size_t length)
@@ -334,10 +326,8 @@ class LLVMBackendModule : BackendModule {
 
     override void done()
     {
-        /*for (i, debugInfo in this.debugInfos) {
-            this.output.append3s(debugInfo.key, " = ", debugInfo.value);
-            this.output.endl;
-        }*/
+        LLVMDIBuilderFinalize(this.dibuilder);
+        LLVMDisposeDIBuilder(this.dibuilder);
     }
 }
 
@@ -384,11 +374,11 @@ class LLVMBackendFunction : BackendFunction {
     RegDefines regDefines;
     int regId;
     int blockId;
-    string debugSubProgram;
     string curLabel;
 
     // correct for sret, byvalue
     LLVMValueRef[] llArgs;
+    LLVMMetadataRef difun;
 
     LLVMValueRef function_;
     LLVMBuilderRef builder;
@@ -403,7 +393,7 @@ class LLVMBackendFunction : BackendFunction {
         return this.labels[name];
     }
 
-    this(this.mod, this.name, this.ret_, this.params, this.debugSubProgram)
+    this(this.mod, this.name, this.ret_, this.params, BackendLocation loc, string decoration)
     {
         auto fpType = new BackendFunctionPointerType(this.ret_, this.params, false);
         auto llFpType = translateFunc(fpType, this.mod.context, this.mod.platform);
@@ -413,6 +403,32 @@ class LLVMBackendFunction : BackendFunction {
             this.function_ = LLVMAddFunction(this.mod.module_, this.name.toStringz, llFpType);
             this.mod.llSetCoerceAttribs(this.function_, this.ret_, this.params);
         }
+
+        auto comps = split(loc.file, "/");
+        auto dir = join(comps[0 .. $ - 1], "/");
+        auto filename = comps[$ - 1];
+
+        auto unit = LLVMDIBuilderCreateFile(
+            this.mod.dibuilder, filename.ptr, filename.length,
+            dir.ptr, dir.length);
+        /*auto diType = LLVMDIBuilderCreateSubroutineType(
+            this.mod.dibuilder,
+            unit,
+            [this.mod.translate(a, false) for a in this.params].ptr,
+            this.params.length,
+            0);*/
+        auto diType = LLVMDIBuilderCreateSubroutineType(
+            this.mod.dibuilder,
+            unit,
+            null, 0,
+            0);
+        this.difun = LLVMDIBuilderCreateFunction(
+            this.mod.dibuilder, unit,
+            name.ptr, name.length,
+            decoration.ptr, decoration.length,
+            unit, 0, diType,
+            false, true, 0, /* LLVMDIFlagPrototyped */ 256 /* why? */, false);
+        this.function_.LLVMSetSubprogram(this.difun);
 
         this.regId = 1;
         this.blockId = 1;
@@ -774,7 +790,6 @@ class LLVMBackendFunction : BackendFunction {
             }
         }
 
-        // string locationKey = this.mod.debugInfo("!DILocation(line: 0, column: 0, scope: " ~ this.debugSubProgram ~ ")");
         auto callType = translateFunc(type, this.mod.context, this.mod.platform);
         auto llFun = LLVMGetNamedFunction(this.mod.module_, name.toStringz);
         if (!llFun) {
@@ -785,6 +800,12 @@ class LLVMBackendFunction : BackendFunction {
         if (sret || ret.instanceOf(BackendVoidType)) {
             name = "";
         }
+
+        // TODO lines
+        auto llLoc = LLVMDIBuilderCreateDebugLocation(
+            LLVMGetModuleContext(this.mod.module_), 0, 0, this.difun, null);
+        LLVMSetCurrentDebugLocation2(this.builder, llLoc);
+
         auto llCall = LLVMBuildCall(
             this.builder, llFun, llArgs.ptr, cast(int) llArgs.length, name.toStringz);
 
@@ -852,11 +873,16 @@ class LLVMBackendFunction : BackendFunction {
                 llArgs ~= llReg(arg);
             }
         }
-        // string locationKey = this.mod.debugInfo("!DILocation(line: 0, column: 0, scope: " ~ this.debugSubProgram ~ ")");
         mut string name = "reg$reg";
         if (sret || ret.instanceOf(BackendVoidType)) {
             name = "";
         }
+
+        // TODO lines
+        auto llLoc = LLVMDIBuilderCreateDebugLocation(
+            LLVMGetModuleContext(this.mod.module_), 0, 0, this.difun, null);
+        LLVMSetCurrentDebugLocation2(this.builder, llLoc);
+
         auto llCall = LLVMBuildCall(
             this.builder, llReg(callReg), llArgs.ptr, cast(int) llArgs.length, name.toStringz);
 
@@ -981,8 +1007,6 @@ class LLVMBackendFunction : BackendFunction {
         this.blockId += 1;
     }
     override void done() {
-        string dbgKey = " !dbg " ~ this.debugSubProgram;
-
         LLVMBuildBr(this.entryBuilder, llLabel("first"));
     }
 }

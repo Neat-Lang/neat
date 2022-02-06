@@ -1151,17 +1151,15 @@ class IdCounter
     }
 }
 
-// TODO document where exactly this is used
-// TODO replace with class and push/pop to swap members
-struct Context
+/**
+ * This contains the parts of Context that are rarely modified,
+ * and should thus be hidden behind a pointer.
+ */
+class ImmutableContext
 {
-    // all members should be treated as immutable
-
     CompilerBase compiler;
 
     Platform platform;
-
-    nullable Namespace namespace;
 
     MacroState macroState;
 
@@ -1173,29 +1171,50 @@ struct Context
 
     Loc[] errorStack;
 
+    this(this.compiler, this.platform, this.macroState, this.nativeWordType, this.idCounter, this.errorStack) { }
+}
+
+/**
+ * Context used when transforming an AST into a semantic tree.
+ */
+struct Context
+{
+    nullable Namespace namespace;
+
+    ImmutableContext data;
+
     Context withNamespace(Namespace namespace)
     {
-        return Context(this.compiler, this.platform, namespace, this.macroState, this.nativeWordType, this.idCounter, this.errorStack);
+        return Context(namespace, this.data);
     }
 
+    // TODO alias, this is a bit too reliant on the inliner
+    CompilerBase compiler() { return data.compiler; }
+
+    Platform platform() { return data.platform; }
+
+    MacroState macroState() { return data.macroState; }
+
+    Type nativeWordType() { return data.nativeWordType; }
+
     void pushErrorLoc(Loc loc) {
-        this.errorStack ~= loc;
+        this.data.errorStack ~= loc;
     }
 
     void popErrorLoc() {
-        this.errorStack = this.errorStack[0 .. $ - 1];
+        this.data.errorStack = this.data.errorStack[0 .. $ - 1];
     }
 
     void assert2(bool test, Loc loc, string msg) {
         if (test) return;
         mut string error;
-        for (loc in errorStack) error ~= "$(loc.location):\n";
+        for (loc in data.errorStack) error ~= "$(loc.location):\n";
         error ~= "$(loc.location): $msg";
         print(error);
         exit(1);
     }
 
-    string getLabel() { return "uniq$(idCounter.next)"; }
+    string getLabel() { return "uniq$(data.idCounter.next)"; }
 }
 
 (nullable Expression | fail Error) isExpressionImplCall(Symbol symbol, Context context, Loc loc)
@@ -1228,8 +1247,10 @@ struct Context
 
 Context makeContext(CompilerBase compiler, Platform platform, nullable Namespace namespace, MacroState macroState)
 {
-    return Context(
-        compiler, platform, namespace, macroState, compiler.nativeWordType(platform), new IdCounter, []);
+    auto data = new ImmutableContext(compiler, platform, macroState, compiler.nativeWordType(platform),
+        new IdCounter, []);
+
+    return Context(namespace, data);
 }
 
 // TODO Statement, Context multi-return

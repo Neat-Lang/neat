@@ -556,6 +556,10 @@ at_revision '999584674639368e1aaf0dd9e05c22908e10a027' 'rebuild neat' 'build/nea
 at_revision '1646dfbec6e7df5ea4aa32774ee901155aedfe23' 'rebuild neat' 'build/neat'
 # either default statement stage 3, null to arrays
 at_revision 'bfa0d7228ef3fe0bbcfcf63ed43b28f26c2637eb' 'rebuild neat' 'build/neat'
+# either lifetime fixes
+at_revision 'f2992bce8528d903ae232b5ec7a91d56cd5f529c' 'rebuild neat' 'build/neat'
+# check arguments are not null
+at_revision '6a55928db7f9fa676531f0fb501a4d3b83b19224' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

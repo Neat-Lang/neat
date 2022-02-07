@@ -391,14 +391,14 @@ class Class
     {
         mut ASTStatement[] castStmts;
         castStmts ~= context.compiler.$stmt
-            import package(compiler).neat.runtime : neat_runtime_refcount_inc;;
+            import package(compiler).neat.runtime : neat_runtime_refcount_inc, neat_runtime_refcount_dec;;
         mut nullable Class current = this;
         while (current)
         {
             auto classType = new ClassType(current.notNull, zeroInitializable=false);
             auto classinfo = new ASTSymbolHelper(new ClassInfo(classType));
             castStmts ~= context.compiler.$stmt if (targetClassinfo is $classinfo) {
-                // take a bonus reference because the return type isn't right
+                // take a bonus reference because TODO
                 neat_runtime_refcount_inc("__instanceof", &(cast(size_t*) this)[1]);
                 return this;
             };
@@ -409,7 +409,7 @@ class Class
                 auto astIntf = new ASTSymbolHelper(intfType);
                 auto intfClassinfo = new ASTSymbolHelper(new ClassInfo(intfType));
                 castStmts ~= context.compiler.$stmt if (targetClassinfo is $intfClassinfo) {
-                    // take a bonus reference because the return type isn't right
+                    // take a bonus reference because TODO
                     neat_runtime_refcount_inc("__instanceof", &(cast(size_t*) this)[1]);
                     // implconv to interface
                     $astIntf intf = this;
@@ -425,14 +425,23 @@ class Class
             }
             current = current.superClass;
         }
-        castStmts ~= context.compiler.$stmt return null;;
+        castStmts ~= context.compiler.$stmt {
+            if (freeOnNull) {
+                // neat_runtime_refcount_dec("__instanceof", &(cast(size_t*) this)[1]);
+            }
+            return null;
+        };
         auto stmt = context.compiler.astSequence(castStmts, __HERE__);
 
         auto classType = new ClassType(this, zeroInitializable=false);
         auto methodNamespace = new ClassNamespace(this.namespace, classType);
+        auto params = [
+            Parameter(false, "targetClassinfo", false, once new Pointer(new Void)),
+            Parameter(false, "freeOnNull", false, once new Boolean),
+        ];
         return new ClassMethod(
             classType, __HERE__, Protection.public_, override_=true, abstract_=false, "__instanceof",
-            once new Pointer(new Void), [Parameter(false, "targetClassinfo", false, once new Pointer(new Void))],
+            once new Pointer(new Void), params,
             stmt, new MacroState, methodNamespace);
     }
 
@@ -643,8 +652,10 @@ class ClassType : Type
                     Parameter(false, "label", false, new Array(new Character)),
                     Parameter(false, "ptr", false, new Pointer(new Void))]);
 
-            context = context.withNamespace(
-                context.compiler.exprAlias(context.namespace, "this", new IgnoreLifetimeExpr(source)));
+            // why do we need to ignore lifetime? what actually eats a lifetime here??
+            context = context.withNamespace(context.compiler.exprAlias(
+                context.namespace, "this",
+                new OverrideLifetimeExpr(source, ExprInfo(false, Ownership.global))));
             context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "size_t", sizeT));
             context = context.withNamespace(context.compiler.exprAlias(
@@ -1020,8 +1031,10 @@ class IntfType : Type
                     Parameter(false, "label", false, new Array(new Character)),
                     Parameter(false, "ptr", false, new Pointer(new Void))]);
 
-            context = context.withNamespace(
-                context.compiler.exprAlias(context.namespace, "this", new IgnoreLifetimeExpr(source)));
+            // why do we need to ignore lifetime? what actually eats a lifetime here??
+            context = context.withNamespace(context.compiler.exprAlias(
+                context.namespace, "this",
+                new OverrideLifetimeExpr(source, ExprInfo(false, Ownership.global))));
             context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "size_t", sizeT));
             context = context.withNamespace(context.compiler.exprAlias(
@@ -1791,6 +1804,7 @@ class ASTInstanceOf : ASTSymbol
     {
         Expression base = retfail beExpression3(context, retfail this.base.compile(context), loc);
         auto type = base.type;
+        auto baseinfo = base.info;
         loc.assert2s(
             type.instanceOf(ClassType) || type.instanceOf(IntfType),
             "Base of instanceOf must be class or interface.");
@@ -1828,17 +1842,28 @@ class ASTInstanceOf : ASTSymbol
                     auto fn = (*cast($astTarget function(void*, void*)**) object)[0];
                     fn(object, $astClassInfo);
                 });
-                return (retfail instanceOfExpr.compile(context)).beExpression;
+                if (auto ret = instanceOfExpr.compile(context).retfail.beExpression)
+                    return new OverrideLifetimeExpr(ret, baseinfo);
+                return null;
             }
 
+            // disable lifetime accounting for this call
+            auto plainBase = new OverrideLifetimeExpr(base, ExprInfo(false, Ownership.global));
             // must exist.
             Symbol instanceOf = (retfail context.compiler.accessMember(
-                    context, base, "__instanceof", loc, false))
+                    context, plainBase, "__instanceof", loc, false))
                 .notNull;
+            bool freeOnNull = baseinfo.ownership == Ownership.gifted;
             auto astInstanceOf = new ASTSymbolHelper(instanceOf);
-            return new PointerCast(target, context.compiler.call(
-                    context, astInstanceOf, [ASTArgument(astClassInfo, "")], loc, false)
+            auto astFreeOnNull = context.compiler.astBoolLiteral(freeOnNull, __HERE__);
+            auto astArgs = [ASTArgument(astClassInfo, ""), ASTArgument(astFreeOnNull, "")];
+            auto ret = new PointerCast(target, context.compiler.call(
+                    context, astInstanceOf, astArgs, loc, false)
                 .retfail.notNull);
+
+            // reuse ownership accounting of source
+            return new OverrideLifetimeExpr(ret, baseinfo);
+
         }
         return context.compiler.exprWithTemporaryExpr(base, &do_)
             .case(nullable Expression expr: expr.notNull, Error err: err);
@@ -1884,7 +1909,9 @@ class ASTNewExpression : ASTSymbol
             (nullable Expression | fail Error) do_(Expression classptr) {
                 // don't clean up classptr after constructor call, we're continuing its lifetime
                 nullable Symbol ctor = retfail context.compiler.accessMember(
-                    context, new IgnoreLifetimeExpr(classptr), "__ctor", this.loc, false);
+                    context,
+                    new OverrideLifetimeExpr(classptr, ExprInfo(false, Ownership.global)),
+                    "__ctor", this.loc, false);
                 assert(!!ctor);
                 auto astCtor = new ASTSymbolHelper(ctor.notNull);
                 auto ctorCall = context.compiler.exprStatement(

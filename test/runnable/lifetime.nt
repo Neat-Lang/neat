@@ -287,15 +287,81 @@ void test_class_field()
     }
     {
         string trace;
+        D nest() {
+            auto c = new C(S("S", &trace, 0));
+            assert((cast(size_t*) c)[1] == 1);
+
+            return new D(c);
+        }
+        mut nullable D d = nest;
+        assert(trace == "+S1 -S0");
+        assert((cast(size_t*) d.c)[1] == 1);
+        d = null;
+        assert(trace == "+S1 -S0 -S1");
+    }
+    {
+        string trace;
+        {
+            auto obj = cast(Object) new C(S("S", &trace, 0));
+            assert(trace == "+S1 -S0");
+        }
+        assert(trace == "+S1 -S0 -S1");
+    }
+}
+
+void test_class_instanceof()
+{
+    dbg("- class instanceof");
+    {
+        string trace;
         {
             mut nullable C c = new C(S("S", &trace, 0));
             assert((cast(size_t*) c)[1] == 1);
             assert(trace == "+S1 -S0");
+            /**
+             * why is obj marked owning? c (so, instanceof)
+             * is a mutable reference, so it can be set
+             * to null. so to avoid a crash via obj access
+             * in that case, we must grab our own reference.
+             */
             nullable Object obj = c.instanceOf(Object);
-            // must take a reference cause obj is a root
+            // must take a reference cause obj is mutable
             assert((cast(size_t*) obj)[1] == 2);
             c = null;
             assert((cast(size_t*) obj)[1] == 1);
+        }
+        assert(trace == "+S1 -S0 -S1");
+    }
+    {
+        string trace;
+        {
+            C c = new C(S("S", &trace, 0));
+            assert(trace == "+S1 -S0");
+            /**
+             * in this case, because our source field
+             * is not mutable, we can safely share
+             * a reference to it even across
+             * the instanceof.
+             */
+            nullable Object obj = c.instanceOf(Object);
+            assert((cast(size_t*) obj)[1] == 1);
+        }
+        assert(trace == "+S1 -S0 -S1");
+    }
+    {
+        string trace;
+        {
+            C c = new C(S("S", &trace, 0));
+            assert(trace == "+S1 -S0");
+            /**
+             * in this case our source field is not
+             * mutable, but obj is, so it must own a
+             * copy again.
+             */
+            mut nullable Object obj = c.instanceOf(Object);
+            assert((cast(size_t*) c)[1] == 2);
+            obj = null;
+            assert((cast(size_t*) c)[1] == 1);
         }
         assert(trace == "+S1 -S0 -S1");
     }
@@ -313,24 +379,24 @@ void test_class_field()
     }
     {
         string trace;
-        mut nullable Object obj = (new C(S("S", &trace, 0))).instanceOf(Object);
-        assert((cast(size_t*) obj)[1] == 1);
-        assert(trace == "+S1 -S0");
-        obj = null;
+        Object create() {
+            return new C(S("S", &trace, 0));
+        }
+        /**
+         * Because create returns a gifted lifetime, that is
+         * destroyed by the failed instanceOf, instanceOf
+         * will free it internally.
+         */
+        nullable D d = create.instanceOf(D);
+        assert(!d);
         assert(trace == "+S1 -S0 -S1");
     }
     {
         string trace;
-        D nest() {
-            auto c = new C(S("S", &trace, 0));
-            assert((cast(size_t*) c)[1] == 1);
-
-            return new D(c);
-        }
-        mut nullable D d = nest;
+        mut nullable Object obj = (new C(S("S", &trace, 0))).instanceOf(Object);
+        assert((cast(size_t*) obj)[1] == 1);
         assert(trace == "+S1 -S0");
-        assert((cast(size_t*) d.c)[1] == 1);
-        d = null;
+        obj = null;
         assert(trace == "+S1 -S0 -S1");
     }
     {
@@ -342,14 +408,6 @@ void test_class_field()
         c = null;
         assert(trace == "+S1 -S0");
         d = null;
-        assert(trace == "+S1 -S0 -S1");
-    }
-    {
-        string trace;
-        {
-            auto obj = cast(Object) new C(S("S", &trace, 0));
-            assert(trace == "+S1 -S0");
-        }
         assert(trace == "+S1 -S0 -S1");
     }
 }
@@ -415,9 +473,9 @@ void test_either_replace()
     assert(trace == "+S1 -S0 -S1 -T0 -U0");
 }
 
-void test_either_case_if()
+void test_either_case()
 {
-    dbg("- either case/if");
+    dbg("- either case");
     (S | int) get(string* sp) { return S("S", sp, 0); }
     {
         string trace;
@@ -440,9 +498,9 @@ void test_either_case_if()
             S s2 = s.case(
                 S s: s,
                 int i: ({ assert(false); S s; s; }));
-            assert(trace == "+S1 +S2 -S1");
+            assert(trace == "+S1");
         }
-        assert(trace == "+S1 +S2 -S1 -S2 -S0");
+        assert(trace == "+S1 -S1 -S0");
     }
     {
         string trace;
@@ -450,9 +508,9 @@ void test_either_case_if()
             S s = get(&trace).case(
                 S s: s,
                 int i: ({ assert(false); S s; s; }));
-            assert(trace == "+S1 +S2 -S1 -S0");
+            assert(trace == "+S1 -S0");
         }
-        assert(trace == "+S1 +S2 -S1 -S0 -S2");
+        assert(trace == "+S1 -S0 -S1");
     }
     {
         string trace;
@@ -462,7 +520,62 @@ void test_either_case_if()
                 int i: 1);
             assert(i == 0);
         }
-        assert(trace == "+S1 -S1 -S0");
+        assert(trace == "-S0");
+    }
+    {
+        string trace;
+        {
+            S s2() {
+                auto a = get(&trace);
+                a.case(
+                    S s: return s,
+                    int i: 0);
+            }
+            auto s = s2;
+            assert(trace == "+S1 -S0");
+        }
+        assert(trace == "+S1 -S0 -S1");
+    }
+    {
+        string trace;
+        {
+            S s() {
+                get(&trace).case(
+                    S s: return s,
+                    int i: 0);
+            }
+            auto s = s;
+            assert(trace == "+S1 -S0");
+        }
+        assert(trace == "+S1 -S0 -S1");
+    }
+}
+
+void test_either_extract()
+{
+    dbg("- either extract");
+    mut string trace;
+    (S | int) test() {
+        return S("S", &trace, 0);
+    }
+    {
+        S test2() {
+            int i <- test;
+            return S("T", &trace, 0);
+        }
+        auto s = test2;
+        assert(trace == "+S1 -S0");
+    }
+    assert(trace == "+S1 -S0 -S1");
+    trace = "";
+    {
+        int test3() {
+            S s <- test;
+            assert(trace == "+S1 -S0");
+            return 0;
+        }
+        test3;
+        assert(trace == "+S1 -S0 -S1");
     }
 }
 
@@ -472,7 +585,8 @@ void test_array_cat()
     {
         string trace;
         {
-            S[] array = [S("S", &trace, 0)] ~ [S("T", &trace, 0)];
+            assert(trace == "");
+            S[] array =  [S("S", &trace, 0)] ~ [S("T", &trace, 0)];
             assert(trace == "+S1 +T1 -T0 -S0");
         }
         assert(trace == "+S1 +T1 -T0 -S0 -S1 -T1");
@@ -722,14 +836,15 @@ void test_either_case_return() {
         assert(trace == "");
     }
     {
+        string trace;
         void bar((S | void) s) {
+            assert(trace == "");
             s.case(S s: ({ return; 0; }), void _: ({ return; 0; }));
         }
-        string trace;
         S s = S("S", &trace, 0);
         assert(trace == "");
         bar(s);
-        assert(trace == "+S1 -S1");
+        assert(trace == "");
     }
 }
 
@@ -784,6 +899,7 @@ void main()
     test_reassignment;
     test_parameter_reassignment;
     test_class_field;
+    test_class_instanceof;
     test_either_member;
     test_either_replace;
     test_array_cat;
@@ -798,7 +914,8 @@ void main()
     test_ufcs_chain;
     test_index_temporary_array;
     test_either_case_return;
-    test_either_case_if;
+    test_either_case;
+    test_either_extract;
     test_hashmap;
     test_paren_property;
 }

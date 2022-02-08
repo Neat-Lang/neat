@@ -210,8 +210,7 @@ class EitherMember : Expression
         return generator.fun.load(backendValueType, valuePtr);
     }
 
-    // TODO work out memory management
-    override ExprInfo info() { return ExprInfo(false, Ownership.owned); }
+    override ExprInfo info() { return value.info; }
 
     override void hash(Hash hash) { hash.adds("EitherMember"); value.hash(hash); hash.addl(offset); }
 }
@@ -451,15 +450,10 @@ class ASTEitherCaseExpr : ASTSymbol
     this(this.loc, this.base, this.cases) { }
 
     override (Expression | fail Error) compile(Context context) {
-        auto baseExpr = base.compile(context).retfail.beExpressionImplCall(context, loc).retfail;
+        auto baseExpr <- base.compile(context).retfail.beExpressionImplCall(context, loc);
+        auto baseExprTemp = new PairedTemporary(baseExpr.type, Ownership.global);
+        Statement baseExprInit = new InitializeTemporaryStatement(baseExprTemp, baseExpr);
 
-        (Expression | fail Error) do_(Expression baseExpr) {
-            return compileBaseExpr(context, baseExpr);
-        }
-        return context.compiler.consume(context, baseExpr, &do_);
-    }
-
-    (Expression | fail Error) compileBaseExpr(Context context, Expression baseExpr) {
         auto either = baseExpr.type.instanceOf(Either);
 
         loc.assert2s(!!either, "Expected Either for case expression");
@@ -498,7 +492,7 @@ class ASTEitherCaseExpr : ASTSymbol
         }
         // as ASTReturn
         auto resultVal = new PairedTemporary(mergeType, Ownership.gifted);
-        auto initResultVal = new UninitializeTemporaryStatement(resultVal);
+        Statement initResultVal = new UninitializeTemporaryStatement(resultVal);
         mut nullable Statement ifTree;
 
         for (case_ in this.cases) {
@@ -517,13 +511,20 @@ class ASTEitherCaseExpr : ASTSymbol
 
             mut Statement[] thenSteps;
 
+            Ownership varOwnership() {
+                if (baseExpr.info.ownership == Ownership.gifted)
+                    return Ownership.owned;
+                return Ownership.borrowed;
+            }
+
             auto namespace = context.compiler.variableDeclaration(
-                context.namespace, case_.identifier, type, ExprInfo(mutable=false, Ownership.owned), false);
+                context.namespace, case_.identifier, type, ExprInfo(mutable=false, varOwnership), false);
+            auto context = context.withNamespace(namespace);
             // FIXME rename to accessDecl
             Reference variable = namespace.accessDecl2(context.compiler);
-            Statement assignment <- context.compiler.move(context, variable, new EitherMember(baseExpr, matched));
-            thenSteps ~= assignment;
-            Expression userExpr = case_.expr.compile(context.withNamespace(namespace)).retfail
+            // Borrow the case base.
+            thenSteps ~= context.compiler.assignStatement(variable, new EitherMember(baseExprTemp, matched));
+            Expression userExpr = case_.expr.compile(context).retfail
                 .beExpressionImplCall(context, caseLoc).retfail;
             (Statement | fail Error) userStmt() {
                 if (case_.return_) {
@@ -538,12 +539,14 @@ class ASTEitherCaseExpr : ASTSymbol
             }
             auto userStmt <- userStmt;
             thenSteps ~= userStmt;
-            if (auto destroy = variable.type.endLifetime(context, variable)) {
-                thenSteps ~= destroy;
+            if (varOwnership == Ownership.owned) {
+                if (auto destroy = variable.type.endLifetime(context, variable)) {
+                    thenSteps ~= destroy;
+                }
             }
             Statement then = context.compiler.sequenceStatement(thenSteps);
             Expression test = retfail context.compiler.binaryOp(
-                "==", context, new EitherType(baseExpr), context.compiler.intLiteral(matched + 1), loc);
+                "==", context, new EitherType(baseExprTemp), context.compiler.intLiteral(matched + 1), loc);
 
             ifTree = context.compiler.ifStatement(test, then, ifTree);
         }
@@ -553,7 +556,7 @@ class ASTEitherCaseExpr : ASTSymbol
         assert(!!ifTree);
 
         return context.compiler.statementExpression(
-            context.compiler.sequenceStatement([initResultVal, ifTree.notNull]), resultVal);
+            context.compiler.sequenceStatement([baseExprInit, initResultVal, ifTree.notNull]), resultVal);
     }
 
     override ASTSymbol quote(Quoter quoter) {

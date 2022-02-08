@@ -560,6 +560,8 @@ at_revision 'bfa0d7228ef3fe0bbcfcf63ed43b28f26c2637eb' 'rebuild neat' 'build/nea
 at_revision 'f2992bce8528d903ae232b5ec7a91d56cd5f529c' 'rebuild neat' 'build/neat'
 # check arguments are not null
 at_revision '6a55928db7f9fa676531f0fb501a4d3b83b19224' 'rebuild neat' 'build/neat'
+# instanceof lifetime passthrough stage 1
+at_revision 'd4dfbaf5e239a85238c516b69b5dd91aa58b1136' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

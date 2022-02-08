@@ -541,6 +541,13 @@ class WrapExpression : Expression
         if (post) post.hash(hash);
         else hash.adds("null");
     }
+
+    override string repr() {
+        if (pre && post) return "wrap($(pre.repr); $(value.repr); $(post.repr))";
+        if (pre) return "wrap($(pre.repr); $(value.repr); -)";
+        if (post) return "wrap(-; $(value.repr); $(post.repr))";
+        return value.repr;
+    }
 }
 
 /**
@@ -584,6 +591,13 @@ class WrapReference : Reference
         reference.hash(hash);
         if (post) post.hash(hash);
         else hash.adds("null");
+    }
+
+    override string repr() {
+        if (pre && post) return "wrap($(pre.repr); $(reference.repr); $(post.repr))";
+        if (pre) return "wrap($(pre.repr); $(reference.repr); -)";
+        if (post) return "wrap(-; $(reference.repr); $(post.repr))";
+        return reference.repr;
     }
 }
 
@@ -1460,6 +1474,9 @@ class ASTLambdaExpr : ASTSymbol
     if (auto trait = retfail parser.parseTrait(lexicalContext)) {
         return trait;
     }
+    if (auto borrow = retfail parser.parseBorrow(lexicalContext)) {
+        return borrow;
+    }
     if (auto lambda = retfail parser.parseLambdaExpression(lexicalContext)) {
         return lambda;
     }
@@ -1566,6 +1583,46 @@ class ASTLambdaExpr : ASTSymbol
     }
 
     return new ASTFormatString(loc, parts);
+}
+
+(nullable ASTBorrow | fail Error) parseBorrow(Parser parser, LexicalContext lexicalContext)
+{
+    auto loc = parser.loc;
+    if (!parser.accept("__borrow"))
+        return null;
+    parser.expect("(");
+    auto locSource = parser.loc;
+    auto source <- parser.parseExpression(lexicalContext);
+    void <- locSource.assert2(!!source, "expression expected");
+    parser.expect(")");
+    return new ASTBorrow(loc, source.notNull);
+}
+
+/**
+ * Even though the lifetime logic does not support this, sometimes it's
+ * useful to be able to borrow an expression anyways.
+ * (for instance, for (a in array) borrows a from array.
+ */
+class ASTBorrow : ASTSymbol
+{
+    Loc loc;
+
+    ASTSymbol source;
+
+    this(this.loc, this.source) { }
+
+    override (Symbol | fail Error) compile(Context context) {
+        auto source <- this.source.compile(context);
+        auto source = source.beExpression2(this.loc);
+        return new OverrideLifetimeExpr(source, ExprInfo(mutable=false, Ownership.borrowed));
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compiler.astNewExpression(
+            quoter.compiler.astIdentifier("ASTBorrow", __HERE__), [
+                quoter.quoteLoc(this.loc),
+                this.source.quote(quoter)], __HERE__);
+    }
 }
 
 // i++, i--, ++i, --i
@@ -2622,8 +2679,13 @@ class ASTVarDeclStatement : ASTStatement
             }
             auto type = type.notNull;
 
-            if (initial.info.ownership == Ownership.owned && !this.mutable && !initial.info.mutable)
+            // can we borrow the expression?
+            // ie. does its lifetime dominate our lifetime?
+            // for this, both we and it must have an uninterruptible, ie. non-mut lifetime.
+            if (initial.info.ownership.(that == Ownership.owned || that == Ownership.borrowed)
+                && !initial.info.mutable && !this.mutable)
             {
+                // print("$(this.loc.location):$(initial.info.repr): borrowing $(initial.repr) for $(this.name)");
                 // don't double-own the value, it's covered by its own ownership
                 // we aren't mutable, so we can safely borrow the initializer.
                 auto decl = new VariableDeclaration(
@@ -2633,6 +2695,7 @@ class ASTVarDeclStatement : ASTStatement
                 return StatementCompileResult(assign, context.withNamespace(decl));
             }
 
+            // print("$(this.loc.location):$(initial.info.repr): moving $(initial.repr) for $(this.name)");
             // otherwise we'll hold a reference ourselves.
             auto decl = new VariableDeclaration(
                 context.namespace, this.name, type, ExprInfo(mutable, Ownership.owned), false);

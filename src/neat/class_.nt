@@ -398,8 +398,6 @@ class Class
             auto classType = new ClassType(current.notNull, zeroInitializable=false);
             auto classinfo = new ASTSymbolHelper(new ClassInfo(classType));
             castStmts ~= context.compiler.$stmt if (targetClassinfo is $classinfo) {
-                // take a bonus reference because TODO
-                neat_runtime_refcount_inc("__instanceof", &(cast(size_t*) this)[1]);
                 return this;
             };
             // TODO allow recursion in nested fn
@@ -409,9 +407,6 @@ class Class
                 auto astIntf = new ASTSymbolHelper(intfType);
                 auto intfClassinfo = new ASTSymbolHelper(new ClassInfo(intfType));
                 castStmts ~= context.compiler.$stmt if (targetClassinfo is $intfClassinfo) {
-                    // take a bonus reference because TODO
-                    neat_runtime_refcount_inc("__instanceof", &(cast(size_t*) this)[1]);
-                    // implconv to interface
                     $astIntf intf = this;
                     return intf;
                 };
@@ -427,7 +422,7 @@ class Class
         }
         castStmts ~= context.compiler.$stmt {
             if (freeOnNull) {
-                // neat_runtime_refcount_dec("__instanceof", &(cast(size_t*) this)[1]);
+                __destroy(this);
             }
             return null;
         };
@@ -655,7 +650,7 @@ class ClassType : Type
             // why do we need to ignore lifetime? what actually eats a lifetime here??
             context = context.withNamespace(context.compiler.exprAlias(
                 context.namespace, "this",
-                new OverrideLifetimeExpr(source, ExprInfo(false, Ownership.global))));
+                new OverrideLifetimeExpr(source, ExprInfo(false, Ownership.owned))));
             context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "size_t", sizeT));
             context = context.withNamespace(context.compiler.exprAlias(
@@ -1034,7 +1029,7 @@ class IntfType : Type
             // why do we need to ignore lifetime? what actually eats a lifetime here??
             context = context.withNamespace(context.compiler.exprAlias(
                 context.namespace, "this",
-                new OverrideLifetimeExpr(source, ExprInfo(false, Ownership.global))));
+                new OverrideLifetimeExpr(source, ExprInfo(false, Ownership.owned))));
             context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "size_t", sizeT));
             context = context.withNamespace(context.compiler.exprAlias(
@@ -1833,29 +1828,30 @@ class ASTInstanceOf : ASTSymbol
             ASTSymbol astTarget = new ASTSymbolHelper(target);
             ASTSymbol astClassInfo = new ASTSymbolHelper(classInfo);
 
+            // disable lifetime accounting for this call
+            auto plainBase = new OverrideLifetimeExpr(base, ExprInfo(false, Ownership.global));
+            bool freeOnNull = baseinfo.ownership == Ownership.gifted;
+            auto astFreeOnNull = context.compiler.astBoolLiteral(freeOnNull, __HERE__);
+
             if (type.instanceOf(IntfType)) {
-                auto astBase = new ASTSymbolHelper(base);
+                auto astBase = new ASTSymbolHelper(plainBase);
                 auto instanceOfExpr = context.compiler.$expr ({
                     auto baseOffset = **cast(size_t**) $astBase;
                     auto object = &(cast(char*) $astBase)[-baseOffset];
                     // vtable 0 is always instanceof
-                    auto fn = (*cast($astTarget function(void*, void*)**) object)[0];
-                    fn(object, $astClassInfo);
+                    auto fn = (*cast($astTarget function(void*, void*, bool)**) object)[0];
+                    fn(object, $astClassInfo, $astFreeOnNull);
                 });
                 if (auto ret = instanceOfExpr.compile(context).retfail.beExpression)
                     return new OverrideLifetimeExpr(ret, baseinfo);
                 return null;
             }
 
-            // disable lifetime accounting for this call
-            auto plainBase = new OverrideLifetimeExpr(base, ExprInfo(false, Ownership.global));
             // must exist.
             Symbol instanceOf = (retfail context.compiler.accessMember(
                     context, plainBase, "__instanceof", loc, false))
                 .notNull;
-            bool freeOnNull = baseinfo.ownership == Ownership.gifted;
             auto astInstanceOf = new ASTSymbolHelper(instanceOf);
-            auto astFreeOnNull = context.compiler.astBoolLiteral(freeOnNull, __HERE__);
             auto astArgs = [ASTArgument(astClassInfo, ""), ASTArgument(astFreeOnNull, "")];
             auto ret = new PointerCast(target, context.compiler.call(
                     context, astInstanceOf, astArgs, loc, false)
@@ -1910,7 +1906,7 @@ class ASTNewExpression : ASTSymbol
                 // don't clean up classptr after constructor call, we're continuing its lifetime
                 nullable Symbol ctor = retfail context.compiler.accessMember(
                     context,
-                    new OverrideLifetimeExpr(classptr, ExprInfo(false, Ownership.global)),
+                    new OverrideLifetimeExpr(classptr, ExprInfo(false, Ownership.owned)),
                     "__ctor", this.loc, false);
                 assert(!!ctor);
                 auto astCtor = new ASTSymbolHelper(ctor.notNull);

@@ -13,10 +13,29 @@ import std.thread;
 pragma(lib, "SDL2");
 pragma(lib, "SDL2_image");
 
+class XorShift
+{
+    ulong a;
+    this(ulong seed) { a = seed; }
+    ulong rand() {
+        mut ulong x = a;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        a = x;
+        return x;
+    }
+    int irand() {
+        // FIXME remainder should be unsignedf
+        return cast(int) ((rand % 1073741824) + 1073741824);
+    }
+    float randf() {
+        return irand / 2147483647.0f;
+    }
+}
+
 extern(C) void* neat_runtime_stdout();
 extern(C) void print(string);
-extern(C) void srand(int seed);
-extern(C) int rand();
 extern(C) char* toStringz(string);
 extern(C) long atol(char* ptr);
 
@@ -48,14 +67,14 @@ AffineTransform makeAffineTransform(float a, float b, float c, float d, float e,
     return res;
 }
 
-float randvary(float v, float f) {
+float randvary(float v, XorShift rng, float f) {
     import std.math : sin;
 
     float interp;
-    if (rand() % 4 != 0) {
-        return v + sin(f * randf) * randf;
+    if (rng.rand % 4 != 0) {
+        return v + sin(f * rng.randf) * rng.randf;
     }
-    return v * (1 - f) + randnf * f;
+    return v * (1 - f) + rng.randf * f;
 }
 
 struct AffineTransform
@@ -78,13 +97,13 @@ struct AffineTransform
         return p;
     }
 
-    void vary(float f) {
-        a = a.randvary(f);
-        b = b.randvary(f);
-        c = c.randvary(f);
-        d = d.randvary(f);
-        e = e.randvary(f);
-        this.f = this.f.randvary(f);
+    void vary(XorShift rng, float f) {
+        a = a.randvary(rng, f);
+        b = b.randvary(rng, f);
+        c = c.randvary(rng, f);
+        d = d.randvary(rng, f);
+        e = e.randvary(rng, f);
+        this.f = this.f.randvary(rng, f);
     }
 }
 
@@ -158,8 +177,8 @@ struct Function
         }
     }
 
-    void vary(float f) {
-        affine.vary(f);
+    void vary(XorShift rng, float f) {
+        affine.vary(rng, f);
     }
 }
 
@@ -169,9 +188,9 @@ struct MetaEntry
 
     Function f;
 
-    void vary(float f) {
-        weight = weight.randvary(f);
-        this.f.vary(f);
+    void vary(XorShift rng, float f) {
+        weight = weight.randvary(rng, f);
+        this.f.vary(rng, f);
     }
 }
 
@@ -183,6 +202,8 @@ struct Metafunction
 
     Color color;
 
+    bool visible;
+
     Point apply(Point p) {
         Point result;
         for (i in 0 .. entries.length) {
@@ -191,46 +212,72 @@ struct Metafunction
         return affine.apply(result);
     }
 
-    void vary(float f) {
-        [entry.vary(f) for entry in entries];
-        affine.vary(f);
+    void vary(XorShift rng, float f) {
+        [entries[i].vary(rng, f) for i in 0 .. entries.length];
+        affine.vary(rng, f);
     }
 }
 
-class ChaosGame
+final class ChaosGame
 {
     Metafunction[] functions;
 
-    Metafunction finalFunction;
+    float[][] transitions; // [from][to], with each being the pass limit for randf to be under
 
     int rstate;
 
     this() { rstate = rand; }
 
-    void apply(RangeCache cache, long steps) {
-        mut Point p = Point(randf, randf);
-        mut Color color = Color(0, 0, 0);
-        for (long l in 0 .. steps) {
-            // stolen from SO
-            rstate = (214013*rstate+2531011);
-            int randval = (rstate / 0x10000)&0x7FFF;
+    void initTransitions(XorShift rng) {
+        float[] genTransitions() {
+            float rescale(float low, float high, float f) {
+                return low + (high - low) * f;
+            }
+            float eps = 0.005f;
+            float[] base = [rescale(eps, 1 - eps, rng.randf()) for f in functions];
+            float sum = [sum a for a in base];
+            mut float[] result;
+            mut float accum = 0;
+            for (weight in base) {
+                result ~= accum + weight / sum;
+                accum += weight / sum;
+            }
+            return result;
+        }
+        transitions = [genTransitions for f in functions];
+    }
 
-            int index = cast(int)(randval % functions.length);
-            auto fun = functions[index];
+    int selectTransition(XorShift rng, int from) {
+        float f = rng.randf;
+        for (mut int i = 0; i < functions.length; i += 1) {
+            if (f < transitions[from][i]) return i;
+        }
+        print("weight normalization failed");
+        return cast(int) (rng.rand() % functions.length);
+    }
+
+    void apply(RangeCache cache, long steps) {
+        auto rng = new XorShift(23);
+        mut Point p = Point(rng.randf, rng.randf);
+        mut Color color = Color(0, 0, 0);
+        mut int index = 0;
+        for (long l in 0 .. steps) {
+            index = selectTransition(rng, index);
 
             p = functions[index].apply(p);
-            color = color.mix(fun.color, 0.5f);
+            color = color.mix(functions[index].color, 0.5f);
 
-            p = finalFunction.apply(p);
-            color = color.mix(finalFunction.color, 0.5f);
-
-            cache.pset(p, color);
+            if (functions[index].visible) {
+                cache.pset(p, color);
+            }
         }
     }
 
-    void vary(float f) {
-        [fun.vary(f) for fun in functions];
-        finalFunction.vary(f);
+    void vary(XorShift rng, float f) {
+        // FIXME should be by reference
+        [functions[i].vary(rng, f) for i in 0 .. functions.length];
+        // if we allow the final to vary, it will visually dominate the output
+        // finalFunction.vary(f);
     }
 }
 
@@ -300,39 +347,34 @@ class Buffer
     }
 }
 
-float randf() {
-    return rand * 1.0f / 2147483647;
+float randnf(XorShift rng) {
+    return rng.randf * 2.0f - 1.0f;
 }
 
-float randnf() {
-    return randf * 2.0f - 1.0f;
-}
-
-AffineTransform randAffine() {
+AffineTransform randAffine(XorShift rng) {
     mut int symmetry = 0;
-    if (rand() % 10 == 0) {
-        symmetry = rand() % 5 + 2;
+    if (rng.irand % 10 == 0) {
+        symmetry = rng.irand % 5 + 2;
     }
-    return makeAffineTransform(randnf, randnf, randnf, randnf, randnf, randnf, symmetry);
+    return makeAffineTransform(rng.randnf, rng.randnf, rng.randnf, rng.randnf, rng.randnf, rng.randnf, symmetry);
 }
 
-Function randFun() {
-    return Function(randAffine, rand % 15);
+Function randFun(XorShift rng) {
+    return Function(randAffine(rng), rng.irand % 15);
 }
 
-Metafunction randMetafun() {
+Metafunction randMetafun(XorShift rng, bool visible) {
     mut MetaEntry[] entries;
     mut float weightsum;
-    for (i in 0 .. rand() % 3 + 2) {
-        float weight = randf;
-        entries ~= MetaEntry(weight, randFun);
+    for (i in 0 .. rng.irand % 4 + 2) {
+        float weight = rng.randf;
+        entries ~= MetaEntry(weight, rng.randFun);
         weightsum += weight;
     }
     for (i in 0 .. entries.length) {
         entries[i].weight /= weightsum;
     }
-    int r = rand();
-    return Metafunction(entries, randAffine, Color(randf, randf, randf));
+    return Metafunction(entries, rng.randAffine, Color(rng.randf, rng.randf, rng.randf), visible);
 }
 
 class RenderGame : Task
@@ -497,17 +539,19 @@ void main(mut string[] args) {
         print("Unknown argument " ~ arg);
         assert(false);
     }
+    auto rng = new XorShift(seed);
     mut int subtasks = 100;
     if (width < 400 && height < 400) subtasks = 4;
 
     auto pool = new ThreadPool(8);
 
-    srand(seed);
     auto game = new ChaosGame;
-    for (i in 0 .. 1 + rand() % 5)
-        game.functions ~= randMetafun;
-    game.finalFunction = randMetafun;
-    game.vary(varyFactor);
+    int limit = 1 + rng.irand % 7;
+    int visible = rng.irand % limit;
+    for (i in 0 .. limit)
+        game.functions ~= rng.randMetafun(i == visible);
+    game.initTransitions(rng);
+    game.vary(rng, varyFactor);
 
     Buffer buffer = new Buffer(width, height);
 

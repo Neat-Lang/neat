@@ -1141,6 +1141,51 @@ class ASTParenPropertyExpression : ASTSymbol
     return new ASTParenPropertyExpression(base, sym, loc);
 }
 
+class ASTPropagateFailureExpr : ASTSymbol
+{
+    Loc loc;
+
+    ASTSymbol base;
+
+    this(this.loc, this.base) { }
+
+    override (Symbol | fail Error) compile(Context context) {
+        auto base = this.base.compile(context).retfail.beExpression;
+        auto either = base.type.instanceOf(Either);
+        context.assert2(!!either, this.loc, "base of '?' must be sumtype");
+        mut ASTEitherCaseExprCase[] cases;
+        for (k, v in either.types) {
+            cases ~= ASTEitherCaseExprCase(
+                __HERE__,
+                new ASTSymbolHelper(v.type),
+                "a",
+                return_=v.fail,
+                expr=new ASTIdentifier("a", false, __HERE__));
+        }
+        auto caseExpr = new ASTEitherCaseExpr(__HERE__, new ASTSymbolHelper(base), cases);
+        context.pushErrorLoc(this.loc);
+        auto ret = caseExpr.compile(context);
+        context.popErrorLoc;
+        return ret;
+    }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTPropagateFailureExpr'!"); assert(false); }
+
+    override string repr() { return this.base.repr ~ "?"; }
+}
+
+(nullable ASTSymbol | fail Error) parsePropagate(Parser parser, LexicalContext context, ASTSymbol left)
+{
+    auto loc = parser.loc;
+    parser.begin;
+    if (!parser.accept("?")) {
+        parser.revert;
+        return null;
+    }
+    parser.commit;
+    return new ASTPropagateFailureExpr(loc, left);
+}
+
 (ASTSymbol | fail Error) parseProperties(Parser parser, LexicalContext lexicalContext, mut ASTSymbol current)
 {
     while (true)
@@ -1171,6 +1216,12 @@ class ASTParenPropertyExpression : ASTSymbol
         if (ASTSymbol call = call)
         {
             current = call;
+            continue;
+        }
+        auto propagateExpr <- parser.parsePropagate(lexicalContext, current);
+        if (ASTSymbol propagateExpr = propagateExpr)
+        {
+            current = propagateExpr;
             continue;
         }
         if (ASTSymbol prop = retfail parser.parseParenPropertyExpression(lexicalContext, current))
@@ -2926,7 +2977,7 @@ class ASTVarExtractDeclStatement : ASTStatement
                 return compileObjectDenullFallback(context, source);
             }
         }
-        this.loc.assert2s(!!sourceType, "Source type for extract decl must be sumtype");
+        context.assert2(!!sourceType, this.loc, "Source type for extract decl must be sumtype");
         auto sourceType = sourceType.notNull;
 
         mut uninitialized Type type;

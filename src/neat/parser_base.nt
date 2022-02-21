@@ -60,7 +60,7 @@ final class Parser
         this.stack = new StackEntry[](0);
         this.level = 0;
         this.current = StackEntry(this.fulltext, row=0, column=0, stripped=false);
-        this.verify;
+        verify;
     }
 
     Loc loc() {
@@ -69,9 +69,10 @@ final class Parser
 
     void verify()
     {
-        assert(this.level <= this.stack.length && this.level >= 0);
+        assert(0 <= this.level && this.level <= this.stack.length);
         if (this.stack.length > 1024) {
-            fail("parse stack overflow");
+            print("parse stack overflow");
+            exit(1);
         }
     }
 
@@ -124,10 +125,10 @@ final class Parser
         return text[0 .. len];
     }
 
-    bool accept(string match)
+    (bool | fail Error) accept(string match)
     {
         this.begin;
-        this.strip;
+        this.strip?;
         auto text = this.text;
         if (text.length < match.length)
         {
@@ -144,12 +145,11 @@ final class Parser
         return false;
     }
 
-    void expect(string match)
+    (void | fail Error) expect(string match)
     {
-        if (!this.accept(match))
-        {
-            this.fail("'" ~ match ~ "' expected");
-        }
+        if (this.accept(match)?)
+            return;
+        return this.fail("'" ~ match ~ "' expected");
     }
 
     // checks that the text is at the hard end of the file,
@@ -161,10 +161,10 @@ final class Parser
 
     // checks that the parser is at the "soft" end of the file,
     // ie. no more meaningful content; only comments and whitespace.
-    bool eof()
+    (bool | fail Error) eof()
     {
         this.begin;
-        this.strip;
+        this.strip?;
         if (this.current.text.length == 0)
         {
             this.commit;
@@ -174,7 +174,7 @@ final class Parser
         return false;
     }
 
-    void strip()
+    (void | fail Error) strip()
     {
         if (this.current.stripped) return;
 
@@ -209,7 +209,7 @@ final class Parser
 
                     if (more == -1 && less == -1) {
                         drop(this.text.length - text.length);
-                        this.fail("comment spans end of file");
+                        return this.fail("comment spans end of file");
                     }
                     if (less != -1 && (more == -1 || less < more))
                     {
@@ -226,26 +226,33 @@ final class Parser
         }
     }
 
-    void assert_(bool flag, string message)
+    (void | fail Error) assert_(bool flag, string message)
     {
-        if (!flag) this.fail(message);
+        if (!flag) return this.fail(message);
+        return;
     }
 
-    void fail(string message)
+    Error fail(string message)
     {
-        this.strip;
-        this.loc.fail(message);
+        this.strip?;
+        return this.loc.fail(message);
     }
 
-    (void | fail Error) assert2(bool flag, string message) {
-        if (!flag) {
-            void <- this.fail2(message);
-        }
+    (void | fail Error) assert2s2(int test, string a, string b) {
+        if (!test) return this.fail(a ~ b);
+        return;
     }
-
-    (void | fail Error) fail2(string message) {
-        this.strip;
-        return new Error(this.loc, message);
+    (void | fail Error) assert2s3(int test, string a, string b, string c) {
+        if (!test) return this.fail(a ~ b ~ c);
+        return;
+    }
+    (void | fail Error) assert2s4(int test, string a, string b, string c, string d) {
+        if (!test) return this.fail(a ~ b ~ c ~ d);
+        return;
+    }
+    (void | fail Error) assert2s5(int test, string a, string b, string c, string d, string e) {
+        if (!test) return this.fail(a ~ b ~ c ~ d ~ e);
+        return;
     }
 
     ParserTransaction transaction() {
@@ -255,11 +262,22 @@ final class Parser
 
 class Error
 {
-    Loc loc;
+    Loc[] stack;
 
     string msg;
 
-    this(this.loc, this.msg) { }
+    this(this.stack, this.msg) { }
+}
+
+// TODO __bottom
+template exitWithError(T) {
+    T exitWithError(Error err) {
+        assert(err.stack.length > 0);
+        for (loc in err.stack[0 .. $ - 1])
+            print(loc.location ~ ":");
+        print(err.stack[$ - 1].location ~ ": error: " ~ err.msg);
+        exit(1);
+    }
 }
 
 struct ParserTransaction
@@ -278,12 +296,12 @@ struct ParserTransaction
     }
 }
 
-bool acceptButNot(Parser parser, string match, string nomatch) {
+(bool | fail Error) acceptButNot(Parser parser, string match, string nomatch) {
     // TODO peek?
     parser.begin;
-    bool fail = parser.accept(nomatch);
+    bool fail = parser.accept(nomatch)?;
     parser.revert;
-    return !fail && parser.accept(match);
+    return !fail && parser.accept(match)?;
 }
 
 bool isWhitespace(char c)
@@ -374,24 +392,38 @@ struct Loc {
         return filename ~ ":" ~ itoa(row + 1) ~ ":" ~ itoa(column + 1);
     }
 
-    void fail(string message) {
-        .print(location ~ ": error: " ~ message);
+    Error fail(string message) {
+        return new Error([*this], message);
+    }
+
+    (void | fail Error) assert(bool flag, string message) {
+        if (!flag) {
+            return this.fail(message);
+        }
+    }
+
+    // This should have been caught earlier.
+    void hardCheck(bool flag, string message) {
+        if (flag) return;
+        print("Internal compiler error!");
+        print(message);
         exit(1);
     }
 
-    void assert2s(int test, string msg) { if (!test) this.fail(msg); }
-    void assert2s2(int test, string a, string b) { if (!test) this.fail(a ~ b); }
-    void assert2s3(int test, string a, string b, string c) { if (!test) this.fail(a ~ b ~ c); }
-    void assert2s4(int test, string a, string b, string c, string d) {
-        if (!test) this.fail(a ~ b ~ c ~ d); }
-    void assert2s5(int test, string a, string b, string c, string d, string e) {
-        if (!test) this.fail(a ~ b ~ c ~ d ~ e); }
-    (void | fail Error) assert2(bool flag, string message) {
-        if (!flag) {
-            void <- this.fail2(message);
-        }
+    (void | fail Error) assert2s2(int test, string a, string b) {
+        if (!test) return this.fail(a ~ b);
+        return;
     }
-    (void | fail Error) fail2(string message) {
-        return new Error(*this, message);
+    (void | fail Error) assert2s3(int test, string a, string b, string c) {
+        if (!test) return this.fail(a ~ b ~ c);
+        return;
+    }
+    (void | fail Error) assert2s4(int test, string a, string b, string c, string d) {
+        if (!test) return this.fail(a ~ b ~ c ~ d);
+        return;
+    }
+    (void | fail Error) assert2s5(int test, string a, string b, string c, string d, string e) {
+        if (!test) return this.fail(a ~ b ~ c ~ d ~ e);
+        return;
     }
 }

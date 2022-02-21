@@ -1,7 +1,6 @@
 module neat.templ;
 
 macro import neat.macros.listcomprehension;
-macro import neat.macros.retfail;
 
 import neat.base;
 import neat.class_;
@@ -15,28 +14,28 @@ import std.thread;
     parser.begin;
     auto instanceLoc = parser.loc;
     // TODO better way to exclude !operator cases
-    if (!parser.accept("!") || parser.accept("=") || acceptIdentifier(parser, "is")) {
+    if (!parser.accept("!")? || parser.accept("=")? || acceptIdentifier(parser, "is")?) {
         parser.revert;
         return null;
     }
     mut ASTSymbol[] templateArgs;
     (void | fail Error) getTemplateArg() {
-        auto templateArg <- lexicalContext.compiler.parseType(parser, lexicalContext);
-        parser.assert_(!!templateArg, "template argument expected");
+        auto templateArg = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+        parser.assert_(!!templateArg, "template argument expected")?;
         templateArgs ~= templateArg.notNull;
     }
 
-    if (parser.accept("(")) {
+    if (parser.accept("(")?) {
         // ( [a [, a]*]? )
-        if (!parser.accept(")")) {
-            void <- getTemplateArg;
-            while (!parser.accept(")")) {
-                parser.expect(",");
-                void <- getTemplateArg;
+        if (!parser.accept(")")?) {
+            getTemplateArg?;
+            while (!parser.accept(")")?) {
+                parser.expect(",")?;
+                getTemplateArg?;
             }
         }
     } else {
-        void <- getTemplateArg;
+        getTemplateArg?;
     }
     parser.commit;
     return new ASTTemplateInstance(base, templateArgs, instanceLoc);
@@ -54,12 +53,12 @@ class ASTTemplateInstance : ASTSymbol
 
     override (Symbol | fail Error) compile(Context context)
     {
-        auto symbol = retfail this.templateDecl.compile(context);
+        auto symbol = this.templateDecl.compile(context)?;
         // TODO LocRange in ASTSymbol
-        auto types = [beType(this.loc, retfail type.compile(context)) for type in this.types];
+        auto types = [beType(this.loc, type.compile(context)?)? for type in this.types];
         auto templDecl = symbol.instanceOf(ScopeBoundTemplateDecl);
 
-        loc.assert2s(!!templDecl, "cannot instantiate non-template");
+        loc.assert(!!templDecl, "cannot instantiate non-template")?;
 
         return templDecl.instantiate(context, this.loc, types);
     }
@@ -139,9 +138,11 @@ class TemplateDecl : LatentSymbol
 
     (Symbol | fail Error) getInstance(mut Context context, Loc loc, Type[] parameters, nullable Expression frame)
     {
-        loc.assert2s(parameters.length == this.decl.typeParameterNames.length,
-            "Unexpected number of parameters to template: " ~
-            "expected $(this.decl.typeParameterNames.length), but got $(parameters.length)");
+        if (parameters.length != this.decl.typeParameterNames.length) {
+            return loc.fail(
+                "Unexpected number of parameters to template: " ~
+                "expected $(this.decl.typeParameterNames.length), but got $(parameters.length)");
+        }
         bool areSame(Type[] left, Type[] right) {
             if (left.length != right.length) return false;
             return [all left[i].same(right[i]) for i in 0 .. left.length];
@@ -164,7 +165,7 @@ class TemplateDecl : LatentSymbol
         }
         context = context.withNamespace(new TemplateInstantiationNamespace(
             this.parent, this.decl.typeParameterNames, parameters));
-        Symbol value = retfail this.decl.content.compile(context);
+        Symbol value = this.decl.content.compile(context)?;
 
         /*
          * Emit instance into new module.
@@ -189,7 +190,7 @@ class TemplateDecl : LatentSymbol
         module_.track(resolvedValue);
 
         // after append, to break recursion loops
-        void <- module_.compile(context);
+        module_.compile(context)?;
 
         contextModule.addModuleDependency(module_);
         return resolvedValue;
@@ -222,36 +223,36 @@ class ASTTemplateDecl : ASTDeclaration
 (nullable ASTTemplateDecl | fail Error) parseTemplateDecl(Parser parser, LexicalContext lexicalContext)
 {
     auto loc = parser.loc;
-    if (!acceptIdentifier(parser, "template"))
+    if (!acceptIdentifier(parser, "template")?)
     {
         return null;
     }
-    auto name = parser.parseIdentifier;
+    auto name = parser.parseIdentifier?;
     mut string[] typeParameters;
     // ( [identifier [, identifier]*]? )
-    parser.expect("(");
-    auto typeParameter = parser.parseIdentifier;
+    parser.expect("(")?;
+    auto typeParameter = parser.parseIdentifier?;
     if (typeParameter.length == 0) {
-        parser.expect(")");
+        parser.expect(")")?;
     } else {
         typeParameters ~= typeParameter;
-        while (!parser.accept(")")) {
-            parser.expect(",");
-            auto typeParameter = parser.parseIdentifier;
+        while (!parser.accept(")")?) {
+            parser.expect(",")?;
+            auto typeParameter = parser.parseIdentifier?;
             typeParameters ~= typeParameter;
         }
     }
-    parser.expect("{");
+    parser.expect("{")?;
     // TODO generalize (parseSymbol)?
     mut uninitialized ASTSymbol member;
-    parser.strip;
+    parser.strip?;
     auto contentLoc = parser.loc;
-    nullable ASTSymbol member <- parseTemplateContents(parser, lexicalContext);
+    nullable ASTSymbol member = parseTemplateContents(parser, lexicalContext)?;
     if (!member) {
-        contentLoc.fail("template member expected");
+        return contentLoc.fail("template member expected");
     }
 
-    parser.expect("}");
+    parser.expect("}")?;
     return new ASTTemplateDecl(name, typeParameters, member.notNull);
 }
 
@@ -259,16 +260,16 @@ class ASTTemplateDecl : ASTDeclaration
 // TODO better name for this category. Maybe it really is parseDeclaration?
 (nullable ASTSymbol | fail Error) parseTemplateContents(Parser parser, LexicalContext lexicalContext) {
     // FIXME
-    auto classDecl <- parseClassDecl(parser, lexicalContext);
+    auto classDecl = parseClassDecl(parser, lexicalContext)?;
     if (ASTClassDecl classDecl = classDecl) {
         return classDecl;
     }
-    auto intfDecl <- parseIntfDecl(parser, lexicalContext);
+    auto intfDecl = parseIntfDecl(parser, lexicalContext)?;
     if (ASTIntfDecl intfDecl = intfDecl) {
         return intfDecl;
     }
     parser.begin;
-    if (ASTDeclaration decl = retfail lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
+    if (ASTDeclaration decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)?) {
         // FIXME figure out how to converge ASTDeclaration and ASTSymbol
         // imports and structs are only "sort of" the same thing - maybe make
         // an ASTTypeDeclaration that can wrap an ASTSymbol?
@@ -280,11 +281,10 @@ class ASTTemplateDecl : ASTDeclaration
         return null;
     }
     parser.revert;
-    auto fun <- parseFunction(parser, lexicalContext);
-    if (ASTFunction fun = fun) {
+    if (auto fun = parseFunction(parser, lexicalContext)?) {
         return fun;
     }
-    if (ASTEnumDecl enumDecl = parseEnumDecl(parser, lexicalContext)) {
+    if (ASTEnumDecl enumDecl = parseEnumDecl(parser, lexicalContext)?) {
         return enumDecl;
     }
     return null;

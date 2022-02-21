@@ -1,7 +1,5 @@
 module neat.macros.cimport;
 
-macro import neat.macros.retfail;
-
 import package(compiler).neat.base;
 import package(compiler).neat.decl;
 import package(compiler).neat.expr;
@@ -14,487 +12,973 @@ import package(compiler).helpers;
 
 extern(C) void neat_runtime_system(string command);
 
-class CImportMacro : Macro
-{
-    this() { }
+version (generation99) {
+    class CImportMacro : Macro
+    {
+        this() { }
 
-    override void apply(MacroArgs args) {
-        auto args = args.instanceOf(ParseImportArgs);
-        if (args) {
-            args.module_ = this.parse(args.parser, args.lexicalContext);
+        override void apply(MacroArgs args) {
+            auto args = args.instanceOf(ParseImportArgs);
+            if (args) {
+                args.module_ = this.parse(args.parser, args.lexicalContext);
+            }
         }
-    }
 
-    (nullable ASTModuleBase | fail Error) parse(Parser parser, LexicalContext lexicalContext) {
-        import std.string : replace;
+        (nullable ASTModuleBase | fail Error) parse(Parser parser, LexicalContext lexicalContext) {
+            import std.string : replace;
 
-        auto loc = parser.loc;
-        if (!parser.acceptIdentifier("c_header"))
-            return null;
-        parser.expect("(");
-        // TODO move into neat.base
-        parser.expect("\"");
-        auto includeSym = parser.parseStringLiteral(lexicalContext, "\"").retfail.instanceOf(ASTStringLiteral);
-        parser.assert_(!!includeSym, "string expected");
-        mut string flags;
-        if (parser.accept(",")) {
-            parser.expect("\"");
-            auto flagsSym = parser.parseStringLiteral(lexicalContext, "\"").retfail.instanceOf(ASTStringLiteral);
-            parser.assert_(!!flagsSym, "flags string expected");
-            flags = flagsSym.text ~ " ";
-        }
-        parser.expect(")");
+            auto loc = parser.loc;
+            if (!parser.acceptIdentifier("c_header")?)
+                return null;
+            parser.expect("(")?;
+            // TODO move into neat.base
+            parser.expect("\"")?;
+            auto includeSym = parser.parseStringLiteral(lexicalContext, "\"")?.instanceOf(ASTStringLiteral);
+            parser.assert_(!!includeSym, "string expected")?;
+            mut string flags;
+            if (parser.accept(",")?) {
+                parser.expect("\"")?;
+                auto flagsSym = parser.parseStringLiteral(lexicalContext, "\"")?.instanceOf(ASTStringLiteral);
+                parser.assert_(!!flagsSym, "flags string expected");
+                flags = flagsSym.text ~ " ";
+            }
+            parser.expect(")")?;
 
-        if (lexicalContext.compiler.cFlags.length > 0)
-            flags = (lexicalContext.compiler.cFlags ~ flags).join(" ");
+            if (lexicalContext.compiler.cFlags.length > 0)
+                flags = (lexicalContext.compiler.cFlags ~ flags).join(" ");
 
-        string include = includeSym.text;
-        string modName = include.replace("/", "_").replace(".", "_").replace("-", "_");
+            string include = includeSym.text;
+            string modName = include.replace("/", "_").replace(".", "_").replace("-", "_");
 
-        auto headerBase = "#include <" ~ include ~ ">\n";
-        auto headerName = ".obj/cimport." ~ modName ~ ".h";
+            auto headerBase = "#include <" ~ include ~ ">\n";
+            auto headerName = ".obj/cimport." ~ modName ~ ".h";
 
-        // Assume system headers don't change.
-        // TODO: Is this legitimate? Can we timestamp the includes?
-        if (!exists(headerName ~ ".out")) {
-            // TODO randomize
-            headerName.write(headerBase);
-            string cmd = "gcc " ~ flags ~ "-dD -E " ~ headerName ~ " > " ~ headerName ~ ".out";
-            print("\$ " ~ cmd);
-            neat_runtime_system(cmd);
-        }
-        string csource = read(headerName ~ ".out");
-        // do not count references on the file source - it will end
-        // up with lots of small inc/decs to fragments that we never free anyway
-        (cast(size_t*) &csource)[2] = 0;
-        auto cparser = new Parser(headerName ~ ".out", csource);
+            // Assume system headers don't change.
+            // TODO: Is this legitimate? Can we timestamp the includes?
+            if (!exists(headerName ~ ".out")) {
+                // TODO randomize
+                headerName.write(headerBase);
+                string cmd = "gcc " ~ flags ~ "-dD -E " ~ headerName ~ " > " ~ headerName ~ ".out";
+                print("\$ " ~ cmd);
+                neat_runtime_system(cmd);
+            }
+            string csource = read(headerName ~ ".out");
+            // do not count references on the file source - it will end
+            // up with lots of small inc/decs to fragments that we never free anyway
+            (cast(size_t*) &csource)[2] = 0;
+            auto cparser = new Parser(headerName ~ ".out", csource);
 
-        auto cparserHelper = new CParserHelper(cparser);
+            auto cparserHelper = new CParserHelper(cparser);
 
-        auto pak = new Package("c_header", "", []);
-        cparserHelper.mod = new ASTModule(cparser.loc, modName, pak, new MacroState, null);
+            auto pak = new Package("c_header", "", []);
+            cparserHelper.mod = new ASTModule(cparser.loc, modName, pak, new MacroState, null);
 
-        void add(string name, (ASTExternFunction | ASTSymbol) symbol) {
-            if (false)
+            void add(string name, (ASTExternFunction | ASTSymbol) symbol) {
+                if (false)
+                    symbol.case {
+                        ASTExternFunction ex:
+                            print("define " ~ ex.name ~ ": " ~ ex.repr);
+                        ASTSymbol sym:
+                            if (!sym.instanceOf(ASTIntLiteral)) {
+                                print("define " ~ name ~ " = " ~ sym.repr);
+                            }
+                    }
                 symbol.case {
-                    ASTExternFunction ex:
-                        print("define " ~ ex.name ~ ": " ~ ex.repr);
-                    ASTSymbol sym:
-                        if (!sym.instanceOf(ASTIntLiteral)) {
-                            print("define " ~ name ~ " = " ~ sym.repr);
+                    ASTExternFunction a:
+                        cparserHelper.mod.entries ~= ASTModuleEntry(Protection.public_, a);
+                    ASTSymbol sym: {
+                        if (!cparserHelper.mod.symbolAliases.has(name)) {
+                            cparserHelper.mod.addAliasDecl(name, Protection.public_, sym);
                         }
-                }
-            symbol.case {
-                ASTExternFunction a:
-                    cparserHelper.mod.entries ~= ASTModuleEntry(Protection.public_, a);
-                ASTSymbol sym: {
-                    if (!cparserHelper.mod.symbolAliases.has(name)) {
-                        cparserHelper.mod.addAliasDecl(name, Protection.public_, sym);
                     }
                 }
             }
-        }
 
-        void eatAttribute() {
-            while (cparser.accept("__attribute__")) {
-                cparser.accept("("); cparser.accept("(");
-                mut int parenlevel = 2;
-                while (parenlevel) {
-                    auto open = cparser.text.find("("), close = cparser.text.find(")");
-                    assert(close != -1);
-                    if (open != -1 && open < close) {
-                        cparser.drop(open + 1);
-                        parenlevel += 1;
-                    } else {
-                        cparser.drop(close + 1);
-                        parenlevel -= 1;
+            (void | fail Error) eatAttribute() {
+                while (cparser.accept("__attribute__")?) {
+                    cparser.accept("(")?; cparser.accept("(")?;
+                    mut int parenlevel = 2;
+                    while (parenlevel) {
+                        auto open = cparser.text.find("("), close = cparser.text.find(")");
+                        assert(close != -1);
+                        if (open != -1 && open < close) {
+                            cparser.drop(open + 1);
+                            parenlevel += 1;
+                        } else {
+                            cparser.drop(close + 1);
+                            parenlevel -= 1;
+                        }
                     }
                 }
             }
-        }
 
-        while (!cparser.eof) {
-            if (!cparserHelper.sysmod && (
-                cparser.accept("# 1 \"<command-line>\"")
-                || cparser.accept("# 0 \"<command-line>\""))) {
-                // start of actual include
-                cparserHelper.sysmod = cparserHelper.mod;
-                cparserHelper.mod = new ASTModule(cparser.loc, modName, pak, new MacroState, null);
-            }
-            if (cparser.accept("#define ")) {
-                auto identifier = cparser.parseIdentifier;
-                if (cparser.accept("(")) { cparser.eatline; continue; }
-                auto loc = cparser.loc;
-                auto num = cparserHelper.parseCNumber;
-                if (cparser.accept(",")) { // comma expression?!
+            while (!cparser.eof?) {
+                if (!cparserHelper.sysmod && (
+                    cparser.accept("# 1 \"<command-line>\"")?
+                    || cparser.accept("# 0 \"<command-line>\"")?)) {
+                    // start of actual include
+                    cparserHelper.sysmod = cparserHelper.mod;
+                    cparserHelper.mod = new ASTModule(cparser.loc, modName, pak, new MacroState, null);
+                }
+                if (cparser.accept("#define ")?) {
+                    auto identifier = cparser.parseIdentifier?;
+                    if (cparser.accept("(")?) { cparser.eatline; continue; }
+                    auto loc = cparser.loc;
+                    auto num = cparserHelper.parseCNumber?;
+                    if (cparser.accept(",")?) { // comma expression?!
+                        cparser.eatline;
+                        continue;
+                    }
+                    num.case {
+                        (:failure): { cparser.eatline; continue; }
+                        (:success, int i): add(identifier, new ASTIntLiteral(i, loc));
+                    }
+                    cparser.assert_(cparser.text.startsWith("\n"), "unknown text")?;
+                    // cparser.expect("\n");
+                    continue;
+                }
+                if (cparser.accept("typedef")?) {
+                    auto type = cparserHelper.parseType?;
+                    if (!type) { cparser.eatline; continue; }
+                    auto type = notNull!ASTSymbol(type);
+                    auto decl = cparserHelper.parseTypedDecl(type)?;
+                    if (!decl.type) { cparser.eatline; continue; }
+                    if (!cparser.accept(";")?) { cparser.eatline; continue; }
+                    add(decl.name, notNull!ASTSymbol(decl.type));
+                    continue;
+                }
+                // match struct foo { }; as "foo"
+                if (cparser.accept("struct")?) {
+                    auto type = cparserHelper.parseStructType?;
+                    if (!type) { cparser.eatline; continue; }
+                    add(type.instanceOf(ASTStructDeclSym).decl.struct_.name, type);
+                    continue;
+                }
+                if (cparser.accept("enum")?) {
+                    auto type = cparserHelper.parseEnumType?;
+                    if (!type) { cparser.eatline; continue; }
+                    continue;
+                }
+                if (cparser.accept("#")?) {
                     cparser.eatline;
                     continue;
                 }
-                num.case {
-                    (:failure): { cparser.eatline; continue; }
-                    (:success, int i): add(identifier, new ASTIntLiteral(i, loc));
-                }
-                cparser.assert_(cparser.text.startsWith("\n"), "unknown text");
-                // cparser.expect("\n");
-                continue;
-            }
-            if (cparser.accept("typedef")) {
-                auto type = cparserHelper.parseType;
-                if (!type) { cparser.eatline; continue; }
-                auto type = notNull!ASTSymbol(type);
-                auto decl = cparserHelper.parseTypedDecl(type);
-                if (!decl.type) { cparser.eatline; continue; }
-                if (!cparser.accept(";")) { cparser.eatline; continue; }
-                add(decl.name, notNull!ASTSymbol(decl.type));
-                continue;
-            }
-            // match struct foo { }; as "foo"
-            if (cparser.accept("struct")) {
-                auto type = cparserHelper.parseStructType;
-                if (!type) { cparser.eatline; continue; }
-                add(type.instanceOf(ASTStructDeclSym).decl.struct_.name, type);
-                continue;
-            }
-            if (cparser.accept("enum")) {
-                auto type = cparserHelper.parseEnumType;
-                if (!type) { cparser.eatline; continue; }
-                continue;
-            }
-            if (cparser.accept("#")) {
-                cparser.eatline;
-                continue;
-            }
-            cparser.accept("extern");
-            eatAttribute;
-            cparser.accept("extern");
-            {
-                bool closeFunction() {
-                    if (!cparser.accept(")")) return false;
-                    eatAttribute;
-                    return cparser.accept(";");
-                }
-                auto loc = cparser.loc;
-                cparser.begin;
-                if (auto retBase = cparserHelper.parseType) {
-                    auto retDecl = cparserHelper.parseTypedDecl(retBase);
-                    if (retDecl.type && retDecl.name.length > 0 && cparser.accept("(")) {
-                        mut ASTParameter[] params;
-                        mut bool success;
-                        while (true) {
-                            if (closeFunction) {
-                                cparser.commit;
-                                if (params.length == 1) {
-                                    auto first = params[0].type.instanceOf(ASTBasicType);
-                                    if (first && first.name == "void") {
-                                        params = [];
+                cparser.accept("extern")?;
+                eatAttribute;
+                cparser.accept("extern")?;
+                {
+                    (bool | fail Error) closeFunction() {
+                        if (!cparser.accept(")")?) return false;
+                        eatAttribute;
+                        return cparser.accept(";")?;
+                    }
+                    auto loc = cparser.loc;
+                    cparser.begin;
+                    if (auto retBase = cparserHelper.parseType?) {
+                        auto retDecl = cparserHelper.parseTypedDecl(retBase)?;
+                        if (retDecl.type && retDecl.name.length > 0 && cparser.accept("(")?) {
+                            mut ASTParameter[] params;
+                            mut bool success;
+                            while (true) {
+                                if (closeFunction?) {
+                                    cparser.commit;
+                                    if (params.length == 1) {
+                                        auto first = params[0].type.instanceOf(ASTBasicType);
+                                        if (first && first.name == "void") {
+                                            params = [];
+                                        }
                                     }
+                                    add(retDecl.name, new ASTExternFunction(
+                                        retDecl.name, notNull!ASTSymbol(retDecl.type), params, variadic=false, loc));
+                                    success = true;
+                                    break;
                                 }
-                                add(retDecl.name, new ASTExternFunction(
-                                    retDecl.name, notNull!ASTSymbol(retDecl.type), params, variadic=false, loc));
-                                success = true;
-                                break;
+                                if (params.length && !cparser.accept(",")?) break;
+                                auto argloc = cparser.loc;
+                                if (auto argBasetype = cparserHelper.parseType?) {
+                                    auto argDecl = cparserHelper.parseTypedDecl(argBasetype)?;
+                                    if (!argDecl.type) break;
+                                    params ~= ASTParameter(
+                                        argDecl.name, false, notNull!ASTSymbol(argDecl.type), argloc);
+                                } else break;
                             }
-                            if (params.length && !cparser.accept(",")) break;
-                            auto argloc = cparser.loc;
-                            if (auto argBasetype = cparserHelper.parseType) {
-                                auto argDecl = cparserHelper.parseTypedDecl(argBasetype);
-                                if (!argDecl.type) break;
-                                params ~= ASTParameter(
-                                    argDecl.name, false, notNull!ASTSymbol(argDecl.type), argloc);
-                            } else break;
+                            if (success) continue;
+                            // print("fail " ~ retDecl.name ~ ": " ~ cparser.text[0 .. 100]);
                         }
-                        if (success) continue;
-                        // print("fail " ~ retDecl.name ~ ": " ~ cparser.text[0 .. 100]);
                     }
+                    // cparser.assert_(false, "here 2?")?;
+                    cparser.revert;
                 }
-                // cparser.assert_(false, "here 2?");
-                cparser.revert;
+                // cparser.assert_(false, "here?")?;
+                cparser.eatline;
             }
-            // cparser.assert_(false, "here?");
-            cparser.eatline;
+
+            return cparserHelper.mod;
         }
-
-        return cparserHelper.mod;
-    }
-}
-
-void eatline(Parser parser) {
-    auto pos = parser.text.find("\n");
-    if (pos == -1) parser.drop(parser.text.length);
-    else parser.drop(pos + 1);
-}
-
-class CLong : ASTSymbol
-{
-    this() { }
-
-    override (Type | fail Error) compile(Context context) {
-        // FIXME this does not apply on win32
-        return context.nativeWordType;
     }
 
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'CLong'!"); assert(false); }
-    override string repr() { return "long int(C)"; }
-}
-
-class CStruct : Struct
-{
-    override bool same(Type other) {
-        if (auto otherStruct = other.instanceOf(CStruct)) {
-            return this.name == otherStruct.name;
-        }
-        return false;
-    }
-}
-
-class CStaticArray : ASTSymbol
-{
-    ASTSymbol type;
-
-    int count;
-
-    Loc loc;
-
-    this(this.type, this.count, this.loc) { }
-
-    override (Type | fail Error) compile(Context context) {
-        import package(compiler).neat.struct_ : Struct;
-
-        // TODO give this a better type
-        mut StructMemberDeclaration[] members;
-        for (i in 0 .. count)
-            members ~= new StructMemberDeclaration(
-                "_" ~ ltoa(i), Protection.public_, beType(this.loc, type.compile(context).retfail));
-
-        return new Struct("SA_hack", members, this.loc, context.namespace.mangle);
+    void eatline(Parser parser) {
+        auto pos = parser.text.find("\n");
+        if (pos == -1) parser.drop(parser.text.length);
+        else parser.drop(pos + 1);
     }
 
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'CStaticArray'!"); assert(false); }
-    override string repr() { return type.repr ~ "[" ~ itoa(count) ~ "](C)"; }
-}
+    class CLong : ASTSymbol
+    {
+        this() { }
 
-class CParserHelper {
-    Parser parser;
+        override (Type | fail Error) compile(Context context) {
+            // FIXME this does not apply on win32
+            return context.nativeWordType;
+        }
 
-    ASTModule mod, sysmod;
-
-    this(this.parser) { }
-
-    nullable ASTSymbol parseType() {
-        parser.acceptIdentifier("const");
-        if (auto ret = parseBasicCType) {
-            return ret;
-        }
-        auto ident = parser.parseIdentifier;
-        if (ident == "struct") {
-            return parseStructType;
-        }
-        if (ident == "enum") {
-            return parseEnumType;
-        }
-        if (ident.length > 0) {
-            if (auto definedSym = this.mod.getSymbolAlias(ident)) return definedSym;
-            if (auto definedSym = this.sysmod.getSymbolAlias(ident)) return definedSym;
-            // print("No such ident " ~ ident);
-        }
-        return null;
+        override ASTSymbol quote(Quoter quoter) { print("cannot quote 'CLong'!"); assert(false); }
+        override string repr() { return "long int(C)"; }
     }
 
-    (nullable ASTSymbol type, string name) parseTypedDecl(ASTSymbol baseType) {
-        mut auto current = baseType;
-        assert(!!current);
-        // TODO polysemous null type
-        nullable ASTSymbol nullSymbol;
-        auto loc = parser.loc;
-        while (true) {
-            if (parser.accept("*") || parser.accept("[]")) {
-                current = new ASTPointer(current, parser.loc);
-                parser.accept("const");
-                parser.accept("restrict");
-                parser.accept("__restrict");
-                continue;
+    class CStruct : Struct
+    {
+        override bool same(Type other) {
+            if (auto otherStruct = other.instanceOf(CStruct)) {
+                return this.name == otherStruct.name;
             }
-            // function pointer
-
-            parser.begin;
-            if (parser.accept("(") && parser.accept("*")) {
-                auto name = parser.parseIdentifier;
-                // I fucking hate C type syntax. No arrays of function pointers for you.
-                if (!parser.accept(")")) {
-                    parser.revert;
-                    return (nullSymbol, "");
-                }
-                parser.expect("(");
-                mut ASTSymbol[] params;
-                while (!parser.accept(")")) {
-                    if (params.length) parser.expect(",");
-                    auto argtype = parseType;
-                    if (!argtype) {
-                        parser.revert;
-                        return (nullSymbol, "");
-                    }
-                    auto arg = parseTypedDecl(notNull!ASTSymbol(argtype));
-                    if (!arg.type) {
-                        parser.revert;
-                        return (nullSymbol, "");
-                    }
-                    params ~= notNull!ASTSymbol(arg.type);
-                }
-                parser.commit;
-                return (new ASTFunctionPointer(current, params, loc), name);
-            }
-            parser.revert;
-            break;
+            return false;
         }
-        // name can be empty!
-        auto name = parser.parseIdentifier;
-        auto loc = parser.loc;
-        while (parser.accept("[")) {
-            if (parser.accept("]")) {
-                current = new ASTPointer(current, parser.loc);
-                continue;
-            }
-            auto n = parseCNumber; auto num = n.case(
-                (:failure): return (nullSymbol, ""),
-                (:success, int i): i);
-            // parser.expect("]");
-            if (!parser.accept("]")) return (nullSymbol, "");
-            current = new CStaticArray(current, num, loc);
-        }
-        return (current, name);
     }
 
-    nullable ASTSymbol parseBasicCType() {
-        with (parser) {
-            begin;
-            auto loc = parser.loc;
-            if (parser.acceptIdentifier("void")) { commit; return new ASTBasicType("void", loc); }
-            if (parser.acceptIdentifier("float")) { commit; return new ASTBasicType("float", loc); }
-            if (parser.acceptIdentifier("double")) { commit; return new ASTBasicType("double", loc); }
-            mut bool signed, unsigned, long_, longlong, short_, char_, int_;
-            while (true) {
-                if (parser.acceptIdentifier("signed")) { signed = true; continue; }
-                if (parser.acceptIdentifier("unsigned")) { unsigned = true; continue; }
-                if (parser.acceptIdentifier("long")) {
-                    long_ = true;
-                    if (parser.acceptIdentifier("long")) longlong = true;
-                    continue;
-                }
-                if (parser.acceptIdentifier("short")) { short_ = true; continue; }
-                if (parser.acceptIdentifier("char")) { char_ = true; continue; }
-                if (parser.acceptIdentifier("int")) { int_ = true; continue; }
-                break;
+    class CStaticArray : ASTSymbol
+    {
+        ASTSymbol type;
+
+        int count;
+
+        Loc loc;
+
+        this(this.type, this.count, this.loc) { }
+
+        override (Type | fail Error) compile(Context context) {
+            import package(compiler).neat.struct_ : Struct;
+
+            // TODO give this a better type
+            mut StructMemberDeclaration[] members;
+            for (i in 0 .. count)
+                members ~= new StructMemberDeclaration(
+                    "_" ~ ltoa(i), Protection.public_, beType(this.loc, type.compile(context)?)?);
+
+            return new Struct("SA_hack", members, this.loc, context.namespace.mangle);
+        }
+
+        override ASTSymbol quote(Quoter quoter) { print("cannot quote 'CStaticArray'!"); assert(false); }
+        override string repr() { return type.repr ~ "[" ~ itoa(count) ~ "](C)"; }
+    }
+
+    class CParserHelper {
+        Parser parser;
+
+        ASTModule mod, sysmod;
+
+        this(this.parser) { }
+
+        (nullable ASTSymbol | fail Error) parseType() {
+            parser.acceptIdentifier("const")?;
+            if (auto ret = parseBasicCType?) {
+                return ret;
             }
-            if (longlong) { commit; return new ASTBasicType("long", loc); }
-            if (long_) { commit; return new CLong; }
-            if (short_) { commit; return new ASTBasicType("short", loc); }
-            if (char_) { commit; return new ASTBasicType("char", loc); }
-            if (signed || unsigned || int_) { commit; return new ASTBasicType("int", loc); }
-            revert;
+            auto ident = parser.parseIdentifier?;
+            if (ident == "struct") {
+                return parseStructType?;
+            }
+            if (ident == "enum") {
+                return parseEnumType?;
+            }
+            if (ident.length > 0) {
+                if (auto definedSym = this.mod.getSymbolAlias(ident)) return definedSym;
+                if (auto definedSym = this.sysmod.getSymbolAlias(ident)) return definedSym;
+                // print("No such ident " ~ ident);
+            }
             return null;
         }
-    }
 
-    ASTSymbol parseStructType() {
-        auto loc = parser.loc;
-        auto name = parser.parseIdentifier;
-        mut ASTStructEntry[] entries;
-        auto emptyStruct = new ASTStructDeclSym(new ASTStructDecl(name, [], loc)); // opaque
-        if (!parser.accept("{")) {
-            if (auto definedSym = this.mod.getSymbolAlias(name)) return definedSym;
-            if (auto definedSym = this.sysmod.getSymbolAlias(name)) return definedSym;
-            return emptyStruct;
-        }
-        void scanToClosingBracket() {
-            mut int bracketDepth = 1;
-            // TODO factor out with () skipping
-            while (bracketDepth) {
-                auto open = parser.text.find("{"), close = parser.text.find("}");
-                assert(close != -1);
-                if (open != -1 && open < close) {
-                    parser.drop(open + 1);
-                    bracketDepth += 1;
-                } else {
-                    parser.drop(close + 1);
-                    bracketDepth -= 1;
+        (nullable ASTSymbol type, string name | fail Error) parseTypedDecl(ASTSymbol baseType) {
+            mut auto current = baseType;
+            assert(!!current);
+            // TODO polysemous null type
+            nullable ASTSymbol nullSymbol;
+            auto loc = parser.loc;
+            while (true) {
+                if (parser.accept("*")? || parser.accept("[]")?) {
+                    current = new ASTPointer(current, parser.loc);
+                    parser.accept("const")?;
+                    parser.accept("restrict")?;
+                    parser.accept("__restrict")?;
+                    continue;
                 }
-            }
-        }
-        while (!parser.accept("}")) {
-            parser.begin;
-            // #defines inside structs happen occasionally
-            if (parser.accept("#define ")) { parser.eatline; parser.commit; continue; }
-            auto baseType = parseType;
-            if (!baseType) { parser.revert; scanToClosingBracket; return emptyStruct; }
-            auto baseType = notNull!ASTSymbol(baseType);
-            mut auto memberDecl = parseTypedDecl(baseType);
-            void flush() {
-                entries ~= (memberDecl.name, Protection.public_, notNull!ASTSymbol(memberDecl.type));
-            }
-            while (parser.accept(",")) {
-                if (!memberDecl.type) { parser.revert; scanToClosingBracket; return emptyStruct; }
-                flush;
-                memberDecl = parseTypedDecl(baseType);
-            }
-            if (!memberDecl.type) { parser.revert; scanToClosingBracket; return emptyStruct; }
-            flush;
-            // parser.expect(";");
-            if (!parser.accept(";")) { parser.revert; scanToClosingBracket; return emptyStruct; }
-            parser.commit;
-        }
-        return new ASTStructDeclSym(new ASTStructDecl(name, entries, loc));
-    }
+                // function pointer
 
-    nullable ASTSymbol parseEnumType() {
-        // TODO export enum members as aliases
-        auto loc = parser.loc;
-        parser.parseIdentifier;
-        if (!parser.accept("{")) return null; // wat
-        mut int lastNum = -1;
-        while (true) {
-            auto name = parser.parseIdentifier;
-            if (!name.length) break;
-            if (parser.accept("=")) {
-                auto num = parseCNumber;
-                num.case {
-                    (:failure): break;
-                    (:success, int i): {
-                        mod.addAliasDecl(name, Protection.public_, new ASTIntLiteral(i, loc));
-                        lastNum = i;
+                parser.begin;
+                if (parser.accept("(")? && parser.accept("*")?) {
+                    auto name = parser.parseIdentifier?;
+                    // I fucking hate C type syntax. No arrays of function pointers for you.
+                    if (!parser.accept(")")?) {
+                        parser.revert;
+                        return (nullSymbol, "");
+                    }
+                    parser.expect("(")?;
+                    mut ASTSymbol[] params;
+                    while (!parser.accept(")")?) {
+                        if (params.length) parser.expect(",")?;
+                        auto argtype = parseType?;
+                        if (!argtype) {
+                            parser.revert;
+                            return (nullSymbol, "");
+                        }
+                        auto arg = parseTypedDecl(notNull!ASTSymbol(argtype))?;
+                        if (!arg.type) {
+                            parser.revert;
+                            return (nullSymbol, "");
+                        }
+                        params ~= notNull!ASTSymbol(arg.type);
+                    }
+                    parser.commit;
+                    return (new ASTFunctionPointer(current, params, loc), name);
+                }
+                parser.revert;
+                break;
+            }
+            // name can be empty!
+            auto name = parser.parseIdentifier?;
+            auto loc = parser.loc;
+            while (parser.accept("[")?) {
+                if (parser.accept("]")?) {
+                    current = new ASTPointer(current, parser.loc);
+                    continue;
+                }
+                auto n = parseCNumber?; auto num = n.case(
+                    (:failure): return (nullSymbol, ""),
+                    (:success, int i): i);
+                // parser.expect("]")?;
+                if (!parser.accept("]")?) return (nullSymbol, "");
+                current = new CStaticArray(current, num, loc);
+            }
+            return (current, name);
+        }
+
+        (nullable ASTSymbol | fail Error) parseBasicCType() {
+            with (parser) {
+                begin;
+                auto loc = parser.loc;
+                if (parser.acceptIdentifier("void")?) { commit; return new ASTBasicType("void", loc); }
+                if (parser.acceptIdentifier("float")?) { commit; return new ASTBasicType("float", loc); }
+                if (parser.acceptIdentifier("double")?) { commit; return new ASTBasicType("double", loc); }
+                mut bool signed, unsigned, long_, longlong, short_, char_, int_;
+                while (true) {
+                    if (parser.acceptIdentifier("signed")?) { signed = true; continue; }
+                    if (parser.acceptIdentifier("unsigned")?) { unsigned = true; continue; }
+                    if (parser.acceptIdentifier("long")?) {
+                        long_ = true;
+                        if (parser.acceptIdentifier("long")?) longlong = true;
+                        continue;
+                    }
+                    if (parser.acceptIdentifier("short")?) { short_ = true; continue; }
+                    if (parser.acceptIdentifier("char")?) { char_ = true; continue; }
+                    if (parser.acceptIdentifier("int")?) { int_ = true; continue; }
+                    break;
+                }
+                if (longlong) { commit; return new ASTBasicType("long", loc); }
+                if (long_) { commit; return new CLong; }
+                if (short_) { commit; return new ASTBasicType("short", loc); }
+                if (char_) { commit; return new ASTBasicType("char", loc); }
+                if (signed || unsigned || int_) { commit; return new ASTBasicType("int", loc); }
+                revert;
+                return null;
+            }
+        }
+
+        (ASTSymbol | fail Error) parseStructType() {
+            auto loc = parser.loc;
+            auto name = parser.parseIdentifier?;
+            mut ASTStructEntry[] entries;
+            auto emptyStruct = new ASTStructDeclSym(new ASTStructDecl(name, [], loc)); // opaque
+            if (!parser.accept("{")?) {
+                if (auto definedSym = this.mod.getSymbolAlias(name)) return definedSym;
+                if (auto definedSym = this.sysmod.getSymbolAlias(name)) return definedSym;
+                return emptyStruct;
+            }
+            void scanToClosingBracket() {
+                mut int bracketDepth = 1;
+                // TODO factor out with () skipping
+                while (bracketDepth) {
+                    auto open = parser.text.find("{"), close = parser.text.find("}");
+                    assert(close != -1);
+                    if (open != -1 && open < close) {
+                        parser.drop(open + 1);
+                        bracketDepth += 1;
+                    } else {
+                        parser.drop(close + 1);
+                        bracketDepth -= 1;
                     }
                 }
-            } else {
-                mod.addAliasDecl(name, Protection.public_, new ASTIntLiteral(lastNum + 1, loc));
-                lastNum++;
             }
-            parser.accept(",");
+            while (!parser.accept("}")?) {
+                parser.begin;
+                // #defines inside structs happen occasionally
+                if (parser.accept("#define ")?) { parser.eatline; parser.commit; continue; }
+                auto baseType = parseType?;
+                if (!baseType) { parser.revert; scanToClosingBracket; return emptyStruct; }
+                auto baseType = notNull!ASTSymbol(baseType);
+                mut auto memberDecl = parseTypedDecl(baseType)?;
+                void flush() {
+                    entries ~= (memberDecl.name, Protection.public_, notNull!ASTSymbol(memberDecl.type));
+                }
+                while (parser.accept(",")?) {
+                    if (!memberDecl.type) { parser.revert; scanToClosingBracket; return emptyStruct; }
+                    flush;
+                    memberDecl = parseTypedDecl(baseType)?;
+                }
+                if (!memberDecl.type) { parser.revert; scanToClosingBracket; return emptyStruct; }
+                flush;
+                // parser.expect(";")?;
+                if (!parser.accept(";")?) { parser.revert; scanToClosingBracket; return emptyStruct; }
+                parser.commit;
+            }
+            return new ASTStructDeclSym(new ASTStructDecl(name, entries, loc));
         }
-        auto close = parser.text.find("}");
-        parser.drop(close + 1);
-        return new ASTBasicType("int", loc);
+
+        (nullable ASTSymbol | fail Error) parseEnumType() {
+            // TODO export enum members as aliases
+            auto loc = parser.loc;
+            parser.parseIdentifier?;
+            if (!parser.accept("{")?) return null; // wat
+            mut int lastNum = -1;
+            while (true) {
+                auto name = parser.parseIdentifier?;
+                if (!name.length) break;
+                if (parser.accept("=")?) {
+                    auto num = parseCNumber?;
+                    num.case {
+                        (:failure): break;
+                        (:success, int i): {
+                            mod.addAliasDecl(name, Protection.public_, new ASTIntLiteral(i, loc));
+                            lastNum = i;
+                        }
+                    }
+                } else {
+                    mod.addAliasDecl(name, Protection.public_, new ASTIntLiteral(lastNum + 1, loc));
+                    lastNum++;
+                }
+                parser.accept(",")?;
+            }
+            auto close = parser.text.find("}");
+            parser.drop(close + 1);
+            return new ASTBasicType("int", loc);
+        }
+
+        (:failure | :success, int i | fail Error) parseCNumber() {
+            // TODO fix refcount again
+            // with (parser) {
+                parser.begin;
+                mut int num;
+                (bool | fail Error) accept(string s) { return parser.accept(s)?; }
+                parser.parseNumber?.case {
+                    (:failure): { parser.revert; return :failure; }
+                    (:success, int i): num = i;
+                }
+                // weird C shit
+                if (accept("e")? || accept("E")? || accept(".")?) {
+                    parser.revert;
+                    return :failure;
+                }
+                accept("U")?; accept("u")?;
+                accept("L")?; accept("l")?;
+                accept("L")?; accept("l")?;
+                parser.commit;
+                return (:success, num);
+            // }
+        }
+    }
+} else {
+    class CImportMacro : Macro
+    {
+        this() { }
+
+        override void apply(MacroArgs args) {
+            auto args = args.instanceOf(ParseImportArgs);
+            if (args) {
+                args.module_ = this.parse(args.parser, args.lexicalContext);
+            }
+        }
+
+        (nullable ASTModuleBase | fail Error) parse(Parser parser, LexicalContext lexicalContext) {
+            import std.string : replace;
+
+            auto loc = parser.loc;
+            if (!parser.acceptIdentifier("c_header"))
+                return null;
+            parser.expect("(");
+            // TODO move into neat.base
+            parser.expect("\"");
+            auto includeSym = parser.parseStringLiteral(lexicalContext, "\"")?.instanceOf(ASTStringLiteral);
+            parser.assert_(!!includeSym, "string expected");
+            mut string flags;
+            if (parser.accept(",")) {
+                parser.expect("\"");
+                auto flagsSym = parser.parseStringLiteral(lexicalContext, "\"")?.instanceOf(ASTStringLiteral);
+                parser.assert_(!!flagsSym, "flags string expected");
+                flags = flagsSym.text ~ " ";
+            }
+            parser.expect(")");
+
+            if (lexicalContext.compiler.cFlags.length > 0)
+                flags = (lexicalContext.compiler.cFlags ~ flags).join(" ");
+
+            string include = includeSym.text;
+            string modName = include.replace("/", "_").replace(".", "_").replace("-", "_");
+
+            auto headerBase = "#include <" ~ include ~ ">\n";
+            auto headerName = ".obj/cimport." ~ modName ~ ".h";
+
+            // Assume system headers don't change.
+            // TODO: Is this legitimate? Can we timestamp the includes?
+            if (!exists(headerName ~ ".out")) {
+                // TODO randomize
+                headerName.write(headerBase);
+                string cmd = "gcc " ~ flags ~ "-dD -E " ~ headerName ~ " > " ~ headerName ~ ".out";
+                print("\$ " ~ cmd);
+                neat_runtime_system(cmd);
+            }
+            string csource = read(headerName ~ ".out");
+            // do not count references on the file source - it will end
+            // up with lots of small inc/decs to fragments that we never free anyway
+            (cast(size_t*) &csource)[2] = 0;
+            auto cparser = new Parser(headerName ~ ".out", csource);
+
+            auto cparserHelper = new CParserHelper(cparser);
+
+            auto pak = new Package("c_header", "", []);
+            cparserHelper.mod = new ASTModule(cparser.loc, modName, pak, new MacroState, null);
+
+            void add(string name, (ASTExternFunction | ASTSymbol) symbol) {
+                if (false)
+                    symbol.case {
+                        ASTExternFunction ex:
+                            print("define " ~ ex.name ~ ": " ~ ex.repr);
+                        ASTSymbol sym:
+                            if (!sym.instanceOf(ASTIntLiteral)) {
+                                print("define " ~ name ~ " = " ~ sym.repr);
+                            }
+                    }
+                symbol.case {
+                    ASTExternFunction a:
+                        cparserHelper.mod.entries ~= ASTModuleEntry(Protection.public_, a);
+                    ASTSymbol sym: {
+                        if (!cparserHelper.mod.symbolAliases.has(name)) {
+                            cparserHelper.mod.addAliasDecl(name, Protection.public_, sym);
+                        }
+                    }
+                }
+            }
+
+            void eatAttribute() {
+                while (cparser.accept("__attribute__")) {
+                    cparser.accept("("); cparser.accept("(");
+                    mut int parenlevel = 2;
+                    while (parenlevel) {
+                        auto open = cparser.text.find("("), close = cparser.text.find(")");
+                        assert(close != -1);
+                        if (open != -1 && open < close) {
+                            cparser.drop(open + 1);
+                            parenlevel += 1;
+                        } else {
+                            cparser.drop(close + 1);
+                            parenlevel -= 1;
+                        }
+                    }
+                }
+            }
+
+            while (!cparser.eof) {
+                if (!cparserHelper.sysmod && (
+                    cparser.accept("# 1 \"<command-line>\"")
+                    || cparser.accept("# 0 \"<command-line>\""))) {
+                    // start of actual include
+                    cparserHelper.sysmod = cparserHelper.mod;
+                    cparserHelper.mod = new ASTModule(cparser.loc, modName, pak, new MacroState, null);
+                }
+                if (cparser.accept("#define ")) {
+                    auto identifier = cparser.parseIdentifier;
+                    if (cparser.accept("(")) { cparser.eatline; continue; }
+                    auto loc = cparser.loc;
+                    auto num = cparserHelper.parseCNumber;
+                    if (cparser.accept(",")) { // comma expression?!
+                        cparser.eatline;
+                        continue;
+                    }
+                    num.case {
+                        (:failure): { cparser.eatline; continue; }
+                        (:success, int i): add(identifier, new ASTIntLiteral(i, loc));
+                    }
+                    cparser.assert_(cparser.text.startsWith("\n"), "unknown text");
+                    // cparser.expect("\n");
+                    continue;
+                }
+                if (cparser.accept("typedef")) {
+                    auto type = cparserHelper.parseType;
+                    if (!type) { cparser.eatline; continue; }
+                    auto type = notNull!ASTSymbol(type);
+                    auto decl = cparserHelper.parseTypedDecl(type);
+                    if (!decl.type) { cparser.eatline; continue; }
+                    if (!cparser.accept(";")) { cparser.eatline; continue; }
+                    add(decl.name, notNull!ASTSymbol(decl.type));
+                    continue;
+                }
+                // match struct foo { }; as "foo"
+                if (cparser.accept("struct")) {
+                    auto type = cparserHelper.parseStructType;
+                    if (!type) { cparser.eatline; continue; }
+                    add(type.instanceOf(ASTStructDeclSym).decl.struct_.name, type);
+                    continue;
+                }
+                if (cparser.accept("enum")) {
+                    auto type = cparserHelper.parseEnumType;
+                    if (!type) { cparser.eatline; continue; }
+                    continue;
+                }
+                if (cparser.accept("#")) {
+                    cparser.eatline;
+                    continue;
+                }
+                cparser.accept("extern");
+                eatAttribute;
+                cparser.accept("extern");
+                {
+                    bool closeFunction() {
+                        if (!cparser.accept(")")) return false;
+                        eatAttribute;
+                        return cparser.accept(";");
+                    }
+                    auto loc = cparser.loc;
+                    cparser.begin;
+                    if (auto retBase = cparserHelper.parseType) {
+                        auto retDecl = cparserHelper.parseTypedDecl(retBase);
+                        if (retDecl.type && retDecl.name.length > 0 && cparser.accept("(")) {
+                            mut ASTParameter[] params;
+                            mut bool success;
+                            while (true) {
+                                if (closeFunction) {
+                                    cparser.commit;
+                                    if (params.length == 1) {
+                                        auto first = params[0].type.instanceOf(ASTBasicType);
+                                        if (first && first.name == "void") {
+                                            params = [];
+                                        }
+                                    }
+                                    add(retDecl.name, new ASTExternFunction(
+                                        retDecl.name, notNull!ASTSymbol(retDecl.type), params, variadic=false, loc));
+                                    success = true;
+                                    break;
+                                }
+                                if (params.length && !cparser.accept(",")) break;
+                                auto argloc = cparser.loc;
+                                if (auto argBasetype = cparserHelper.parseType) {
+                                    auto argDecl = cparserHelper.parseTypedDecl(argBasetype);
+                                    if (!argDecl.type) break;
+                                    params ~= ASTParameter(
+                                        argDecl.name, false, notNull!ASTSymbol(argDecl.type), argloc);
+                                } else break;
+                            }
+                            if (success) continue;
+                            // print("fail " ~ retDecl.name ~ ": " ~ cparser.text[0 .. 100]);
+                        }
+                    }
+                    // cparser.assert_(false, "here 2?");
+                    cparser.revert;
+                }
+                // cparser.assert_(false, "here?");
+                cparser.eatline;
+            }
+
+            return cparserHelper.mod;
+        }
     }
 
-    (:failure | :success, int i) parseCNumber() {
-        // TODO fix refcount again
-        // with (parser) {
-            parser.begin;
-            mut int num;
-            bool accept(string s) { return parser.accept(s); }
-            parser.parseNumber.case {
-                (:failure): { parser.revert; return :failure; }
-                (:success, int i): num = i;
+    void eatline(Parser parser) {
+        auto pos = parser.text.find("\n");
+        if (pos == -1) parser.drop(parser.text.length);
+        else parser.drop(pos + 1);
+    }
+
+    class CLong : ASTSymbol
+    {
+        this() { }
+
+        override (Type | fail Error) compile(Context context) {
+            // FIXME this does not apply on win32
+            return context.nativeWordType;
+        }
+
+        override ASTSymbol quote(Quoter quoter) { print("cannot quote 'CLong'!"); assert(false); }
+        override string repr() { return "long int(C)"; }
+    }
+
+    class CStruct : Struct
+    {
+        override bool same(Type other) {
+            if (auto otherStruct = other.instanceOf(CStruct)) {
+                return this.name == otherStruct.name;
             }
-            // weird C shit
-            if (accept("e") || accept("E") || accept(".")) {
+            return false;
+        }
+    }
+
+    class CStaticArray : ASTSymbol
+    {
+        ASTSymbol type;
+
+        int count;
+
+        Loc loc;
+
+        this(this.type, this.count, this.loc) { }
+
+        override (Type | fail Error) compile(Context context) {
+            import package(compiler).neat.struct_ : Struct;
+
+            // TODO give this a better type
+            mut StructMemberDeclaration[] members;
+            for (i in 0 .. count)
+                members ~= new StructMemberDeclaration(
+                    "_" ~ ltoa(i), Protection.public_, beType(this.loc, type.compile(context)?));
+
+            return new Struct("SA_hack", members, this.loc, context.namespace.mangle);
+        }
+
+        override ASTSymbol quote(Quoter quoter) { print("cannot quote 'CStaticArray'!"); assert(false); }
+        override string repr() { return type.repr ~ "[" ~ itoa(count) ~ "](C)"; }
+    }
+
+    class CParserHelper {
+        Parser parser;
+
+        ASTModule mod, sysmod;
+
+        this(this.parser) { }
+
+        nullable ASTSymbol parseType() {
+            parser.acceptIdentifier("const");
+            if (auto ret = parseBasicCType) {
+                return ret;
+            }
+            auto ident = parser.parseIdentifier;
+            if (ident == "struct") {
+                return parseStructType;
+            }
+            if (ident == "enum") {
+                return parseEnumType;
+            }
+            if (ident.length > 0) {
+                if (auto definedSym = this.mod.getSymbolAlias(ident)) return definedSym;
+                if (auto definedSym = this.sysmod.getSymbolAlias(ident)) return definedSym;
+                // print("No such ident " ~ ident);
+            }
+            return null;
+        }
+
+        (nullable ASTSymbol type, string name) parseTypedDecl(ASTSymbol baseType) {
+            mut auto current = baseType;
+            assert(!!current);
+            // TODO polysemous null type
+            nullable ASTSymbol nullSymbol;
+            auto loc = parser.loc;
+            while (true) {
+                if (parser.accept("*") || parser.accept("[]")) {
+                    current = new ASTPointer(current, parser.loc);
+                    parser.accept("const");
+                    parser.accept("restrict");
+                    parser.accept("__restrict");
+                    continue;
+                }
+                // function pointer
+
+                parser.begin;
+                if (parser.accept("(") && parser.accept("*")) {
+                    auto name = parser.parseIdentifier;
+                    // I fucking hate C type syntax. No arrays of function pointers for you.
+                    if (!parser.accept(")")) {
+                        parser.revert;
+                        return (nullSymbol, "");
+                    }
+                    parser.expect("(");
+                    mut ASTSymbol[] params;
+                    while (!parser.accept(")")) {
+                        if (params.length) parser.expect(",");
+                        auto argtype = parseType;
+                        if (!argtype) {
+                            parser.revert;
+                            return (nullSymbol, "");
+                        }
+                        auto arg = parseTypedDecl(notNull!ASTSymbol(argtype));
+                        if (!arg.type) {
+                            parser.revert;
+                            return (nullSymbol, "");
+                        }
+                        params ~= notNull!ASTSymbol(arg.type);
+                    }
+                    parser.commit;
+                    return (new ASTFunctionPointer(current, params, loc), name);
+                }
                 parser.revert;
-                return :failure;
+                break;
             }
-            accept("U"); accept("u");
-            accept("L"); accept("l");
-            accept("L"); accept("l");
-            parser.commit;
-            return (:success, num);
-        // }
+            // name can be empty!
+            auto name = parser.parseIdentifier;
+            auto loc = parser.loc;
+            while (parser.accept("[")) {
+                if (parser.accept("]")) {
+                    current = new ASTPointer(current, parser.loc);
+                    continue;
+                }
+                auto n = parseCNumber; auto num = n.case(
+                    (:failure): return (nullSymbol, ""),
+                    (:success, int i): i);
+                // parser.expect("]");
+                if (!parser.accept("]")) return (nullSymbol, "");
+                current = new CStaticArray(current, num, loc);
+            }
+            return (current, name);
+        }
+
+        nullable ASTSymbol parseBasicCType() {
+            with (parser) {
+                begin;
+                auto loc = parser.loc;
+                if (parser.acceptIdentifier("void")) { commit; return new ASTBasicType("void", loc); }
+                if (parser.acceptIdentifier("float")) { commit; return new ASTBasicType("float", loc); }
+                if (parser.acceptIdentifier("double")) { commit; return new ASTBasicType("double", loc); }
+                mut bool signed, unsigned, long_, longlong, short_, char_, int_;
+                while (true) {
+                    if (parser.acceptIdentifier("signed")) { signed = true; continue; }
+                    if (parser.acceptIdentifier("unsigned")) { unsigned = true; continue; }
+                    if (parser.acceptIdentifier("long")) {
+                        long_ = true;
+                        if (parser.acceptIdentifier("long")) longlong = true;
+                        continue;
+                    }
+                    if (parser.acceptIdentifier("short")) { short_ = true; continue; }
+                    if (parser.acceptIdentifier("char")) { char_ = true; continue; }
+                    if (parser.acceptIdentifier("int")) { int_ = true; continue; }
+                    break;
+                }
+                if (longlong) { commit; return new ASTBasicType("long", loc); }
+                if (long_) { commit; return new CLong; }
+                if (short_) { commit; return new ASTBasicType("short", loc); }
+                if (char_) { commit; return new ASTBasicType("char", loc); }
+                if (signed || unsigned || int_) { commit; return new ASTBasicType("int", loc); }
+                revert;
+                return null;
+            }
+        }
+
+        ASTSymbol parseStructType() {
+            auto loc = parser.loc;
+            auto name = parser.parseIdentifier;
+            mut ASTStructEntry[] entries;
+            auto emptyStruct = new ASTStructDeclSym(new ASTStructDecl(name, [], loc)); // opaque
+            if (!parser.accept("{")) {
+                if (auto definedSym = this.mod.getSymbolAlias(name)) return definedSym;
+                if (auto definedSym = this.sysmod.getSymbolAlias(name)) return definedSym;
+                return emptyStruct;
+            }
+            void scanToClosingBracket() {
+                mut int bracketDepth = 1;
+                // TODO factor out with () skipping
+                while (bracketDepth) {
+                    auto open = parser.text.find("{"), close = parser.text.find("}");
+                    assert(close != -1);
+                    if (open != -1 && open < close) {
+                        parser.drop(open + 1);
+                        bracketDepth += 1;
+                    } else {
+                        parser.drop(close + 1);
+                        bracketDepth -= 1;
+                    }
+                }
+            }
+            while (!parser.accept("}")) {
+                parser.begin;
+                // #defines inside structs happen occasionally
+                if (parser.accept("#define ")) { parser.eatline; parser.commit; continue; }
+                auto baseType = parseType;
+                if (!baseType) { parser.revert; scanToClosingBracket; return emptyStruct; }
+                auto baseType = notNull!ASTSymbol(baseType);
+                mut auto memberDecl = parseTypedDecl(baseType);
+                void flush() {
+                    entries ~= (memberDecl.name, Protection.public_, notNull!ASTSymbol(memberDecl.type));
+                }
+                while (parser.accept(",")) {
+                    if (!memberDecl.type) { parser.revert; scanToClosingBracket; return emptyStruct; }
+                    flush;
+                    memberDecl = parseTypedDecl(baseType);
+                }
+                if (!memberDecl.type) { parser.revert; scanToClosingBracket; return emptyStruct; }
+                flush;
+                // parser.expect(";");
+                if (!parser.accept(";")) { parser.revert; scanToClosingBracket; return emptyStruct; }
+                parser.commit;
+            }
+            return new ASTStructDeclSym(new ASTStructDecl(name, entries, loc));
+        }
+
+        nullable ASTSymbol parseEnumType() {
+            // TODO export enum members as aliases
+            auto loc = parser.loc;
+            parser.parseIdentifier;
+            if (!parser.accept("{")) return null; // wat
+            mut int lastNum = -1;
+            while (true) {
+                auto name = parser.parseIdentifier;
+                if (!name.length) break;
+                if (parser.accept("=")) {
+                    auto num = parseCNumber;
+                    num.case {
+                        (:failure): break;
+                        (:success, int i): {
+                            mod.addAliasDecl(name, Protection.public_, new ASTIntLiteral(i, loc));
+                            lastNum = i;
+                        }
+                    }
+                } else {
+                    mod.addAliasDecl(name, Protection.public_, new ASTIntLiteral(lastNum + 1, loc));
+                    lastNum++;
+                }
+                parser.accept(",");
+            }
+            auto close = parser.text.find("}");
+            parser.drop(close + 1);
+            return new ASTBasicType("int", loc);
+        }
+
+        (:failure | :success, int i) parseCNumber() {
+            // TODO fix refcount again
+            // with (parser) {
+                parser.begin;
+                mut int num;
+                bool accept(string s) { return parser.accept(s); }
+                parser.parseNumber.case {
+                    (:failure): { parser.revert; return :failure; }
+                    (:success, int i): num = i;
+                }
+                // weird C shit
+                if (accept("e") || accept("E") || accept(".")) {
+                    parser.revert;
+                    return :failure;
+                }
+                accept("U"); accept("u");
+                accept("L"); accept("l");
+                accept("L"); accept("l");
+                parser.commit;
+                return (:success, num);
+            // }
+        }
     }
 }
 
@@ -505,7 +989,7 @@ class ASTStructDeclSym : ASTSymbol
     this(this.decl) { }
 
     override (Symbol | fail Error) compile(Context context) {
-        auto struct_ <- this.decl.compileToStruct(context);
+        auto struct_ = this.decl.compileToStruct(context)?;
         auto cstruct = new CStruct(struct_.name, struct_.members, struct_.loc, context.namespace.mangle);
 
         return cstruct;

@@ -3,7 +3,6 @@ module neat.class_;
 macro import neat.macros.listcomprehension;
 macro import neat.macros.once;
 macro import neat.macros.quasiquoting;
-macro import neat.macros.retfail;
 
 import backend.base;
 import helpers;
@@ -77,8 +76,8 @@ class ClassNamespace : Namespace
         if (auto thisPtr = thisPtr) {
             auto thisPtr = new PointerCast(this.class_, thisPtr);
 
-            if (auto result = retfail context.compiler.accessMemberWithLifetime(
-                    context, thisPtr, name, loc, true))
+            if (auto result = context.compiler.accessMemberWithLifetime(
+                    context, thisPtr, name, loc, true)?)
                 return result;
         }
 
@@ -235,7 +234,7 @@ class Class
     }
 
     // FIXME: roll into vtable(), this.vtable => this.vtableCache
-    void genVtable(Context context)
+    (void | fail Error) genVtable(Context context)
     {
         if (this.vtableSymbol != "") return;
 
@@ -248,7 +247,7 @@ class Class
 
         mut (ClassMethod | IntfMethod | (:baseOffset, size_t offs))[] vtable;
         if (this.superClass) {
-            this.superClass.genVtable(context);
+            this.superClass.genVtable(context)?;
             for (a in this.superClass.vtable)
                 vtable ~= a;
             vtable[0] = this.methods[0];
@@ -295,13 +294,13 @@ class Class
             for (i, a in vtable) {
                 if (!a.sameName) continue;
                 overridden = true;
-                method.loc.assert2s(method.override_ || isCtor,
-                    "Expected 'override' attribute for overriding method.");
+                method.loc.assert(method.override_ || isCtor,
+                    "Expected 'override' attribute for overriding method.")?;
                 if (!isCtor) { // ctor is always called static
                     // override
                     vtable[i].case {
-                        ClassMethod classMethod: validateOverride(classMethod, method);
-                        IntfMethod intfMethod: validateOverride(intfMethod, method);
+                        ClassMethod classMethod: validateOverride(classMethod, method)?;
+                        IntfMethod intfMethod: validateOverride(intfMethod, method)?;
                         (:baseOffset, size_t offs): {}
                     }
                 }
@@ -310,8 +309,8 @@ class Class
             }
             if (!overridden)
             {
-                method.loc.assert2s(!method.override_,
-                    "'override' specified but method does not override a parent method.");
+                method.loc.assert(!method.override_,
+                    "'override' specified but method does not override a parent method.")?;
                 // print("b: $(this.name): vtable[$(vtable.length)] = $(method.name)");
                 vtable ~= method;
             }
@@ -322,11 +321,11 @@ class Class
                 method.case {
                     ClassMethod method: {
                         if (method.abstract_)
-                            this.decl.loc.fail(
+                            return this.decl.loc.fail(
                                 "Abstract method '$(method.name)' not overridden in non-abstract class $(this.name)");
                     }
                     IntfMethod method: {
-                        this.decl.loc.fail(
+                        return this.decl.loc.fail(
                             "Interface method '$(method.name)' not overridden in non-abstract class $(this.name)");
                     }
                     (:baseOffset, size_t offs): { }
@@ -344,22 +343,22 @@ class Class
         this.vtableSymbol = this.mangledName ~ "_vtable";
     }
 
-    void validateOverride(FunctionDeclaration parent, ClassMethod child)
+    (void | fail Error) validateOverride(FunctionDeclaration parent, ClassMethod child)
     {
         child.loc.assert2s4(parent.params.length == child.params.length,
-            "Override expected ", ltoa(parent.params.length), " arguments, not ", ltoa(child.params.length));
+            "Override expected ", ltoa(parent.params.length), " arguments, not ", ltoa(child.params.length))?;
         // return type is covariant
         child.loc.assert2s4(child.ret.isStrictSubtypeOf(parent.ret),
             "child return type must be strict subtype of parent return type: ",
-            child.ret.repr, " and ", parent.ret.repr);
+            child.ret.repr, " and ", parent.ret.repr)?;
         for (i, parentParam in parent.params) {
             auto childParam = child.params[i];
-            child.loc.assert2s(parentParam.mutable == childParam.mutable,
-                "parameter mutability must match between base method and override");
+            child.loc.assert(parentParam.mutable == childParam.mutable,
+                "parameter mutability must match between base method and override")?;
             // parameters are contravariant
             child.loc.assert2s4(parentParam.type.isStrictSubtypeOf(childParam.type),
                 "child argument type must be strict supertype of parent argument type: ",
-                childParam.type.repr, " and ", parentParam.type.repr);
+                childParam.type.repr, " and ", parentParam.type.repr)?;
         }
     }
 
@@ -466,9 +465,15 @@ class Class
 
 class ClassType : Type
 {
+    string mangledName;
+
     Class class_;
 
-    this(this.class_, this.zeroInitializable) { }
+    this(this.class_, this.zeroInitializable) {
+        if (this.zeroInitializable)
+            this.mangledName = "nullable_" ~ this.class_.mangledName;
+        else this.mangledName = this.class_.mangledName;
+    }
 
     ClassType makeNullable() {
         if (this.zeroInitializable) return this;
@@ -521,9 +526,7 @@ class ClassType : Type
     }
 
     override string mangle() {
-        if (this.zeroInitializable)
-            return "nullable_" ~ this.class_.mangledName;
-        return this.class_.mangledName;
+        return this.mangledName;
     }
 
     override (nullable Expression | fail Error) truthy(Context context, Expression value, Loc loc)
@@ -623,7 +626,7 @@ class ClassType : Type
     override bool same(Type other) {
 
         if (auto otherClass = other.instanceOf(ClassType)) {
-            return otherClass.mangle == this.mangle;
+            return otherClass.mangledName == this.mangledName;
         }
         return false;
     }
@@ -663,7 +666,7 @@ class ClassType : Type
                 neat_runtime_refcount_inc(inc_name, &(cast(size_t*) this)[1]);
             };
             auto assign = context.compiler.assignStatement(target, source);
-            return context.compiler.sequence((retfail incref.compile(context)).statement, assign);
+            return context.compiler.sequence(incref.compile(context)?.statement, assign);
         }
         return context.compiler.stmtWithTemporaryExpr(source, &do_);
     }
@@ -1044,7 +1047,7 @@ class IntfType : Type
                 neat_runtime_refcount_inc(inc_name, &(cast(size_t*) object)[1]);
             };
             auto assign = context.compiler.assignStatement(target, source);
-            return context.compiler.sequence((retfail incref.compile(context)).statement, assign);
+            return context.compiler.sequence(incref.compile(context)?.statement, assign);
         }
         return context.compiler.stmtWithTemporaryExpr(source, &do_);
     }
@@ -1275,8 +1278,8 @@ class ASTClassDecl : ASTSymbol
         mut nullable Class superClass = null;
         mut Intf[] superIntfs = [];
         for (i, super_ in this.supers) {
-            nullable Symbol superObj <- context.namespace.lookup(super_, context, loc, null);
-            this.loc.assert2s(!!superObj, "super class/intf not found: $super_");
+            nullable Symbol superObj = context.namespace.lookup(super_, context, loc, null)?;
+            if (!superObj) return this.loc.fail("super class/intf not found: $super_");
             auto superClassTest = superObj.instanceOf(ClassType);
             if (i == 0 && superClassTest) {
                 // first super may be a class
@@ -1284,7 +1287,7 @@ class ASTClassDecl : ASTSymbol
             } else {
                 // all others must be intfs
                 auto superIntf = superObj.instanceOf(IntfType);
-                this.loc.assert2s(!!superIntf, "super interface is not an interface: $super_");
+                if (!superIntf) return this.loc.fail("super interface is not an interface: $super_");
                 superIntfs ~= superIntf.intf;
             }
         }
@@ -1305,7 +1308,7 @@ class ASTClassDecl : ASTSymbol
         (void | fail Error) walk(ASTClassEntry entry) {
             entry.case {
                 ASTClassDeclMember member: {
-                    auto type = beType(member.loc, retfail member.type.compile(currentContext));
+                    auto type = beType(member.loc, member.type.compile(currentContext)?)?;
                     memberFields ~= (member.name, member.protection, type);
                 }
                 ASTClassDeclMethod method: {
@@ -1316,13 +1319,13 @@ class ASTClassDecl : ASTSymbol
                  * because version blocks *don't* open a scope.
                  */
                 ASTDeclaration astDecl: {
-                    currentContext = retfail astDecl.compile(currentContext);
+                    currentContext = astDecl.compile(currentContext)?;
                 }
                 ASTClassVersionBlock ver: {
                     if ([any a == ver.name for a in context.platform.versions]) {
-                        [retfail walk(entry) for entry in ver.then];
+                        [walk(entry)? for entry in ver.then];
                     } else {
-                        [retfail walk(entry) for entry in ver.else_];
+                        [walk(entry)? for entry in ver.else_];
                     }
                 }
             }
@@ -1353,7 +1356,7 @@ class ASTClassDecl : ASTSymbol
                         findType = &findType_;
                         auto type = findType(target);
                         // TODO specific loc
-                        method.loc.assert2s2(!!type, "no such member: ", param.name);
+                        method.loc.assert2s2(!!type, "no such member: ", param.name)?;
                         methodParams[k] = Parameter(true, param.name, false, type.notNull);
                     }
                     ASTParameter param:
@@ -1361,7 +1364,7 @@ class ASTClassDecl : ASTSymbol
                             false,
                             param.name,
                             param.mutable,
-                            beType(param.loc, retfail param.type.compile(methodContext)));
+                            beType(param.loc, param.type.compile(methodContext)?)?);
                 }
             }
 
@@ -1374,13 +1377,13 @@ class ASTClassDecl : ASTSymbol
                 method.override_,
                 method.abstract_,
                 method.name,
-                beType(method.loc, retfail method.ret.compile(methodContext)),
+                beType(method.loc, method.ret.compile(methodContext)?)?,
                 methodParams,
                 method.body_,
                 this.macroState,
                 methodNamespace);
         }
-        target.genVtable(currentContext);
+        target.genVtable(currentContext)?;
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTClassDecl'!"); assert(false); }
@@ -1417,10 +1420,10 @@ class ASTIntfDecl : ASTSymbol
         if (this.superIntfs.length > 0)
         {
             for (superIntf in this.superIntfs) {
-                nullable Symbol superIntfSym <- context.namespace.lookup(superIntf, context, loc, null);
-                this.loc.assert2s(!!superIntfSym, "super interface not found: " ~ superIntf);
+                nullable Symbol superIntfSym = context.namespace.lookup(superIntf, context, loc, null)?;
+                this.loc.assert(!!superIntfSym, "super interface not found: " ~ superIntf)?;
                 auto superIntf = superIntfSym.instanceOf(IntfType);
-                this.loc.assert2s(!!superIntf, "super interface is not an interface");
+                this.loc.assert(!!superIntf, "super interface is not an interface")?;
                 superIntfs ~= superIntf.intf;
             }
         }
@@ -1445,17 +1448,17 @@ class ASTIntfDecl : ASTSymbol
                             false,
                             param.name,
                             param.mutable,
-                            beType(param.loc, retfail param.type.compile(currentContext)));
+                            beType(param.loc, param.type.compile(currentContext)?)?);
                     }
 
                     target.methods ~= new IntfMethod(
                         intfType,
                         method.name,
-                        beType(method.loc, retfail method.ret.compile(currentContext)),
+                        beType(method.loc, method.ret.compile(currentContext)?)?,
                         methodParams);
                 }
                 ASTDeclaration astDecl: {
-                    currentContext = retfail astDecl.compile(currentContext);
+                    currentContext = astDecl.compile(currentContext)?;
                 }
             }
         }
@@ -1471,44 +1474,42 @@ class ASTIntfDecl : ASTSymbol
     mut bool classAbstract = false;
     mut bool classFinal = false;
     parser.begin;
-    parser.strip;
+    parser.strip?;
     auto loc = parser.loc;
     while (true) {
-        if (acceptIdentifier(parser, "abstract")) {
+        if (acceptIdentifier(parser, "abstract")?) {
             classAbstract = true;
             continue;
         }
-        if (acceptIdentifier(parser, "final")) {
+        if (acceptIdentifier(parser, "final")?) {
             classFinal = true;
             continue;
         }
         break;
     }
-    if (!acceptIdentifier(parser, "class"))
+    if (!acceptIdentifier(parser, "class")?)
     {
         parser.revert;
         return null;
     }
     parser.commit;
 
-    string name = parseIdentifier(parser);
+    string name = parseIdentifier(parser)?;
     mut string[] supers;
-    if (parser.accept(":")) {
+    if (parser.accept(":")?) {
         while (true) {
-            auto super_ = parseIdentifier(parser);
-            parser.assert_(super_.length > 0, "expected super class identifier");
+            auto super_ = parseIdentifier(parser)?;
+            parser.assert_(super_.length > 0, "expected super class identifier")?;
             supers ~= super_;
-            if (parser.accept(",")) continue;
+            if (parser.accept(",")?) continue;
             break;
         }
     }
 
     mut ASTClassEntry[] members;
-    parser.expect("{");
-    while (!parser.accept("}")) {
-        // FIXME parseClassEntry(parser, lexicalContext).return(Error)?
-        auto e <- parseClassEntry(parser, lexicalContext);
-        members ~= e;
+    parser.expect("{")?;
+    while (!parser.accept("}")?) {
+        members ~= parseClassEntry(parser, lexicalContext)?;
     }
     return new ASTClassDecl(
         name, supers, classFinal, classAbstract,
@@ -1517,30 +1518,25 @@ class ASTIntfDecl : ASTSymbol
 
 (ASTClassEntry[] | fail Error) parseClassEntry(Parser parser, LexicalContext lexicalContext)
 {
-    if (parser.accept("version")) {
+    if (parser.accept("version")?) {
         mut ASTClassEntry[] then, else_;
-        parser.expect("(");
-        string versionStr = parser.parseIdentifier;
-        parser.expect(")");
-        if (parser.accept("{")) {
-            while (!parser.accept("}")) {
-                // FIXME
-                auto e <- parser.parseClassEntry(lexicalContext);
-                then ~= e;
+        parser.expect("(")?;
+        string versionStr = parser.parseIdentifier?;
+        parser.expect(")")?;
+        if (parser.accept("{")?) {
+            while (!parser.accept("}")?) {
+                then ~= parser.parseClassEntry(lexicalContext)?;
             }
         } else {
-            auto e <- parser.parseClassEntry(lexicalContext);
-            then ~= e;
+            then ~= parser.parseClassEntry(lexicalContext)?;
         }
-        if (parser.accept("else")) {
-            if (parser.accept("{")) {
-                while (!parser.accept("}")) {
-                    auto e <- parser.parseClassEntry(lexicalContext);
-                    else_ ~= e;
+        if (parser.accept("else")?) {
+            if (parser.accept("{")?) {
+                while (!parser.accept("}")?) {
+                    else_ ~= parser.parseClassEntry(lexicalContext)?;
                 }
             } else {
-                auto e <- parser.parseClassEntry(lexicalContext);
-                else_ ~= e;
+                else_ ~= parser.parseClassEntry(lexicalContext)?;
             }
         }
         // FIXME explicitly type hinted literal
@@ -1548,7 +1544,7 @@ class ASTIntfDecl : ASTSymbol
         return [result];
     }
 
-    parser.strip;
+    parser.strip?;
 
     auto loc = parser.loc;
 
@@ -1558,56 +1554,55 @@ class ASTIntfDecl : ASTSymbol
     mut bool abstract_ = false;
     mut Protection protection = Protection.public_;
     while (true) {
-        if (acceptIdentifier(parser, "override")) {
+        if (acceptIdentifier(parser, "override")?) {
             override_ = true;
             continue;
         }
-        if (acceptIdentifier(parser, "abstract")) {
+        if (acceptIdentifier(parser, "abstract")?) {
             abstract_ = true;
             continue;
         }
         // FIXME only allow one
         // FIXME parseProtection?
-        if (acceptIdentifier(parser, "public")) {
+        if (acceptIdentifier(parser, "public")?) {
             protection = Protection.public_;
             continue;
         }
-        if (acceptIdentifier(parser, "private")) {
+        if (acceptIdentifier(parser, "private")?) {
             protection = Protection.private_;
             continue;
         }
-        if (acceptIdentifier(parser, "protected")) {
+        if (acceptIdentifier(parser, "protected")?) {
             protection = Protection.protected_;
             continue;
         }
         break;
     }
 
-    if (auto decl = retfail lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
+    if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)?) {
         // TODO return [ASTClassEntry: decl];
         ASTClassEntry entry = decl;
         return [entry];
     }
 
-    if (parser.accept("this"))
+    if (parser.accept("this")?)
     {
-        parser.assert_(!override_, "cannot override constructor");
+        parser.assert_(!override_, "cannot override constructor")?;
         retType = new ASTBasicType("void", loc);
         memberName = "__ctor";
     }
     else
     {
-        // FIXME
-        auto t <- lexicalContext.compiler.parseType(parser, lexicalContext);
-        retType = t;
-        parser.assert_(!!retType, "expected member type");
-        memberName = parseIdentifier(parser);
-        parser.assert_(memberName.length > 0, "expected member name");
+        retType = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+        parser.assert_(!!retType, "expected member type")?;
+        string ident = parseIdentifier(parser)?;
+        memberName = ident;
+        parser.assert_(memberName.length > 0, "expected member name")?;
     }
-    if (parser.accept("(")) // method
+    if (parser.accept("(")?) // method
     {
-        auto params <- parseParamList(parser, lexicalContext);
-        ASTStatement stmt <- lexicalContext.compiler.parseStatement(parser, lexicalContext);
+        auto params = parseParamList(parser, lexicalContext)?;
+        ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
         ASTClassEntry entry = ASTClassDeclMethod(
             loc, protection, override_, abstract_, memberName, retType.notNull, params, stmt);
         return [entry];
@@ -1615,18 +1610,19 @@ class ASTIntfDecl : ASTSymbol
     else
     {
         mut ASTClassEntry[] members;
-        void addMember() {
-            parser.assert_(!override_, "cannot override class member");
-            parser.assert_(!abstract_, "cannot declare class member abstract");
+        (void | fail Error) addMember() {
+            parser.assert_(!override_, "cannot override class member")?;
+            parser.assert_(!abstract_, "cannot declare class member abstract")?;
             members ~= ASTClassDeclMember(protection, memberName, retType.notNull, loc);
         }
-        addMember;
-        while (!parser.accept(";")) {
-            parser.expect(",");
-            if (parser.accept(";")) break;
-            memberName = parseIdentifier(parser);
-            parser.assert_(memberName.length > 0, "expected member name");
-            addMember;
+        addMember?;
+        while (!parser.accept(";")?) {
+            parser.expect(",")?;
+            if (parser.accept(";")?) break;
+            string ident = parser.parseIdentifier?;
+            memberName = ident;
+            parser.assert_(memberName.length > 0, "expected member name")?;
+            addMember?;
         }
         return members;
     }
@@ -1635,49 +1631,49 @@ class ASTIntfDecl : ASTSymbol
 (nullable ASTIntfDecl | fail Error) parseIntfDecl(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
-    parser.strip;
+    parser.strip?;
     auto loc = parser.loc;
-    if (!acceptIdentifier(parser, "interface"))
+    if (!acceptIdentifier(parser, "interface")?)
     {
         parser.revert;
         return null;
     }
     parser.commit;
 
-    string name = parseIdentifier(parser);
+    string name = parseIdentifier(parser)?;
     mut string[] superIntfs;
-    if (parser.accept(":")) {
+    if (parser.accept(":")?) {
         while (true) {
-            string superIntf = parseIdentifier(parser);
-            parser.assert_(superIntf.length > 0, "expected super identifier identifier");
+            string superIntf = parseIdentifier(parser)?;
+            parser.assert_(superIntf.length > 0, "expected super identifier identifier")?;
             superIntfs ~= superIntf;
-            if (parser.accept(",")) continue;
+            if (parser.accept(",")?) continue;
             break;
         }
     }
     mut (ASTIntfDeclMethod | ASTDeclaration)[] members;
-    parser.expect("{");
-    while (!parser.accept("}"))
+    parser.expect("{")?;
+    while (!parser.accept("}")?)
     {
-        parser.strip;
+        parser.strip?;
 
         auto loc = parser.loc;
 
-        if (auto decl = retfail lexicalContext.compiler.parseDeclaration(parser, lexicalContext)) {
+        if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)?) {
             members ~= decl;
             continue;
         }
 
-        nullable ASTSymbol retType <- lexicalContext.compiler.parseType(parser, lexicalContext);
-        parser.assert_(!!retType, "expected member type");
-        string memberName = parseIdentifier(parser);
-        parser.assert_(memberName.length > 0, "expected member name");
-        parser.expect("(");
-        auto params <- parseParamList(parser, lexicalContext);
-        parser.expect(";");
-        parser.loc.assert2s(
+        nullable ASTSymbol retType = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+        parser.assert_(!!retType, "expected member type")?;
+        string memberName = parseIdentifier(parser)?;
+        parser.assert_(memberName.length > 0, "expected member name")?;
+        parser.expect("(")?;
+        auto params = parseParamList(parser, lexicalContext)?;
+        parser.expect(";")?;
+        parser.loc.assert(
             [all a.case(ASTParameter: true, ASTThisAssignment: false) for a in params],
-            "no 'this.' in interface method");
+            "no 'this.' in interface method")?;
         // FIXME bottom
         ASTParameter fail() { assert(false); }
         auto astParameters = [a.case(ASTParameter p: p, ASTThisAssignment: fail) for a in params];
@@ -1795,17 +1791,17 @@ class ASTInstanceOf : ASTSymbol
 
     override (Symbol | fail Error) compile(Context context)
     {
-        Expression base = retfail beExpression3(context, retfail this.base.compile(context), loc);
+        Expression base = this.base.compile(context)?.beExpressionImplCall(context, loc)?;
         auto type = base.type;
         auto baseinfo = base.info;
-        loc.assert2s(
+        loc.assert(
             type.instanceOf(ClassType) || type.instanceOf(IntfType),
-            "Base of instanceOf must be class or interface.");
+            "Base of instanceOf must be class or interface.")?;
         (nullable Expression | fail Error) do_(Expression base) {
-            auto targetSym = retfail target.compile(context);
+            auto targetSym = target.compile(context)?;
             nullable ClassType targetClass = targetSym.instanceOf(ClassType);
             nullable IntfType targetIntf = targetSym.instanceOf(IntfType);
-            loc.assert2s(targetClass || targetIntf, "Target of instanceOf must be class or interface.");
+            loc.assert(targetClass || targetIntf, "Target of instanceOf must be class or interface.")?;
             if (targetClass) {
                 // might be in a template instantiated with targetClass!
                 auto contextModule = findParent!ModuleBase(context.namespace);
@@ -1840,20 +1836,20 @@ class ASTInstanceOf : ASTSymbol
                     auto fn = (*cast($astTarget function(void*, void*, bool)**) object)[0];
                     fn(object, $astClassInfo, $astFreeOnNull);
                 });
-                if (auto ret = instanceOfExpr.compile(context).retfail.beExpression)
+                if (auto ret = instanceOfExpr.compile(context)?.beExpression)
                     return new OverrideLifetimeExpr(ret, baseinfo);
                 return null;
             }
 
             // must exist.
-            Symbol instanceOf = (retfail context.compiler.accessMember(
-                    context, plainBase, "__instanceof", loc, false))
+            Symbol instanceOf = context.compiler.accessMember(
+                    context, plainBase, "__instanceof", loc, false)?
                 .notNull;
             auto astInstanceOf = new ASTSymbolHelper(instanceOf);
             auto astArgs = [ASTArgument(astClassInfo, ""), ASTArgument(astFreeOnNull, "")];
             auto ret = new PointerCast(target, context.compiler.call(
-                    context, astInstanceOf, astArgs, loc, false)
-                .retfail.notNull);
+                    context, astInstanceOf, astArgs, loc, false)?
+                .notNull);
 
             // reuse ownership accounting of source
             return new OverrideLifetimeExpr(ret, baseinfo);
@@ -1869,14 +1865,14 @@ class ASTInstanceOf : ASTSymbol
 (nullable ASTSymbol | fail Error) parseInstanceOf(Parser parser, LexicalContext lexicalContext, ASTSymbol left)
 {
     parser.begin;
-    if (!(parser.accept(".") && parser.accept("instanceOf")))
+    if (!(parser.accept(".")? && parser.accept("instanceOf")?))
     {
         parser.revert;
         return null;
     }
-    parser.expect("(");
-    nullable ASTSymbol type <- lexicalContext.compiler.parseType(parser, lexicalContext);
-    parser.expect(")");
+    parser.expect("(")?;
+    nullable ASTSymbol type = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+    parser.expect(")")?;
     parser.commit;
     return new ASTInstanceOf(left, type.notNull, parser.loc);
 }
@@ -1893,41 +1889,41 @@ class ASTNewExpression : ASTSymbol
 
     override (Symbol | fail Error) compile(Context context)
     {
-        Type type = beType(this.loc, retfail this.type.compile(context));
+        Type type = beType(this.loc, this.type.compile(context)?)?;
 
         if (auto classType = type.instanceOf(ClassType)) {
             Expression classptr = new NewClassExpression(classType);
 
-            this.loc.assert2s2(!!classType, "expected new <class>, not %s", type.repr);
+            this.loc.assert2s2(!!classType, "expected new <class>, not %s", type.repr)?;
 
             (nullable Expression | fail Error) do_(Expression classptr) {
                 // don't clean up classptr after constructor call, we're continuing its lifetime
-                nullable Symbol ctor = retfail context.compiler.accessMember(
+                nullable Symbol ctor = context.compiler.accessMember(
                     context,
                     new OverrideLifetimeExpr(classptr, ExprInfo(false, Ownership.owned)),
-                    "__ctor", this.loc, false);
+                    "__ctor", this.loc, false)?;
                 assert(!!ctor);
                 auto astCtor = new ASTSymbolHelper(ctor.notNull);
                 auto ctorCall = context.compiler.exprStatement(
-                        context.compiler.call(context, astCtor, this.astArgs, this.loc, false)
-                    .retfail.notNull);
+                        context.compiler.call(context, astCtor, this.astArgs, this.loc, false)?
+                    .notNull);
 
                 return context.compiler.statementExpression(ctorCall, classptr);
             }
-             return (retfail context.compiler.exprWithTemporaryExpr(classptr, &do_)).notNull;
+             return context.compiler.exprWithTemporaryExpr(classptr, &do_)?.notNull;
         }
         if (auto arrayType = type.instanceOf(Array)) {
-            this.loc.assert2s(this.astArgs.length == 1, "expected one argument to loc");
+            this.loc.assert(this.astArgs.length == 1, "expected one argument to loc")?;
 
             Type sizeT = context.nativeWordType;
             auto length = expectImplicitConvertTo(
                 context,
-                retfail beExpression3(context, retfail this.astArgs[0].sym.compile(context), this.loc),
+                this.astArgs[0].sym.compile(context)?.beExpressionImplCall(context, this.loc)?,
                 sizeT,
-                this.loc);
+                this.loc)?;
             return new ArrayAllocation(arrayType.elementType, length);
         }
-        this.loc.assert2s2(false, "don't know how to allocate ", type.repr);
+        this.loc.assert2s2(false, "don't know how to allocate ", type.repr)?;
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -1957,11 +1953,10 @@ class Super : Symbol
                 (:baseOffset, size_t): false);
         }
         auto methodOffset = [first i for i, a in superClass.vtable where matches(a) else -1];
-        loc.assert2s3(methodOffset != -1, "Method '", name, "' not found in super class!");
+        loc.assert2s3(methodOffset != -1, "Method '", name, "' not found in super class!")?;
         // TODO lookup() that handles the stackframe thing
         auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
-        auto baseExpr = context.namespace.lookup("this", context, loc, stackframe)
-            .retfail
+        auto baseExpr = context.namespace.lookup("this", context, loc, stackframe)?
             .instanceOf(Expression)
             .notNull;
         return new ClassMethodSymbol(superClass, baseExpr, methodOffset, staticLookup=true);
@@ -1979,8 +1974,8 @@ class ASTSuper : ASTSymbol
 
     override (Symbol | fail Error) compile(Context context) {
         auto classNs = findParent!ClassNamespace(context.namespace);
-        loc.assert2s(!!classNs, "'super' may only appear in class");
-        loc.assert2s(!!classNs.class_.superClass, "'super' may only appear in class that has parent class");
+        loc.assert(!!classNs, "'super' may only appear in class")?;
+        loc.assert(!!classNs.class_.superClass, "'super' may only appear in class that has parent class")?;
         return new Super(classNs.class_);
     }
 
@@ -2005,7 +2000,7 @@ class ASTNullable : ASTSymbol
     this(this.loc, this.next, this.nullify) { }
 
     override (Symbol | fail Error) compile(Context context) {
-        auto next = beType(this.loc, retfail this.next.compile(context));
+        auto next = beType(this.loc, this.next.compile(context)?)?;
         if (nullify) {
             if (auto classType = next.instanceOf(ClassType))
                 return classType.makeNullable;
@@ -2017,7 +2012,7 @@ class ASTNullable : ASTSymbol
             else if (auto intfType = next.instanceOf(IntfType))
                 return intfType.makeNotNullable;
         }
-        context.assert2(false, this.loc, "Cannot mark type as (non)nullable: $(next.repr)");
+        context.assert2(false, this.loc, "Cannot mark type as (non)nullable: $(next.repr)")?;
     }
 
     override ASTSymbol quote(Quoter quoter) {

@@ -1,7 +1,6 @@
 module neat.vectors;
 
 macro import neat.macros.listcomprehension;
-macro import neat.macros.retfail;
 
 import backend.base;
 import helpers;
@@ -22,7 +21,8 @@ class ASTVectorType : ASTSymbol
 
     override (Type | fail Error) compile(Context context)
     {
-        return new VectorType(beType(this.loc, retfail this.elementType.compile(context)), count);
+        return new VectorType(
+            beType(this.loc, this.elementType.compile(context)?)?, count);
     }
 }
 
@@ -167,9 +167,9 @@ class VectorType : Type
         auto lhsVectorType = lhs.type.instanceOf(VectorType);
         auto rhsVectorType = rhs.type.instanceOf(VectorType);
         if (lhsVectorType && rhsVectorType) {
-            loc.assert2s(lhsVectorType.length == rhsVectorType.length, "vectors have different size");
+            loc.assert(lhsVectorType.length == rhsVectorType.length, "vectors have different size")?;
         }
-        loc.assert2s(!!lhsVectorType, "lhs must be vector (TODO)");
+        loc.assert(!!lhsVectorType, "lhs must be vector (TODO)")?;
         if (op == "==" || op == ">" || op == "<" || op == ">=" || op == "<=") {
             Expression getRight(int index) {
                 if (rhsVectorType) return new VectorMember(rhs, index);
@@ -186,7 +186,7 @@ class VectorType : Type
             for (i in 0 .. lhsVectorType.length) {
                 auto leftMember = new VectorMember(lhs, cast(int) i);
                 auto rightMember = getRightConverted(leftMember.type, cast(int) i);
-                auto test = retfail context.compiler.binaryOp(op, context, leftMember, rightMember, loc);
+                auto test = context.compiler.binaryOp(op, context, leftMember, rightMember, loc)?;
                 if (auto left = andList) andList = new BoolAnd(left, test);
                 else andList = test;
             }
@@ -209,7 +209,7 @@ class VectorType : Type
                 for (i in 0 .. lhsVectorType.length) {
                     auto leftMember = new VectorMember(lhs, cast(int) i);
                     auto rightMember = getRightConverted(leftMember.type, cast(int) i);
-                    members ~= retfail context.compiler.binaryOp(op, context, leftMember, rightMember, loc);
+                    members ~= context.compiler.binaryOp(op, context, leftMember, rightMember, loc)?;
                 }
                 return mkVector(context, loc, members);
             }
@@ -220,11 +220,12 @@ class VectorType : Type
 
     override (nullable Expression | fail Error) call(Context context, Loc loc, ASTArgument[] args)
     {
-        loc.assert2s(args.length == this.length || args.length == 1, "invalid number of args for vector constructor");
+        loc.assert(
+            args.length == this.length || args.length == 1, "invalid number of args for vector constructor")?;
 
         // TODO arg name validation
         auto args = [
-            retfail beExpression3(context, retfail arg.sym.compile(context), loc)
+            arg.sym.compile(context)?.beExpressionImplCall(context, loc)?
             for arg in args];
 
         // TODO a better way to generically construct types backed by BackendStructType
@@ -233,7 +234,7 @@ class VectorType : Type
             mut Statement initialize = new UninitializeTemporaryStatement(result);
             (nullable Expression | fail Error) do1(Expression arg) {
                 (Expression | fail Error) do2(Expression arg) {
-                    auto arg = expectImplicitConvertTo(context, arg, elementType, loc);
+                    auto arg = expectImplicitConvertTo(context, arg, elementType, loc)?;
                     for (i in 0 .. this.length) {
                         auto field = new VectorMemberReference(result, cast(int) i);
                         auto stmt = context.compiler.assignStatement(field, arg);
@@ -255,9 +256,9 @@ class VectorType : Type
         auto result = new PairedTemporary(this, Ownership.gifted);
         mut Statement initialize = new UninitializeTemporaryStatement(result);
         for (i in 0 .. this.length) {
-            auto arg = expectImplicitConvertTo(context, args[i], elementType, loc);
+            auto arg = expectImplicitConvertTo(context, args[i], elementType, loc)?;
             auto field = new VectorMemberReference(result, cast(int) i);
-            auto stmt = retfail context.compiler.move(context, field, arg);
+            auto stmt = context.compiler.move(context, field, arg)?;
 
             initialize = context.compiler.sequence(initialize, stmt);
         }

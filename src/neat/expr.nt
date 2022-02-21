@@ -2,7 +2,6 @@ module neat.expr;
 
 macro import neat.macros.hash;
 macro import neat.macros.once;
-macro import neat.macros.retfail;
 
 import backend.base;
 import helpers;
@@ -13,11 +12,11 @@ import neat.parser;
 import neat.parser_base;
 import neat.types;
 
-Expression expectImplicitConvertTo(Context context, Expression from, Type to, Loc loc)
+(Expression | fail Error) expectImplicitConvertTo(Context context, Expression from, Type to, Loc loc)
 {
-    loc.assert2s(!!to, "no implconv target type");
+    loc.assert(!!to, "no implconv target type")?;
     if (auto result = implicitConvertTo(context, from, to)) return result;
-    context.assert2(false, loc, "Cannot convert to $(to.repr): $(from.type.repr)");
+    context.assert2(false, loc, "Cannot convert to $(to.repr): $(from.type.repr)")?;
 }
 
 // TODO implicitConvertTo should only require Type - ie. return a Expression function(Expression).
@@ -111,8 +110,8 @@ class BinaryOp : Expression
         string op = this.op;
         bool isFloating(Type type) { return type.instanceOf(Float) || type.instanceOf(Double); }
         if (op == "<<" || op == ">>" || op == ">>>" || op == "&" || op == "|" || op == "^") {
-            loc.assert2s(!left.type.isFloating, "cannot use float for bitop");
-            loc.assert2s(!right.type.isFloating, "cannot use float for bitop");
+            loc.hardCheck(!left.type.isFloating, "cannot use float for bitop");
+            loc.hardCheck(!right.type.isFloating, "cannot use float for bitop");
             if (right.type.instanceOf(Long)) this.type = right.type;
             else this.type = left.type;
         } else  if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
@@ -126,7 +125,7 @@ class BinaryOp : Expression
         else if (op == "==" || op == "!=" || op == ">=" || op == "<=" || op == ">" || op == "<" || op == "is")
             this.type = once new Boolean;
         else {
-            this.loc.fail("unknown op '" ~ op ~ "'");
+            loc.hardCheck(false, "unknown op '" ~ op ~ "'");
         }
     }
 
@@ -152,23 +151,28 @@ class BinaryOp : Expression
         }
         else if (this.op != "==") // you can == pointers
         {
-            this.loc.assert2s3(
-                ltype.instanceOf(Integer) || ltype.instanceOf(Long) ||
+            if (!(ltype.instanceOf(Integer) || ltype.instanceOf(Long) ||
                 ltype.instanceOf(Character) || ltype.instanceOf(UByte) ||
                 ltype.instanceOf(Float) || ltype.instanceOf(Double) ||
-                ltype.instanceOf(Boolean),
-                this.op, " (l) expected bool/int/float/double/long/char, not ", ltype.repr);
+                ltype.instanceOf(Boolean)))
+            {
+                this.loc.hardCheck(
+                    false, "$(this.op) (l) expected bool/int/float/double/long/char, not $(ltype.repr)");
+            }
         } else {
-            this.loc.assert2s3(
-                ltype.instanceOf(Integer) || ltype.instanceOf(Long) ||
+            if (!(ltype.instanceOf(Integer) || ltype.instanceOf(Long) ||
                 ltype.instanceOf(Character) || ltype.instanceOf(UByte) ||
                 ltype.instanceOf(Float) || ltype.instanceOf(Double) ||
                 ltype.instanceOf(Boolean) ||
-                ltype.instanceOf(Pointer) || ltype.instanceOf(FunctionPointer),
-                this.op, " (l) expected bool/int/float/double/long/char/pointer/fp, not ", ltype.repr);
+                ltype.instanceOf(Pointer) || ltype.instanceOf(FunctionPointer)))
+            {
+                this.loc.hardCheck(
+                    false, "$(this.op) (l) expected bool/int/float/double/long/char/pointer/fp, not $(ltype.repr)");
+            }
         }
-        this.loc.assert2s5(!!ltype.same(rtype),
-            this.op, ": types don't match, ", ltype.repr, ", ", rtype.repr);
+        if (!ltype.same(rtype)) {
+            this.loc.hardCheck(false, "$(this.op): types don't match, $(ltype.repr), $(rtype.repr)");
+        }
         int leftreg = left.emit(output);
         int rightreg = right.emit(output);
         return output.fun.binop(op, ltype.emit(output.platform), leftreg, rightreg);
@@ -592,8 +596,8 @@ class Call : Expression
 
 (Expression | fail Error) truthy(Context context, Expression value, Loc loc) {
     Type type = value.type;
-    loc.assert2s(!!type, "internal error");
-    auto truthyExpr <- type.truthy(context, value, loc);
+    loc.assert(!!type, "internal error")?;
+    auto truthyExpr = type.truthy(context, value, loc)?;
     if (auto truthyExpr = truthyExpr) return truthyExpr;
 
     if (type.instanceOf(Boolean))
@@ -606,12 +610,14 @@ class Call : Expression
 
         return new BinaryOp("!=", new CastExpr(sizeT, value), once new IntLiteral(0), loc);
     }
-    loc.assert2s(type.instanceOf(Integer) || type.instanceOf(Long), "integer or bool expected, not $(type.repr)");
+    if (!type.instanceOf(Integer) && !type.instanceOf(Long)) {
+        return loc.fail("integer or bool expected, not $(type.repr)");
+    }
     return new BinaryOp("!=", value, once new IntLiteral(0), loc);
 }
 
 (bool | :unknown | fail Error) staticTruthy(Context context, ASTSymbol value) {
-    auto test = retfail value.compile(context);
+    auto test = value.compile(context)?;
     if (auto boolLit = test.instanceOf(BoolLiteral)) {
         return boolLit.value;
     }
@@ -632,17 +638,17 @@ class ASTBinaryOp : ASTSymbol
 
     override (Expression | fail Error) compile(Context context)
     {
-        mut Expression left <- beExpression3(context, retfail this.left.compile(context), this.loc);
-        mut Expression right <- beExpression3(context, retfail this.right.compile(context), this.loc);
+        mut Expression left = this.left.compile(context)?.beExpressionImplCall(context, this.loc)?;
+        mut Expression right = this.right.compile(context)?.beExpressionImplCall(context, this.loc)?;
 
-        if (auto opOverload = retfail left.type.binaryOp(context, this.op, left, right, this.loc))
+        if (auto opOverload = left.type.binaryOp(context, this.op, left, right, this.loc)?)
             return opOverload;
 
         if (this.op == "~")
         {
-            loc.assert2s2(
-                !!left.type.instanceOf(Array),
-                "Left hand side of concatenation isn't array, but ", left.type.repr);
+            if (!left.type.instanceOf(Array)) {
+                return loc.fail("Left hand side of concatenation isn't array, but $(left.type.repr)");
+            }
             if (auto converted = implicitConvertTo(context, right, left.type.instanceOf(Array).elementType)) {
                 return context.compiler.binaryOp("~", context, left, converted, this.loc);
             }
@@ -651,12 +657,12 @@ class ASTBinaryOp : ASTSymbol
         }
         if (this.op == "&&")
             return new BoolAnd(
-                retfail truthy(context, left, this.loc),
-                retfail truthy(context, right, this.loc));
+                truthy(context, left, this.loc)?,
+                truthy(context, right, this.loc)?);
         if (this.op == "||")
             return new BoolOr(
-                retfail truthy(context, left, this.loc),
-                retfail truthy(context, right, this.loc));
+                truthy(context, left, this.loc)?,
+                truthy(context, right, this.loc)?);
 
         // try to merge types
         if (auto converted = implicitConvertTo(context, right, left.type)) {
@@ -998,10 +1004,10 @@ class ASTCastExpr : ASTSymbol
 
     override (Expression | fail Error) compile(Context context)
     {
-        auto target = beType(this.loc, retfail this.target.compile(context));
-        auto value <- beExpression3(context, retfail this.value.compile(context), loc);
+        auto target = beType(this.loc, this.target.compile(context)?)?;
+        auto value = this.value.compile(context)?.beExpressionImplCall(context, this.loc)?;
 
-        this.loc.assert2s(!value.type.instanceOf(Array), "what are you doing");
+        this.loc.assert(!value.type.instanceOf(Array), "what are you doing")?;
 
         return castTo(context, target, value);
     }
@@ -1023,8 +1029,8 @@ class ASTNegation : ASTSymbol
 
     override (Expression | fail Error) compile(Context context)
     {
-        Expression isTrue <- truthy(
-            context, retfail beExpression3(context, retfail this.next.compile(context), this.loc), this.loc);
+        Expression isTrue = truthy(
+            context, this.next.compile(context)?.beExpressionImplCall(context, this.loc)?, this.loc)?;
 
         return new BinaryOp("==", isTrue, new BoolLiteral(false), this.loc);
     }
@@ -1081,7 +1087,7 @@ class ASTSizeOf : ASTSymbol
 
     override (Symbol | fail Error) compile(Context context)
     {
-        auto target = retfail target.compile(context);
+        auto target = target.compile(context)?;
         if (auto expr = target.instanceOf(Expression))
             return new SizeOf(expr.type);
         if (auto type = target.instanceOf(Type))

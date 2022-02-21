@@ -1,7 +1,6 @@
 module neat.macros.assert;
 
 macro import neat.macros.quasiquoting;
-macro import neat.macros.retfail;
 
 import package(compiler).helpers;
 import package(compiler).neat.array;
@@ -29,7 +28,7 @@ class ASTAssertion : ASTStatement
         return (context.compiler.$expr ({
             import package(compiler).neat.runtime : itoa;
             identName ~ " = " ~ itoa(cast(int) $sym);
-        })).compile(context).retfail.instanceOf(Expression).notNull;
+        })).compile(context)?.instanceOf(Expression).notNull;
     }
 
     (nullable Expression | fail Error) binopTest(mut Context context, ASTBinaryOp binop) {
@@ -41,15 +40,15 @@ class ASTAssertion : ASTStatement
         set("leftStr", context.compiler.stringLiteral(leftStr));
         set("rightStr", context.compiler.stringLiteral(rightStr));
         auto
-            left = binop.left.compile(context).retfail.instanceOf(Expression),
-            right = binop.right.compile(context).retfail.instanceOf(Expression);
+            left = binop.left.compile(context)?.instanceOf(Expression),
+            right = binop.right.compile(context)?.instanceOf(Expression);
         if (!left || !right) return null;
         set("left", left);
         set("right", right);
 
         if (binop.op == "&&") {
-            auto leftRecurse <- dispatch(context, binop.left);
-            auto rightRecurse <- dispatch(context, binop.right);
+            auto leftRecurse = dispatch(context, binop.left)?;
+            auto rightRecurse = dispatch(context, binop.right)?;
             if (!leftRecurse || !rightRecurse) return null;
             set("leftRecurse", leftRecurse);
             set("rightRecurse", rightRecurse);
@@ -59,11 +58,11 @@ class ASTAssertion : ASTStatement
                 if (!left) ret = leftStr ~ " failed, because " ~ leftRecurse;
                 else ret = rightStr ~ " failed, because " ~ rightRecurse;
                 ret;
-            })).compile(context).retfail.instanceOf(Expression);
+            })).compile(context)?.instanceOf(Expression);
         }
         if (binop.op == "||") {
-            auto leftRecurse <- dispatch(context, binop.left);
-            auto rightRecurse <- dispatch(context, binop.right);
+            auto leftRecurse = dispatch(context, binop.left)?;
+            auto rightRecurse = dispatch(context, binop.right)?;
             if (!leftRecurse || !rightRecurse) return null;
             set("leftRecurse", leftRecurse);
             set("rightRecurse", rightRecurse);
@@ -75,7 +74,7 @@ class ASTAssertion : ASTStatement
                 else ret = leftStr ~ " failed (because " ~ leftRecurse ~ ") and "
                     ~ rightStr ~ " failed (because " ~ rightRecurse ~ ")";
                 ret;
-            })).compile(context).retfail.instanceOf(Expression);
+            })).compile(context)?.instanceOf(Expression);
         }
         bool isString(Type type) {
             if (auto arr = type.instanceOf(Array))
@@ -91,32 +90,32 @@ class ASTAssertion : ASTStatement
                 return (context.compiler.$expr ({
                     import package(compiler).neat.runtime : itoa;
                     leftStr ~ " = " ~ itoa(cast(int) left);
-                })).compile(context).retfail.instanceOf(Expression);
+                })).compile(context)?.instanceOf(Expression);
             }
             return (context.compiler.$expr ({
                 import package(compiler).neat.runtime : itoa;
                 leftStr ~ " = " ~ itoa(cast(int) left)
                 ~ " and " ~ rightStr ~ " = " ~ itoa(cast(int) right);
-            })).compile(context).retfail.instanceOf(Expression);
+            })).compile(context)?.instanceOf(Expression);
         }
         if (left.type.instanceOf(Float) && right.type.instanceOf(Float)) {
             return (context.compiler.$expr ({
                 import package(compiler).neat.runtime : ftoa;
                 leftStr ~ " = " ~ ftoa(left)
                 ~ " and " ~ rightStr ~ " = " ~ ftoa(right);
-            })).compile(context).retfail.instanceOf(Expression);
+            })).compile(context)?.instanceOf(Expression);
         }
         if (left.type.isString && right.type.isString) {
             if (right.instanceOf(StringLiteral)) {
                 return (
                     context.compiler.$expr leftStr ~ " = \"" ~ left ~ "\""
-                ).compile(context).retfail.instanceOf(Expression);
+                ).compile(context)?.instanceOf(Expression);
             }
             return (
                 context.compiler.$expr
                     leftStr ~ " = \"" ~ left ~ "\""
                     ~ " and " ~ rightStr ~ " = \"" ~ right ~ "\""
-            ).compile(context).retfail.instanceOf(Expression);
+            ).compile(context)?.instanceOf(Expression);
         }
         return null;
     }
@@ -128,7 +127,7 @@ class ASTAssertion : ASTStatement
                 context.compiler.exprAlias(context.namespace, name, value));
         }
 
-        auto nextRecurse <- dispatch(context, astNegation.next);
+        auto nextRecurse = dispatch(context, astNegation.next)?;
         if (!nextRecurse) return null;
         set("nextRecurse", nextRecurse);
         string nextStr = repr(astNegation.next);
@@ -136,7 +135,7 @@ class ASTAssertion : ASTStatement
 
         return (
             context.compiler.$expr nextRecurse ~ " was true"
-        ).compile(context).retfail.instanceOf(Expression);
+        ).compile(context)?.instanceOf(Expression);
     }
 
     (nullable Expression | fail Error) dispatch(Context context, ASTSymbol sym) {
@@ -168,7 +167,7 @@ class ASTAssertion : ASTStatement
         context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "assert", assertFun));
         string failedMsg = loc.location() ~ ": assertion failed: " ~ exprText ~ ", because ";
-        auto ifFailed <- dispatch(context, test);
+        auto ifFailed = dispatch(context, test)?;
         if (auto ifFailed = ifFailed) {
             context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "ifFailed", ifFailed));
@@ -180,33 +179,37 @@ class ASTAssertion : ASTStatement
                     assert(false);
                 }
             };
-            auto assertTestStmt <- assertTest.compile(context);
+            auto assertTestStmt = assertTest.compile(context)?;
             return StatementCompileResult(assertTestStmt.statement, context);
         }
 
         // fallback: old impl
         // TODO quasiquote this
-        auto test <- this.test.compile(context);
-        auto expr = beExpression2(test, this.loc);
-        auto texpr <- context.compiler.truthy(context, expr, this.loc);
+        auto test = this.test.compile(context)?;
+        version (generation99) {
+            auto expr = beExpression2(test, this.loc)?;
+        } else {
+            auto expr = beExpression2(test, this.loc);
+        }
+        auto texpr = context.compiler.truthy(context, expr, this.loc)?;
         // FIXME
-        auto nexpr <- context.compiler.binaryOp(
+        auto nexpr = context.compiler.binaryOp(
             // "==", context, texpr, new BoolLiteral(false), this.loc);
             "==", context,
             texpr,
-            (context.compiler.$expr false).compile(context).retfail.beExpression,
-            this.loc);
+            (context.compiler.$expr false).compile(context)?.beExpression,
+            this.loc)?;
 
-        Expression failStr <- context.compiler.binaryOp(
+        Expression failStr = context.compiler.binaryOp(
                 "~", context,
                 context.compiler.stringLiteral(this.loc.location()),
                 context.compiler.stringLiteral(": '" ~ this.exprText ~ "' was false"),
-                this.loc);
+                this.loc)?;
         Expression false_ = context.compiler.intLiteral(0);
         Statement printSt = context.compiler.exprStatement(
-            context.compiler.plainCall(context, printFun, [failStr], this.loc, false).retfail.notNull);
+            context.compiler.plainCall(context, printFun, [failStr], this.loc, false)?.notNull);
         Statement failSt = context.compiler.exprStatement(
-            context.compiler.plainCall(context, assertFun, [false_], this.loc, false).retfail.notNull);
+            context.compiler.plainCall(context, assertFun, [false_], this.loc, false)?.notNull);
         // `if (!$expression) { print($assertLocStr ~ ": '" ~ $exprText ~ "' was false."); assert(false); }`
         return StatementCompileResult(
             context.compiler.ifStatement(
@@ -261,25 +264,43 @@ class ParseAssert : Macro
         parser.begin();
         parser.strip();
         auto assertLoc = parser.loc();
-        if (!parser.accept("assert"))
-        {
-            parser.revert();
-            return null;
-        }
-        if (!parser.accept("("))
-        {
-            parser.revert();
-            return null;
+        version (generation99) {
+            if (!parser.accept("assert")?)
+            {
+                parser.revert;
+                return null;
+            }
+            if (!parser.accept("(")?)
+            {
+                parser.revert;
+                return null;
+            }
+        } else {
+            if (!parser.accept("assert"))
+            {
+                parser.revert;
+                return null;
+            }
+            if (!parser.accept("("))
+            {
+                parser.revert;
+                return null;
+            }
         }
         parser.commit();
         auto exprStartLoc = parser.loc;
         auto exprStart = parser.text;
-        auto expression = context.compiler.parseExpression(parser, context).retfail.notNull;
+        auto expression = context.compiler.parseExpression(parser, context)?.notNull;
         auto exprEnd = parser.text;
         auto exprText = exprStart[0 .. exprStart.length - exprEnd.length];
 
-        parser.expect(")");
-        parser.expect(";");
+        version (generation99) {
+            parser.expect(")")?;
+            parser.expect(";")?;
+        } else {
+            parser.expect(")");
+            parser.expect(";");
+        }
 
         return new ASTAssertion(expression, exprText, exprStartLoc);
     }

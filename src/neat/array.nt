@@ -3,7 +3,6 @@ module neat.array;
 macro import neat.macros.hash;
 macro import neat.macros.once;
 macro import neat.macros.quasiquoting;
-macro import neat.macros.retfail;
 
 import backend.base;
 import helpers;
@@ -47,7 +46,10 @@ class Array : Type
             // Can we find a better way to maybe avoid running into that
             // class ErrorType : Type seems like admitting defeat.
             s.resolve.case {
-                Symbol sym: return beType(__HERE__, sym);
+                Symbol sym: beType(__HERE__, sym).case {
+                    Type type: return type;
+                    Error err: assert(false);
+                }
                 Error err: assert(false);
             }
         }
@@ -101,7 +103,7 @@ class Array : Type
             auto stmt = compiler.$stmt if (source.base) {
                 neat_runtime_refcount_inc("array acquire", source.base);
             };
-            auto result = retfail stmt.compile(context);
+            auto result = stmt.compile(context)?;
             return compiler.sequenceStatement([
                 result.statement,
                 compiler.assignStatement(target, source)]);
@@ -136,8 +138,8 @@ class Array : Type
             }
             if (field == "next") {
                 auto length = new ArrayLength(base, context.nativeWordType);
-                auto lengthLessOne = retfail context.compiler.binaryOp(
-                    "-", context, length, context.compiler.intLiteral(1), loc);
+                auto lengthLessOne = context.compiler.binaryOp(
+                    "-", context, length, context.compiler.intLiteral(1), loc)?;
 
                 return new ArraySlice(
                     base, context.compiler.intLiteral(0), lengthLessOne, loc);
@@ -187,12 +189,13 @@ class ASTArray : ASTSymbol
 
     override (Type | fail Error) compile(Context context)
     {
-        auto sym <- this.elementType.compile(context);
+        auto sym = this.elementType.compile(context)?;
         if (auto pending = sym.instanceOf(PendingSymbol))
         {
             return new Array(pending);
         }
-        return new Array(beType(this.loc, sym));
+        auto symtype = beType(this.loc, sym)?;
+        return new Array(symtype);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -368,7 +371,8 @@ class ArraySlice : Expression
         } else if (auto pointerType = baseType.instanceOf(Pointer)) {
             this.arrayType = new Array(pointerType.target);
         } else {
-            this.loc.assert2s(false, "slice of non-array/non-pointer");
+            print("$(loc.location): slice of non-array/non-pointer - catch this earlier!");
+            exit(1);
         }
         this.type = this.arrayType;
         this.info = this.base.info;
@@ -528,25 +532,28 @@ Expression releaseArray(Context context, Expression value) {
     auto astRight = new ASTSymbolHelper(right);
 
     return compiler.call(
-            context, astFn, [ASTArgument(astLeft, ""), ASTArgument(astRight, "")], loc, false)
-        .retfail.notNull;
+            context, astFn, [ASTArgument(astLeft, ""), ASTArgument(astRight, "")], loc, false)?
+        .notNull;
 }
 
 (nullable ASTSymbol | fail Error) parseArrayLiteral(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto loc = parser.loc;
-    if (!parser.accept("[")) {
+    if (parser.accept("[")?) { }
+    else {
         parser.revert;
         return null;
     }
     mut ASTArrayLiteralElement[] values;
-    while (!parser.accept("]")) {
+    while (true) {
+        if (parser.accept("]")?) break;
         auto loc = parser.loc;
-        ASTSymbol value = lexicalContext.compiler.parseExpression(parser, lexicalContext)
-            .retfail.notNull;
+        ASTSymbol value = lexicalContext.compiler.parseExpression(parser, lexicalContext)?
+            .notNull;
         values ~= ASTArrayLiteralElement(value, loc);
-        parser.accept(",");
+        if (parser.accept("]")?) break;
+        parser.expect(",")?;
     }
     parser.commit;
     return new ASTArrayLiteral(null, values);
@@ -631,10 +638,10 @@ class ASTArrayLiteral : ASTSymbol
             return new EmptyArrayLiteral(null);
         mut Expression[] values;
         for (element in this.elements)
-            values ~= retfail beExpression3(context, retfail element.value.compile(context), element.loc);
+            values ~= element.value.compile(context)?.beExpressionImplCall(context, element.loc)?;
         (Type | fail Error) getType() {
             if (this.typeHint) {
-                return beType(__HERE__, retfail this.typeHint.compile(context));
+                return beType(__HERE__, this.typeHint.compile(context)?);
             }
             mut nullable Expression mergedReference;
             for (i, element in this.elements) {
@@ -645,16 +652,16 @@ class ASTArrayLiteral : ASTSymbol
                     auto left = context.compiler.implicitConvertTo(context, value, mergedReference.type);
                     auto right = context.compiler.implicitConvertTo(context, mergedReference.notNull, value.type);
                     if (!left && !right)
-                        element.loc.assert2s(false, "incompatible expression type");
+                        return element.loc.fail("incompatible expression type");
                     else if (left && right && !left.type.same(right.type))
-                        element.loc.assert2s(false, "ambiguous expression type");
+                        return element.loc.fail("ambiguous expression type");
                     if (left) mergedReference = left;
                     else if (right) mergedReference = right;
                 }
             }
             return mergedReference.type;
         }
-        auto mergeType = retfail getType;
+        auto mergeType = getType?;
         for (i in 0 .. this.elements.length) {
             if (auto castValue = context.compiler.implicitConvertTo(context, values[i], mergeType))
                 values[i] = castValue;
@@ -667,7 +674,7 @@ class ASTArrayLiteral : ASTSymbol
             for (int i, value in values) {
                 auto target = context.compiler.dereference(
                     context.compiler.pointerOffset(base, context.compiler.intLiteral(i)));
-                moves ~= retfail context.compiler.move(context, target, value);
+                moves ~= context.compiler.move(context, target, value)?;
             }
             return context.compiler.statementExpression(
                 context.compiler.sequenceStatement(moves), target);
@@ -690,10 +697,10 @@ class ASTArrayLength : ASTSymbol
     this(this.loc) { }
 
     override (Symbol | fail Error) compile(Context context) {
-        auto surroundingArraySymbol <- context.compiler.lookup(context, __HERE__, "__array");
-        loc.assert2s(
+        auto surroundingArraySymbol = context.compiler.lookup(context, __HERE__, "__array")?;
+        loc.assert(
             surroundingArraySymbol && surroundingArraySymbol.instanceOf(Expression),
-            "'\$' can only be used inside an array index context");
+            "'\$' can only be used inside an array index context")?;
 
         return new ArrayLength(
             surroundingArraySymbol.instanceOf(Expression).notNull,

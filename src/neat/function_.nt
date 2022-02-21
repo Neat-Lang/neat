@@ -2,7 +2,6 @@ module neat.function_;
 
 macro import neat.macros.listcomprehension;
 macro import neat.macros.once;
-macro import neat.macros.retfail;
 
 import backend.base;
 import helpers;
@@ -109,15 +108,15 @@ class Function : FunctionDeclaration
             auto argExpr = new ArgExpr(extra + i, param.type);
 
             if (param.isThisAssignment) {
-                this.loc.assert2s(!!thisDecl, "no this. args outside class");
+                this.loc.assert(!!thisDecl, "no this. args outside class")?;
 
                 auto target = compiler.accessMemberWithLifetime(
-                        context, thisDecl.accessDecl(context.compiler), param.name, this.loc, false)
-                    .retfail.instanceOf(Reference);
-                this.loc.assert2s2(!!target, "not a reference: ", param.name);
+                        context, thisDecl.accessDecl(context.compiler), param.name, this.loc, false)?
+                    .instanceOf(Reference);
+                this.loc.assert2s2(!!target, "not a reference: ", param.name)?;
                 auto target = target.notNull;
 
-                if (auto copy = retfail param.type.copyInto(context, target, argExpr))
+                if (auto copy = param.type.copyInto(context, target, argExpr)?)
                     argAssignments[extra + i] = copy;
                 else argAssignments[extra + i] = compiler.assignStatement(target, argExpr);
             } else {
@@ -127,7 +126,7 @@ class Function : FunctionDeclaration
                         scope_, param.name, param.type, ExprInfo(true, Ownership.owned), false);
                     auto target = argDecl.accessDecl(context.compiler);
 
-                    if (auto assign = retfail param.type.copyInto(context, target, argExpr))
+                    if (auto assign = param.type.copyInto(context, target, argExpr)?)
                         argAssignments[extra + i] = assign;
                     else argAssignments[extra + i] = compiler.assignStatement(target, argExpr);
                     scope_ = argDecl;
@@ -143,8 +142,8 @@ class Function : FunctionDeclaration
 
         context = context.withNamespace(scope_);
 
-        auto pair <- this.statement.compile(context);
-        auto compiledStatement <- compiler.unwindScope(pair.context, stackframe, pair.statement);
+        auto pair = this.statement.compile(context)?;
+        auto compiledStatement = compiler.unwindScope(pair.context, stackframe, pair.statement)?;
 
         return mkCompiledFunction(this, compiledStatement, stackframe, argAssignments);
     }
@@ -333,8 +332,8 @@ class VariableDeclaration : DeclarationHolder
             // soft destructuring
             if (!hidden && this.variable.name == "") {
                 auto unnamedVar = access(context.compiler, frame);
-                auto target = retfail context.compiler.accessMemberWithLifetime(
-                        context, unnamedVar, name, loc, true);
+                auto target = context.compiler.accessMemberWithLifetime(
+                        context, unnamedVar, name, loc, true)?;
                 if (target) return target;
             }
         }
@@ -462,7 +461,7 @@ class ASTFunction : ASTSymbol
     override (Symbol | fail Error) compile(Context context)
     {
         auto params = [
-            Parameter(false, param.name, param.mutable, beType(param.loc, retfail param.type.compile(context)))
+            Parameter(false, param.name, param.mutable, beType(param.loc, param.type.compile(context)?)?)
             for param in this.params];
 
         // It's nice to be able to reference the function
@@ -473,7 +472,7 @@ class ASTFunction : ASTSymbol
         if (this.isDeclaration)
         {
             return new FunctionDeclaration(
-                this.name, beType(this.loc, retfail this.ret.compile(returnTypeContext)), params);
+                this.name, beType(this.loc, this.ret.compile(returnTypeContext)?)?, params);
         }
 
         auto module_ = findParent!ModuleBase(context.namespace);
@@ -481,7 +480,7 @@ class ASTFunction : ASTSymbol
         auto fun = new Function(
             this.loc,
             this.name,
-            beType(this.loc, retfail this.ret.compile(returnTypeContext)),
+            beType(this.loc, this.ret.compile(returnTypeContext)?)?,
             params,
             this.statement, this.macroState, false);
 
@@ -511,16 +510,16 @@ class ASTFunction : ASTSymbol
 (nullable ASTFunction | fail Error) parseFunction(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
-    nullable ASTSymbol ret <- lexicalContext.compiler.parseType(parser, lexicalContext);
+    nullable ASTSymbol ret = lexicalContext.compiler.parseType(parser, lexicalContext)?;
     if (!ret)
     {
         parser.revert;
         return null;
     }
-    string name = parser.parseIdentifier;
+    string name = parser.parseIdentifier?;
     // avoid 'mut typeof(expr)' from matching as a function
     // TODO reserved identifier list
-    if (!name.length || name == "typeof" || !parser.accept("("))
+    if (!name.length || name == "typeof" || !parser.accept("(")?)
     {
         parser.revert;
         return null;
@@ -528,8 +527,8 @@ class ASTFunction : ASTSymbol
     parser.commit;
     // FIXME
     // auto params = parseIdentifierList(parser, lexicalContext, variadics=false).params;
-    auto params <- parseIdentifierList(parser, lexicalContext, variadics=false);
-    ASTStatement stmt <- lexicalContext.compiler.parseStatement(parser, lexicalContext);
+    auto params = parseIdentifierList(parser, lexicalContext, variadics=false)?;
+    ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
     return new ASTFunction(parser.loc, name, ret.notNull, params.params, false, stmt, lexicalContext.macroState);
 }
 
@@ -537,16 +536,16 @@ class ASTFunction : ASTSymbol
 {
     mut ASTParameter[] params;
     mut bool variadic = false;
-    while (!parser.accept(")"))
+    while (!parser.accept(")")?)
     {
         if (params.length) {
-            if (!parser.accept(",")) {
-                parser.fail("',' or ')' expected");
+            if (!parser.accept(",")?) {
+                return parser.fail("',' or ')' expected");
             }
         }
         if (variadics) {
             parser.begin;
-            if (parser.accept("...") && parser.accept(")")) {
+            if (parser.accept("...")? && parser.accept(")")?) {
                 parser.commit;
                 variadic = true;
                 break;
@@ -556,12 +555,12 @@ class ASTFunction : ASTSymbol
 
         auto loc = parser.loc;
         mut bool mutable;
-        if (parser.acceptIdentifier("mut")) mutable = true;
-        nullable ASTSymbol paramType <- lexicalContext.compiler.parseType(parser, lexicalContext);
+        if (parser.acceptIdentifier("mut")?) mutable = true;
+        nullable ASTSymbol paramType = lexicalContext.compiler.parseType(parser, lexicalContext)?;
         if (!paramType) {
-            parser.fail("type expected");
+            return parser.fail("type expected");
         }
-        string paramName = parser.parseIdentifier;
+        string paramName = parser.parseIdentifier?;
         params ~= ASTParameter(paramName, mutable, paramType.notNull, loc);
     }
     return (params, variadic);
@@ -570,29 +569,29 @@ class ASTFunction : ASTSymbol
 ((ASTParameter | ASTThisAssignment)[] | fail Error) parseParamList(Parser parser, LexicalContext lexicalContext)
 {
     mut (ASTParameter | ASTThisAssignment)[] params;
-    while (!parser.accept(")"))
+    while (!parser.accept(")")?)
     {
         if (params.length > 0)
         {
-            if (!parser.accept(","))
+            if (!parser.accept(",")?)
             {
-                parser.fail("',' or ')' expected");
+                return parser.fail("',' or ')' expected");
             }
         }
         auto loc = parser.loc;
-        if (parser.accept("this."))
+        if (parser.accept("this.")?)
         {
-            string argname = parseIdentifier(parser);
+            string argname = parseIdentifier(parser)?;
             params ~= ASTThisAssignment(argname);
         }
         else
         {
             mut bool mutable;
-            if (parser.acceptIdentifier("mut")) mutable = true;
-            nullable ASTSymbol argtype <- lexicalContext.compiler.parseType(parser, lexicalContext);
-            parser.assert_(!!argtype, "argument type expected");
-            string argname = parseIdentifier(parser);
-            parser.assert_(argname.length > 0, "argument name expected");
+            if (parser.acceptIdentifier("mut")?) mutable = true;
+            nullable ASTSymbol argtype = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+            parser.assert_(!!argtype, "argument type expected")?;
+            string argname = parseIdentifier(parser)?;
+            parser.assert_(argname.length > 0, "argument name expected")?;
             params ~= ASTParameter(name=argname, mutable, argtype.notNull, loc);
         }
     }

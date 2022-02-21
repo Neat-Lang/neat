@@ -1,7 +1,6 @@
 module neat.struct_;
 
 macro import neat.macros.listcomprehension;
-macro import neat.macros.retfail;
 
 import backend.base;
 import helpers;
@@ -116,16 +115,15 @@ class Struct : Type
             first i for i, a in this.methods[0 .. this.validMethods]
             where a.name == member && allowed(a.protection)
             else -1];
-        if (methodOffset != -1)
-        {
+        if (methodOffset != -1) {
             auto method = this.methods[methodOffset];
             if (method.static_) {
-                loc.assert2s(!baseExpr, "static method cannot be called on value");
+                loc.assert(!baseExpr, "static method cannot be called on value")?;
                 return method;
             } else {
                 // TODO dereference-into-symbol so we can '&' it again
                 auto funcPtr = context.compiler.referenceFunction(method);
-                loc.assert2s(!!baseExpr, "non-static method cannot be called on type");
+                loc.assert(!!baseExpr, "non-static method cannot be called on type")?;
                 return new ClassMethodPtr(funcPtr, baseExpr.notNull, false, method.name);
             }
         }
@@ -197,13 +195,13 @@ class Struct : Type
                     auto targetField = new StructMemberReference(target, i);
                     auto sourceField = new StructMember(source, i);
                     (Statement | fail Error) copyInto() {
-                        if (auto stmt = retfail member.type.copyInto(context, targetField, sourceField)) {
+                        if (auto stmt = member.type.copyInto(context, targetField, sourceField)?) {
                             anySpecialAssignments = true;
                             return stmt;
                         }
                         return compiler.assignStatement(targetField, sourceField);
                     }
-                    assigns ~= retfail copyInto;
+                    assigns ~= copyInto?;
                 }
                 if (!anySpecialAssignments) return null;
                 return compiler.sequenceStatement(assigns);
@@ -243,7 +241,7 @@ class Struct : Type
 
     override (nullable Expression | fail Error) call(Context context, Loc loc, ASTArgument[] args)
     {
-        loc.assert2s(args.length == this.members.length, "invalid number of args for struct constructor");
+        loc.assert(args.length == this.members.length, "invalid number of args for struct constructor")?;
 
         auto params = [Parameter(
                 isThisAssignment=false,
@@ -251,16 +249,16 @@ class Struct : Type
                 mutable=false,
                 type=member.type
             ) for member in this.members];
-        validateCall(params, args, "$(this.name).this()", variadic=false, loc);
+        validateCall(params, args, "$(this.name).this()", variadic=false, loc)?;
 
         auto temp = new PairedTemporary(this, Ownership.gifted);
         mut Statement initialize = new UninitializeTemporaryStatement(temp);
         for (i, arg in args) {
-            mut Expression arg = retfail beExpression3(context, retfail arg.sym.compile(context), loc);
-            arg = expectImplicitConvertTo(context, arg, this.members[i].type, loc);
+            Expression arg = beExpression3(context, arg.sym.compile(context)?, loc)?;
+            Expression arg = expectImplicitConvertTo(context, arg, this.members[i].type, loc)?;
 
             auto field = new StructMemberReference(temp, i);
-            mut auto stmt <- context.compiler.move(context, field, arg);
+            mut auto stmt = context.compiler.move(context, field, arg)?;
             if (!stmt) stmt = new AssignStatement(field, arg);
 
             initialize = sequence(initialize, stmt);
@@ -279,7 +277,7 @@ class Struct : Type
                         }
                         return context.compiler.exprWithTemporaryExpr(right, &do4);
                     }
-                    return (retfail context.compiler.exprWithTemporaryExpr(left, &do3)).notNull;
+                    return context.compiler.exprWithTemporaryExpr(left, &do3)?.notNull;
                 }
                 return context.compiler.consume(context, right, &do2);
             }
@@ -296,11 +294,11 @@ class Struct : Type
         auto leftField = new StructMember(left, i);
         auto rightField = new StructMember(right, i);
         (Expression | fail Error) cmp() {
-            if (auto eq = retfail leftField.type.binaryOp(context, "==", leftField, rightField, loc))
+            if (auto eq = leftField.type.binaryOp(context, "==", leftField, rightField, loc)?)
                 return eq;
             return new BinaryOp("==", leftField, rightField, loc);
         }
-        test = new BoolAnd(test, retfail cmp);
+        test = new BoolAnd(test, cmp?);
     }
     return test;
 }
@@ -503,13 +501,13 @@ class StructNamespace : Namespace
         // TODO early name check?
         if (auto thisPtr = thisPtr) {
             auto thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr); // This is good code. Good code.
-            if (auto result = retfail context.compiler.accessMemberWithLifetime(
-                    context, thisPtr, name, loc, true))
+            if (auto result = context.compiler.accessMemberWithLifetime(
+                    context, thisPtr, name, loc, true)?)
                 return result;
         } else {
             // static lookup
-            if (auto result = retfail context.compiler.accessMemberWithLifetime(
-                    context, this.struct_, name, loc, true))
+            if (auto result = context.compiler.accessMemberWithLifetime(
+                    context, this.struct_, name, loc, true)?)
                 return result;
         }
 
@@ -586,7 +584,8 @@ class ASTStruct : ASTSymbol
             entry.case {
                 ASTStructMember member: {
                     members ~= new StructMemberDeclaration(
-                        member.name, member.protection, beType(this.loc, retfail member.type.compile(context)));
+                        member.name, member.protection,
+                        beType(this.loc, member.type.compile(context)?)?);
                 }
                 ASTStructVersionBlock ver: {
                     if ([any a == ver.name for a in context.platform.versions]) {
@@ -633,7 +632,8 @@ class ASTStruct : ASTSymbol
                 param.case {
                     ASTParameter param:
                         methodParams[k] = Parameter(
-                            false, param.name, param.mutable, beType(param.loc, retfail param.type.compile(structContext)));
+                            false, param.name, param.mutable,
+                            beType(param.loc, param.type.compile(structContext)?)?);
                     ASTThisAssignment param:
                         assert(false); // TODO this.foo
                 }
@@ -652,7 +652,7 @@ class ASTStruct : ASTSymbol
                 method.static_,
                 method.protection,
                 method.name,
-                beType(this.loc, retfail method.ret.compile(structContext)),
+                beType(this.loc, method.ret.compile(structContext)?)?,
                 methodParams,
                 method.body_, context.macroState);
             struct_.validMethods = i + 1;
@@ -674,7 +674,7 @@ class ASTStructDecl : ASTDeclaration
 
     override (Context | fail Error) compile(Context context)
     {
-        auto struct_ = retfail this.struct_.compile(context);
+        auto struct_ = this.struct_.compile(context)?;
         auto module_ = findParent!ModuleBase(context.namespace);
 
         for (method in struct_.methods) {
@@ -708,16 +708,16 @@ class ASTStructDecl : ASTDeclaration
 {
     auto loc = parser.loc;
     parser.begin;
-    if (parseIdentifier(parser) != "struct") {
+    if (parseIdentifier(parser)? != "struct") {
         parser.revert;
         return null;
     }
-    string name = parseIdentifier(parser);
+    string name = parseIdentifier(parser)?;
     assert(!!name.length);
     mut ASTStructEntry[] entries;
-    parser.expect("{");
-    while (!parser.accept("}")) {
-        auto entry <- parseStructEntry(parser, lexicalContext);
+    parser.expect("{")?;
+    while (!parser.accept("}")?) {
+        auto entry = parseStructEntry(parser, lexicalContext)?;
         entries ~= entry;
     }
     parser.commit;
@@ -726,13 +726,13 @@ class ASTStructDecl : ASTDeclaration
 
 (ASTStructEntry[] | fail Error) parseStructBlock(Parser parser, LexicalContext lexicalContext) {
     mut ASTStructEntry[] entries;
-    if (parser.accept("{")) {
-        while (!parser.accept("}")) {
-            auto entry <- parser.parseStructEntry(lexicalContext);
+    if (parser.accept("{")?) {
+        while (!parser.accept("}")?) {
+            auto entry = parser.parseStructEntry(lexicalContext)?;
             entries ~= entry;
         }
     } else {
-        auto entry <- parser.parseStructEntry(lexicalContext);
+        auto entry = parser.parseStructEntry(lexicalContext)?;
         entries ~= entry;
     }
     return entries;
@@ -741,34 +741,32 @@ class ASTStructDecl : ASTDeclaration
 (ASTStructEntry[] | fail Error) parseStructEntry(Parser parser, LexicalContext lexicalContext)
 {
     // FIXME merge version into static if via __traits(versionSet)
-    if (parser.accept("version")) {
-        parser.expect("(");
-        string versionStr = parser.parseIdentifier;
-        parser.expect(")");
-        ASTStructEntry[] then <- parser.parseStructBlock(lexicalContext);
+    if (parser.accept("version")?) {
+        parser.expect("(")?;
+        string versionStr = parser.parseIdentifier?;
+        parser.expect(")")?;
+        ASTStructEntry[] then = parser.parseStructBlock(lexicalContext)?;
         mut ASTStructEntry[] else_;
-        if (parser.accept("else")) {
-            auto e <- parser.parseStructBlock(lexicalContext);
-            else_ = e;
+        if (parser.accept("else")?) {
+            else_ = parser.parseStructBlock(lexicalContext)?;
         }
         // FIXME explicitly type hinted literal
         ASTStructEntry result = new ASTStructVersionBlock(versionStr, then, else_);
         return [result];
     }
     parser.begin;
-    if (parser.acceptIdentifier("static") && parser.acceptIdentifier("if")) {
+    if (parser.acceptIdentifier("static")? && parser.acceptIdentifier("if")?) {
         parser.commit;
-        parser.expect("(");
-        auto cond = retfail lexicalContext.compiler.parseExpression(parser, lexicalContext);
+        parser.expect("(")?;
+        auto cond = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
         if (!cond) {
-            parser.fail("static if condition expected");
+            return parser.fail("static if condition expected");
         }
-        parser.expect(")");
-        ASTStructEntry[] then <- parser.parseStructBlock(lexicalContext);
+        parser.expect(")")?;
+        ASTStructEntry[] then = parser.parseStructBlock(lexicalContext)?;
         mut ASTStructEntry[] else_;
-        if (parser.accept("else")) {
-            auto e <- parser.parseStructBlock(lexicalContext);
-            else_ = e;
+        if (parser.accept("else")?) {
+            else_ = parser.parseStructBlock(lexicalContext)?;
         }
         // FIXME explicitly type hinted literal
         ASTStructEntry result = new ASTStructStaticIf(cond.notNull, then, else_);
@@ -782,65 +780,65 @@ class ASTStructDecl : ASTDeclaration
     mut Protection protection = Protection.public_;
     auto loc = parser.loc;
     while (true) {
-        if (parser.accept("static")) {
+        if (parser.accept("static")?) {
             static_ = true;
             continue;
         }
         // FIXME only allow one
         // FIXME parseProtection?
-        if (acceptIdentifier(parser, "public")) {
+        if (acceptIdentifier(parser, "public")?) {
             protection = Protection.public_;
             continue;
         }
-        if (acceptIdentifier(parser, "private")) {
+        if (acceptIdentifier(parser, "private")?) {
             protection = Protection.private_;
             continue;
         }
         break;
     }
-    if (parser.accept("this"))
+    if (parser.accept("this")?)
     {
         memberType = new ASTBasicType("void", parser.loc);
         memberName = "__ctor";
     }
-    else if (parser.accept("~this"))
+    else if (parser.accept("~this")?)
     {
         memberType = new ASTBasicType("void", parser.loc);
         memberName = "__dtor";
     }
     else
     {
-        // FIXME
-        auto e <- lexicalContext.compiler.parseType(parser, lexicalContext);
-        memberType = e;
-        if (!memberType) parser.fail("expected member type");
-        memberName = parseIdentifier(parser);
-        if (!memberName.length) parser.fail("expected member name");
+        memberType = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+        if (!memberType) return parser.fail("expected member type");
+        string ident = parser.parseIdentifier?;
+        memberName = ident;
+        if (!memberName.length) return parser.fail("expected member name");
     }
-    if (parser.accept("(")) // method
+    if (parser.accept("(")?) // method
     {
-        auto params <- parseParamList(parser, lexicalContext);
+        auto params = parseParamList(parser, lexicalContext)?;
         parser.assert_(
-            memberName != "__dtor" || params.length == 0, "destructor cannot take parameters");
-        ASTStatement stmt <- lexicalContext.compiler.parseStatement(parser, lexicalContext);
+            memberName != "__dtor" || params.length == 0, "destructor cannot take parameters")?;
+        ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
         entries ~= ASTStructMethod(
             parser.loc, static_, protection, memberName, memberType.notNull, params, stmt);
     }
     else
     {
-        loc.assert2s(!static_, "no static fields");
-        void addMember() {
-            parser.assert_(memberName != "__ctor", "constructor cannot be member");
-            parser.assert_(memberName != "__dtor", "destructor cannot be member");
+        loc.assert(!static_, "no static fields")?;
+        (void | fail Error) addMember() {
+            parser.assert_(memberName != "__ctor", "constructor cannot be member")?;
+            parser.assert_(memberName != "__dtor", "destructor cannot be member")?;
             entries ~= (memberName, protection, memberType.notNull);
         }
-        addMember;
-        while (!parser.accept(";")) {
-            parser.expect(",");
-            if (parser.accept(";")) break;
-            memberName = parseIdentifier(parser);
-            if (!memberName.length) parser.fail("expected member name");
-            addMember;
+        addMember?;
+        while (!parser.accept(";")?) {
+            parser.expect(",")?;
+            if (parser.accept(";")?) break;
+            string ident = parseIdentifier(parser)?;
+            memberName = ident;
+            if (!memberName.length) return parser.fail("expected member name");
+            addMember?;
         }
     }
     return entries;

@@ -8,70 +8,314 @@ import package(compiler).neat.parser_base;
 
 import std.string;
 
-struct JSONValue
-{
-    (:false | :true | int | string | JSONValue[] | (string key, JSONValue value)[]) value;
+// TODO: Write dedicated JSON parser instead of hijacking neat's parsing.
+version (generation99) {
+    struct JSONValue
+    {
+        (:false | :true | int | string | JSONValue[] | (string key, JSONValue value)[]) value;
 
-    static JSONValue parse(string str) {
-        auto parser = new Parser("", str);
-        auto ret = jsonParseImpl(parser);
-        if (!parser.eof) parser.fail("text after json");
-        return ret;
-    }
+        static JSONValue parse(string str) {
+            auto parser = new Parser("", str);
+            (JSONValue | fail Error) result() {
+                auto ret = jsonParseImpl(parser)?;
+                if (!parser.eof?) return parser.fail("text after json");
+                return ret;
+            }
+            result.case {
+                JSONValue value: return value;
+                Error err: err.exitWithError;
+            }
+        }
 
-    static JSONValue loadFile(string file) {
-        import std.file : readText;
+        static JSONValue loadFile(string file) {
+            import std.file : readText;
 
-        auto str = readText(file);
-        auto parser = new Parser(file, str);
-        auto ret = jsonParseImpl(parser);
-        if (!parser.eof) parser.fail("text after json");
-        return ret;
-    }
+            auto str = readText(file);
+            auto parser = new Parser(file, str);
+            (JSONValue | fail Error) result() {
+                auto ret = jsonParseImpl(parser)?;
+                if (!parser.eof?) return parser.fail("text after json");
+                return ret;
+            }
+            result.case {
+                JSONValue value: return value;
+                Error err: err.exitWithError;
+            }
+        }
 
-    ((string key, JSONValue value)[] | :wrongType) object() {
-        return value.case(
-            (:false): :wrongType, (:true): :wrongType, int: :wrongType, string: :wrongType, JSONValue[]: :wrongType,
-            (string key, JSONValue value)[] obj: obj);
-    }
+        ((string key, JSONValue value)[] | :wrongType) object() {
+            return value.case(
+                (:false): :wrongType, (:true): :wrongType, int: :wrongType, string: :wrongType, JSONValue[]: :wrongType,
+                (string key, JSONValue value)[] obj: obj);
+        }
 
-    bool isObject() {
-        // FIXME object.case() once fix built
-        return object().case(
-            (:wrongType): false,
-            (string key, JSONValue value)[]: true);
-    }
+        bool isObject() {
+            // FIXME object.case() once fix built
+            return object().case(
+                (:wrongType): false,
+                (string key, JSONValue value)[]: true);
+        }
 
-    JSONValue get(string key) {
-        object.case {
-            (:wrongType): assert(false);
-            (string key, JSONValue value)[] obj: {
-                assert([any a.key == key for a in obj]);
-                return [first a.value for a in obj where a.key == key else ({ assert(false); JSONValue(:false); })];
+        JSONValue get(string key) {
+            object.case {
+                (:wrongType): assert(false);
+                (string key, JSONValue value)[] obj: {
+                    assert([any a.key == key for a in obj]);
+                    return [first a.value for a in obj where a.key == key else ({ assert(false); JSONValue(:false); })];
+                }
+            }
+        }
+
+        bool has(string key) {
+            object.case {
+                (:wrongType): assert(false);
+                (string key, JSONValue value)[] obj:
+                    return [any a.key == key for a in obj];
+            }
+        }
+
+        void set(string key, JSONValue value) {
+            object().case {
+                (:wrongType): assert(false);
+                (string key, JSONValue value)[] arr: this.value = arr ~ (key, value);
+            }
+        }
+
+        string[] keys() {
+            object.case {
+                (:wrongType): assert(false);
+                (string key, JSONValue value)[] obj: return [a.key for a in obj];
             }
         }
     }
 
-    bool has(string key) {
-        object.case {
-            (:wrongType): assert(false);
-            (string key, JSONValue value)[] obj:
-                return [any a.key == key for a in obj];
+    (JSONValue | fail Error) jsonParseImpl(Parser parser) {
+        if (parser.accept("\"")?) {
+            return JSONValue(parseStringLiteral(parser)?);
+        }
+        parser.parseNumber?.case {
+            (:failure): {}
+            int value: return JSONValue(value);
+        }
+        if (parser.accept("[")?) {
+            mut JSONValue[] entries;
+            if (!parser.accept("]")?) while (true) {
+                entries ~= jsonParseImpl(parser)?;
+                if (parser.accept("]")?) break;
+                parser.expect(",")?;
+            }
+            return JSONValue(entries);
+        }
+        if (parser.accept("{")?) {
+            mut (string key, JSONValue val)[] entries;
+            if (!parser.accept("}")?) while (true) {
+                parser.expect("\"")?;
+                auto key = parseStringLiteral(parser)?;
+                parser.expect(":")?;
+                auto value = jsonParseImpl(parser)?;
+                entries ~= (key, value);
+                if (parser.accept("}")?) break;
+                parser.expect(",")?;
+            }
+            return JSONValue(entries);
+        }
+        return parser.fail("unexpected input: " ~ parser.text);
+    }
+    (string | fail Error) parseStringLiteral(Parser parser)
+    {
+        mut int matchLen;
+        auto loc = parser.loc;
+        string start = parser.text;
+        while (parser.text[0 .. 1] != "\"") {
+            if (parser.text.length == 0) {
+                return parser.fail("expected end of string, got end of file");
+            }
+            if (parser.text[0 .. 1] == "\\") {
+                matchLen = matchLen + 1;
+                parser.drop(1);
+            }
+            matchLen = matchLen + 1;
+            parser.drop(1);
+        }
+        string str = start[0 .. matchLen];
+        if (!parser.accept("\"")?) {
+            return parser.fail("this should never happen");
+        }
+
+        return replaceEscapes(str);
+    }
+
+    (:failure | int | fail Error) parseNumber(Parser parser)
+    {
+        parser.begin;
+        mut bool negative = parser.accept("-")?;
+        if (parser.accept("-")?)
+            negative = true;
+        parser.strip?;
+        if (parser.hard_eof || !isDigit(parser.text[0]))
+        {
+            parser.revert;
+            return :failure;
+        }
+        mut string number;
+        while (!parser.hard_eof && isDigit(parser.text[0]))
+        {
+            number ~= parser.text[0];
+            parser.drop(1);
+        }
+        parser.commit;
+        mut int i = atoi(number);
+        if (negative) i = -i;
+        return i;
+    }
+
+} else {
+    struct JSONValue
+    {
+        (:false | :true | int | string | JSONValue[] | (string key, JSONValue value)[]) value;
+
+        static JSONValue parse(string str) {
+            auto parser = new Parser("", str);
+            auto ret = jsonParseImpl(parser);
+            if (!parser.eof) parser.fail("text after json");
+            return ret;
+        }
+
+        static JSONValue loadFile(string file) {
+            import std.file : readText;
+
+            auto str = readText(file);
+            auto parser = new Parser(file, str);
+            auto ret = jsonParseImpl(parser);
+            if (!parser.eof) parser.fail("text after json");
+            return ret;
+        }
+
+        ((string key, JSONValue value)[] | :wrongType) object() {
+            return value.case(
+                (:false): :wrongType, (:true): :wrongType, int: :wrongType, string: :wrongType, JSONValue[]: :wrongType,
+                (string key, JSONValue value)[] obj: obj);
+        }
+
+        bool isObject() {
+            // FIXME object.case() once fix built
+            return object().case(
+                (:wrongType): false,
+                (string key, JSONValue value)[]: true);
+        }
+
+        JSONValue get(string key) {
+            object.case {
+                (:wrongType): assert(false);
+                (string key, JSONValue value)[] obj: {
+                    assert([any a.key == key for a in obj]);
+                    return [first a.value for a in obj where a.key == key else ({ assert(false); JSONValue(:false); })];
+                }
+            }
+        }
+
+        bool has(string key) {
+            object.case {
+                (:wrongType): assert(false);
+                (string key, JSONValue value)[] obj:
+                    return [any a.key == key for a in obj];
+            }
+        }
+
+        void set(string key, JSONValue value) {
+            object().case {
+                (:wrongType): assert(false);
+                (string key, JSONValue value)[] arr: this.value = arr ~ (key, value);
+            }
+        }
+
+        string[] keys() {
+            object.case {
+                (:wrongType): assert(false);
+                (string key, JSONValue value)[] obj: return [a.key for a in obj];
+            }
         }
     }
 
-    void set(string key, JSONValue value) {
-        object().case {
-            (:wrongType): assert(false);
-            (string key, JSONValue value)[] arr: this.value = arr ~ (key, value);
+    JSONValue jsonParseImpl(Parser parser) {
+        if (parser.accept("\"")) {
+            return JSONValue(parseStringLiteral(parser));
         }
+        parser.parseNumber.case {
+            (:failure): {}
+            int value: return JSONValue(value);
+        }
+        if (parser.accept("[")) {
+            mut JSONValue[] entries;
+            if (!parser.accept("]")) while (true) {
+                entries ~= jsonParseImpl(parser);
+                if (parser.accept("]")) break;
+                parser.expect(",");
+            }
+            return JSONValue(entries);
+        }
+        if (parser.accept("{")) {
+            mut (string key, JSONValue val)[] entries;
+            if (!parser.accept("}")) while (true) {
+                parser.expect("\"");
+                auto key = parseStringLiteral(parser);
+                parser.expect(":");
+                auto value = jsonParseImpl(parser);
+                entries ~= (key, value);
+                if (parser.accept("}")) break;
+                parser.expect(",");
+            }
+            return JSONValue(entries);
+        }
+        parser.fail("unexpected input: " ~ parser.text);
     }
 
-    string[] keys() {
-        object.case {
-            (:wrongType): assert(false);
-            (string key, JSONValue value)[] obj: return [a.key for a in obj];
+    string parseStringLiteral(Parser parser)
+    {
+        mut int matchLen;
+        auto loc = parser.loc;
+        string start = parser.text;
+        while (parser.text[0 .. 1] != "\"") {
+            if (parser.text.length == 0) {
+                parser.fail("expected end of string, got end of file");
+            }
+            if (parser.text[0 .. 1] == "\\") {
+                matchLen = matchLen + 1;
+                parser.drop(1);
+            }
+            matchLen = matchLen + 1;
+            parser.drop(1);
         }
+        string str = start[0 .. matchLen];
+        if (!parser.accept("\"")) {
+            parser.fail("this should never happen");
+        }
+
+        return replaceEscapes(str);
+    }
+
+    (:failure | int) parseNumber(Parser parser)
+    {
+        parser.begin;
+        mut bool negative = parser.accept("-");
+        if (parser.accept("-"))
+            negative = true;
+        parser.strip;
+        if (parser.eof || !isDigit(parser.text[0]))
+        {
+            parser.revert;
+            return :failure;
+        }
+        mut string number;
+        while (!parser.eof && isDigit(parser.text[0]))
+        {
+            number ~= parser.text[0];
+            parser.drop(1);
+        }
+        parser.commit;
+        mut int i = atoi(number);
+        if (negative) i = -i;
+        return i;
     }
 }
 
@@ -82,39 +326,6 @@ unittest
     assert(JSONValue.parse("{\"Hello\": \"World\"}").str == "{\"Hello\": \"World\"}");
     // TODO
     // auto value = JSONValue({ "Hello": "World" });
-}
-
-JSONValue jsonParseImpl(Parser parser) {
-    if (parser.accept("\"")) {
-        return JSONValue(parseStringLiteral(parser));
-    }
-    parser.parseNumber.case {
-        (:failure): {}
-        int value: return JSONValue(value);
-    }
-    if (parser.accept("[")) {
-        mut JSONValue[] entries;
-        if (!parser.accept("]")) while (true) {
-            entries ~= jsonParseImpl(parser);
-            if (parser.accept("]")) break;
-            parser.expect(",");
-        }
-        return JSONValue(entries);
-    }
-    if (parser.accept("{")) {
-        mut (string key, JSONValue val)[] entries;
-        if (!parser.accept("}")) while (true) {
-            parser.expect("\"");
-            auto key = parseStringLiteral(parser);
-            parser.expect(":");
-            auto value = jsonParseImpl(parser);
-            entries ~= (key, value);
-            if (parser.accept("}")) break;
-            parser.expect(",");
-        }
-        return JSONValue(entries);
-    }
-    parser.fail("unexpected input: " ~ parser.text);
 }
 
 string str(JSONValue jv) {
@@ -137,54 +348,6 @@ string quote(string s) {
         else quoted ~= ch;
     }
     return "\"" ~ quoted ~ "\"";
-}
-
-(:failure | int) parseNumber(Parser parser)
-{
-    parser.begin;
-    mut bool negative = parser.accept("-");
-    if (parser.accept("-"))
-        negative = true;
-    parser.strip;
-    if (parser.eof || !isDigit(parser.text[0]))
-    {
-        parser.revert;
-        return :failure;
-    }
-    mut string number;
-    while (!parser.eof && isDigit(parser.text[0]))
-    {
-        number ~= parser.text[0];
-        parser.drop(1);
-    }
-    parser.commit;
-    mut int i = atoi(number);
-    if (negative) i = -i;
-    return i;
-}
-
-string parseStringLiteral(Parser parser)
-{
-    mut int matchLen;
-    auto loc = parser.loc;
-    string start = parser.text;
-    while (parser.text[0 .. 1] != "\"") {
-        if (parser.text.length == 0) {
-            parser.fail("expected end of string, got end of file");
-        }
-        if (parser.text[0 .. 1] == "\\") {
-            matchLen = matchLen + 1;
-            parser.drop(1);
-        }
-        matchLen = matchLen + 1;
-        parser.drop(1);
-    }
-    string str = start[0 .. matchLen];
-    if (!parser.accept("\"")) {
-        parser.fail("this should never happen");
-    }
-
-    return replaceEscapes(str);
 }
 
 string replaceEscapes(string text) {

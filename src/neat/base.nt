@@ -288,7 +288,7 @@ abstract class Type : Symbol
     /**
      * Called to resolve `base[index]`.
      */
-    nullable Expression index(Context context, Expression base, Expression index, Loc loc)
+    (nullable Expression | fail Error) index(Context context, Expression base, Expression index, Loc loc)
     {
         return null;
     }
@@ -296,7 +296,8 @@ abstract class Type : Symbol
     /**
      * Called to resolve `base[index] = value`.
      */
-    nullable Statement indexAssignment(Context context, Expression base, Expression index, Expression value, Loc loc)
+    (nullable Statement | fail Error) indexAssignment(
+        Context context, Expression base, Expression index, Expression value, Loc loc)
     {
         return null;
     }
@@ -475,22 +476,22 @@ Expression beExpression(Symbol symbol)
     assert(false);
 }
 
-Expression beExpression2(Symbol symbol, Loc loc)
+(Expression | fail Error) beExpression2(Symbol symbol, Loc loc)
 {
     if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
         return new SymbolIdentifierExpression(symbolIdent.name);
     if (auto expr = symbol.instanceOf(Expression))
         return expr;
-    loc.fail("expression expected");
+    return loc.fail("expression expected");
 }
 
-Type beType(Loc loc, Symbol symbol)
+(Type | fail Error) beType(Loc loc, Symbol symbol)
 {
     if (auto type = symbol.instanceOf(Type))
         return type;
     if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
         return new SymbolIdentifierType(symbolIdent.name);
-    loc.assert2s(false, "type expected");
+    return loc.fail("type expected");
 }
 
 abstract class Reference : Expression
@@ -692,27 +693,28 @@ class FunctionDeclaration : Symbol
     }
 }
 
-void validateCall(Parameter[] params, ASTArgument[] args, string name, bool variadic, Loc loc)
+(void | fail Error) validateCall(Parameter[] params, ASTArgument[] args, string name, bool variadic, Loc loc)
 {
     if (variadic) {
         if (args.length < params.length) {
-            loc.assert2s(false,
+            return loc.fail(
                 "unexpected number of arguments to $(name): expected at least $(params.length), but got $(args.length)");
         }
     } else {
         if (params.length != args.length) {
-            loc.assert2s(false,
+            return loc.fail(
                 "unexpected number of arguments to $(name): expected $(params.length), but got $(args.length)");
         }
     }
     for (i, arg in args[0 .. params.length]) {
-        if (arg.name.length > 0) {
+        if (arg.name.length > 0 && arg.name != params[i].name) {
             // TODO args.loc
-            loc.assert2s(
-                arg.name == params[i].name,
+            return loc.fail(
                 "expected parameter named '$(params[i].name)', but got '$(arg.name)'");
         }
     }
+    // TODO can we omit this pls
+    return;
 }
 
 /**
@@ -1120,10 +1122,10 @@ abstract class CompilerBase
         assert(false);
     }
 
-    Expression expectImplicitConvertTo(Context context, Expression from, Type to, Loc loc)
+    (Expression | fail Error) expectImplicitConvertTo(Context context, Expression from, Type to, Loc loc)
     {
         if (auto result = implicitConvertTo(context, from, to)) return result;
-        context.assert2(false, loc, "Cannot convert to $(to.repr): $(from.type.repr)");
+        context.assert2(false, loc, "Cannot convert to $(to.repr): $(from.type.repr)")?;
     }
 
     // true if ClassType or IntfType
@@ -1217,13 +1219,9 @@ struct Context
         this.data.errorStack = this.data.errorStack[0 .. $ - 1];
     }
 
-    void assert2(bool test, Loc loc, string msg) {
+    (void | fail Error) assert2(bool test, Loc loc, string msg) {
         if (test) return;
-        mut string error;
-        for (loc in data.errorStack) error ~= "$(loc.location):\n";
-        error ~= "$(loc.location): $msg";
-        print(error);
-        exit(1);
+        return new Error(data.errorStack ~ loc, msg);
     }
 
     string getLabel() { return "uniq$(data.idCounter.next)"; }
@@ -1237,9 +1235,8 @@ struct Context
     // implicit function calls
     // TODO check if we should propagate this upcall
     auto astSymbol = new ASTSymbolHelper(symbol);
-    // if (auto expr = context.compiler.plainCall(context, symbol, [], loc, true))
-    auto expr <- context.compiler.call(context, astSymbol, [], loc, true);
-    if (auto expr = expr)
+    // if (auto expr = context.compiler.plainCall(context, symbol, [], loc, true)?)
+    if (auto expr = context.compiler.call(context, astSymbol, [], loc, true)?)
         return expr;
     return symbol.instanceOf(Expression);
 }
@@ -1251,10 +1248,9 @@ struct Context
 
 (Expression | fail Error) beExpressionImplCall(Symbol symbol, Context context, Loc loc)
 {
-    auto expr <- symbol.isExpressionImplCall(context, loc);
-    if (auto expr = expr)
+    if (auto expr = symbol.isExpressionImplCall(context, loc)?)
         return expr;
-    loc.fail("expression expected");
+    return loc.fail("expression expected");
 }
 
 Context makeContext(CompilerBase compiler, Platform platform, nullable Namespace namespace, MacroState macroState)
@@ -1351,8 +1347,8 @@ class ASTIdentifier : ASTSymbol
                 return context.namespace.lookup(this.name, context, loc, null);
             }
         }
-        nullable Symbol symbol <- resolve;
-        this.loc.assert2s2(!!symbol, this.name, " not found");
+        nullable Symbol symbol = resolve?;
+        this.loc.assert2s2(!!symbol, this.name, " not found")?;
         return symbol.notNull;
     }
 

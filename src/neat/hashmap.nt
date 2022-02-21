@@ -2,7 +2,6 @@ module neat.hashmap;
 
 macro import neat.macros.once;
 macro import neat.macros.quasiquoting;
-macro import neat.macros.retfail;
 
 import backend.base;
 import neat.array;
@@ -77,7 +76,7 @@ class HashMap : Type
             auto stmt = compiler.$stmt if (cast(void*) source != null) {
                 neat_runtime_refcount_inc("hashmap acquire", cast(size_t*) source);
             };
-            auto result = retfail stmt.compile(context);
+            auto result = stmt.compile(context)?;
             return compiler.sequenceStatement([
                 result.statement,
                 compiler.assignStatement(target, source)]);
@@ -110,64 +109,63 @@ class HashMap : Type
         if (auto base = base) {
             // TODO args.loc
             if (field == "set") {
-                loc.assert2s(args.length == 2, "hashmap.set() expects key, value");
-                auto key <- args[0].sym.compile(context).retfail.beExpressionImplCall(context, loc);
-                auto value <- args[1].sym.compile(context).retfail.beExpressionImplCall(context, loc);
-                auto keyConv = expectImplicitConvertTo(context, key, this.key, loc);
-                auto valueConv = expectImplicitConvertTo(context, value, this.value, loc);
-                auto set = retfail setHashmap(context, this, base, keyConv, valueConv, loc);
+                loc.assert(args.length == 2, "hashmap.set() expects key, value")?;
+                auto key = args[0].sym.compile(context)?.beExpressionImplCall(context, loc)?;
+                auto value = args[1].sym.compile(context)?.beExpressionImplCall(context, loc)?;
+                auto keyConv = expectImplicitConvertTo(context, key, this.key, loc)?;
+                auto valueConv = expectImplicitConvertTo(context, value, this.value, loc)?;
+                auto set = setHashmap(context, this, base, keyConv, valueConv, loc)?;
                 return context.compiler.statementExpression(set, context.compiler.voidLiteral);
             }
             if (field == "get") {
-                loc.assert2s(args.length == 2, "hashmap.get() expects two parameters, key and default");
-                auto key <- args[0].sym.compile(context).retfail.beExpressionImplCall(context, loc);
-                auto deflt <- args[1].sym.compile(context).retfail.beExpressionImplCall(context, loc);
+                loc.assert(args.length == 2, "hashmap.get() expects two parameters, key and default")?;
+                auto key = args[0].sym.compile(context)?.beExpressionImplCall(context, loc)?;
+                auto deflt = args[1].sym.compile(context)?.beExpressionImplCall(context, loc)?;
                 return getHashmapDefault(context, loc, this, base, key, deflt, insert=false);
             }
             if (field == "require") {
-                loc.assert2s(args.length == 2, "hashmap.require() expects two parameters, key and default");
-                auto key <- args[0].sym.compile(context).retfail.beExpressionImplCall(context, loc);
-                auto deflt <- args[1].sym.compile(context).retfail.beExpressionImplCall(context, loc);
+                loc.assert(args.length == 2, "hashmap.require() expects two parameters, key and default")?;
+                auto key = args[0].sym.compile(context)?.beExpressionImplCall(context, loc)?;
+                auto deflt = args[1].sym.compile(context)?.beExpressionImplCall(context, loc)?;
                 return getHashmapDefault(context, loc, this, base, key, deflt, insert=true);
             }
             if (field == "has") {
-                loc.assert2s(args.length == 1, "hashmap.has() expects one parameter, key");
-                auto key <- args[0].sym.compile(context).retfail.beExpressionImplCall(context, loc);
+                loc.assert(args.length == 1, "hashmap.has() expects one parameter, key")?;
+                auto key = args[0].sym.compile(context)?.beExpressionImplCall(context, loc)?;
                 return hasKeyHashmap(context, this, base, key);
             }
             if (field == "resize") {
-                loc.assert2s(args.length == 1, "hashmap.resize() expects one parameter, new size");
-                auto newsize <- args[0].sym.compile(context).retfail.beExpressionImplCall(context, loc);
+                loc.assert(args.length == 1, "hashmap.resize() expects one parameter, new size")?;
+                auto newsize = args[0].sym.compile(context)?.beExpressionImplCall(context, loc)?;
                 return resizeHashmap(context, this, base, newsize);
             }
         } else {
             if (field == "allocate") {
-                loc.assert2s(args.length == 1, "hashmap.allocate() expects one parameter, size");
-                auto size <- args[0].sym.compile(context).retfail.beExpressionImplCall(context, loc);
-                auto sizeT = expectImplicitConvertTo(context, size, context.nativeWordType, loc);
+                loc.assert(args.length == 1, "hashmap.allocate() expects one parameter, size")?;
+                auto size = args[0].sym.compile(context)?.beExpressionImplCall(context, loc)?;
+                auto sizeT = expectImplicitConvertTo(context, size, context.nativeWordType, loc)?;
                 return allocateHashmap(context, this, sizeT);
             }
             if (field == "hash") {
-                loc.assert2s(args.length == 1, "hashmap.hash() expects one parameter, key");
-                auto key <- args[0].sym.compile(context).retfail.beExpressionImplCall(context, loc);
+                loc.assert(args.length == 1, "hashmap.hash() expects one parameter, key")?;
+                auto key = args[0].sym.compile(context)?.beExpressionImplCall(context, loc)?;
                 return hashFun(context, loc, this, key);
             }
         }
         return null;
     }
 
-    override nullable Expression index(Context context, Expression base, Expression index, Loc loc) {
-        auto indexConv = expectImplicitConvertTo(context, index, this.key, loc);
+    override (nullable Expression | fail Error) index(Context context, Expression base, Expression index, Loc loc) {
+        auto indexConv = expectImplicitConvertTo(context, index, this.key, loc)?;
         return getHashmap(context, this, base, indexConv);
     }
 
-    override nullable Statement indexAssignment(Context context, Expression base, Expression index, Expression value, Loc loc) {
-        auto indexConv = expectImplicitConvertTo(context, index, this.key, loc);
-        auto valueConv = expectImplicitConvertTo(context, value, this.value, loc);
-        setHashmap(context, this, base, indexConv, valueConv, loc).case {
-            Statement stmt: return stmt;
-            Error err: assert(false);
-        }
+    override (nullable Statement | fail Error) indexAssignment(
+        Context context, Expression base, Expression index, Expression value, Loc loc
+    ) {
+        auto indexConv = expectImplicitConvertTo(context, index, this.key, loc)?;
+        auto valueConv = expectImplicitConvertTo(context, value, this.value, loc)?;
+        return setHashmap(context, this, base, indexConv, valueConv, loc);
     }
 }
 
@@ -187,13 +185,18 @@ private ASTSymbol wrap(Context context, HashMap hashmap, ASTSymbol value) {
     });
 }
 
-private Expression hashFun(Context context, Loc loc, HashMap hashmap, Expression key) {
+private (Expression | fail Error) hashFun(Context context, Loc loc, HashMap hashmap, Expression key) {
     Parameter[] params = [
         Parameter(false, "key", false, key.type)];
 
+    bool isString = key.type.same(once new Array(new Character));
+    bool isInt = key.type.same(once new Integer) || key.type.same(once new Long);
+    if (!isString && !isInt) {
+        return loc.fail("TODO: hash() of $(key.type.repr)");
+    }
     // TODO proper unsigned types
     ASTSymbol hashfn() {
-        if (key.type.same(once new Array(new Character))) {
+        if (isString) {
             return context.compiler.$expr ({
                 // fnv hash
                 mut int hash = 0x811c9dc5;
@@ -205,7 +208,7 @@ private Expression hashFun(Context context, Loc loc, HashMap hashmap, Expression
                 hash;
             });
         }
-        if (key.type.same(once new Integer) || key.type.same(once new Long)) {
+        if (isInt) {
             // knuth hash
             return context.compiler.$expr ({
                 mut int hash = key * 2654435761;
@@ -213,7 +216,7 @@ private Expression hashFun(Context context, Loc loc, HashMap hashmap, Expression
                 hash;
             });
         }
-        loc.assert2s(false, "TODO: hash() of $(key.type.repr)");
+        loc.hardCheck(false, "internal error");
     }
     ASTStatement body_() {
         return context.compiler.astReturn(wrap(context, hashmap, hashfn), __HERE__);
@@ -297,7 +300,7 @@ private (Statement | fail Error) setHashmap(
     Context context, HashMap hashmap, Expression base, Expression key, Expression value, Loc loc)
 {
     auto baseRef = base.instanceOf(Reference);
-    loc.assert2s(!!baseRef && baseRef.info.mutable, "target of hashmap assignment must be mutable");
+    loc.assert(!!baseRef && baseRef.info.mutable, "target of hashmap assignment must be mutable")?;
     auto baseRef = baseRef.notNull;
     // we temporize value first thing, because evaluating value may change the addresss of the hashmap.
     (nullable Statement | fail Error) do3(Expression value) {
@@ -478,7 +481,7 @@ private Expression hasKeyHashmap(Context context, HashMap hashmap, Expression ba
     return context.compiler.mkCall(fn, [base, key], __HERE__);
 }
 
-public Expression getHashmapDefault(
+public (Expression | fail Error) getHashmapDefault(
     Context context, Loc loc, HashMap hashmap, Expression base, Expression key, Expression deflt, bool insert)
 {
     auto astValue = new ASTSymbolHelper(hashmap.value);
@@ -488,7 +491,7 @@ public Expression getHashmapDefault(
     mut ASTStatement astElse = context.compiler.$stmt ret = $astDeflt;;
     if (insert) {
         auto baseRef = base.instanceOf(Reference);
-        loc.assert2s(!!baseRef && baseRef.info.mutable, "target of hashmap assignment must be mutable");
+        loc.assert(!!baseRef && baseRef.info.mutable, "target of hashmap assignment must be mutable")?;
         astElse = context.compiler.$stmt {
             ret = $astDeflt;
             $astBase[key] = ret;
@@ -511,7 +514,7 @@ public Expression getHashmapDefault(
 
 public Expression releaseHashmap(Context context, Expression value) {
     auto hashmap = value.type.instanceOf(HashMap);
-    __HERE__.assert2s(!!hashmap, "hashmap expected");
+    __HERE__.hardCheck(!!hashmap, "hashmap expected");
     auto hashmap = hashmap.notNull;
     Parameter[] params = [Parameter(false, "value", false, hashmap)];
 
@@ -623,8 +626,8 @@ class ASTHashMap : ASTSymbol
     this(this.key, this.value, this.loc) { }
 
     override (Type | fail Error) compile(Context context) {
-        auto key = beType(this.loc, retfail this.key.compile(context));
-        auto value = beType(this.loc, retfail this.value.compile(context));
+        auto key = beType(this.loc, this.key.compile(context)?)?;
+        auto value = beType(this.loc, this.value.compile(context)?)?;
         return new HashMap(key=key, value=value);
     }
 

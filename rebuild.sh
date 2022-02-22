@@ -16,7 +16,8 @@ then
     FLAGS=""
 fi
 
-FLAGS="${FLAGS} -I$(llvm-config --includedir) -L-L$(llvm-config --libdir) \
+LLVM_CONFIG="/usr/lib/llvm/12/bin/llvm-config"
+FLAGS="${FLAGS} -I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir) \
     -version=LLVMBackend -macro-version=LLVMBackend"
 
 function checksum {

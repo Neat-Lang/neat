@@ -568,6 +568,8 @@ at_revision '2a737673a32790db9bf9418e4e9ae75bdfe2f768' 'rebuild neat' 'build/nea
 at_revision '66c150198319fb3a71153dcf4cb4ad66ba3cab85' 'rebuild neat' 'build/neat'
 # Add expr? for error propagation.
 at_revision '930e680c8adb03abb3c5c97cfb3a1ce7a7594742' 'rebuild neat' 'build/neat'
+# Port compiler to expr?.
+at_revision 'f68c0527808c4da0f68f01e65847ef8096c52f21' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

@@ -715,7 +715,7 @@ class ClassType : Type
         stmt.compile(context).case {
             StatementCompileResult res:
                 return context.compiler.sequence(initTemp, res.statement);
-            Error err: assert(false);
+            Error err: exitWithError!Statement(err);
         }
     }
 
@@ -1512,14 +1512,14 @@ class ASTIntfDecl : ASTSymbol
     mut ASTClassEntry[] members;
     parser.expect("{")?;
     while (!parser.accept("}")?) {
-        members ~= parseClassEntry(parser, lexicalContext)?;
+        members ~= parseClassEntry(parser, lexicalContext, name)?;
     }
     return new ASTClassDecl(
         name, supers, classFinal, classAbstract,
         members, lexicalContext.macroState, loc);
 }
 
-(ASTClassEntry[] | fail Error) parseClassEntry(Parser parser, LexicalContext lexicalContext)
+(ASTClassEntry[] | fail Error) parseClassEntry(Parser parser, LexicalContext lexicalContext, string className)
 {
     if (parser.accept("version")?) {
         mut ASTClassEntry[] then, else_;
@@ -1528,18 +1528,18 @@ class ASTIntfDecl : ASTSymbol
         parser.expect(")")?;
         if (parser.accept("{")?) {
             while (!parser.accept("}")?) {
-                then ~= parser.parseClassEntry(lexicalContext)?;
+                then ~= parser.parseClassEntry(lexicalContext, className)?;
             }
         } else {
-            then ~= parser.parseClassEntry(lexicalContext)?;
+            then ~= parser.parseClassEntry(lexicalContext, className)?;
         }
         if (parser.accept("else")?) {
             if (parser.accept("{")?) {
                 while (!parser.accept("}")?) {
-                    else_ ~= parser.parseClassEntry(lexicalContext)?;
+                    else_ ~= parser.parseClassEntry(lexicalContext, className)?;
                 }
             } else {
-                else_ ~= parser.parseClassEntry(lexicalContext)?;
+                else_ ~= parser.parseClassEntry(lexicalContext, className)?;
             }
         }
         // FIXME explicitly type hinted literal
@@ -1605,9 +1605,20 @@ class ASTIntfDecl : ASTSymbol
     if (parser.accept("(")?) // method
     {
         auto params = parseParamList(parser, lexicalContext)?;
-        ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
+        mut nullable ASTStatement stmt = null;
+        if (abstract_ && parser.accept(";")?) {
+            ASTSymbol astName = new ASTStringLiteral(className ~ "." ~ memberName, __HERE__);
+            stmt = lexicalContext.compiler.$stmt {
+                import package(compiler).neat.runtime.stdlib : exit;
+
+                print("Error: " ~ $astName ~ ": called an unimplemented method!");
+                exit(1);
+            };
+        } else {
+            stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
+        }
         ASTClassEntry entry = ASTClassDeclMethod(
-            loc, protection, override_, abstract_, memberName, retType.notNull, params, stmt);
+            loc, protection, override_, abstract_, memberName, retType.notNull, params, stmt.notNull);
         return [entry];
     }
     else

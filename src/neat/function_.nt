@@ -102,7 +102,8 @@ class Function : FunctionDeclaration
                 new PointerCast(contextType, new ArgExpr(0, voidp)));
         }
 
-        mut auto context = makeContext(compiler, platform, scope_, this.macroState);
+        auto framePtr = compiler.reference(compiler.stackFrame(new Void));
+        mut auto context = makeContext(compiler, platform, scope_, this.macroState).withFramePointer(framePtr);
 
         for (int i, param in this.params) {
             auto argExpr = new ArgExpr(extra + i, param.type);
@@ -251,21 +252,19 @@ class FunctionScope : FunctionScopeBase
 
     override string mangle() { return this.mangle_; }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc, nullable Expression frame)
+    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc)
     {
         assert(!!this.parent);
 
-        mut nullable Expression nextFrame;
-        if (this.extra && frame)
-        {
+        mut nullable Expression nextFramePointer = null;
+        if (this.extra && context.framePointer) {
             // first field in stackframe must be parent
             // TODO better?
-            auto framePtr = new PointerCast(once new Pointer(new Pointer(new Void)), frame.notNull);
-
-            nextFrame = context.compiler.dereference(framePtr);
+            auto framePtr = new PointerCast(once new Pointer(new Pointer(new Void)), context.framePointer.notNull);
+            nextFramePointer = context.compiler.dereference(framePtr);
         }
 
-        return this.parent.lookup(name, context, loc, nextFrame);
+        return this.parent.lookup(name, context.withFramePointer(nextFramePointer), loc);
     }
 }
 
@@ -279,7 +278,7 @@ class ReturnTypeNamespace : Namespace
 
     this(this.parent, this.params) { }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc, nullable Expression frame) {
+    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc) {
         for (param in this.params) {
             if (param.name == name) {
                 import neat.expr : NullExpr;
@@ -287,7 +286,7 @@ class ReturnTypeNamespace : Namespace
                 return new NullExpr(param.type);
             }
         }
-        if (this.parent) return this.parent.lookup(name, context, loc, frame);
+        if (this.parent) return this.parent.lookup(name, context, loc);
         return null;
     }
 }
@@ -322,10 +321,10 @@ class VariableDeclaration : DeclarationHolder
         return new InfoReference(reference, info);
     }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc, nullable Expression frame)
+    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc)
     {
         // Frame may be null for struct nested in function.
-        if (auto frame = frame) {
+        if (auto frame = context.framePointer) {
             if (this.variable.name == name) {
                 return access(context.compiler, frame);
             }
@@ -337,7 +336,7 @@ class VariableDeclaration : DeclarationHolder
                 if (target) return target;
             }
         }
-        if (this.parent) return this.parent.lookup(name, context, loc, frame);
+        if (this.parent) return this.parent.lookup(name, context, loc);
         return null;
     }
 }
@@ -435,8 +434,8 @@ class LatentNestedFunction : LatentSymbol
 
     this(this.fun) { }
 
-    override Symbol resolve(Context context, nullable Expression frame) {
-        return new NestedFunction(this.fun, frame.notNull);
+    override Symbol resolve(Context context) {
+        return new NestedFunction(this.fun, context.framePointer.notNull);
     }
 }
 

@@ -42,13 +42,8 @@ abstract class Namespace
      *          meaning it decides whether private members may be read.
      *
      * loc:     The location of the symbol triggering the lookup.
-     *
-     * frame:   Pointer to the object that the lookup is proceeding on.
-     *          Stackframe in case of a function lookup.
-     *          When looking up outer variables in nested functions, the frame pointer
-     *          is taken from the inner stackframe.
      */
-    abstract (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc, nullable Expression frame);
+    abstract (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc);
 
     string mangle() { return this.parent.mangle; }
 }
@@ -140,8 +135,8 @@ abstract class LoopScope : Namespace
     abstract (Statement | fail Error) breakFrom(Context context);
     abstract (Statement | fail Error) continueFrom(Context context);
     // purely a marker
-    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc, nullable Expression frame) {
-        return this.parent.lookup(name, context, loc, frame);
+    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc) {
+        return this.parent.lookup(name, context, loc);
     }
 }
 
@@ -154,15 +149,15 @@ class SymbolAlias : Namespace
 
     this(this.parent, this.name, this.value) { this.isContextScope = parent.isContextScope; }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc, nullable Expression frame)
+    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc)
     {
         if (this.name == name) {
             if (auto latent = this.value.instanceOf(LatentSymbol)) {
-                return latent.resolve(context, frame);
+                return latent.resolve(context);
             }
             return value;
         }
-        if (this.parent) return this.parent.lookup(name, context, loc, frame);
+        if (this.parent) return this.parent.lookup(name, context, loc);
         return null;
     }
 }
@@ -1140,11 +1135,17 @@ struct Context
 {
     nullable Namespace namespace;
 
+    // the reference by which free variables are resolved.
+    nullable Expression framePointer;
+
     ImmutableContext data;
 
-    Context withNamespace(Namespace namespace)
-    {
-        return Context(namespace, this.data);
+    Context withNamespace(Namespace namespace) {
+        return Context(namespace, this.framePointer, this.data);
+    }
+
+    Context withFramePointer(nullable Expression framePointer) {
+        return Context(this.namespace, framePointer, this.data);
     }
 
     // TODO alias, this is a bit too reliant on the inliner
@@ -1203,7 +1204,7 @@ Context makeContext(CompilerBase compiler, Platform platform, nullable Namespace
     auto data = new ImmutableContext(compiler, platform, macroState, compiler.nativeWordType(platform),
         new IdCounter, []);
 
-    return Context(namespace, data);
+    return Context(namespace, null, data);
 }
 
 // TODO Statement, Context multi-return
@@ -1218,7 +1219,7 @@ abstract class ASTStatement
 {
     abstract (StatementCompileResult | fail Error) compile(Context context);
 
-    abstract ASTSymbol quote(Quoter quoter);
+    ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTStatement'!"); assert(false); }
 }
 
 /**
@@ -1284,12 +1285,11 @@ class ASTIdentifier : ASTSymbol
         (nullable Symbol | fail Error) resolve() {
             if (this.moduleLevel) {
                 auto module_ = findParent!ModuleBase(context.namespace);
-                return module_.lookup(this.name, context, loc, null);
+                return module_.lookup(this.name, context.withFramePointer(null), loc);
             } else if (context.namespace.isContextScope) {
-                auto stackframe = context.compiler.reference(context.compiler.stackFrame(new Void));
-                return context.namespace.lookup(this.name, context, loc, stackframe);
+                return context.namespace.lookup(this.name, context, loc);
             } else {
-                return context.namespace.lookup(this.name, context, loc, null);
+                return context.namespace.lookup(this.name, context.withFramePointer(null), loc);
             }
         }
         nullable Symbol symbol = resolve?;
@@ -1492,7 +1492,7 @@ abstract class LateSymbol : Symbol
  */
 abstract class LatentSymbol : Symbol
 {
-    abstract Symbol resolve(Context context, nullable Expression frame);
+    abstract Symbol resolve(Context context);
 }
 
 // class.member

@@ -760,9 +760,8 @@ class ASTCall : ASTSymbol
                 auto member = accessMember(
                     context, base, astMemberAccess.member, astMemberAccess.loc, allowUndefined=true)?;
                 if (!member) {
-                    auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
                     // if `foo` has no `bar` but there is a `bar` symbol:
-                    if (auto callable = context.namespace.lookup(astMemberAccess.member, context, this.loc, stackframe)?) {
+                    if (auto callable = context.namespace.lookup(astMemberAccess.member, context, this.loc)?) {
                         // rewrite foo.bar(baz) to bar(foo, baz)
                         auto target = new ASTIdentifier(astMemberAccess.member, false, astMemberAccess.loc);
                         auto args = [ASTArgument(astMemberAccess.base, "")] ~ this.args;
@@ -1041,8 +1040,7 @@ class ASTMember : ASTMemberBase
         if (auto base = this.base.compile(context)?.isExpressionImplCall(context, this.loc)?) {
             auto member = accessMember(context, base, this.member, this.loc, allowUndefined=true)?;
             if (!member) {
-                auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
-                auto callable = context.namespace.lookup(this.member, context, this.loc, stackframe)?;
+                auto callable = context.namespace.lookup(this.member, context, this.loc)?;
                 // if `foo` has no `bar` but there is a `bar` symbol:
                 if (callable) {
                     auto target = new ASTIdentifier(this.member, false, this.loc);
@@ -1421,10 +1419,9 @@ class ASTLambdaExpr : ASTSymbol
                 ASTParameter(paramName, mutable=false, new ASTIdentifier("T", false, __HERE__), __HERE__)],
             isDeclaration=false, statement=returnLambdaExpr, this.macroState);
         auto astTemplateDecl = new ASTTemplateDecl(lambdaName, ["T"], lambdaFun);
-        auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
         auto templateDecl = new ScopeBoundTemplateDecl(
             new TemplateDecl(context.namespace, astTemplateDecl),
-            stackframe);
+            context.framePointer);
         string repr = "$paramName -> $(this.value.repr)";
 
         return new LambdaExpr(templateDecl, repr);
@@ -2303,9 +2300,8 @@ class ASTIfStatement : ASTStatement
                     auto pair = vardecl.compile(context)?;
                     prelude = pair.statement;
                     testSucceedsContext = pair.context;
-                    auto stackframe = once new ReferenceExpression(new StackFrame(new Void));
                     auto var = testSucceedsContext.namespace.lookup(
-                            vardecl.name, context, this.loc, stackframe)?
+                            vardecl.name, context, this.loc)?
                         .notNull
                         .beExpression;
                     // TODO lookup() that handles the stackframe thing
@@ -3908,7 +3904,8 @@ class Resolver
         if (!ret) return null;
         if (auto latent = ret.instanceOf(LatentSymbol)) {
             // we're at global scope; no frame pointer will be applied.
-            ret = latent.resolve(context, null);
+            assert(!context.framePointer);
+            ret = latent.resolve(context);
         }
         return ret;
     }
@@ -4114,9 +4111,12 @@ class Module : ModuleBase
         return null;
     }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc, nullable Expression frame)
+    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc)
     {
-        if (!!frame) { print("error: lookup with frame propagated to Module"); assert(false); }
+        if (!!context.framePointer) {
+            print("error: lookup with frame propagated to Module");
+            assert(false);
+        }
 
         this.resolver.lookup(context, loc, name, Protection.private_).case {
             nullable Symbol sym: if (sym) return sym;
@@ -4134,7 +4134,7 @@ class Module : ModuleBase
         }
         assert(!this.parent);
         if (this.parentModule)
-            return this.parentModule.lookup(name, context, loc, frame);
+            return this.parentModule.lookup(name, context, loc);
         return null;
     }
 }
@@ -4305,12 +4305,12 @@ class ImportNamespace : Namespace
         this.isContextScope = this.parent.isContextScope;
     }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc, nullable Expression frame) {
+    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc) {
         if (!symbols.length || [any symbol == name for symbol in symbols]) {
             auto sym = module_.lookupPublic(context, loc, name)?;
             if (sym) return sym;
         }
-        return this.parent.lookup(name, context, loc, frame);
+        return this.parent.lookup(name, context, loc);
     }
 }
 

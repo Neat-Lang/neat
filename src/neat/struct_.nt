@@ -5,6 +5,7 @@ macro import neat.macros.listcomprehension;
 import backend.base;
 import helpers;
 import neat.base;
+import neat.decl;
 import neat.expr;
 import neat.function_;
 import neat.hash;
@@ -36,7 +37,7 @@ class Struct : Type
 
     private (BackendStructType type, Platform platform) backendCache;
 
-    void* a, b, c;
+    StructAliasDecl[] decls;
 
     this(this.name, this.members, this.loc, string manglePrefix) {
         this.mangledName = manglePrefix ~ "_struct_" ~ this.name;
@@ -44,7 +45,6 @@ class Struct : Type
             all member.type.zeroInitializable for member in this.members];
         this.validMethods = this.methods.length;
         this.mutex = new Mutex;
-        a = null; b = null; c = null;
     }
 
     override bool same(Type other) {
@@ -129,6 +129,22 @@ class Struct : Type
                 loc.assert(!!baseExpr, "non-static method cannot be called on type")?;
                 return new ClassMethodPtr(funcPtr, baseExpr.notNull, false, method.name);
             }
+        }
+        size_t declOffset = [
+            first i for i, a in this.decls
+            where a.name == member/* && allowed(a.protection) TODO */
+            else -1];
+        if (declOffset != -1) {
+            loc.assert(!!baseExpr, "alias cannot be called on type (TODO)")?;
+            auto reference = baseExpr.instanceOf(Reference);
+            loc.assert(!!reference, "can only access struct alias on reference")?;
+            auto refPtr = context.compiler.reference(reference.notNull);
+            auto decl = this.decls[declOffset];
+            auto context = decl.structParentContext
+                .withNamespace(new StructNamespace(decl.structParentContext.namespace.parent, this))
+                .withFramePointer(refPtr);
+            auto ret = decl.target.compile(context)?;
+            return ret;
         }
         return null;
     }
@@ -392,12 +408,22 @@ struct ASTStructMethod
     ASTStatement body_;
 }
 
+struct StructAliasDecl
+{
+    string name;
+
+    ASTSymbol target;
+
+    Context structParentContext;
+}
+
 ASTSymbol quoteStructEntry(ASTStructEntry entry, Quoter quoter) {
     entry.case {
         ASTStructMember member: return member.quoteStructMember(quoter);
         ASTStructMethod method: return method.quoteStructMethod(quoter);
         ASTStructVersionBlock blk: return blk.quoteVersionBlock(quoter);
         ASTStructStaticIf staticIf: return staticIf.quoteStaticIf(quoter);
+        ASTAliasDecl aliasDecl: return aliasDecl.quote(quoter);
     }
 }
 
@@ -567,7 +593,7 @@ class ASTStructStaticIf
     this(this.condition, this.then, this.else_) { }
 }
 
-alias ASTStructEntry = (ASTStructMember | ASTStructMethod
+alias ASTStructEntry = (ASTStructMember | ASTStructMethod | ASTAliasDecl
     | ASTStructVersionBlock | ASTStructStaticIf);
 
 class ASTStruct : ASTSymbol
@@ -583,24 +609,24 @@ class ASTStruct : ASTSymbol
     override (Struct | fail Error) compile(Context context) {
         mut StructMemberDeclaration[] members;
         mut ASTStructMethod[] methods;
+        mut StructAliasDecl[] decls;
         (void | fail Error) walk(ASTStructEntry entry) {
             entry.case {
-                ASTStructMember member: {
+                ASTStructMember member:
                     members ~= new StructMemberDeclaration(
                         member.name, member.protection,
                         beType(this.loc, member.type.compile(context)?)?);
-                }
-                ASTStructVersionBlock ver: {
+                ASTStructVersionBlock ver:
                     if ([any a == ver.name for a in context.platform.versions]) {
                         [walk(entry) for entry in ver.then];
                     } else {
                         [walk(entry) for entry in ver.else_];
                     }
-                }
-                ASTStructMethod method: {
+                ASTStructMethod method:
                     methods ~= method;
-                }
-                ASTStructStaticIf staticIf: {
+                ASTAliasDecl decl:
+                    decls ~= StructAliasDecl(decl.name, decl.target, context);
+                ASTStructStaticIf staticIf:
                     auto tern = staticTruthy(context, staticIf.condition);
 
                     tern.case {
@@ -616,7 +642,6 @@ class ASTStruct : ASTSymbol
                         }
                         Error err: return err;
                     }
-                }
             }
         }
         [walk(a) for a in this.entries];
@@ -660,6 +685,7 @@ class ASTStruct : ASTSymbol
                 method.body_, context.macroState);
             struct_.validMethods = i + 1;
         }
+        struct_.decls = decls;
 
         return struct_;
     }
@@ -798,6 +824,11 @@ class ASTStructDecl : ASTDeclaration
             continue;
         }
         break;
+    }
+    if (auto aliasDecl = parseAliasDecl(parser, lexicalContext)?) {
+        parser.assert_(!static_, "TODO static alias")?;
+        entries ~= aliasDecl;
+        return entries;
     }
     if (parser.accept("this")?)
     {

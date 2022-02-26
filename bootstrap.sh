@@ -572,6 +572,8 @@ at_revision '930e680c8adb03abb3c5c97cfb3a1ce7a7594742' 'rebuild neat' 'build/nea
 at_revision 'f68c0527808c4da0f68f01e65847ef8096c52f21' 'rebuild neat' 'build/neat'
 # Abstract class methods don't need a body.
 at_revision '893a26919397e9287efacedeedb2a98241f5f0e7' 'rebuild neat' 'build/neat'
+# paren properties support freeform identifiers, lookup frame refactor, struct spacers
+at_revision 'cff2fb98c0e01c5d98bd269cb6dfc06807eae91f' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

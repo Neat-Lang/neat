@@ -17,9 +17,13 @@ class ASTAssertion : ASTStatement
 
     string exprText;
 
-    Loc loc;
+    version (next_generation) {
+        Loc loc;
 
-    this(this.test, this.exprText, this.loc) { }
+        this(this.test, this.exprText, this.loc) { }
+    } else {
+        this(this.test, this.exprText, this.locRange) { }
+    }
 
     (Expression | fail Error) symbolTest(Context context, ASTSymbol sym) {
         auto context = context.withNamespace(context.compiler.exprAlias(
@@ -166,7 +170,10 @@ class ASTAssertion : ASTStatement
                     context.namespace, "print", printFun));
         context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "assert", assertFun));
-        string failedMsg = loc.location() ~ ": assertion failed: " ~ exprText ~ ", because ";
+        version (next_generation)
+            string failedMsg = loc.location() ~ ": assertion failed: " ~ exprText ~ ", because ";
+        else
+            string failedMsg = locRange.repr ~ ": assertion failed: " ~ exprText ~ ", because ";
         auto ifFailed = dispatch(context, test)?;
         if (auto ifFailed = ifFailed) {
             context = context.withNamespace(context.compiler.exprAlias(
@@ -185,27 +192,59 @@ class ASTAssertion : ASTStatement
 
         // fallback: old impl
         // TODO quasiquote this
-        auto test = this.test.compile(context)?;
-        auto expr = beExpression2(test, this.loc)?;
-        auto texpr = context.compiler.truthy(context, expr, this.loc)?;
-        // FIXME
-        auto nexpr = context.compiler.binaryOp(
-            // "==", context, texpr, new BoolLiteral(false), this.loc);
-            "==", context,
-            texpr,
-            (context.compiler.$expr false).compile(context)?.beExpression,
-            this.loc)?;
-
-        Expression failStr = context.compiler.binaryOp(
-                "~", context,
-                context.compiler.stringLiteral(this.loc.location()),
-                context.compiler.stringLiteral(": '" ~ this.exprText ~ "' was false"),
+        version (next_generation) {
+            auto test = this.test.compile(context)?;
+            auto expr = beExpression2(test, this.loc)?;
+            auto texpr = context.compiler.truthy(context, expr, this.loc)?;
+            // FIXME
+            auto nexpr = context.compiler.binaryOp(
+                // "==", context, texpr, new BoolLiteral(false), this.loc);
+                "==", context,
+                texpr,
+                (context.compiler.$expr false).compile(context)?.beExpression,
                 this.loc)?;
-        Expression false_ = context.compiler.intLiteral(0);
-        Statement printSt = context.compiler.exprStatement(
-            context.compiler.plainCall(context, printFun, [failStr], this.loc, false)?.notNull);
-        Statement failSt = context.compiler.exprStatement(
-            context.compiler.plainCall(context, assertFun, [false_], this.loc, false)?.notNull);
+
+            Expression failStr = context.compiler.binaryOp(
+                    "~", context,
+                    context.compiler.stringLiteral(this.loc.location()),
+                    context.compiler.stringLiteral(": '" ~ this.exprText ~ "' was false"),
+                    this.loc)?;
+            Expression false_ = context.compiler.intLiteral(0);
+            Statement printSt = context.compiler.exprStatement(
+                context.compiler.plainCall(context, printFun, [failStr], this.loc, false)?.notNull);
+            Statement failSt = context.compiler.exprStatement(
+                context.compiler.plainCall(context, assertFun, [false_], this.loc, false)?.notNull);
+        } else {
+            auto test = this.test.compile(context)?;
+            auto expr = test.beExpression(this.locRange)?;
+            auto texpr = context.compiler.truthy(context, expr, this.locRange)?;
+            // FIXME
+            version (next_compiler)
+                auto nexpr = context.compiler.binaryOp(
+                    // "==", context, texpr, new BoolLiteral(false), this.locRange);
+                    "==", context,
+                    texpr,
+                    (context.compiler.$expr false).compile(context)?.beExpression,
+                    this.locRange)?;
+            else
+                auto nexpr = context.compiler.binaryOp(
+                    // "==", context, texpr, new BoolLiteral(false), this.locRange);
+                    "==", context,
+                    texpr,
+                    (context.compiler.$expr false).compile(context)?.beExpression(this.locRange)?,
+                    this.locRange)?;
+
+            Expression failStr = context.compiler.binaryOp(
+                    "~", context,
+                    context.compiler.stringLiteral(this.locRange.repr),
+                    context.compiler.stringLiteral(": '" ~ this.exprText ~ "' was false"),
+                    this.locRange)?;
+            Expression false_ = context.compiler.intLiteral(0);
+            Statement printSt = context.compiler.exprStatement(
+                context.compiler.plainCall(context, printFun, [failStr], this.locRange, false)?.notNull);
+            Statement failSt = context.compiler.exprStatement(
+                context.compiler.plainCall(context, assertFun, [false_], this.locRange, false)?.notNull);
+        }
         // `if (!$expression) { print($assertLocStr ~ ": '" ~ $exprText ~ "' was false."); assert(false); }`
         return StatementCompileResult(
             context.compiler.ifStatement(
@@ -216,11 +255,19 @@ class ASTAssertion : ASTStatement
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        with (quoter.compiler) return astNewExpression(
-            astIdentifier("ASTAssertion", __HERE__), [
-                this.test.quote(quoter),
-                astStringLiteral(this.exprText, __HERE__),
-                quoter.quoteLoc(this.loc)], __HERE__);
+        version (next_generation) {
+            with (quoter.compiler) return astNewExpression(
+                astIdentifier("ASTAssertion", __HERE__), [
+                    this.test.quote(quoter),
+                    astStringLiteral(this.exprText, __HERE__),
+                    quoter.quoteLoc(this.loc)], __HERE__);
+        } else {
+            with (quoter.compiler) return astNewExpression(
+                astIdentifier("ASTAssertion", __HERE__), [
+                    this.test.quote(quoter),
+                    astStringLiteral(this.exprText, __HERE__),
+                    quoter.quoteLocRange(this.locRange)], __HERE__);
+        }
     }
 }
 
@@ -259,7 +306,6 @@ class ParseAssert : Macro
     (nullable ASTStatement | fail Error) parse(Parser parser, LexicalContext context) {
         parser.begin;
         parser.strip?;
-        auto assertLoc = parser.loc;
         if (!parser.accept("assert")?)
         {
             parser.revert;
@@ -271,16 +317,24 @@ class ParseAssert : Macro
             return null;
         }
         parser.commit;
-        auto exprStartLoc = parser.loc;
+        version (next_generation)
+            auto exprStartLoc = parser.loc;
+        else
+            auto exprStartFrom = parser.from?;
         auto exprStart = parser.text;
         auto expression = context.compiler.parseExpression(parser, context)?.notNull;
         auto exprEnd = parser.text;
         auto exprText = exprStart[0 .. exprStart.length - exprEnd.length];
 
+        version (next_generation) { }
+        else { auto exprRange = parser.to(exprStartFrom); }
         parser.expect(")")?;
         parser.expect(";")?;
 
-        return new ASTAssertion(expression, exprText, exprStartLoc);
+        version (next_generation)
+            return new ASTAssertion(expression, exprText, exprStartLoc);
+        else
+            return new ASTAssertion(expression, exprText, exprRange);
     }
 }
 

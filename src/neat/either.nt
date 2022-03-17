@@ -24,7 +24,7 @@ import neat.types;
  */
 struct ASTEitherDeclEntry
 {
-    Loc loc;
+    (Loc | LocRange) locRange;
 
     bool fail;
 
@@ -41,7 +41,7 @@ class ASTEitherDecl : ASTSymbol
     {
         auto partTypes = new (bool fail, Type)[](this.partTypes.length);
         for (i, partType in this.partTypes) {
-            auto type = beType(partType.loc, partType.symbol.compile(context)?)?;
+            auto type = partType.symbol.compile(context)?.beType2(partType.locRange.case(Loc loc: loc.locRange, LocRange range: range))?;
             partTypes[i] = (partType.fail, type);
         }
 
@@ -52,20 +52,20 @@ class ASTEitherDecl : ASTSymbol
     {
         // TODO move into quoter?
         ASTSymbol quoteBool(bool b) {
-            if (b) return quoter.compiler.astIdentifier("true", __HERE__);
-            return quoter.compiler.astIdentifier("false", __HERE__);
+            if (b) return quoter.compiler.astIdentifier("true", __RANGE__);
+            return quoter.compiler.astIdentifier("false", __RANGE__);
         }
         mut ASTSymbol[] quotedParts;
         for (entry in this.partTypes) {
             quotedParts ~= quoter.compiler.astCall(
-                quoter.compiler.astIdentifier("ASTEitherDeclEntry", __HERE__), [
-                    quoter.quoteLoc(entry.loc),
+                quoter.compiler.astIdentifier("ASTEitherDeclEntry", __RANGE__), [
+                    quoter.quoteLocRange(entry.locRange.case(Loc loc: loc.locRange, LocRange range: range)),
                     quoteBool(entry.fail),
-                    entry.symbol.quote(quoter)], __HERE__);
+                    entry.symbol.quote(quoter)], __RANGE__);
         }
         return quoter.compiler.astNewExpression(
-            quoter.compiler.astIdentifier("ASTEitherDecl", __HERE__), [
-                quoter.compiler.astArrayLiteral(quotedParts, __HERE__)], __HERE__);
+            quoter.compiler.astIdentifier("ASTEitherDecl", __RANGE__), [
+                quoter.compiler.astArrayLiteral(quotedParts, __RANGE__)], __RANGE__);
     }
 }
 
@@ -261,7 +261,7 @@ class Either : Type
                     auto member = new EitherMember(source, i);
                     auto converted = context.compiler.implicitConvertTo(context, member, targetType).notNull;
                     Expression test = context.compiler.binaryOp(
-                        "==", context, sourceType, context.compiler.intLiteral(i + 1), __HERE__)?;
+                        "==", context, sourceType, context.compiler.intLiteral(i + 1), __RANGE__)?;
                     Statement assign = context.compiler.assignStatement(target, converted);
                     ifTree = context.compiler.ifStatement(test, assign, ifTree);
                 }
@@ -331,7 +331,7 @@ class Either : Type
                     return context.compiler.assignStatement(targetMember, sourceMember);
                 }
                 Expression test = context.compiler.binaryOp(
-                    "==", context, sourceType, context.compiler.intLiteral(i + 1), __HERE__)?;
+                    "==", context, sourceType, context.compiler.intLiteral(i + 1), __RANGE__)?;
                 ifTree = context.compiler.ifStatement(test, copy?, ifTree);
             }
             if (auto ifTree = ifTree)
@@ -360,7 +360,7 @@ class Either : Type
                 if (auto destroy = entry.type.endLifetime(context, member))
                 {
                     Expression test = context.compiler.binaryOp(
-                        "==", context, valueType, context.compiler.intLiteral(i + 1), __HERE__)?;
+                        "==", context, valueType, context.compiler.intLiteral(i + 1), __RANGE__)?;
                     ifTree = context.compiler.ifStatement(test, destroy, ifTree);
                 }
             }
@@ -376,7 +376,8 @@ class Either : Type
         }
     }
 
-    override (nullable Expression | fail Error) binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
+    override (nullable Expression | fail Error) binaryOp(
+        Context context, string op, Expression lhs, Expression rhs, LocRange locRange)
     {
         if (op == "==") {
             mut auto rhs = rhs;
@@ -391,22 +392,22 @@ class Either : Type
                     auto lhsType = new EitherType(lhs);
                     auto rhsType = new EitherType(rhs);
                     auto typeEq = context.compiler.astBinaryOp(
-                        "==", new ASTSymbolHelper(lhsType), new ASTSymbolHelper(rhsType), __HERE__);
+                        "==", new ASTSymbolHelper(lhsType), new ASTSymbolHelper(rhsType), __RANGE__);
                     mut ASTEitherCaseExprCase[] eqCases;
                     for (i, entry in types) {
                         auto rhsMember = new EitherMember(rhs, cast(int) i);
                         auto memberEq = context.compiler.astBinaryOp(
                             "==",
-                            context.compiler.astIdentifier("a", __HERE__),
-                            new ASTSymbolHelper(rhsMember), __HERE__);
+                            context.compiler.astIdentifier("a", __RANGE__),
+                            new ASTSymbolHelper(rhsMember), __RANGE__);
 
                         eqCases ~= ASTEitherCaseExprCase(
-                            __HERE__, new ASTSymbolHelper(entry.type), "a", return_=false, memberEq);
+                            __RANGE__, new ASTSymbolHelper(entry.type), "a", return_=false, memberEq);
                     }
-                    auto eqTest = new ASTEitherCaseExpr(__HERE__, new ASTSymbolHelper(lhs), eqCases);
-                    auto combinedExpr = context.compiler.astBinaryOp("&&", typeEq, eqTest, __HERE__);
+                    auto eqTest = new ASTEitherCaseExpr(__RANGE__, new ASTSymbolHelper(lhs), eqCases);
+                    auto combinedExpr = context.compiler.astBinaryOp("&&", typeEq, eqTest, __RANGE__);
 
-                    return combinedExpr.compile(context)?.beExpression;
+                    return combinedExpr.compile(context)?.beExpression(locRange)?;
                 }
                 return context.compiler.exprWithTemporaryExpr(rhs, &do2);
             }
@@ -421,13 +422,14 @@ class Either : Type
  */
 struct ASTEitherCaseExprCase
 {
-    Loc loc;
+    (Loc|LocRange) loc;
+
+    LocRange locRange() { return loc.case(Loc loc: loc.locRange, LocRange range: range); }
 
     ASTSymbol type;
 
     string identifier;
 
-    // FIXME remove this - easily done with T t: ({ return t; })
     bool return_;
 
     ASTSymbol expr;
@@ -435,28 +437,26 @@ struct ASTEitherCaseExprCase
 
 class ASTEitherCaseExpr : ASTSymbol
 {
-    Loc loc;
-
     ASTSymbol base;
 
     ASTEitherCaseExprCase[] cases;
 
-    this(this.loc, this.base, this.cases) { }
+    this((Loc | LocRange) locRange, this.base, this.cases) { this.locRange = locRange.case(LocRange range: range, Loc loc: loc.locRange); }
 
     override (Expression | fail Error) compile(Context context) {
-        auto baseExpr = base.compile(context)?.beExpressionImplCall(context, loc)?;
+        auto baseExpr = base.compile(context)?.beExpressionImplCall(context, locRange)?;
         auto baseExprTemp = new PairedTemporary(baseExpr.type, Ownership.global);
         Statement baseExprInit = new InitializeTemporaryStatement(baseExprTemp, baseExpr);
 
         auto either = baseExpr.type.instanceOf(Either);
 
-        loc.assert(!!either, "Expected Either for case expression")?;
+        locRange.assert(!!either, "Expected Either for case expression")?;
 
         bool[] handled = new bool[](either.types.length);
 
         // TODO implicitConvertTo should only require Type - ie. return a Expression function(Expression).
         mut Type[] resultTypes;
-        void mergeType(Loc loc, Expression expr) {
+        void mergeType(LocRange locRange, Expression expr) {
             auto exprType = expr.type;
             for (resultType in resultTypes)
                 if (resultType.same(exprType)) return;
@@ -465,8 +465,8 @@ class ASTEitherCaseExpr : ASTSymbol
         for (case_ in this.cases) {
             if (case_.return_) continue;
 
-            auto caseType = beType(loc, case_.type.compile(context)?)?;
-            auto caseLoc = case_.loc;
+            auto caseLoc = case_.locRange;
+            auto caseType = case_.type.compile(context)?.beType2(caseLoc)?;
 
             auto namespace = context.compiler.variableDeclaration(
                 context.namespace, case_.identifier, caseType, ExprInfo(mutable=false, Ownership.owned), false);
@@ -490,8 +490,8 @@ class ASTEitherCaseExpr : ASTSymbol
         mut nullable Statement ifTree;
 
         for (case_ in this.cases) {
-            auto caseLoc = case_.loc;
-            Type type = beType(caseLoc, case_.type.compile(context)?)?;
+            auto caseLoc = case_.locRange;
+            Type type = case_.type.compile(context)?.beType2(caseLoc)?;
 
             mut int matched = -1;
             for (int k, eitherType in either.types) {
@@ -523,8 +523,8 @@ class ASTEitherCaseExpr : ASTSymbol
             (Statement | fail Error) userStmt() {
                 if (case_.return_) {
                     Type ret = findParent!FunctionScopeBase(context.namespace).ret;
-                    auto userExpr = context.compiler.expectImplicitConvertTo(context, userExpr, ret, this.loc)?;
-                    return context.compiler.astReturn(new ASTSymbolHelper(userExpr), __HERE__).compile(context)?
+                    auto userExpr = context.compiler.expectImplicitConvertTo(context, userExpr, ret, this.locRange)?;
+                    return context.compiler.astReturn(new ASTSymbolHelper(userExpr), __RANGE__).compile(context)?
                          .statement;
                 } else {
                     Expression expr = context.compiler.expectImplicitConvertTo(context, userExpr, mergeType, caseLoc)?;
@@ -539,13 +539,13 @@ class ASTEitherCaseExpr : ASTSymbol
             }
             Statement then = context.compiler.sequenceStatement(thenSteps);
             Expression test = context.compiler.binaryOp(
-                "==", context, new EitherType(baseExprTemp), context.compiler.intLiteral(matched + 1), loc)?;
+                "==", context, new EitherType(baseExprTemp), context.compiler.intLiteral(matched + 1), locRange)?;
 
             ifTree = context.compiler.ifStatement(test, then, ifTree);
         }
         for (i, handled in handled) {
             if (!handled) {
-                return loc.fail("Type " ~ either.types[i].type.repr() ~ " not handled!");
+                return locRange.fail("Type " ~ either.types[i].type.repr() ~ " not handled!");
             }
         }
         assert(!!ifTree);
@@ -557,51 +557,52 @@ class ASTEitherCaseExpr : ASTSymbol
     override ASTSymbol quote(Quoter quoter) {
         mut ASTSymbol[] quotedCases;
         ASTSymbol quoteBool(bool b) {
-            if (b) return quoter.compiler.astIdentifier("true", __HERE__);
-            return quoter.compiler.astIdentifier("false", __HERE__);
+            if (b) return quoter.compiler.astIdentifier("true", __RANGE__);
+            return quoter.compiler.astIdentifier("false", __RANGE__);
         }
         for (case_ in this.cases) {
             quotedCases ~= quoter.compiler.astCall(
-                quoter.compiler.astIdentifier("ASTEitherCaseExprCase", __HERE__), [
-                    quoter.quoteLoc(case_.loc),
+                quoter.compiler.astIdentifier("ASTEitherCaseExprCase", __RANGE__), [
+                    quoter.quoteLocRange(case_.locRange),
                     case_.type.quote(quoter),
-                    quoter.compiler.astStringLiteral(case_.identifier, __HERE__),
+                    quoter.compiler.astStringLiteral(case_.identifier, __RANGE__),
                     quoteBool(case_.return_),
-                    case_.expr.quote(quoter)], __HERE__);
+                    case_.expr.quote(quoter)], __RANGE__);
         }
         return quoter.compiler.astNewExpression(
-            quoter.compiler.astIdentifier("ASTEitherCaseExpr", __HERE__), [
-                quoter.quoteLoc(this.loc),
+            quoter.compiler.astIdentifier("ASTEitherCaseExpr", __RANGE__), [
+                quoter.quoteLocRange(this.locRange),
                 this.base.quote(quoter),
-                quoter.compiler.astArrayLiteral(quotedCases, __HERE__)], __HERE__);
+                quoter.compiler.astArrayLiteral(quotedCases, __RANGE__)], __RANGE__);
     }
 }
 
 (nullable ASTSymbol | fail Error) parseEitherCaseExpr(Parser parser, LexicalContext lexicalContext, ASTSymbol current)
 {
-    parser.begin();
+    parser.begin;
     if (!(parser.accept(".")? && acceptIdentifier(parser, "case")? && parser.accept("(")?))
     {
-        parser.revert();
+        parser.revert;
         return null;
     }
-    parser.commit();
+    auto from = parser.from?;
+    parser.commit;
 
     mut ASTEitherCaseExprCase[] cases;
     while (!parser.accept(")")?)
     {
         if (cases.length) parser.expect(",")?;
+        auto caseFrom = parser.from?;
         nullable ASTSymbol type = lexicalContext.compiler.parseType(parser, lexicalContext)?;
-        parser.assert_(!!type, "case type expected")?;
+        parser.to(caseFrom).assert(!!type, "case type expected")?;
         string identifier = parseIdentifier(parser)?;
         parser.expect(":")?;
         bool return_ = parser.acceptIdentifier("return")?;
-        auto loc = parser.loc;
         ASTSymbol expr = lexicalContext.compiler.parseExpression(parser, lexicalContext)?
             .notNull;
-        cases ~= ASTEitherCaseExprCase(loc, type.notNull, identifier, return_, expr);
+        cases ~= ASTEitherCaseExprCase(parser.to(from), type.notNull, identifier, return_, expr);
     }
-    return new ASTEitherCaseExpr(parser.loc, current, cases);
+    return new ASTEitherCaseExpr(parser.to(from), current, cases);
 }
 
 /**
@@ -613,7 +614,9 @@ class ASTEitherCaseExpr : ASTSymbol
 
 struct ASTEitherCaseStmtCase
 {
-    Loc loc;
+    (Loc|LocRange) loc;
+
+    LocRange locRange() { return loc.case(Loc loc: loc.locRange, LocRange range: range); }
 
     ASTSymbol type;
 
@@ -624,39 +627,38 @@ struct ASTEitherCaseStmtCase
 
 class ASTEitherCaseStmt : ASTStatement
 {
-    Loc loc;
-
     ASTSymbol base;
 
     ASTEitherCaseStmtCase[] cases;
 
     nullable ASTStatement default_;
 
-    this(this.loc, this.base, this.cases, this.default_) { }
+    this((LocRange|Loc) locRange, this.base, this.cases, this.default_) { this.locRange = locRange.case(Loc loc: loc.locRange, LocRange range: range); }
 
     override (StatementCompileResult | fail Error) compile(Context context) {
-        auto baseExpr = base.compile(context)?.beExpressionImplCall(context, loc)?;
+        auto baseExpr = base.compile(context)?
+            .beExpressionImplCall(context, locRange)?;
         // FIXME
-        // loc.assert2s(baseExpr.info.ownership != Ownership.gifted, "TODO: Either base expr must not be gifted");
+        // locRange.assert(baseExpr.info.ownership != Ownership.gifted, "TODO: Either base expr must not be gifted");
         auto baseType = baseExpr.type;
         auto either = baseType.instanceOf(Either);
 
-        loc.assert(!!either, "Expected Either for case expression")?;
+        locRange.assert(!!either, "Expected Either for case expression")?;
 
         (nullable Statement | fail Error) do_(Expression baseExpr) {
             bool[] handled = new bool[](either.types.length);
             mut nullable Statement ifTree = null;
             for (case_ in this.cases) {
-                Type type = beType(case_.loc, case_.type.compile(context)?)?;
+                Type type = case_.type.compile(context)?.beType2(case_.locRange)?;
 
                 mut int matched = -1;
                 for (int k, entry in either.types) {
                     if (type.same(entry.type)) {
-                        case_.loc.assert(matched == -1, "either type " ~ type.repr() ~ " matched twice")?;
+                        case_.locRange.assert(matched == -1, "either type " ~ type.repr() ~ " matched twice")?;
                         matched = k;
                     }
                 }
-                case_.loc.assert(matched != -1, "Type is not listed in Either!")?;
+                case_.locRange.assert(matched != -1, "Type is not listed in Either!")?;
                 handled[matched] = true;
 
                 with (context.compiler) {
@@ -668,7 +670,7 @@ class ASTEitherCaseStmt : ASTStatement
                     auto userStmtPair = case_.stmt.compile(context.withNamespace(namespace))?;
                     Statement then = sequenceStatement([assignment, userStmtPair.statement]);
                     Expression test = binaryOp(
-                        "==", context, new EitherType(baseExpr), intLiteral(matched + 1), this.loc)?;
+                        "==", context, new EitherType(baseExpr), intLiteral(matched + 1), this.locRange)?;
 
                     ifTree = ifStatement(test, then, ifTree);
                 }
@@ -678,11 +680,11 @@ class ASTEitherCaseStmt : ASTStatement
                     if (!handled) {
                         auto defaultPair = default_.compile(context)?;
                         Expression test = binaryOp(
-                            "==", context, new EitherType(baseExpr), intLiteral(i + 1), this.loc)?;
+                            "==", context, new EitherType(baseExpr), intLiteral(i + 1), this.locRange)?;
                         ifTree = ifStatement(test, defaultPair.statement, ifTree);
                     }
                 } else if (!handled) {
-                    return loc.fail("Type " ~ either.types[i].type.repr() ~ " not handled!");
+                    return locRange.fail("Type " ~ either.types[i].type.repr() ~ " not handled!");
                 }
             }
             return ifTree;
@@ -696,22 +698,22 @@ class ASTEitherCaseStmt : ASTStatement
         mut ASTSymbol[] quotedCases;
         for (case_ in this.cases) {
             quotedCases ~= quoter.compiler.astCall(
-                quoter.compiler.astIdentifier("ASTEitherCaseStmtCase", __HERE__), [
-                    quoter.quoteLoc(case_.loc),
+                quoter.compiler.astIdentifier("ASTEitherCaseStmtCase", __RANGE__), [
+                    quoter.quoteLocRange(case_.locRange),
                     case_.type.quote(quoter),
-                    quoter.compiler.astStringLiteral(case_.identifier, __HERE__),
-                    case_.stmt.quote(quoter)], __HERE__);
+                    quoter.compiler.astStringLiteral(case_.identifier, __RANGE__),
+                    case_.stmt.quote(quoter)], __RANGE__);
         }
         ASTSymbol quote(nullable ASTStatement either) {
             if (auto either = either) return either.quote(quoter);
-            else return quoter.compiler.astIdentifier("null", __HERE__);
+            else return quoter.compiler.astIdentifier("null", __RANGE__);
         }
         return quoter.compiler.astNewExpression(
-            quoter.compiler.astIdentifier("ASTEitherCaseStmt", __HERE__), [
-                quoter.quoteLoc(this.loc),
+            quoter.compiler.astIdentifier("ASTEitherCaseStmt", __RANGE__), [
+                quoter.quoteLocRange(this.locRange),
                 this.base.quote(quoter),
-                quoter.compiler.astArrayLiteral(quotedCases, __HERE__),
-                quote(this.default_)], __HERE__);
+                quoter.compiler.astArrayLiteral(quotedCases, __RANGE__),
+                quote(this.default_)], __RANGE__);
     }
 }
 
@@ -724,15 +726,18 @@ class ASTEitherCaseStmt : ASTStatement
         return null;
     }
     auto member = expr.instanceOf(ASTMemberBase);
+    auto from = parser.from?;
     if (!member || member.member != "case" || !parser.accept("{")?) {
         parser.revert;
         return null;
     }
+    auto locRange = parser.to(from);
     parser.commit();
 
     mut ASTEitherCaseStmtCase[] cases;
     mut nullable ASTStatement default_ = null;
     while (!parser.accept("}")?) {
+        auto caseFrom = parser.from?;
         if (parser.accept("default")?) {
             parser.expect(":")?;
             if (default_) {
@@ -748,16 +753,16 @@ class ASTEitherCaseStmt : ASTStatement
         // identifier can be empty
         string identifier = parseIdentifier(parser)?;
         parser.expect(":")?;
-        auto loc = parser.loc;
+        auto caseLocRange = parser.to(caseFrom);
         auto stmt = parseEitherBlock(parser, lexicalContext)?;
-        cases ~= ASTEitherCaseStmtCase(loc, type.notNull, identifier, stmt);
+        cases ~= ASTEitherCaseStmtCase(caseLocRange, type.notNull, identifier, stmt);
     }
-    return new ASTEitherCaseStmt(parser.loc, member.base, cases, default_);
+    return new ASTEitherCaseStmt(locRange, member.base, cases, default_);
 }
 
 (ASTStatement | fail Error) parseEitherBlock(Parser parser, LexicalContext lexicalContext)
 {
-    auto loc = parser.loc;
+    auto from = parser.from?;
     mut ASTStatement[] stmts;
     while (true) {
         parser.begin;
@@ -775,5 +780,5 @@ class ASTEitherCaseStmt : ASTStatement
         ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
         stmts ~= stmt;
     }
-    return lexicalContext.compiler.astScope(stmts, loc);
+    return lexicalContext.compiler.astScope(stmts, parser.to(from));
 }

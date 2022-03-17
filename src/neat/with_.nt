@@ -18,14 +18,14 @@ class WithNamespace : DeclarationHolder, Unwindable
     // so we still need to go over a temporary variable.
     Reference temporary;
 
-    Loc loc;
+    LocRange locRange;
 
-    this(this.parent, this.temporary, this.loc) { this.isContextScope = parent.isContextScope; }
+    this(this.parent, this.temporary, this.locRange) { this.isContextScope = parent.isContextScope; }
 
     override (nullable Statement | fail Error) unwind(Context context) {
         if (auto exit = temporary.type.accessMember(
-                this.loc, context, temporary, "onExit", Protection.private_)?) {
-            return context.compiler.exprStatement(exit.beExpressionImplCall(context, this.loc)?);
+                context, temporary, "onExit", Protection.private_, this.locRange)?) {
+            return context.compiler.exprStatement(exit.beExpressionImplCall(context, this.locRange)?);
         }
         return null;
     }
@@ -35,11 +35,11 @@ class WithNamespace : DeclarationHolder, Unwindable
         return temporary;
     }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc)
+    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange)
     {
-        auto member = context.compiler.accessMemberWithLifetime(context, temporary, name, loc, true)?;
+        auto member = context.compiler.accessMemberWithLifetime(context, temporary, name, locRange, true)?;
         if (member) return member;
-        if (this.parent) return this.parent.lookup(name, context, loc);
+        if (this.parent) return this.parent.lookup(name, context, locRange);
         return null;
     }
 }
@@ -50,27 +50,25 @@ class ASTWithStatement : ASTStatement
 
     ASTStatement stmt;
 
-    Loc loc;
-
-    this(this.expr, this.stmt, this.loc) { }
+    this(this.expr, this.stmt, this.locRange) { }
 
     override (StatementCompileResult | fail Error) compile(Context context)
     {
-        Expression expr = this.expr.compile(context)?.beExpressionImplCall(context, this.loc)?;
+        Expression expr = this.expr.compile(context)?.beExpressionImplCall(context, this.expr.locRange)?;
 
         (nullable Statement | fail Error) do_(Reference temp)
         {
             mut nullable Statement prefix, suffix;
             if (auto enter = temp.type.accessMember(
-                this.loc, context, temp, "onEnter", Protection.private_)?) {
-                prefix = context.compiler.exprStatement(enter.beExpressionImplCall(context, this.loc)?);
+                context, temp, "onEnter", Protection.private_, this.locRange)?) {
+                prefix = context.compiler.exprStatement(enter.beExpressionImplCall(context, this.locRange)?);
             }
             if (auto exit = temp.type.accessMember(
-                this.loc, context, temp, "onExit", Protection.private_)?) {
-                suffix = context.compiler.exprStatement(exit.beExpressionImplCall(context, this.loc)?);
+                context, temp, "onExit", Protection.private_, this.locRange)?) {
+                suffix = context.compiler.exprStatement(exit.beExpressionImplCall(context, this.locRange)?);
             }
 
-            auto subContext = context.withNamespace(new WithNamespace(context.namespace, temp, this.loc));
+            auto subContext = context.withNamespace(new WithNamespace(context.namespace, temp, this.locRange));
             auto subStmtPair = this.stmt.compile(subContext)?;
             auto stmt = subStmtPair.statement;
 
@@ -89,16 +87,19 @@ class ASTWithStatement : ASTStatement
 
 (nullable ASTStatement | fail Error) parseWithStatement(Parser parser, LexicalContext lexicalContext)
 {
-    auto loc = parser.loc;
-    if (!acceptIdentifier(parser, "with")?)
-    {
+    parser.begin;
+    auto from = parser.from?;
+    if (!acceptIdentifier(parser, "with")?) {
+        parser.revert;
         return null;
     }
+    parser.commit;
     parser.expect("(")?;
     auto subExpr = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
     parser.assert_(!!subExpr, "with expression expected")?;
     parser.expect(")")?;
+    auto locRange = parser.to(from);
     auto body_ = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
 
-    return new ASTWithStatement(subExpr.notNull, body_, loc);
+    return new ASTWithStatement(subExpr.notNull, body_, locRange);
 }

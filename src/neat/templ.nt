@@ -12,12 +12,13 @@ import std.thread;
 (nullable ASTSymbol | fail Error) parseTemplateInstantiation(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
 {
     parser.begin;
-    auto instanceLoc = parser.loc;
+    auto instanceFrom = parser.from?;
     // TODO better way to exclude !operator cases
     if (!parser.accept("!")? || parser.accept("=")? || acceptIdentifier(parser, "is")?) {
         parser.revert;
         return null;
     }
+    auto instanceLocRange = parser.to(instanceFrom);
     mut ASTSymbol[] templateArgs;
     (void | fail Error) getTemplateArg() {
         auto templateArg = lexicalContext.compiler.parseType(parser, lexicalContext)?;
@@ -38,7 +39,7 @@ import std.thread;
         getTemplateArg?;
     }
     parser.commit;
-    return new ASTTemplateInstance(base, templateArgs, instanceLoc);
+    return new ASTTemplateInstance(base, templateArgs, instanceLocRange);
 }
 
 class ASTTemplateInstance : ASTSymbol
@@ -47,20 +48,18 @@ class ASTTemplateInstance : ASTSymbol
 
     ASTSymbol[] types;
 
-    Loc loc;
-
-    this(this.templateDecl, this.types, this.loc) { }
+    this(this.templateDecl, this.types, this.locRange) { }
 
     override (Symbol | fail Error) compile(Context context)
     {
         auto symbol = this.templateDecl.compile(context)?;
         // TODO LocRange in ASTSymbol
-        auto types = [beType(this.loc, type.compile(context)?)? for type in this.types];
+        auto types = [type.compile(context)?.beType2(this.locRange)? for type in this.types];
         auto templDecl = symbol.instanceOf(ScopeBoundTemplateDecl);
 
-        loc.assert(!!templDecl, "cannot instantiate non-template")?;
+        locRange.assert(!!templDecl, "cannot instantiate non-template")?;
 
-        return templDecl.instantiate(context, this.loc, types);
+        return templDecl.instantiate(context, this.locRange, types);
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTTemplateInstance'!"); assert(false); }
@@ -74,11 +73,11 @@ class TemplateInstantiationNamespace : Namespace
 
     this(this.parent, this.parameterNames, this.parameterTypes) { this.isContextScope = false; }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc) {
+    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange) {
         for (i, parameterName in parameterNames) {
             if (name == parameterName) return parameterTypes[i];
         }
-        return parent.lookup(name, context, loc);
+        return parent.lookup(name, context, locRange);
     }
 
     override string mangle() {
@@ -98,10 +97,10 @@ class ScopeBoundTemplateDecl : Symbol
 
     this(this.latent, this.frame) { }
 
-    (Symbol | fail Error) instantiate(Context context, Loc loc, Type[] parameters)
+    (Symbol | fail Error) instantiate(Context context, LocRange locRange, Type[] parameters)
     {
-        context.pushErrorLoc(loc);
-        auto ret = this.latent.getInstance(context.withFramePointer(this.frame), loc, parameters);
+        context.pushErrorLoc(locRange);
+        auto ret = this.latent.getInstance(context.withFramePointer(this.frame), locRange, parameters);
         context.popErrorLoc;
         return ret;
     }
@@ -136,10 +135,10 @@ class TemplateDecl : LatentSymbol
         return this.mangle == other.mangle; // hax
     }
 
-    (Symbol | fail Error) getInstance(mut Context context, Loc loc, Type[] parameters)
+    (Symbol | fail Error) getInstance(mut Context context, LocRange locRange, Type[] parameters)
     {
         if (parameters.length != this.decl.typeParameterNames.length) {
-            return loc.fail(
+            return locRange.fail(
                 "Unexpected number of parameters to template: " ~
                 "expected $(this.decl.typeParameterNames.length), but got $(parameters.length)");
         }
@@ -173,7 +172,7 @@ class TemplateDecl : LatentSymbol
          * gets the same reused symbols.
          */
         string moduleMangle = this.mangle ~ "_instance_" ~ parameters.mangle;
-        ModuleBase module_ = context.compiler.createModule(this.decl.name, moduleMangle, loc, null);
+        ModuleBase module_ = context.compiler.createModule(this.decl.name, moduleMangle, locRange, null);
 
         with (this.mutex.locked) {
             this.instantiations ~= (module_, parameters, value);
@@ -222,9 +221,7 @@ class ASTTemplateDecl : ASTDeclaration
 
 (nullable ASTTemplateDecl | fail Error) parseTemplateDecl(Parser parser, LexicalContext lexicalContext)
 {
-    auto loc = parser.loc;
-    if (!acceptIdentifier(parser, "template")?)
-    {
+    if (!acceptIdentifier(parser, "template")?) {
         return null;
     }
     auto name = parser.parseIdentifier?;
@@ -246,10 +243,10 @@ class ASTTemplateDecl : ASTDeclaration
     // TODO generalize (parseSymbol)?
     mut uninitialized ASTSymbol member;
     parser.strip?;
-    auto contentLoc = parser.loc;
+    auto contentFrom = parser.from?;
     nullable ASTSymbol member = parseTemplateContents(parser, lexicalContext)?;
     if (!member) {
-        return contentLoc.fail("template member expected");
+        return parser.to(contentFrom).fail("template member expected");
     }
 
     parser.expect("}")?;

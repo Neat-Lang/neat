@@ -13,8 +13,6 @@ import neat.types;
 
 class Function : FunctionDeclaration
 {
-    Loc loc;
-
     ASTStatement statement;
 
     MacroState macroState;
@@ -23,7 +21,9 @@ class Function : FunctionDeclaration
 
     bool hasThisArg;
 
-    this(this.loc, this.name, this.ret, this.params, this.statement, this.macroState, this.hasThisArg)
+    LocRange locRange;
+
+    this(this.name, this.ret, this.params, this.statement, this.macroState, this.hasThisArg, this.locRange)
     {
         this.contextType = null;
         this.parent = null;
@@ -76,7 +76,7 @@ class Function : FunctionDeclaration
     (CompiledFunction | fail Error) compile(CompilerBase compiler, Platform platform)
     {
         auto stackframe = new FunctionScope(
-            compiler, this.ret, this.contextType, this.parent.notNull, this.mangle, this.loc);
+            compiler, this.ret, this.contextType, this.parent.notNull, this.mangle, this.locRange);
         mut Namespace scope_ = stackframe;
         mut int extra = 0;
         if (this.contextType)
@@ -109,12 +109,12 @@ class Function : FunctionDeclaration
             auto argExpr = new ArgExpr(extra + i, param.type);
 
             if (param.isThisAssignment) {
-                this.loc.assert(!!thisDecl, "no this. args outside class")?;
+                this.locRange.assert(!!thisDecl, "no this. args outside class")?;
 
                 auto target = compiler.accessMemberWithLifetime(
-                        context, thisDecl.accessDecl(context.compiler), param.name, this.loc, false)?
+                        context, thisDecl.accessDecl(context.compiler), param.name, this.locRange, false)?
                     .instanceOf(Reference);
-                this.loc.assert2s2(!!target, "not a reference: ", param.name)?;
+                this.locRange.assert2(!!target, "not a reference: ", param.name)?;
                 auto target = target.notNull;
 
                 if (auto copy = param.type.copyInto(context, target, argExpr)?)
@@ -179,7 +179,7 @@ class CompiledFunction : FinishedSymbol
             this.fun.repr,
             this.fun.ret.emit(generator.platform),
             paramTypes,
-            this.fun.loc.toBackendLoc
+            this.fun.locRange.toBackendLoc
         );
 
         generator.frameReg = generator.fun.staticAlloca(this.stackframe.structType.emit(generator.platform));
@@ -229,13 +229,13 @@ class FunctionScope : FunctionScopeBase
 
     string mangle_;
 
-    Loc loc;
+    LocRange locRange;
 
     Type structType;
 
-    this(this.compiler, this.ret, this.extra, this.parent, this.mangle_, this.loc) {
+    this(this.compiler, this.ret, this.extra, this.parent, this.mangle_, this.locRange) {
         // TODO dedicated stackframe type so we don't need to keep recreating struct type instances
-        this.structType = compiler.struct_("", this.variables, this.loc, this.mangle_);
+        this.structType = compiler.struct_("", this.variables, this.locRange, this.mangle_);
         this.isContextScope = true;
     }
 
@@ -245,14 +245,14 @@ class FunctionScope : FunctionScopeBase
         assert(!info.mutable || info.ownership == Ownership.owned);
 
         this.variables ~= new StructMemberDeclaration(name, Protection.public_, type);
-        this.structType = this.compiler.struct_("", this.variables, this.loc, this.mangle_);
+        this.structType = this.compiler.struct_("", this.variables, this.locRange, this.mangle_);
 
         return new LatentVariable(name, this.structType, cast(int) this.variables.length - 1, info);
     }
 
     override string mangle() { return this.mangle_; }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc)
+    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange)
     {
         assert(!!this.parent);
 
@@ -264,7 +264,7 @@ class FunctionScope : FunctionScopeBase
             nextFramePointer = context.compiler.dereference(framePtr);
         }
 
-        return this.parent.lookup(name, context.withFramePointer(nextFramePointer), loc);
+        return this.parent.lookup(name, context.withFramePointer(nextFramePointer), locRange);
     }
 }
 
@@ -278,7 +278,7 @@ class ReturnTypeNamespace : Namespace
 
     this(this.parent, this.params) { }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc) {
+    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange) {
         for (param in this.params) {
             if (param.name == name) {
                 import neat.expr : NullExpr;
@@ -286,7 +286,7 @@ class ReturnTypeNamespace : Namespace
                 return new NullExpr(param.type);
             }
         }
-        if (this.parent) return this.parent.lookup(name, context, loc);
+        if (this.parent) return this.parent.lookup(name, context, locRange);
         return null;
     }
 }
@@ -321,7 +321,7 @@ class VariableDeclaration : DeclarationHolder
         return new InfoReference(reference, info);
     }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc)
+    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange)
     {
         // Frame may be null for struct nested in function.
         if (auto frame = context.framePointer) {
@@ -332,11 +332,11 @@ class VariableDeclaration : DeclarationHolder
             if (!hidden && this.variable.name == "") {
                 auto unnamedVar = access(context.compiler, frame);
                 auto target = context.compiler.accessMemberWithLifetime(
-                        context, unnamedVar, name, loc, true)?;
+                        context, unnamedVar, name, locRange, true)?;
                 if (target) return target;
             }
         }
-        if (this.parent) return this.parent.lookup(name, context, loc);
+        if (this.parent) return this.parent.lookup(name, context, locRange);
         return null;
     }
 }
@@ -441,8 +441,6 @@ class LatentNestedFunction : LatentSymbol
 
 class ASTFunction : ASTSymbol
 {
-    Loc loc;
-
     string name;
 
     ASTSymbol ret;
@@ -455,12 +453,12 @@ class ASTFunction : ASTSymbol
 
     MacroState macroState;
 
-    this(this.loc, this.name, this.ret, this.params, this.isDeclaration, this.statement, this.macroState) { }
+    this(this.name, this.ret, this.params, this.isDeclaration, this.locRange, this.statement, this.macroState) { }
 
     override (Symbol | fail Error) compile(Context context)
     {
         auto params = [
-            Parameter(false, param.name, param.mutable, beType(param.loc, param.type.compile(context)?)?)
+            Parameter(false, param.name, param.mutable, param.type.compile(context)?.beType2(param.locRange)?)
             for param in this.params];
 
         // It's nice to be able to reference the function
@@ -470,18 +468,18 @@ class ASTFunction : ASTSymbol
 
         if (this.isDeclaration)
         {
+            // FIXME retLocRange
             return new FunctionDeclaration(
-                this.name, beType(this.loc, this.ret.compile(returnTypeContext)?)?, params);
+                this.name, this.ret.compile(returnTypeContext)?.beType2(this.locRange)?, params);
         }
 
         auto module_ = findParent!ModuleBase(context.namespace);
 
         auto fun = new Function(
-            this.loc,
             this.name,
-            beType(this.loc, this.ret.compile(returnTypeContext)?)?,
+            this.ret.compile(returnTypeContext)?.beType2(this.locRange)?,
             params,
-            this.statement, this.macroState, false);
+            this.statement, this.macroState, false, this.locRange);
 
         if (auto functionScope = findParent!FunctionScope(context.namespace)) {
             auto structType = functionScope.structType;
@@ -509,6 +507,7 @@ class ASTFunction : ASTSymbol
 (nullable ASTFunction | fail Error) parseFunction(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
+    auto from = parser.from?;
     nullable ASTSymbol ret = lexicalContext.compiler.parseType(parser, lexicalContext)?;
     if (!ret)
     {
@@ -518,6 +517,7 @@ class ASTFunction : ASTSymbol
     string name = parser.parseIdentifier?;
     // avoid 'mut typeof(expr)' from matching as a function
     // TODO reserved identifier list
+    auto locRange = parser.to(from);
     if (!name.length || name == "typeof" || !parser.accept("(")?)
     {
         parser.revert;
@@ -528,10 +528,11 @@ class ASTFunction : ASTSymbol
     // auto params = parseIdentifierList(parser, lexicalContext, variadics=false).params;
     auto params = parseIdentifierList(parser, lexicalContext, variadics=false)?;
     ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
-    return new ASTFunction(parser.loc, name, ret.notNull, params.params, false, stmt, lexicalContext.macroState);
+    return new ASTFunction(name, ret.notNull, params.params, false, locRange, stmt, lexicalContext.macroState);
 }
 
-(ASTParameter[] params, bool variadic | fail Error) parseIdentifierList(Parser parser, LexicalContext lexicalContext, bool variadics)
+(ASTParameter[] params, bool variadic | fail Error) parseIdentifierList(
+    Parser parser, LexicalContext lexicalContext, bool variadics)
 {
     mut ASTParameter[] params;
     mut bool variadic = false;
@@ -542,6 +543,7 @@ class ASTFunction : ASTSymbol
                 return parser.fail("',' or ')' expected");
             }
         }
+        auto from = parser.from?;
         if (variadics) {
             parser.begin;
             if (parser.accept("...")? && parser.accept(")")?) {
@@ -552,7 +554,6 @@ class ASTFunction : ASTSymbol
             parser.revert;
         }
 
-        auto loc = parser.loc;
         mut bool mutable;
         if (parser.acceptIdentifier("mut")?) mutable = true;
         nullable ASTSymbol paramType = lexicalContext.compiler.parseType(parser, lexicalContext)?;
@@ -560,7 +561,7 @@ class ASTFunction : ASTSymbol
             return parser.fail("type expected");
         }
         string paramName = parser.parseIdentifier?;
-        params ~= ASTParameter(paramName, mutable, paramType.notNull, loc);
+        params ~= ASTParameter(paramName, mutable, paramType.notNull, parser.to(from));
     }
     return (params, variadic);
 }
@@ -577,11 +578,11 @@ class ASTFunction : ASTSymbol
                 return parser.fail("',' or ')' expected");
             }
         }
-        auto loc = parser.loc;
+        auto from = parser.from?;
         if (parser.accept("this.")?)
         {
             string argname = parseIdentifier(parser)?;
-            params ~= ASTThisAssignment(argname);
+            params ~= ASTThisAssignment(argname, parser.to(from));
         }
         else
         {
@@ -591,7 +592,7 @@ class ASTFunction : ASTSymbol
             parser.assert_(!!argtype, "argument type expected")?;
             string argname = parseIdentifier(parser)?;
             parser.assert_(argname.length > 0, "argument name expected")?;
-            params ~= ASTParameter(name=argname, mutable, argtype.notNull, loc);
+            params ~= ASTParameter(name=argname, mutable, argtype.notNull, parser.to(from));
         }
     }
     return params;

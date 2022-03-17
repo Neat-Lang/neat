@@ -11,18 +11,16 @@ import neat.parser_base;
 
 class ASTVectorType : ASTSymbol
 {
-    Loc loc;
-
     ASTSymbol elementType;
 
     int count;
 
-    this(this.loc, this.elementType, this.count) { }
+    this(this.elementType, this.count, this.locRange) { }
 
     override (Type | fail Error) compile(Context context)
     {
         return new VectorType(
-            beType(this.loc, this.elementType.compile(context)?)?, count);
+            this.elementType.compile(context)?.beType2(this.locRange)?, count);
     }
 }
 
@@ -135,7 +133,7 @@ class VectorType : Type
     }
 
     override (nullable Symbol | fail Error) accessMember(
-        Loc loc, Context context, nullable Expression base, string field, Protection _)
+        Context context, nullable Expression base, string field, Protection _, LocRange locRange)
     {
         // TODO part of type? third parameter?
         (nullable Expression | fail Error) do_(Expression base) {
@@ -155,21 +153,22 @@ class VectorType : Type
             }
             if (members.length == 1)
                 return members[0];
-            return (new VectorType(elementType, cast(int) members.length)).mkVector(context, loc, members);
+            return (new VectorType(elementType, cast(int) members.length)).mkVector(context, locRange, members);
         }
         if (auto base = base)
             return context.compiler.exprWithTemporaryExpr(base, &do_);
         return null;
     }
 
-    override (nullable Expression | fail Error) binaryOp(Context context, string op, Expression lhs, Expression rhs, Loc loc)
+    override (nullable Expression | fail Error) binaryOp(
+        Context context, string op, Expression lhs, Expression rhs, LocRange locRange)
     {
         auto lhsVectorType = lhs.type.instanceOf(VectorType);
         auto rhsVectorType = rhs.type.instanceOf(VectorType);
         if (lhsVectorType && rhsVectorType) {
-            loc.assert(lhsVectorType.length == rhsVectorType.length, "vectors have different size")?;
+            locRange.assert(lhsVectorType.length == rhsVectorType.length, "vectors have different size")?;
         }
-        loc.assert(!!lhsVectorType, "lhs must be vector (TODO)")?;
+        locRange.assert(!!lhsVectorType, "lhs must be vector (TODO)")?;
         if (op == "==" || op == ">" || op == "<" || op == ">=" || op == "<=") {
             Expression getRight(int index) {
                 if (rhsVectorType) return new VectorMember(rhs, index);
@@ -186,7 +185,7 @@ class VectorType : Type
             for (i in 0 .. lhsVectorType.length) {
                 auto leftMember = new VectorMember(lhs, cast(int) i);
                 auto rightMember = getRightConverted(leftMember.type, cast(int) i);
-                auto test = context.compiler.binaryOp(op, context, leftMember, rightMember, loc)?;
+                auto test = context.compiler.binaryOp(op, context, leftMember, rightMember, locRange)?;
                 if (auto left = andList) andList = new BoolAnd(left, test);
                 else andList = test;
             }
@@ -209,32 +208,32 @@ class VectorType : Type
                 for (i in 0 .. lhsVectorType.length) {
                     auto leftMember = new VectorMember(lhs, cast(int) i);
                     auto rightMember = getRightConverted(leftMember.type, cast(int) i);
-                    members ~= context.compiler.binaryOp(op, context, leftMember, rightMember, loc)?;
+                    members ~= context.compiler.binaryOp(op, context, leftMember, rightMember, locRange)?;
                 }
-                return mkVector(context, loc, members);
+                return mkVector(context, locRange, members);
             }
             return context.compiler.exprWithTemporaryExpr(rhs, &do2);
         }
         return context.compiler.exprWithTemporaryExpr(lhs, &do1);
     }
 
-    override (nullable Expression | fail Error) call(Context context, Loc loc, ASTArgument[] args)
+    override (nullable Expression | fail Error) call(Context context, LocRange locRange, ASTArgument[] args)
     {
-        loc.assert(
+        locRange.assert(
             args.length == this.length || args.length == 1, "invalid number of args for vector constructor")?;
 
         // TODO arg name validation
-        auto args = [
-            arg.sym.compile(context)?.beExpressionImplCall(context, loc)?
+        auto argExprs = [
+            arg.sym.compile(context)?.beExpressionImplCall(context, arg.locRange)?
             for arg in args];
 
         // TODO a better way to generically construct types backed by BackendStructType
-        if (args.length == 1) {
+        if (argExprs.length == 1) {
             auto result = new PairedTemporary(this, Ownership.gifted);
             mut Statement initialize = new UninitializeTemporaryStatement(result);
             (nullable Expression | fail Error) do1(Expression arg) {
                 (Expression | fail Error) do2(Expression arg) {
-                    auto arg = expectImplicitConvertTo(context, arg, elementType, loc)?;
+                    auto arg = expectImplicitConvertTo(context, arg, elementType, args[0].locRange)?;
                     for (i in 0 .. this.length) {
                         auto field = new VectorMemberReference(result, cast(int) i);
                         auto stmt = context.compiler.assignStatement(field, arg);
@@ -245,18 +244,18 @@ class VectorType : Type
                 }
                 return context.compiler.consume(context, arg, &do2);
             }
-            return context.compiler.exprWithTemporaryExpr(args[0], &do1);
+            return context.compiler.exprWithTemporaryExpr(argExprs[0], &do1);
         } else {
-            return mkVector(context, loc, args);
+            return mkVector(context, locRange, argExprs);
         }
     }
 
     // consumes "args"
-    (Expression | fail Error) mkVector(Context context, Loc loc, Expression[] args) {
+    (Expression | fail Error) mkVector(Context context, LocRange locRange, Expression[] args) {
         auto result = new PairedTemporary(this, Ownership.gifted);
         mut Statement initialize = new UninitializeTemporaryStatement(result);
         for (i in 0 .. this.length) {
-            auto arg = expectImplicitConvertTo(context, args[i], elementType, loc)?;
+            auto arg = expectImplicitConvertTo(context, args[i], elementType, locRange)?;
             auto field = new VectorMemberReference(result, cast(int) i);
             auto stmt = context.compiler.move(context, field, arg)?;
 

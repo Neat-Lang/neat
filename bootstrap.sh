@@ -576,6 +576,8 @@ at_revision '893a26919397e9287efacedeedb2a98241f5f0e7' 'rebuild neat' 'build/nea
 at_revision 'cff2fb98c0e01c5d98bd269cb6dfc06807eae91f' 'rebuild neat' 'build/neat'
 # fix class resolution error reporting
 at_revision '447416986ef4e4aa80fce36f3fb6d5166c8d8dc5' 'rebuild neat' 'build/neat'
+# start adding locrange types, add __RANGE__
+at_revision 'eda231e26a53f9a00b7880f981a467d64b4c1cb2' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

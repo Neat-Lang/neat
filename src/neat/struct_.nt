@@ -27,7 +27,7 @@ class Struct : Type
     // some methods will be null.
     size_t validMethods;
 
-    Loc loc;
+    LocRange locRange;
 
     string mangledName;
 
@@ -39,7 +39,7 @@ class Struct : Type
 
     StructAliasDecl[] decls;
 
-    this(this.name, this.members, this.loc, string manglePrefix) {
+    this(this.name, this.members, this.locRange, string manglePrefix) {
         this.mangledName = manglePrefix ~ "_struct_" ~ this.name;
         this.zeroInitializable = [
             all member.type.zeroInitializable for member in this.members];
@@ -92,7 +92,7 @@ class Struct : Type
     }
 
     override (nullable Symbol | fail Error) accessMember(
-        Loc loc, Context context, nullable Expression baseExpr, string member, Protection protection)
+        Context context, nullable Expression baseExpr, string member, Protection protection, LocRange locRange)
     {
         bool allowed(Protection symbol) {
             int rank(Protection p) {
@@ -121,12 +121,12 @@ class Struct : Type
         if (methodOffset != -1) {
             auto method = this.methods[methodOffset];
             if (method.static_) {
-                loc.assert(!baseExpr, "static method cannot be called on value")?;
+                locRange.assert(!baseExpr, "static method cannot be called on value")?;
                 return method;
             } else {
                 // TODO dereference-into-symbol so we can '&' it again
                 auto funcPtr = context.compiler.referenceFunction(method);
-                loc.assert(!!baseExpr, "non-static method cannot be called on type")?;
+                locRange.assert(!!baseExpr, "non-static method cannot be called on type")?;
                 return new ClassMethodPtr(funcPtr, baseExpr.notNull, false, method.name);
             }
         }
@@ -135,9 +135,9 @@ class Struct : Type
             where a.name == member/* && allowed(a.protection) TODO */
             else -1];
         if (declOffset != -1) {
-            loc.assert(!!baseExpr, "alias cannot be called on type (TODO)")?;
+            locRange.assert(!!baseExpr, "alias cannot be called on type (TODO)")?;
             auto reference = baseExpr.instanceOf(Reference);
-            loc.assert(!!reference, "can only access struct alias on reference")?;
+            locRange.assert(!!reference, "can only access struct alias on reference")?;
             auto refPtr = context.compiler.reference(reference.notNull);
             auto decl = this.decls[declOffset];
             auto context = decl.structParentContext
@@ -238,7 +238,7 @@ class Struct : Type
         FunctionDeclaration copyCtor = getCopyCtor;
         if (copyCtor) {
             Expression targetPtr = context.compiler.castTo(new Pointer(new Void), new ReferenceExpression(target));
-            auto call = new Call(copyCtor, [targetPtr, source], this.loc);
+            auto call = new Call(copyCtor, [targetPtr, source], this.locRange);
             return new ExprStatement(call);
         }
         auto copyStmt = copyRecursive(context, target, source);
@@ -252,15 +252,15 @@ class Struct : Type
         Expression ptr = context.compiler.castTo(new Pointer(new Void), new ReferenceExpression(ref_));
         nullable Statement callAutoDtor_ = callAutoDtor(context, ref_);
         if (auto destructor = getDtor) {
-            auto callDtor = new ExprStatement(new Call(destructor, [ptr], this.loc));
+            auto callDtor = new ExprStatement(new Call(destructor, [ptr], this.locRange));
             return sequence(callDtor, callAutoDtor_);
         }
         return callAutoDtor_;
     }
 
-    override (nullable Expression | fail Error) call(Context context, Loc loc, ASTArgument[] args)
+    override (nullable Expression | fail Error) call(Context context, LocRange locRange, ASTArgument[] args)
     {
-        loc.assert(args.length == this.members.length, "invalid number of args for struct constructor")?;
+        locRange.assert(args.length == this.members.length, "invalid number of args for struct constructor")?;
 
         auto params = [Parameter(
                 isThisAssignment=false,
@@ -268,13 +268,13 @@ class Struct : Type
                 mutable=false,
                 type=member.type
             ) for member in this.members];
-        validateCall(params, args, "$(this.name).this()", variadic=false, loc)?;
+        validateCall(params, args, "$(this.name).this()", variadic=false, locRange)?;
 
         auto temp = new PairedTemporary(this, Ownership.gifted);
         mut Statement initialize = new UninitializeTemporaryStatement(temp);
         for (i, arg in args) {
-            Expression arg = beExpression3(context, arg.sym.compile(context)?, loc)?;
-            Expression arg = expectImplicitConvertTo(context, arg, this.members[i].type, loc)?;
+            Expression arg = arg.sym.compile(context)?.beExpressionImplCall(context, locRange)?;
+            Expression arg = expectImplicitConvertTo(context, arg, this.members[i].type, locRange)?;
 
             auto field = new StructMemberReference(temp, i);
             mut auto stmt = context.compiler.move(context, field, arg)?;
@@ -285,14 +285,16 @@ class Struct : Type
         return new StatementExpression(initialize, temp, false);
     }
 
-    override (nullable Expression | fail Error) binaryOp(Context context, string op, Expression left, Expression right, Loc loc) {
+    override (nullable Expression | fail Error) binaryOp(
+        Context context, string op, Expression left, Expression right, LocRange locRange)
+    {
         if (op == "==" && right.type.same(left.type)) {
             // TODO this is shit, factor expr and temporary shit out into one generic function
             (Expression | fail Error) do1(Expression left) {
                 (Expression | fail Error) do2(Expression right) {
                     (nullable Expression | fail Error) do3(Expression left) {
                         (nullable Expression | fail Error) do4(Expression right) {
-                            return structEqual(context, left, right, loc);
+                            return structEqual(context, left, right, locRange);
                         }
                         return context.compiler.exprWithTemporaryExpr(right, &do4);
                     }
@@ -306,16 +308,16 @@ class Struct : Type
     }
 }
 
-(Expression | fail Error) structEqual(Context context, Expression left, Expression right, Loc loc) {
+(Expression | fail Error) structEqual(Context context, Expression left, Expression right, LocRange locRange) {
     auto structType = left.type.instanceOf(Struct);
     mut Expression test = new IntLiteral(1);
     for (i in 0 .. structType.members.length) {
         auto leftField = new StructMember(left, i);
         auto rightField = new StructMember(right, i);
         (Expression | fail Error) cmp() {
-            if (auto eq = leftField.type.binaryOp(context, "==", leftField, rightField, loc)?)
+            if (auto eq = leftField.type.binaryOp(context, "==", leftField, rightField, locRange)?)
                 return eq;
-            return new BinaryOp("==", leftField, rightField, loc);
+            return new BinaryOp("==", leftField, rightField, locRange);
         }
         test = new BoolAnd(test, cmp?);
     }
@@ -393,8 +395,6 @@ class StructMemberReference : Reference
 
 struct ASTStructMethod
 {
-    Loc loc;
-
     bool static_;
 
     Protection protection;
@@ -406,6 +406,8 @@ struct ASTStructMethod
     (ASTParameter | ASTThisAssignment)[] params;
 
     ASTStatement body_;
+
+    LocRange locRange;
 }
 
 struct StructAliasDecl
@@ -430,9 +432,9 @@ ASTSymbol quoteStructEntry(ASTStructEntry entry, Quoter quoter) {
 ASTSymbol quoteStructMember(ASTStructMember member, Quoter quoter) {
     with (quoter.compiler) {
         return astTupleLiteral([
-            astStringLiteral(member.name, __HERE__),
+            astStringLiteral(member.name, __RANGE__),
             member.protection.quoteProtection(quoter),
-            member.type.quote(quoter)], __HERE__);
+            member.type.quote(quoter)], __RANGE__);
     }
 }
 
@@ -442,18 +444,18 @@ ASTSymbol quoteStructMethod(ASTStructMethod method, Quoter quoter) {
     ASTSymbol transformParameter(ASTParameter param) {
         with (quoter.compiler) {
             return astCall(
-                astIdentifier("ASTParameter", __HERE__), [
-                    astStringLiteral(param.name, __HERE__),
-                    astBoolLiteral(param.mutable, __HERE__),
+                astIdentifier("ASTParameter", __RANGE__), [
+                    astStringLiteral(param.name, __RANGE__),
+                    astBoolLiteral(param.mutable, __RANGE__),
                     param.type.quote(quoter),
-                    quoter.quoteLoc(param.loc)], __HERE__);
+                    quoter.quoteLocRange(param.locRange)], __RANGE__);
         }
     }
     ASTSymbol transformThisAssignment(ASTThisAssignment assignment) {
         with (quoter.compiler) {
             return astCall(
-                astIdentifier("ASTThisAssignment", __HERE__), [
-                    astStringLiteral(assignment.name, __HERE__)], __HERE__);
+                astIdentifier("ASTThisAssignment", __RANGE__), [
+                    astStringLiteral(assignment.name, __RANGE__)], __RANGE__);
         }
     }
     ASTSymbol transformParam(typeof(method.params[0]) param) {
@@ -464,42 +466,42 @@ ASTSymbol quoteStructMethod(ASTStructMethod method, Quoter quoter) {
     ASTSymbol[] params = [transformParam(a) for a in method.params];
     with (quoter.compiler) {
         return astCall(
-            astIdentifier("ASTStructMethod", __HERE__), [
-                quoter.quoteLoc(method.loc),
-                astBoolLiteral(method.static_, __HERE__),
+            astIdentifier("ASTStructMethod", __RANGE__), [
+                astBoolLiteral(method.static_, __RANGE__),
                 method.protection.quoteProtection(quoter),
-                astStringLiteral(method.name, __HERE__),
+                astStringLiteral(method.name, __RANGE__),
                 method.ret.quote(quoter),
-                astArrayLiteral(params, __HERE__),
-                method.body_.quote(quoter)], __HERE__);
+                astArrayLiteral(params, __RANGE__),
+                method.body_.quote(quoter),
+                quoter.quoteLocRange(method.locRange)], __RANGE__);
     }
 }
 
 ASTSymbol quoteVersionBlock(ASTStructVersionBlock block, Quoter quoter) {
     with (quoter.compiler) {
         return astNewExpression(
-            astIdentifier("ASTStructVersionBlock", __HERE__), [
-                astStringLiteral(block.name, __HERE__),
+            astIdentifier("ASTStructVersionBlock", __RANGE__), [
+                astStringLiteral(block.name, __RANGE__),
                 astArrayLiteral(
                     [a.quoteStructEntry(quoter) for a in block.then],
-                    __HERE__),
+                    __RANGE__),
                 astArrayLiteral(
                     [a.quoteStructEntry(quoter) for a in block.else_],
-                    __HERE__)], __HERE__);
+                    __RANGE__)], __RANGE__);
     }
 }
 
 ASTSymbol quoteStaticIf(ASTStructStaticIf staticIf, Quoter quoter) {
     with (quoter.compiler) {
         return astNewExpression(
-            astIdentifier("ASTStructStaticIf", __HERE__), [
+            astIdentifier("ASTStructStaticIf", __RANGE__), [
                 staticIf.condition.quote(quoter),
                 astArrayLiteral(
                     [a.quoteStructEntry(quoter) for a in staticIf.then],
-                    __HERE__),
+                    __RANGE__),
                 astArrayLiteral(
                     [a.quoteStructEntry(quoter) for a in staticIf.else_],
-                    __HERE__)], __HERE__);
+                    __RANGE__)], __RANGE__);
     }
 }
 
@@ -507,11 +509,11 @@ ASTSymbol quoteStaticIf(ASTStructStaticIf staticIf, Quoter quoter) {
 ASTSymbol quoteProtection(Protection protection, Quoter quoter) {
     with (quoter.compiler) {
         if (protection == Protection.public_) {
-            return astMember(astIdentifier("Protection", __HERE__), "public_", __HERE__);
+            return astMember(astIdentifier("Protection", __RANGE__), "public_", __RANGE__);
         } else if (protection == Protection.private_) {
-            return astMember(astIdentifier("Protection", __HERE__), "private_", __HERE__);
+            return astMember(astIdentifier("Protection", __RANGE__), "private_", __RANGE__);
         } else if (protection == Protection.protected_) {
-            return astMember(astIdentifier("Protection", __HERE__), "protected_", __HERE__);
+            return astMember(astIdentifier("Protection", __RANGE__), "protected_", __RANGE__);
         } else {
             assert(false);
         }
@@ -524,25 +526,25 @@ class StructNamespace : Namespace
 
     this(this.parent, this.struct_) { this.isContextScope = true; }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, Loc loc)
+    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange)
     {
         if (name == struct_.name) return struct_;
         // TODO early name check?
         if (auto thisPtr = context.framePointer) {
             auto thisPtr = new PointerCast(new Pointer(this.struct_), thisPtr); // This is good code. Good code.
             if (auto result = context.compiler.accessMemberWithLifetime(
-                    context, thisPtr, name, loc, true)?)
+                    context, thisPtr, name, locRange, true)?)
                 return result;
         } else {
             // static lookup
             if (auto result = context.compiler.accessMemberWithLifetime(
-                    context, this.struct_, name, loc, true)?)
+                    context, this.struct_, name, locRange, true)?)
                 return result;
         }
 
         // TODO "outer"?
         if (!this.parent) return null;
-        return this.parent.lookup(name, context.withFramePointer(null), loc);
+        return this.parent.lookup(name, context.withFramePointer(null), locRange);
     }
 }
 
@@ -554,8 +556,8 @@ class StructMethod : Function
 
     string mangledName;
 
-    this(this.loc, Struct structType, nullable Namespace namespace, this.static_, this.protection, this.name,
-         this.ret, this.params, this.statement, this.macroState)
+    this(Struct structType, nullable Namespace namespace, this.static_, this.protection, this.name,
+         this.ret, this.params, this.statement, this.macroState, this.locRange)
     {
         // TODO super()
         auto structNamespace = new StructNamespace(namespace, structType);
@@ -602,9 +604,7 @@ class ASTStruct : ASTSymbol
 
     ASTStructEntry[] entries;
 
-    Loc loc;
-
-    this(this.name, this.entries, this.loc) { }
+    this(this.name, this.entries, this.locRange) { }
 
     override (Struct | fail Error) compile(Context context) {
         mut StructMemberDeclaration[] members;
@@ -615,7 +615,7 @@ class ASTStruct : ASTSymbol
                 ASTStructMember member:
                     members ~= new StructMemberDeclaration(
                         member.name, member.protection,
-                        beType(this.loc, member.type.compile(context)?)?);
+                        member.type.compile(context)?.beType2(this.locRange)?);
                 ASTStructVersionBlock ver:
                     if ([any a == ver.name for a in context.platform.versions]) {
                         [walk(entry) for entry in ver.then];
@@ -637,7 +637,7 @@ class ASTStruct : ASTSymbol
                                 [walk(entry) for entry in staticIf.else_];
                         }
                         (:unknown): {
-                            return this.loc.fail("cannot statically evaluate condition: "
+                            return this.locRange.fail("cannot statically evaluate condition: "
                                 ~ staticIf.condition.repr);
                         }
                         Error err: return err;
@@ -646,7 +646,7 @@ class ASTStruct : ASTSymbol
         }
         [walk(a) for a in this.entries];
 
-        auto struct_ = new Struct(this.name, members, this.loc, context.namespace.mangle);
+        auto struct_ = new Struct(this.name, members, this.locRange, context.namespace.mangle);
         // make S visible in struct S {}
         auto structNamespace = new StructNamespace(
             context.namespace, struct_);
@@ -661,7 +661,7 @@ class ASTStruct : ASTSymbol
                     ASTParameter param:
                         methodParams[k] = Parameter(
                             false, param.name, param.mutable,
-                            beType(param.loc, param.type.compile(structContext)?)?);
+                            param.type.compile(structContext)?.beType2(param.locRange)?);
                     ASTThisAssignment param:
                         assert(false); // TODO this.foo
                 }
@@ -674,15 +674,16 @@ class ASTStruct : ASTSymbol
             auto returnTypeContext = structContext.withNamespace(returnTypeNamespace);
 
             struct_.methods[i] = new StructMethod(
-                method.loc,
                 struct_,
                 context.namespace,
                 method.static_,
                 method.protection,
                 method.name,
-                beType(this.loc, method.ret.compile(structContext)?)?,
+                method.ret.compile(structContext)?.beType2(this.locRange)?,
                 methodParams,
-                method.body_, context.macroState);
+                method.body_,
+                context.macroState,
+                method.locRange);
             struct_.validMethods = i + 1;
         }
         struct_.decls = decls;
@@ -697,8 +698,8 @@ class ASTStructDecl : ASTDeclaration
 {
     ASTStruct struct_;
 
-    this(string name, ASTStructEntry[] entries, Loc loc) {
-        this.struct_ = new ASTStruct(name, entries, loc);
+    this(string name, ASTStructEntry[] entries, (Loc|LocRange) locRange) {
+        this.struct_ = new ASTStruct(name, entries, locRange.case(Loc loc: loc.locRange, LocRange range: range));
     }
 
     override (Context | fail Error) compile(Context context)
@@ -721,12 +722,12 @@ class ASTStructDecl : ASTDeclaration
     override ASTSymbol quote(Quoter quoter) {
         ASTSymbol[] entries = [a.quoteStructEntry(quoter) for a in this.struct_.entries];
         with (quoter.compiler) {
-            ASTSymbol structEntry = astIdentifier("ASTStructEntry", __HERE__);
+            ASTSymbol structEntry = astIdentifier("ASTStructEntry", __RANGE__);
             return astNewExpression(
-                astIdentifier("ASTStructDecl", __HERE__), [
-                    astStringLiteral(this.struct_.name, __HERE__),
-                    astArrayLiteralTypeHint(structEntry, entries, __HERE__),
-                    quoter.quoteLoc(this.struct_.loc)], __HERE__);
+                astIdentifier("ASTStructDecl", __RANGE__), [
+                    astStringLiteral(this.struct_.name, __RANGE__),
+                    astArrayLiteralTypeHint(structEntry, entries, __RANGE__),
+                    quoter.quoteLocRange(this.struct_.locRange)], __RANGE__);
         }
     }
 
@@ -735,14 +736,15 @@ class ASTStructDecl : ASTDeclaration
 
 (nullable ASTStructDecl | fail Error) parseStructDecl(Parser parser, LexicalContext lexicalContext)
 {
-    auto loc = parser.loc;
     parser.begin;
+    auto from = parser.from?;
     if (parseIdentifier(parser)? != "struct") {
         parser.revert;
         return null;
     }
     string name = parseIdentifier(parser)?;
     assert(!!name.length);
+    auto locRange = parser.to(from);
     mut ASTStructEntry[] entries;
     parser.expect("{")?;
     while (!parser.accept("}")?) {
@@ -750,7 +752,7 @@ class ASTStructDecl : ASTDeclaration
         entries ~= entry;
     }
     parser.commit;
-    return new ASTStructDecl(name, entries, loc);
+    return new ASTStructDecl(name, entries, locRange);
 }
 
 (ASTStructEntry[] | fail Error) parseStructBlock(Parser parser, LexicalContext lexicalContext) {
@@ -807,7 +809,7 @@ class ASTStructDecl : ASTDeclaration
     mut nullable ASTSymbol memberType;
     mut string memberName;
     mut Protection protection = Protection.public_;
-    auto loc = parser.loc;
+    auto from = parser.from?;
     while (true) {
         if (parser.accept("static")?) {
             static_ = true;
@@ -832,12 +834,12 @@ class ASTStructDecl : ASTDeclaration
     }
     if (parser.accept("this")?)
     {
-        memberType = new ASTBasicType("void", parser.loc);
+        memberType = new ASTBasicType("void", __RANGE__);
         memberName = "__ctor";
     }
     else if (parser.accept("~this")?)
     {
-        memberType = new ASTBasicType("void", parser.loc);
+        memberType = new ASTBasicType("void", __RANGE__);
         memberName = "__dtor";
     }
     else
@@ -848,6 +850,7 @@ class ASTStructDecl : ASTDeclaration
         memberName = ident;
         if (!memberName.length) return parser.fail("expected member name");
     }
+    auto locRange = parser.to(from);
     if (parser.accept("(")?) // method
     {
         auto params = parseParamList(parser, lexicalContext)?;
@@ -855,11 +858,11 @@ class ASTStructDecl : ASTDeclaration
             memberName != "__dtor" || params.length == 0, "destructor cannot take parameters")?;
         ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
         entries ~= ASTStructMethod(
-            parser.loc, static_, protection, memberName, memberType.notNull, params, stmt);
+            static_, protection, memberName, memberType.notNull, params, stmt, locRange);
     }
     else
     {
-        loc.assert(!static_, "no static fields")?;
+        parser.to(from).assert(!static_, "no static fields")?;
         (void | fail Error) addMember() {
             parser.assert_(memberName != "__ctor", "constructor cannot be member")?;
             parser.assert_(memberName != "__dtor", "destructor cannot be member")?;

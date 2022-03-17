@@ -45,8 +45,10 @@ class Array : Type
             // BIG TODO: What exactly is supposed to happen in the Error case here?!
             // Can we find a better way to maybe avoid running into that
             // class ErrorType : Type seems like admitting defeat.
+            // Maybe like a class PendingSymbolSet, that gathers them all during compilation (in context?)
+            // we're gonna need context downmerging anyway, for stackframes
             s.resolve.case {
-                Symbol sym: beType(__HERE__, sym).case {
+                Symbol sym: sym.beType2(__RANGE__).case {
                     Type type: return type;
                     Error err: assert(false);
                 }
@@ -117,7 +119,7 @@ class Array : Type
     }
 
     override (nullable Symbol | fail Error) accessMember(
-        Loc loc, Context context, nullable Expression base, string field, Protection _)
+        Context context, nullable Expression base, string field, Protection _, LocRange locRange)
     {
         if (auto base = base) {
             if (field == "length")
@@ -134,21 +136,23 @@ class Array : Type
                 auto length = new ArrayLength(base, context.nativeWordType);
 
                 return context.compiler.binaryOp(
-                    "==", context, length, context.compiler.intLiteral(0), loc);
+                    "==", context, length, context.compiler.intLiteral(0), locRange);
             }
             if (field == "next") {
                 auto length = new ArrayLength(base, context.nativeWordType);
                 auto lengthLessOne = context.compiler.binaryOp(
-                    "-", context, length, context.compiler.intLiteral(1), loc)?;
+                    "-", context, length, context.compiler.intLiteral(1), locRange)?;
 
                 return new ArraySlice(
-                    base, context.compiler.intLiteral(0), lengthLessOne, loc);
+                    base, context.compiler.intLiteral(0), lengthLessOne, locRange);
             }
         }
         return null;
     }
 
-    override (nullable Expression | fail Error) binaryOp(Context context, string op, Expression left, Expression right, Loc loc) {
+    override (nullable Expression | fail Error) binaryOp(
+        Context context, string op, Expression left, Expression right, LocRange locRange)
+    {
         if (op == "==" && right.type.instanceOf(Array)) {
             (Expression | fail Error) do1(Expression left) {
                 (Expression | fail Error) do2(Expression right) {
@@ -170,10 +174,10 @@ class Array : Type
         return null;
     }
 
-    override (nullable Expression | fail Error) truthy(Context context, Expression expr, Loc loc)
+    override (nullable Expression | fail Error) truthy(Context context, Expression expr, LocRange locRange)
     {
         (Expression | fail Error) do_(Expression expr) {
-            return context.compiler.truthy(context, new ArrayPointer(this.elementType, expr), loc);
+            return context.compiler.truthy(context, new ArrayPointer(this.elementType, expr), locRange);
         }
         return context.compiler.consume(context, expr, &do_);
     }
@@ -183,9 +187,7 @@ class ASTArray : ASTSymbol
 {
     ASTSymbol elementType;
 
-    Loc loc;
-
-    this(this.elementType, this.loc) { }
+    this(this.elementType, this.locRange) { }
 
     override (Type | fail Error) compile(Context context)
     {
@@ -194,12 +196,12 @@ class ASTArray : ASTSymbol
         {
             return new Array(pending);
         }
-        auto symtype = beType(this.loc, sym)?;
+        auto symtype = sym.beType2(this.locRange)?;
         return new Array(symtype);
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astArray", [ elementType.quote(quoter) ], loc);
+        return quoter.compilerCall("astArray", [ elementType.quote(quoter) ], locRange);
     }
 }
 
@@ -360,18 +362,18 @@ class ArraySlice : Expression
 
     Expression upper;
 
-    Loc loc;
+    LocRange locRange;
 
     Array arrayType;
 
-    this(this.base, this.lower, this.upper, this.loc) {
+    this(this.base, this.lower, this.upper, this.locRange) {
         auto baseType = this.base.type;
         if (auto arrayType = baseType.instanceOf(Array)) {
             this.arrayType = arrayType;
         } else if (auto pointerType = baseType.instanceOf(Pointer)) {
             this.arrayType = new Array(pointerType.target);
         } else {
-            print("$(loc.location): slice of non-array/non-pointer - catch this earlier!");
+            print("$(locRange.repr): slice of non-array/non-pointer - catch this earlier!");
             exit(1);
         }
         this.type = this.arrayType;
@@ -447,7 +449,7 @@ Expression arrayEqual(Context context, Expression left, Expression right) {
 
     auto fn = compiler.createRuntimeFunction(context, "array_eq", new Boolean, params, &body_);
 
-    return context.compiler.mkCall(fn, [left, right], __HERE__);
+    return context.compiler.mkCall(fn, [left, right], __RANGE__);
 }
 
 Expression releaseArray(Context context, Expression value) {
@@ -471,10 +473,10 @@ Expression releaseArray(Context context, Expression value) {
 
     auto fn = compiler.createRuntimeFunction(context, "arrayrelease", new Void, params, &body_);
 
-    return context.compiler.mkCall(fn, [value], __HERE__);
+    return context.compiler.mkCall(fn, [value], __RANGE__);
 }
 
-(Expression | fail Error) arrayCat(Context context, Expression left, Expression right, Loc loc) {
+(Expression | fail Error) arrayCat(Context context, Expression left, Expression right, LocRange locRange) {
     auto compiler = context.compiler;
 
     Array leftArray = left.type.instanceOf(Array).notNull;
@@ -487,7 +489,7 @@ Expression releaseArray(Context context, Expression value) {
     bool appendArrays = leftArray.same(right.type);
 
     if (!appendElementType && !appendArrays) {
-        return loc.fail("incompatible types for concat: " ~ leftArray.repr ~ " and " ~ right.type.repr);
+        return locRange.fail("incompatible types for concat: " ~ leftArray.repr ~ " and " ~ right.type.repr);
     }
 
     ASTStatement body_() {
@@ -537,15 +539,24 @@ Expression releaseArray(Context context, Expression value) {
     auto astLeft = new ASTSymbolHelper(left);
     auto astRight = new ASTSymbolHelper(right);
 
-    return compiler.call(
-            context, astFn, [ASTArgument(astLeft, ""), ASTArgument(astRight, "")], loc, false)?
-        .notNull;
+    version (next_generation) {
+        return compiler.call(
+                context, astFn, [
+                    ASTArgument(astLeft, ""), ASTArgument(astRight, "")],
+                locRange, false)?
+            .notNull;
+    } else {
+        return compiler.call(
+                context, astFn, [
+                    ASTArgument(astLeft, "", __RANGE__), ASTArgument(astRight, "", __RANGE__)],
+                locRange, false)?
+            .notNull;
+    }
 }
 
 (nullable ASTSymbol | fail Error) parseArrayLiteral(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
-    auto loc = parser.loc;
     if (parser.accept("[")?) { }
     else {
         parser.revert;
@@ -554,10 +565,10 @@ Expression releaseArray(Context context, Expression value) {
     mut ASTArrayLiteralElement[] values;
     while (true) {
         if (parser.accept("]")?) break;
-        auto loc = parser.loc;
+        auto from = parser.from?;
         ASTSymbol value = lexicalContext.compiler.parseExpression(parser, lexicalContext)?
             .notNull;
-        values ~= ASTArrayLiteralElement(value, loc);
+        values ~= ASTArrayLiteralElement(value, parser.to(from));
         if (parser.accept("]")?) break;
         parser.expect(",")?;
     }
@@ -628,7 +639,7 @@ struct ASTArrayLiteralElement
 {
     ASTSymbol value;
 
-    Loc loc;
+    LocRange locRange;
 }
 
 class ASTArrayLiteral : ASTSymbol
@@ -644,10 +655,10 @@ class ASTArrayLiteral : ASTSymbol
             return new EmptyArrayLiteral(null);
         mut Expression[] values;
         for (element in this.elements)
-            values ~= element.value.compile(context)?.beExpressionImplCall(context, element.loc)?;
+            values ~= element.value.compile(context)?.beExpressionImplCall(context, element.locRange)?;
         (Type | fail Error) getType() {
             if (this.typeHint) {
-                return beType(__HERE__, this.typeHint.compile(context)?);
+                return this.typeHint.compile(context)?.beType2(__RANGE__)?;
             }
             mut nullable Expression mergedReference;
             for (i, element in this.elements) {
@@ -658,9 +669,9 @@ class ASTArrayLiteral : ASTSymbol
                     auto left = context.compiler.implicitConvertTo(context, value, mergedReference.type);
                     auto right = context.compiler.implicitConvertTo(context, mergedReference.notNull, value.type);
                     if (!left && !right)
-                        return element.loc.fail("incompatible expression type");
+                        return element.locRange.fail("incompatible expression type");
                     else if (left && right && !left.type.same(right.type))
-                        return element.loc.fail("ambiguous expression type");
+                        return element.locRange.fail("ambiguous expression type");
                     if (left) mergedReference = left;
                     else if (right) mergedReference = right;
                 }
@@ -698,13 +709,11 @@ class ASTArrayLiteral : ASTSymbol
  */
 class ASTArrayLength : ASTSymbol
 {
-    Loc loc;
-
-    this(this.loc) { }
+    this((Loc|LocRange) locRange) { this.locRange = locRange.case(Loc loc: loc.locRange, LocRange range: range); }
 
     override (Symbol | fail Error) compile(Context context) {
-        auto surroundingArraySymbol = context.compiler.lookup(context, __HERE__, "__array")?;
-        loc.assert(
+        auto surroundingArraySymbol = context.compiler.lookup(context, __RANGE__, "__array")?;
+        locRange.assert(
             surroundingArraySymbol && surroundingArraySymbol.instanceOf(Expression),
             "'\$' can only be used inside an array index context")?;
 
@@ -715,7 +724,7 @@ class ASTArrayLength : ASTSymbol
 
     override ASTSymbol quote(Quoter quoter) {
         return quoter.compiler.astNewExpression(
-            quoter.compiler.astIdentifier("ASTArrayLength", loc), [
-                quoter.quoteLoc(loc)], loc);
+            quoter.compiler.astIdentifier("ASTArrayLength", locRange), [
+                quoter.quoteLocRange(locRange)], locRange);
     }
 }

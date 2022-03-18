@@ -133,11 +133,13 @@ class LLVMBackendModule : BackendModule {
     bool forMacro;
 
     LLVMContextRef context;
+    LLVMTargetMachineRef machine;
 
     LLVMModuleRef module_;
 
     LLVMDIBuilderRef dibuilder;
     LLVMMetadataRef dicu;
+
 
     this(this.platform, BackendLocation loc, this.forMacro) {
         this.context = LLVMContextCreate;
@@ -148,6 +150,19 @@ class LLVMBackendModule : BackendModule {
 
         this.module_ = LLVMModuleCreateWithNameInContext(filename.toStringz, context);
         this.dibuilder = LLVMCreateDIBuilder(this.module_);
+
+        char* triple = "x86_64-pc-linux-gnu";
+        char* error;
+        LLVMTargetRef target;
+        bool succ = LLVMGetTargetFromTriple(triple, &target, &error) == 0;
+        assert(succ);
+        this.machine = LLVMCreateTargetMachine(
+            target, triple, "generic", LLVMGetHostCPUFeatures, LLVMCodeGenLevelNone, LLVMRelocPIC, LLVMCodeModelDefault);
+        auto datalayout = LLVMCreateTargetDataLayout(machine);
+        auto datalayoutStr = LLVMCopyStringRepOfTargetData(datalayout);
+
+        LLVMSetTarget(this.module_, "x86_64-pc-linux-gnu");
+        LLVMSetDataLayout(this.module_, datalayoutStr);
 
         auto verStr = "Debug Info Version";
         LLVMAddModuleFlag(
@@ -164,8 +179,6 @@ class LLVMBackendModule : BackendModule {
             this.module_, LLVMModuleFlagBehaviorWarning,
             picLevel.ptr, picLevel.length,
             LLVMValueAsMetadata(LLVMConstInt(LLVMInt32TypeInContext(this.context), 1, SignExtend=false)));
-
-        LLVMSetTarget(module_, "x86_64-pc-linux-gnu");
 
         auto file = LLVMDIBuilderCreateFile(
             dibuilder,
@@ -192,17 +205,8 @@ class LLVMBackendModule : BackendModule {
             LLVMContextDispose(this.context);
             return;
         }
-        LLVMTargetRef target;
-        char* triple = "x86_64-pc-linux-gnu";
         char* error;
-        bool succ = LLVMGetTargetFromTriple(triple, &target, &error) == 0;
-        assert(succ);
-        auto machine = LLVMCreateTargetMachine(
-            target, triple, "generic", LLVMGetHostCPUFeatures(), LLVMCodeGenLevelNone, LLVMRelocPIC, LLVMCodeModelDefault);
-        auto datalayout = LLVMCreateTargetDataLayout(machine);
-        auto datalayoutStr = LLVMCopyStringRepOfTargetData(datalayout);
-        LLVMSetDataLayout(this.module_, datalayoutStr);
-        bool succ = LLVMTargetMachineEmitToFile(machine, this.module_, file.toStringz, LLVMObjectFile, &error) == 0;
+        bool succ = LLVMTargetMachineEmitToFile(this.machine, this.module_, file.toStringz, LLVMObjectFile, &error) == 0;
         if (!succ) {
             print("compilation failed: $(cToString(error))");
             assert(false);

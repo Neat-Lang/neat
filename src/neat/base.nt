@@ -63,10 +63,7 @@ class ASTImportStatement
 
     LocRange locRange;
 
-    // FIXME
-    this(this.target, this.isMacroImport, this.symbols, (Loc|LocRange) locRange) {
-        this.locRange = locRange.case(Loc loc: loc.locRange, LocRange range: range);
-    }
+    this(this.target, this.isMacroImport, this.symbols, this.locRange) { }
 
     string repr(string pak) {
         this.target.case {
@@ -81,33 +78,18 @@ class ASTImportStatement
     }
 
     ASTSymbol quote(Quoter quoter) {
-        version (next_generation) {
-            ASTSymbol target = this.target.case(
-                (:normal, string name, string pak):
-                    quoter.compiler.astTupleLiteral([
-                        new ASTSymbolIdentifier("normal"),
-                        quoter.compiler.astStringLiteral(name, __RANGE__),
-                        quoter.compiler.astStringLiteral(pak, __RANGE__)], __RANGE__),
-                (:macro_, ASTModuleBase module_):
-                    ({
-                        assert(false);
-                        mut uninitialized ASTSymbol bottom;
-                        bottom;
-                    }));
-        } else {
-            ASTSymbol target = this.target.case(
-                (:normal, string name, string pak):
-                    quoter.compiler.astTupleLiteral([
-                        new ASTSymbolIdentifier("normal", __RANGE__),
-                        quoter.compiler.astStringLiteral(name, __RANGE__),
-                        quoter.compiler.astStringLiteral(pak, __RANGE__)], __RANGE__),
-                (:macro_, ASTModuleBase module_):
-                    ({
-                        assert(false);
-                        mut uninitialized ASTSymbol bottom;
-                        bottom;
-                    }));
-        }
+        ASTSymbol target = this.target.case(
+            (:normal, string name, string pak):
+                quoter.compiler.astTupleLiteral([
+                    new ASTSymbolIdentifier("normal", __RANGE__),
+                    quoter.compiler.astStringLiteral(name, __RANGE__),
+                    quoter.compiler.astStringLiteral(pak, __RANGE__)], __RANGE__),
+            (:macro_, ASTModuleBase module_):
+                ({
+                    assert(false);
+                    mut uninitialized ASTSymbol bottom;
+                    bottom;
+                }));
         mut ASTSymbol[] symbols;
         for (sym in this.symbols)
             symbols ~= quoter.compiler.astStringLiteral(sym, __RANGE__);
@@ -480,11 +462,6 @@ abstract class Expression : Symbol
 
 (Expression | fail Error) beExpression(Symbol symbol, LocRange locRange)
 {
-    return beExpression2(symbol, locRange);
-}
-
-(Expression | fail Error) beExpression2(Symbol symbol, LocRange locRange)
-{
     if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
         return new SymbolIdentifierExpression(symbolIdent.name);
     if (auto expr = symbol.instanceOf(Expression))
@@ -492,7 +469,7 @@ abstract class Expression : Symbol
     return locRange.fail("expression expected");
 }
 
-(Type | fail Error) beType(LocRange locRange, Symbol symbol)
+(Type | fail Error) beType(Symbol symbol, LocRange locRange)
 {
     if (auto type = symbol.instanceOf(Type))
         return type;
@@ -503,11 +480,7 @@ abstract class Expression : Symbol
 
 (Type | fail Error) beType2(Symbol symbol, LocRange locRange)
 {
-    if (auto type = symbol.instanceOf(Type))
-        return type;
-    if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
-        return new SymbolIdentifierType(symbolIdent.name);
-    return locRange.fail("type expected");
+    return beType(symbol, locRange);
 }
 
 abstract class Reference : Expression
@@ -657,11 +630,7 @@ struct ASTArgument
 
     string name;
 
-    version (next_generation) {
-        LocRange locRange() { return __RANGE__; }
-    } else {
-        LocRange locRange;
-    }
+    LocRange locRange;
 }
 
 class FunctionDeclaration : Symbol
@@ -820,22 +789,15 @@ abstract class ModuleBase : Namespace
     abstract void track((Symbol | FinishedSymbol) sym);
 }
 
-alias ExtForVarDecl = ((:auto_ | ASTSymbol | :none) type, (LocRange|Loc) locRange, string name);
+alias ExtForVarDecl = ((:auto_ | ASTSymbol | :none) type, LocRange locRange, string name);
 
 ASTSymbol quoteExtForVarDecl(ExtForVarDecl decl, Quoter quoter) {
     mut ASTSymbol[] tupleArgs;
-    version (next_generation) {
-        tupleArgs ~= decl.type.case(
-                (:auto_): new ASTSymbolIdentifier("auto_"),
-                (:none): new ASTSymbolIdentifier("none"),
-                ASTSymbol sym: sym.quote(quoter));
-    } else {
-        tupleArgs ~= decl.type.case(
-                (:auto_): new ASTSymbolIdentifier("auto_", __RANGE__),
-                (:none): new ASTSymbolIdentifier("none", __RANGE__),
-                ASTSymbol sym: sym.quote(quoter));
-    }
-    tupleArgs ~= quoter.quoteLocRange(decl.locRange.case(Loc loc: loc.locRange, LocRange range: range));
+    tupleArgs ~= decl.type.case(
+            (:auto_): new ASTSymbolIdentifier("auto_", __RANGE__),
+            (:none): new ASTSymbolIdentifier("none", __RANGE__),
+            ASTSymbol sym: sym.quote(quoter));
+    tupleArgs ~= quoter.quoteLocRange(decl.locRange);
     // auto $foo => (..., foo)
     if (decl.name.length > 0 && decl.name[0 .. 1] == "\$") {
         tupleArgs ~= quoter.compiler.astIdentifier(decl.name[1 .. $], __RANGE__);
@@ -872,104 +834,104 @@ abstract class CompilerBase
     abstract (nullable ASTDeclaration | fail Error) parseDeclaration(
         Parser parser, LexicalContext lexicalContext);
 
-    abstract ASTStatement astExpressionStmt(ASTSymbol expr, (Loc|LocRange) loc);
+    abstract ASTStatement astExpressionStmt(ASTSymbol expr, LocRange locRange);
 
-    abstract ASTStatement astScope(ASTStatement[] stmts, (Loc|LocRange) loc);
+    abstract ASTStatement astScope(ASTStatement[] stmts, LocRange locRange);
 
     // sequence of statements that don't open a new scope
-    abstract ASTStatement astSequence(ASTStatement[] stmts, (Loc|LocRange) loc);
+    abstract ASTStatement astSequence(ASTStatement[] stmts, LocRange locRange);
 
-    abstract ASTStatement astIf((ASTSymbol | ASTStatement) test, ASTStatement then, nullable ASTStatement else_, (Loc|LocRange) loc);
+    abstract ASTStatement astIf((ASTSymbol | ASTStatement) test, ASTStatement then, nullable ASTStatement else_, LocRange locRange);
 
     abstract ASTStatement astForLoop(
-        ASTStatement init, ASTSymbol test, ASTStatement step, ASTStatement body_, (Loc|LocRange) loc);
+        ASTStatement init, ASTSymbol test, ASTStatement step, ASTStatement body_, LocRange locRange);
 
     abstract ASTStatement astExtForLoop(
-        ASTSymbol source, ExtForVarDecl var1, (ExtForVarDecl | :none) var2, ASTStatement body_, (Loc|LocRange) loc);
+        ASTSymbol source, ExtForVarDecl var1, (ExtForVarDecl | :none) var2, ASTStatement body_, LocRange locRange);
 
-    abstract ASTStatement astAssign(ASTSymbol target, ASTSymbol source, (Loc|LocRange) loc);
+    abstract ASTStatement astAssign(ASTSymbol target, ASTSymbol source, LocRange locRange);
 
     abstract ASTStatement astDeclareVar(
-        string name, bool mutable, bool uninitialized, nullable ASTSymbol initial, (Loc|LocRange) loc);
+        string name, bool mutable, bool uninitialized, nullable ASTSymbol initial, LocRange locRange);
 
     abstract ASTStatement astDeclareVarExtract(
-        string name, bool mutable, bool infer, nullable ASTSymbol type, ASTSymbol source, (Loc|LocRange) loc);
+        string name, bool mutable, bool infer, nullable ASTSymbol type, ASTSymbol source, LocRange locRange);
 
     // initial is optional
     abstract ASTStatement astDeclareTypedVar(
-        string name, bool mutable, bool uninitialized, ASTSymbol type, nullable ASTSymbol initial, (Loc|LocRange) loc);
+        string name, bool mutable, bool uninitialized, ASTSymbol type, nullable ASTSymbol initial, LocRange locRange);
 
-    abstract ASTStatement astReturn(ASTSymbol value, (Loc|LocRange) loc);
+    abstract ASTStatement astReturn(ASTSymbol value, LocRange locRange);
 
-    abstract ASTSymbol astBinaryOp(string op, ASTSymbol left, ASTSymbol right, (Loc|LocRange) loc);
+    abstract ASTSymbol astBinaryOp(string op, ASTSymbol left, ASTSymbol right, LocRange locRange);
 
-    abstract ASTSymbol astCast(ASTSymbol target, ASTSymbol value, (Loc|LocRange) loc);
+    abstract ASTSymbol astCast(ASTSymbol target, ASTSymbol value, LocRange locRange);
 
-    abstract ASTSymbol astIndex(ASTSymbol base, ASTSymbol index, (Loc|LocRange) loc);
+    abstract ASTSymbol astIndex(ASTSymbol base, ASTSymbol index, LocRange locRange);
 
-    abstract ASTSymbol astMember(ASTSymbol base, string name, (Loc|LocRange) loc);
+    abstract ASTSymbol astMember(ASTSymbol base, string name, LocRange locRange);
 
-    abstract ASTSymbol astReference(ASTSymbol value, (Loc|LocRange) loc);
+    abstract ASTSymbol astReference(ASTSymbol value, LocRange locRange);
 
-    abstract ASTSymbol astDereference(ASTSymbol value, (Loc|LocRange) loc);
+    abstract ASTSymbol astDereference(ASTSymbol value, LocRange locRange);
 
-    abstract ASTSymbol astIntLiteral(int value, (Loc|LocRange) loc);
+    abstract ASTSymbol astIntLiteral(int value, LocRange locRange);
 
-    abstract ASTSymbol astLongLiteral(long value, (Loc|LocRange) loc);
+    abstract ASTSymbol astLongLiteral(long value, LocRange locRange);
 
-    abstract ASTSymbol astStringLiteral(string text, (Loc|LocRange) loc);
+    abstract ASTSymbol astStringLiteral(string text, LocRange locRange);
 
-    ASTSymbol astBoolLiteral(bool value, (Loc|LocRange) loc) {
-        if (value) return astIdentifier("true", loc);
-        else return astIdentifier("false", loc);
+    ASTSymbol astBoolLiteral(bool value, LocRange locRange) {
+        if (value) return astIdentifier("true", locRange);
+        else return astIdentifier("false", locRange);
     }
 
-    ASTSymbol astArrayLiteral(ASTSymbol[] values, (Loc|LocRange) loc) {
-        return astArrayLiteralTypeHint(null, values, loc);
+    ASTSymbol astArrayLiteral(ASTSymbol[] values, LocRange locRange) {
+        return astArrayLiteralTypeHint(null, values, locRange);
     }
 
-    abstract ASTSymbol astArrayLiteralTypeHint(nullable ASTSymbol typeHint, ASTSymbol[] values, (Loc|LocRange) loc);
+    abstract ASTSymbol astArrayLiteralTypeHint(nullable ASTSymbol typeHint, ASTSymbol[] values, LocRange locRange);
 
-    abstract ASTSymbol astTupleLiteral(ASTSymbol[] entries, (Loc|LocRange) loc);
+    abstract ASTSymbol astTupleLiteral(ASTSymbol[] entries, LocRange locRange);
 
-    abstract ASTSymbol astArraySlice(ASTSymbol array, ASTSymbol lower, ASTSymbol upper, (Loc|LocRange) loc);
+    abstract ASTSymbol astArraySlice(ASTSymbol array, ASTSymbol lower, ASTSymbol upper, LocRange locRange);
 
     // a .. b
-    abstract ASTSymbol astIota(ASTSymbol from, ASTSymbol to, (Loc|LocRange) loc);
+    abstract ASTSymbol astIota(ASTSymbol from, ASTSymbol to, LocRange locRange);
 
-    abstract ASTSymbol astVoidLiteral((Loc|LocRange) loc);
+    abstract ASTSymbol astVoidLiteral(LocRange locRange);
 
-    abstract ASTSymbol astIdentifier(string name, (Loc|LocRange) loc);
+    abstract ASTSymbol astIdentifier(string name, LocRange locRange);
 
-    abstract ASTSymbol astNegation(ASTSymbol value, (Loc|LocRange) loc);
+    abstract ASTSymbol astNegation(ASTSymbol value, LocRange locRange);
 
-    abstract ASTSymbol astCall(ASTSymbol target, ASTSymbol[] args, (Loc|LocRange) loc);
+    abstract ASTSymbol astCall(ASTSymbol target, ASTSymbol[] args, LocRange locRange);
 
-    abstract ASTSymbol astNewExpression(ASTSymbol type, (ASTSymbol[] | ASTArgument[]) args, (Loc|LocRange) loc);
+    abstract ASTSymbol astNewExpression(ASTSymbol type, (ASTSymbol[] | ASTArgument[]) args, LocRange locRange);
 
-    abstract ASTSymbol astDestroy(ASTSymbol target, (Loc|LocRange) loc);
+    abstract ASTSymbol astDestroy(ASTSymbol target, LocRange locRange);
 
-    abstract ASTSymbol astStatementExpression(ASTStatement[] statements, ASTSymbol expr, (Loc|LocRange) loc);
+    abstract ASTSymbol astStatementExpression(ASTStatement[] statements, ASTSymbol expr, LocRange locRange);
 
-    abstract ASTSymbol astArray(ASTSymbol elementType, (Loc|LocRange) loc);
+    abstract ASTSymbol astArray(ASTSymbol elementType, LocRange locRange);
 
-    abstract ASTSymbol astBasicType(string name, (Loc|LocRange) loc);
+    abstract ASTSymbol astBasicType(string name, LocRange locRange);
 
-    abstract ASTSymbol astTypeOf(ASTSymbol symbol, (Loc|LocRange) loc);
+    abstract ASTSymbol astTypeOf(ASTSymbol symbol, LocRange locRange);
 
-    abstract ASTSymbol astPointer(ASTSymbol target, (Loc|LocRange) loc);
+    abstract ASTSymbol astPointer(ASTSymbol target, LocRange locRange);
 
-    abstract ASTSymbol astNullable(ASTSymbol next, bool nullify, (Loc|LocRange) loc);
+    abstract ASTSymbol astNullable(ASTSymbol next, bool nullify, LocRange locRange);
 
-    abstract ASTDeclaration astImport(ASTImportStatement import_, ASTModuleBase module_, (Loc|LocRange) loc);
+    abstract ASTDeclaration astImport(ASTImportStatement import_, ASTModuleBase module_, LocRange locRange);
 
-    abstract ASTModuleBase resolveImport(string pak, ASTImportStatement import_, (Loc|LocRange) loc);
+    abstract ASTModuleBase resolveImport(string pak, ASTImportStatement import_, LocRange locRange);
 
     // expressions and statements
     abstract nullable Expression implicitConvertTo(Context context, Expression from, Type to);
 
     abstract (Expression | fail Error) binaryOp(
-        string op, Context context, Expression left, Expression right, (Loc|LocRange) loc);
+        string op, Context context, Expression left, Expression right, LocRange locRange);
 
     abstract Expression intLiteral(int value);
 
@@ -977,7 +939,7 @@ abstract class CompilerBase
 
     abstract Expression voidLiteral();
 
-    abstract (Expression | fail Error) truthy(Context context, Expression value, (Loc|LocRange) loc);
+    abstract (Expression | fail Error) truthy(Context context, Expression value, LocRange locRange);
 
     abstract Expression castTo(Type target, Expression source);
 
@@ -986,12 +948,12 @@ abstract class CompilerBase
     abstract Reference stackFrame(Type type);
 
     abstract (nullable Expression | fail Error) plainCall(
-        Context context, Symbol sym, Expression[] args, (Loc|LocRange) loc, bool isImplCall);
+        Context context, Symbol sym, Expression[] args, LocRange locRange, bool isImplCall);
 
     abstract (nullable Expression | fail Error) call(
-        Context context, ASTSymbol target, ASTArgument[] args, (Loc|LocRange) loc, bool isImplCall);
+        Context context, ASTSymbol target, ASTArgument[] args, LocRange locRange, bool isImplCall);
 
-    abstract Expression mkCall(Symbol target, Expression[] args, (Loc|LocRange) loc);
+    abstract Expression mkCall(Symbol target, Expression[] args, LocRange locRange);
 
     abstract Expression pointerOffset(Expression pointer, Expression offset);
 
@@ -1027,15 +989,15 @@ abstract class CompilerBase
         Context context, Expression expr, (nullable Statement | fail Error) delegate(Reference) dg);
 
     abstract (nullable Symbol | fail Error) accessMember(
-        Context context, Symbol base, string member, (Loc|LocRange) loc, bool allowUndefined);
+        Context context, Symbol base, string member, LocRange locRange, bool allowUndefined);
 
     abstract Reference structMemberReference(Reference base, int index);
 
     abstract (nullable Symbol | fail Error) accessMemberWithLifetime(
-        Context context, Symbol base, string member, (Loc|LocRange) loc, bool allowUndefined);
+        Context context, Symbol base, string member, LocRange locRange, bool allowUndefined);
 
     // look up name following the namespace in context
-    abstract (nullable Symbol | fail Error) lookup(Context context, (Loc|LocRange) loc, string name);
+    abstract (nullable Symbol | fail Error) lookup(Context context, LocRange locRange, string name);
 
     abstract Statement assignStatement(Reference target, Expression value);
 
@@ -1100,23 +1062,23 @@ abstract class CompilerBase
 
     abstract Type nativeWordType(Platform platform);
 
-    abstract Type struct_(string name, StructMemberDeclaration[] members, (Loc|LocRange) loc, string manglePrefix);
+    abstract Type struct_(string name, StructMemberDeclaration[] members, LocRange locRange, string manglePrefix);
 
-    (Expression | fail Error) expectImplicitConvertTo(Context context, Expression from, Type to, (Loc|LocRange) loc)
+    (Expression | fail Error) expectImplicitConvertTo(Context context, Expression from, Type to, LocRange locRange)
     {
         if (auto result = implicitConvertTo(context, from, to)) return result;
-        context.assert2(false, loc.case(Loc loc: loc.locRange, LocRange range: range), "Cannot convert to $(to.repr): $(from.type.repr)")?;
+        context.assert2(false, locRange, "Cannot convert to $(to.repr): $(from.type.repr)")?;
     }
 
     // true if ClassType or IntfType
     abstract bool isClassType(Type type);
 
     // called when expr is discarded (usually via ignored return value)
-    abstract (void | fail Error) discardErrorCheck(Expression expr, (Loc|LocRange) loc);
+    abstract (void | fail Error) discardErrorCheck(Expression expr, LocRange locRange);
 
     abstract (void | fail Error) addDefaultImports(Context context, ModuleBase module_);
 
-    abstract ModuleBase createModule(string name, string mangle, (Loc|LocRange) loc, nullable ModuleBase parent);
+    abstract ModuleBase createModule(string name, string mangle, LocRange locRange, nullable ModuleBase parent);
 }
 
 abstract class WorkPoolBase
@@ -1195,8 +1157,8 @@ struct Context
 
     Type nativeWordType() { return data.nativeWordType; }
 
-    void pushErrorLoc((Loc | LocRange) locRange) {
-        this.data.errorStack ~= locRange.case(Loc loc: loc.locRange, LocRange loc: loc);
+    void pushErrorLoc(LocRange locRange) {
+        this.data.errorStack ~= locRange;
     }
 
     void popErrorLoc() {
@@ -1353,11 +1315,7 @@ class ASTSymbolIdentifier : ASTSymbol
 {
     string name;
 
-    version (next_generation) {
-        this(this.name) { }
-    } else {
-        this(this.name, this.locRange) { }
-    }
+    this(this.name, this.locRange) { }
 
     override (SymbolIdentifier | fail Error) compile(Context context) {
         return new SymbolIdentifier(this.name);

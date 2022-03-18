@@ -42,8 +42,7 @@ rm build/neat.ini || true
 
 I=1
 NEXT=compiler$(($(build/neat -print-generation) + 1))
-build/neat $FLAGS -next-generation -version=next_generation -macro-version=next_generation \
-    -P$NEXT:src -Pcompiler:build/src src/main.nt -o build/neat_test$I
+build/neat $FLAGS -next-generation -P$NEXT:src -Pcompiler:build/src src/main.nt -o build/neat_test$I
 
 if [ \! -z ${FAST+x} ]
 then

@@ -194,23 +194,12 @@ with (parser.transaction)
         assert(members.length > 0);
 
         if (members.length == 1 && members[0].name == "") {
-            version (next_generation)
-                declEntries ~= ASTEitherDeclEntry(__HERE__, fail, members[0].sym);
-            else
-                declEntries ~= ASTEitherDeclEntry(members[0].locRange, fail, members[0].sym);
-
+            declEntries ~= ASTEitherDeclEntry(members[0].locRange, fail, members[0].sym);
         } else {
-            version (next_generation) {
-                declEntries ~= ASTEitherDeclEntry(
-                    __HERE__,
-                    fail,
-                    new ASTTupleType(parser.loc, [(a.name, a.sym) for a in members]));
-            } else {
-                declEntries ~= ASTEitherDeclEntry(
-                    parser.to(from),
-                    fail,
-                    new ASTTupleType([(a.name, a.sym) for a in members], parser.to(from)));
-            }
+            declEntries ~= ASTEitherDeclEntry(
+                parser.to(from),
+                fail,
+                new ASTTupleType([(a.name, a.sym) for a in members], parser.to(from)));
         }
         members = [];
         fail = false;
@@ -302,11 +291,7 @@ with (parser.transaction)
             string symbolIdentifier = parser.parseIdentifier?;
             if (symbolIdentifier != "") {
                 commit;
-                version (next_generation) {
-                    return new ASTSymbolIdentifier(symbolIdentifier);
-                } else {
-                    return new ASTSymbolIdentifier(symbolIdentifier, __RANGE__);
-                }
+                return new ASTSymbolIdentifier(symbolIdentifier, __RANGE__);
             }
         }
     }
@@ -671,15 +656,9 @@ class WrapReference : Reference
         // Simplest conceivable IFTI
         auto types = [arg.type for arg in args];
         // Some types, like Lambda, generate different types every time they're compiled.
-        version (next_generation) {
-            auto repackagedArgs = [
-                ASTArgument(new ASTSymbolHelper(arg), astArgs[i].name)
-                for i, arg in args];
-        } else {
-            auto repackagedArgs = [
-                ASTArgument(new ASTSymbolHelper(arg), astArgs[i].name, astArgs[i].locRange)
-                for i, arg in args];
-        }
+        auto repackagedArgs = [
+            ASTArgument(new ASTSymbolHelper(arg), astArgs[i].name, astArgs[i].locRange)
+            for i, arg in args];
         auto instance = templ.instantiate(context, locRange, types)?;
 
         return call(context, new ASTSymbolHelper(instance), repackagedArgs, locRange, autoCall);
@@ -791,10 +770,7 @@ class ASTCall : ASTSymbol
                     if (auto callable = context.namespace.lookup(astMemberAccess.member, context, this.locRange)?) {
                         // rewrite foo.bar(baz) to bar(foo, baz)
                         auto target = new ASTIdentifier(astMemberAccess.member, false, astMemberAccess.locRange);
-                        version (next_generation)
-                            auto args = [ASTArgument(astMemberAccess.base, "")] ~ this.args;
-                        else
-                            auto args = [ASTArgument(astMemberAccess.base, "", __RANGE__)] ~ this.args;
+                        auto args = [ASTArgument(astMemberAccess.base, "", astMemberAccess.locRange)] ~ this.args;
                         return (new ASTCall(target, args, this.locRange)).compile(context);
                     }
                 }
@@ -838,11 +814,7 @@ class ASTCall : ASTSymbol
         }
         nullable ASTSymbol arg = parser.parseExpression(lexicalContext)?;
         parser.to(from).assert(!!arg, "expression expected")?;
-        version (next_generation) {
-            args ~= ASTArgument(arg.notNull, name);
-        } else {
-            args ~= ASTArgument(arg.notNull, name, parser.to(from));
-        }
+        args ~= ASTArgument(arg.notNull, name, parser.to(from));
     }
     return args;
 }
@@ -1083,8 +1055,7 @@ class ASTMember : ASTMemberBase
                 if (callable) {
                     auto target = new ASTIdentifier(this.member, false, this.locRange);
                     // bar(foo)
-                    version (next_generation) auto args = [ASTArgument(this.base, "")];
-                    else auto args = [ASTArgument(this.base, "", this.locRange)];
+                    auto args = [ASTArgument(this.base, "", this.locRange)];
                     return (new ASTCall(target, args, this.locRange)).compile(context);
                 }
             }
@@ -1687,11 +1658,7 @@ with (parser.transaction)
     parser.to(fromSource).assert(!!source, "expression expected")?;
     parser.expect(")")?;
     commit;
-    version (next_generation) {
-        return new ASTBorrow(__HERE__, source.notNull);
-    } else {
-        return new ASTBorrow(source.notNull, parser.to(from));
-    }
+    return new ASTBorrow(source.notNull, parser.to(from));
 }
 
 /**
@@ -1703,14 +1670,10 @@ class ASTBorrow : ASTSymbol
 {
     ASTSymbol source;
 
-    version (next_generation) {
-        this(Loc loc, this.source) { this.locRange = loc.locRange; }
-    } else {
-        this(this.source, this.locRange) { }
-    }
+    this(this.source, this.locRange) { }
 
     override (Symbol | fail Error) compile(Context context) {
-        auto source = this.source.compile(context)?.beExpression2(this.locRange)?;
+        auto source = this.source.compile(context)?.beExpression(this.locRange)?;
         return new OverrideLifetimeExpr(source, ExprInfo(mutable=false, Ownership.borrowed));
     }
 
@@ -1749,7 +1712,7 @@ class ASTPrePostIncDec : ASTSymbol
                 (:post): op.what.case(
                     (:inc): context.compiler.$expr ({ auto ret = ref_; ref_ += 1; ret; }),
                     (:dec): context.compiler.$expr ({ auto ret = ref_; ref_ -= 1; ret; })))
-                .compile(context)?.beExpression2(__RANGE__)?;
+                .compile(context)?.beExpression(__RANGE__)?;
         }
         auto refptr = context.compiler.reference(target.instanceOf(Reference).notNull);
         return context.compiler.exprWithTemporaryExpr(refptr, &do_)?.notNull;
@@ -1787,18 +1750,6 @@ with (parser.transaction)
         (:none): {}
     }
     return ret;
-}
-
-// the AST of a Loc literal recreating the passed loc.
-ASTSymbol hereExpr(Loc loc, LexicalContext lexicalContext)
-{
-    with (lexicalContext.compiler)
-        return astCall(
-            astIdentifier("Loc", __RANGE__), [
-                astStringLiteral(loc.filename, __RANGE__),
-                astIntLiteral(loc.row, __RANGE__),
-                astIntLiteral(loc.column, __RANGE__),
-            ], __RANGE__);
 }
 
 // the AST of a LocRange literal recreating the passed loc.
@@ -1841,7 +1792,6 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
     string name = parser.parseIdentifier?;
     if (name.length)
     {
-        if (name == "__HERE__") return hereExpr(loc, lexicalContext);
         if (name == "__RANGE__") return locRangeExpr(parser.to(from), lexicalContext);
         if (name == "\$") return new ASTArrayLength(parser.to(from));
         if (name == "super") return new ASTSuper(parser.to(from));
@@ -1853,11 +1803,7 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
             string symbolIdentifier = parser.parseIdentifier?;
             if (symbolIdentifier != "") {
                 parser.commit;
-                version (next_generation) {
-                    return new ASTSymbolIdentifier(symbolIdentifier);
-                } else {
-                    return new ASTSymbolIdentifier(symbolIdentifier, parser.to(from));
-                }
+                return new ASTSymbolIdentifier(symbolIdentifier, parser.to(from));
             }
         }
         parser.revert;
@@ -3586,14 +3532,9 @@ class ASTExtForLoop : ASTStatement
         mut ASTSymbol[] args;
         args ~= source.quote(quoter);
         args ~= var1.quoteExtForVarDecl(quoter);
-        version (next_generation)
-            args ~= var2.case(
-                ExtForVarDecl decl: decl.quoteExtForVarDecl(quoter),
-                (:none): new ASTSymbolIdentifier("none"));
-        else
-            args ~= var2.case(
-                ExtForVarDecl decl: decl.quoteExtForVarDecl(quoter),
-                (:none): new ASTSymbolIdentifier("none", __RANGE__));
+        args ~= var2.case(
+            ExtForVarDecl decl: decl.quoteExtForVarDecl(quoter),
+            (:none): new ASTSymbolIdentifier("none", __RANGE__));
         args ~= body_.quote(quoter);
 
         return quoter.compilerCall("astExtForLoop", args, locRange);

@@ -578,6 +578,8 @@ at_revision 'cff2fb98c0e01c5d98bd269cb6dfc06807eae91f' 'rebuild neat' 'build/nea
 at_revision '447416986ef4e4aa80fce36f3fb6d5166c8d8dc5' 'rebuild neat' 'build/neat'
 # start adding locrange types, add __RANGE__
 at_revision 'eda231e26a53f9a00b7880f981a467d64b4c1cb2' 'rebuild neat' 'build/neat'
+# LocRange transition step 1.
+at_revision '16a837f400b85f707189d97827137f0bcce8be3a' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

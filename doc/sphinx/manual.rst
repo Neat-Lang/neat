@@ -1,7 +1,7 @@
-.. _learning:
+.. _manual:
 
-Learning Neat
-=============
+The Neat Language
+=================
 
 This document goes through every Neat language feature in approximate sequence.
 The goal is that you should be able to understand the entire language by just
@@ -353,22 +353,22 @@ Sum type
         float f: f / 2.0f);
 
     a.case {
-        int i: {
+        int i:
             print(itoa(i));
-        }
-        float f: print(ftoa(f));
+        float f:
+            print(ftoa(f));
     }
 
-    if (int i <- a) {
+    if (i in a) {
         print(i);
     }
 
 Members of a sumtype can be marked as "fail", enabling error return::
 
-    (int | fail FileNotFound) foo() { return "test".readAll.itoa; }
+    (int | fail FileNotFound) foo() { return "test".readAll?.itoa; }
 
-    // if foo returns a FileNotFound, it will be implicitly returned.
-    int i <- foo();
+    // if foo returns a FileNotFound, it will be automatically returned at the '?'.
+    int i = foo()?;
 
 Struct
 ^^^^^^

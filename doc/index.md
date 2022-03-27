@@ -1,6 +1,6 @@
-# Notes on Cx Compiler Development
+# Notes on Neat Compiler Development
 
-Cx tries to do the simple, straightforward thing in every case.
+Neat tries to do the simple, straightforward thing in every case.
 Nonetheless, during development, several lessons were learnt,
 leading to late changes in functionality.
 

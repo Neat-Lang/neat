@@ -5,8 +5,8 @@ Neat language documentation
    :maxdepth: 2
    :caption: Contents:
 
-   faq
-   learning
+   intro
+   manual
 
 Index
 ==================

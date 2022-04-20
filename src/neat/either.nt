@@ -422,9 +422,7 @@ class Either : Type
  */
 struct ASTEitherCaseExprCase
 {
-    (Loc|LocRange) loc;
-
-    LocRange locRange() { return loc.case(Loc loc: loc.locRange, LocRange range: range); }
+    LocRange locRange;
 
     ASTSymbol type;
 
@@ -453,27 +451,48 @@ class ASTEitherCaseExpr : ASTSymbol
         locRange.assert(!!either, "Expected Either for case expression")?;
 
         bool[] handled = new bool[](either.types.length);
+        int[] matchIndexes = new int[](this.cases.length);
+        for (i, _ in matchIndexes) matchIndexes[i] = -1;
 
         // TODO implicitConvertTo should only require Type - ie. return a Expression function(Expression).
         mut Type[] resultTypes;
-        void mergeType(LocRange locRange, Expression expr) {
-            auto exprType = expr.type;
+        void mergeType(LocRange locRange, Type exprType) {
             for (resultType in resultTypes)
                 if (resultType.same(exprType)) return;
             resultTypes ~= exprType;
         }
-        for (case_ in this.cases) {
-            if (case_.return_) continue;
-
+        for (i, case_ in this.cases) {
             auto caseLoc = case_.locRange;
             auto caseType = case_.type.compile(context)?.beType2(caseLoc)?;
+
+            mut int matchIndex = -1;
+            for (int k, eitherType in either.types) {
+                if (caseType.same(eitherType.type)) {
+                    caseLoc.assert(matchIndex == -1, "either type $(eitherType.type.repr) matched twice")?;
+                    matchIndex = k;
+                }
+            }
+            caseLoc.assert(matchIndex != -1, "Type is not listed in Either!")?;
+            handled[matchIndex] = true;
+            matchIndexes[i] = matchIndex;
+
+            if (case_.return_) continue;
 
             auto namespace = context.compiler.variableDeclaration(
                 context.namespace, case_.identifier, caseType, ExprInfo(mutable=false, Ownership.owned), false);
             auto subContext = context.withNamespace(namespace);
 
             Expression expr = case_.expr.compile(subContext)?.beExpressionImplCall(context, caseLoc)?;
-            mergeType(caseLoc, expr);
+            mergeType(caseLoc, expr.type);
+        }
+
+        for (i, handled in handled) {
+            if (!handled) {
+                // print("type $(either.types[i].type.repr) not handled, default type");
+                // return locRange.fail("Type " ~ either.types[i].type.repr() ~ " not handled!");
+                // silently pass through
+                mergeType(__RANGE__, either.types[i].type);
+            }
         }
 
         assert(resultTypes.length > 0);
@@ -489,19 +508,10 @@ class ASTEitherCaseExpr : ASTSymbol
         Statement initResultVal = new UninitializeTemporaryStatement(resultVal);
         mut nullable Statement ifTree;
 
-        for (case_ in this.cases) {
+        (void | fail Error) handleCase(ASTEitherCaseExprCase case_, int matchIndex)
+        {
             auto caseLoc = case_.locRange;
             Type type = case_.type.compile(context)?.beType2(caseLoc)?;
-
-            mut int matched = -1;
-            for (int k, eitherType in either.types) {
-                if (type.same(eitherType.type)) {
-                    caseLoc.assert(matched == -1, "either type " ~ type.repr() ~ " matched twice")?;
-                    matched = k;
-                }
-            }
-            caseLoc.assert(matched != -1, "Type is not listed in Either!")?;
-            handled[matched] = true;
 
             mut Statement[] thenSteps;
 
@@ -517,7 +527,7 @@ class ASTEitherCaseExpr : ASTSymbol
             // FIXME rename to accessDecl
             Reference variable = namespace.accessDecl2(context.compiler);
             // Borrow the case base.
-            thenSteps ~= context.compiler.assignStatement(variable, new EitherMember(baseExprTemp, matched));
+            thenSteps ~= context.compiler.assignStatement(variable, new EitherMember(baseExprTemp, matchIndex));
             Expression userExpr = case_.expr.compile(context)?
                 .beExpressionImplCall(context, caseLoc)?;
             (Statement | fail Error) userStmt() {
@@ -539,13 +549,28 @@ class ASTEitherCaseExpr : ASTSymbol
             }
             Statement then = context.compiler.sequenceStatement(thenSteps);
             Expression test = context.compiler.binaryOp(
-                "==", context, new EitherType(baseExprTemp), context.compiler.intLiteral(matched + 1), locRange)?;
+                "==", context, new EitherType(baseExprTemp), context.compiler.intLiteral(matchIndex + 1), locRange)?;
 
             ifTree = context.compiler.ifStatement(test, then, ifTree);
         }
-        for (i, handled in handled) {
+
+        for (i, case_ in this.cases) {
+            int matchIndex = matchIndexes[i];
+
+            assert(matchIndex != -1);
+
+            handleCase(case_, matchIndex)?;
+        }
+        for (int i, handled in handled) {
             if (!handled) {
-                return locRange.fail("Type " ~ either.types[i].type.repr() ~ " not handled!");
+                // generate passthrough expr
+                auto passthroughCase = ASTEitherCaseExprCase(
+                    __RANGE__,
+                    new ASTSymbolHelper(either.types[i].type),
+                    "a",
+                    return_=false,
+                    new ASTIdentifier("a", moduleLevel=false, __RANGE__));
+                handleCase(passthroughCase, i)?;
             }
         }
         assert(!!ifTree);

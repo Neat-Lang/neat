@@ -442,25 +442,33 @@ class DelegateFuncPtr : Expression
 
 /**
  * "Plain" call without lifetime handling.
+ * An :argCastError is an error that occurred while converting the arguments.
+ * These errors may be tolerated if an overload exists that does not cause an error.
  */
-(nullable Expression | fail Error) plainCall(Context context, Symbol target,
-    mut Expression[] args, LocRange locRange, bool isImplCall)
+(Expression, CallQuality | :mismatch | (:argCastError, Error) | fail Error) plainCall(
+    Context context, Symbol target, mut Expression[] args, LocRange locRange, bool isImplCall)
 {
     if (auto fundecl = target.instanceOf(FunctionDeclaration))
     {
         // skip variadic args
-        args = [
-            expectImplicitConvertTo(context, arg, fundecl.params[i].type, locRange)?
-            for i, arg in args[0 .. fundecl.params.length]] ~ args[fundecl.params.length .. $];
-        return new Call(fundecl, args, locRange);
+        auto argTypes = [param.type for param in fundecl.params];
+        auto castResult = castArgs(context, args[0 .. argTypes.length], argTypes, locRange)?.case(
+            (:argCastError, Error err): return (:argCastError, err));
+        args = castResult.args ~ args[argTypes.length .. $];
+        return (new Call(fundecl, args, locRange), castResult.quality);
     }
     if (ClassMethodPtr method = target.instanceOf(ClassMethodPtr))
     {
+        mut CallQuality quality = CallQuality.match;
         if (auto funcptr = method.funcPtr.type.instanceOf(FunctionPointer)) {
             // this ptr
             if (args.length != funcptr.params.length - 1)
                 return locRange.fail("wrong number of arguments: expected $(funcptr.params.length - 1) but got $(args.length)");
-            args = [expectImplicitConvertTo(context, arg, funcptr.params[i+1].type, locRange)? for i, arg in args];
+            auto argTypes = [funcptr.params[i+1].type for i, _ in args];
+            auto result = castArgs(context, args[0 .. argTypes.length], argTypes, locRange)?.case(
+                (:argCastError, Error err): return (:argCastError, err));
+            args = result.args;
+            quality = result.quality;
         } else {
             return locRange.fail("function reference or funcptr expected? but is '$(method.funcPtr.type.repr)'");
         }
@@ -474,39 +482,46 @@ class DelegateFuncPtr : Expression
         (nullable Expression | fail Error) doRef(Reference thisValue) {
             return doPtr(context.compiler.reference(thisValue));
         }
+
         if (method.valueIsPtr) {
-            return context.compiler.exprWithTemporaryExpr(method.thisValue, &doPtr);
+            if (auto ret = context.compiler.exprWithTemporaryExpr(method.thisValue, &doPtr)?)
+                return (ret, quality);
         } else if (auto ref_ = method.thisValue.instanceOf(Reference)) {
             auto ptr = context.compiler.reference(ref_);
-            return context.compiler.exprWithTemporaryExpr(ptr, &doPtr);
+            if (auto ret = context.compiler.exprWithTemporaryExpr(ptr, &doPtr)?)
+                return (ret, quality);
         } else {
-            return context.compiler.exprWithTemporary(method.thisValue, &doRef);
+            if (auto ret = context.compiler.exprWithTemporary(method.thisValue, &doRef)?)
+                return (ret, quality);
         }
+        return :mismatch;
     }
-    if (isImplCall) return null;
+    if (isImplCall) return :mismatch;
     nullable Expression expr = target.instanceOf(Expression);
     // TODO
     // auto funcptr = expr?.type.instanceOf(FunctionPointer);
     mut nullable FunctionPointer funcptr;
     if (expr) funcptr = expr.type.instanceOf(FunctionPointer);
-    if (expr && funcptr)
-    {
-        args = [expectImplicitConvertTo(context, arg, funcptr.params[i].type, locRange)? for i, arg in args];
-        return new FuncPtrCall(expr.notNull, args, locRange);
+    if (expr && funcptr) {
+        auto argTypes = [funcptr.params[i].type for i, _ in args];
+        auto result = castArgs(context, args[0 .. argTypes.length], argTypes, locRange)?.case(
+            (:argCastError, Error err): return (:argCastError, err));
+        return (new FuncPtrCall(expr.notNull, result.args, locRange), result.quality);
     }
     mut nullable NestedFunctionPointer nestedfuncptr;
     if (expr) nestedfuncptr = expr.type.instanceOf(NestedFunctionPointer);
-    if (expr && nestedfuncptr)
-    {
+    if (expr && nestedfuncptr) {
         auto expr = expr.notNull;
-        args = [expectImplicitConvertTo(context, arg, nestedfuncptr.params[i], locRange)? for i, arg in args];
+        auto argTypes = [nestedfuncptr.params[i] for i, _ in args];
+        auto result = castArgs(context, args[0 .. argTypes.length], argTypes, locRange)?.case(
+            (:argCastError, Error err): return (:argCastError, err));
         // TODO cache delegate
         auto funcPtr = new DelegateFuncPtr(expr);
         auto thisPtr = new DelegateDataPtr(expr);
         mut Expression[] combinedArgs;
         combinedArgs ~= thisPtr;
-        combinedArgs ~= args;
-        return new FuncPtrCall(funcPtr, combinedArgs, locRange);
+        combinedArgs ~= result.args;
+        return (new FuncPtrCall(funcPtr, combinedArgs, locRange), result.quality);
     }
     return locRange.fail("unknown call target");
 }
@@ -638,6 +653,7 @@ class WrapReference : Reference
         }
     }
 
+    // FIXME push the validation down into overload checking
     if (auto fundecl = target.instanceOf(FunctionDeclaration)) {
         validateCall(fundecl.params, astArgs, fundecl.name, variadic=fundecl.variadic, locRange)?;
     }
@@ -652,6 +668,51 @@ class WrapReference : Reference
         arg.sym.compile(context)?.beExpressionImplCall(context, locRange)?
         for arg in astArgs];
 
+    if (auto overload = target.instanceOf(Overload)) {
+        // TODO transpose macro!
+        auto possibleCalls = [callResolved(context, target, astArgs, args, locRange, autoCall)?
+            for target in overload.parts];
+
+        auto matches = possibleCalls.pickMatches;
+        // TODO this should also allow for classes of errors like wrong number of parameters - to be
+        // *reported*, but still allow another overload to match.
+        auto perfectMatches = [a for a in matches where a.quality == CallQuality.match];
+        if (perfectMatches.length == 1) return perfectMatches[0].expr;
+        locRange.assert(perfectMatches.length == 0, "multiple possible targets for call: $(overload.repr)")?;
+        if (matches.length == 1) return matches[0].expr; // one matched with conversion
+        locRange.assert(matches.length == 0, "multiple possible targets for call: $(overload.repr)")?;
+        locRange.assert(false, "no overload matched call: $(overload.repr)")?;
+    }
+
+    callResolved(context, target, astArgs, args, locRange, autoCall)?.case {
+        (Expression expr, CallQuality quality): return expr;
+        (:argCastError, Error err): return null;
+        (:mismatch): return null;
+    }
+}
+
+// TODO: find a better way to metaprogram this!
+(Expression expr, CallQuality quality)[] pickMatches(
+    (Expression expr, CallQuality quality | :mismatch | (:argCastError, Error))[] args)
+{
+    mut (Expression expr, CallQuality quality)[] ret;
+    for (arg in args) arg.case {
+        (Expression, CallQuality) match: ret ~= match;
+        (:argCastError, Error): {} // TODO report errors better
+        (:mismatch): {}
+    }
+    return ret;
+}
+
+enum CallQuality
+{
+    match,
+    convRequired,
+}
+
+(Expression expr, CallQuality quality | :mismatch | (:argCastError, Error) | fail Error) callResolved(
+    Context context, mut Symbol target, ASTArgument[] astArgs, Expression[] args, LocRange locRange, bool autoCall)
+{
     if (auto templ = target.instanceOf(ScopeBoundTemplateDecl)) {
         // Simplest conceivable IFTI
         auto types = [arg.type for arg in args];
@@ -660,8 +721,10 @@ class WrapReference : Reference
             ASTArgument(new ASTSymbolHelper(arg), astArgs[i].name, astArgs[i].locRange)
             for i, arg in args];
         auto instance = templ.instantiate(context, locRange, types)?;
+        auto callExpr = call(context, new ASTSymbolHelper(instance), repackagedArgs, locRange, autoCall)?.notNull;
 
-        return call(context, new ASTSymbolHelper(instance), repackagedArgs, locRange, autoCall);
+        // FIXME instantiation failures (type mismatches?) will go here
+        return (callExpr, CallQuality.match);
     }
 
     mut nullable Statement pre, post;
@@ -685,13 +748,17 @@ class WrapReference : Reference
 
     if (auto lateSym = target.instanceOf(LateSymbol)) {
         // completely bypass plainCall with a FuncPtrCall
+        mut CallQuality quality = CallQuality.match;
         (nullable Expression | fail Error) do1(Expression baseExpr) {
             auto funcPtr = lateSym.resolve(context, baseExpr);
             mut Expression[] args = args;
 
             if (auto funcPtr = funcPtr.type.instanceOf(FunctionPointer)) {
                 validateCall(funcPtr.params[1 .. $], astArgs, "function pointer", variadic=false, locRange)?;
-                args = [expectImplicitConvertTo(context, arg, funcPtr.params[i+1].type, locRange)? for i, arg in args];
+                auto result = castArgs(context, args, [funcPtr.params[i+1].type for i, _ in args], locRange)?
+                    .case((:argCastError, Error err): return err);
+                args = result.args;
+                quality = result.quality;
             } else {
                 return locRange.fail("function reference or funcptr expected? but is '$(funcPtr.type.repr)'");
             }
@@ -707,7 +774,7 @@ class WrapReference : Reference
         }
         auto fpCall = context.compiler.consume(context, lateSym.baseExpr, &do2)?;
 
-        return new WrapExpression(pre, fpCall, post);
+        return (new WrapExpression(pre, fpCall, post), quality);
     }
 
     nullable ClassMethodPtr method = target.instanceOf(ClassMethodPtr);
@@ -728,9 +795,32 @@ class WrapReference : Reference
             doRef(tempThis);
         }
     }
-    if (auto callResult = plainCall(context, target, args, locRange, autoCall)?)
-        return new WrapExpression(pre, callResult, post);
-    return null;
+    return plainCall(context, target, args, locRange, autoCall)?.case(
+        (Expression expr, CallQuality quality): (new WrapExpression(pre, expr, post), quality),
+        (:argCastError, Error err): (:argCastError, err),
+        (:mismatch): :mismatch);
+}
+
+(Expression[] args, CallQuality quality | (:argCastError, Error) | fail Error) castArgs(
+    Context context, Expression[] args, Type[] types, LocRange locRange)
+{
+    mut Expression[] result;
+    mut bool withConv = false;
+    for (i, arg in args) {
+        auto type = types[i];
+        if (arg.type.same(type)) {
+            result ~= arg;
+            continue;
+        }
+        if (auto ret = implicitConvertTo(context, arg, type)) {
+            result ~= ret;
+            withConv = true;
+        } else {
+            return (:argCastError, locRange.fail("cannot implicitly convert $(arg.type.repr) to $(type.repr)"));
+        }
+    }
+    if (withConv) return (result, CallQuality.convRequired);
+    return (result, CallQuality.match);
 }
 
 /**
@@ -3911,6 +4001,18 @@ struct ResolvingModuleEntry
     (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStruct | ASTAliasDecl | ASTUnitTest | Nothing) symbol;
 }
 
+class Overload : Symbol
+{
+    Symbol[] parts;
+
+    this(this.parts) { }
+
+    override string repr() {
+        string partsRepr = [join with ", " part.repr for part in parts];
+        return "[$partsRepr]";
+    }
+}
+
 class Resolver
 {
     ResolvingModuleEntry[] entries;
@@ -3942,24 +4044,30 @@ class Resolver
                 return entry == Protection.public_;
             return true;
         }
-        int hit = cast(int) [
-            first i for i, a in this.entries
-            where a.name == name && allowed(a.protection)
-            else -1];
-        if (hit == -1) return null;
-        if (this.entries[hit].resolving) {
-            return new NotYetResolvedSymbol(this, hit, locRange);
+        int[] hits = [cast(int) i for i, a in this.entries where a.name == name && allowed(a.protection)];
+        if (hits.empty) return null;
+        // TODO figure out what do here if we have more than one
+        if (hits.length == 1 && this.entries[hits[0]].resolving) {
+            return new NotYetResolvedSymbol(this, hits[0], locRange);
         }
-        resolve(context, locRange, hit)?;
+        for (hit in hits) {
+            resolve(context, locRange, hit)?;
+        }
 
-        mut nullable Symbol ret = this.entries[hit].resolution?;
-        if (!ret) return null;
-        if (auto latent = ret.instanceOf(LatentSymbol)) {
-            // we're at global scope; no frame pointer will be applied.
-            assert(!context.framePointer);
-            ret = latent.resolve(context);
+        (Symbol | fail Error) get(int hit) {
+            // FIXME when can this be null??
+            mut auto ret = this.entries[hit].resolution?.notNull;
+            if (auto latent = ret.instanceOf(LatentSymbol)) {
+                // we're at global scope; no frame pointer will be applied.
+                assert(!context.framePointer);
+                ret = latent.resolve(context);
+            }
+            return ret;
         }
-        return ret;
+
+        mut Symbol[] syms = [get(hit)? for hit in hits];
+        if (syms.length == 1) return syms[0];
+        return new Overload(syms);
     }
 
     (void | fail Error) resolve(Context context, LocRange locRange, int i)

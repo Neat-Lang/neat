@@ -582,6 +582,8 @@ at_revision 'eda231e26a53f9a00b7880f981a467d64b4c1cb2' 'rebuild neat' 'build/nea
 at_revision '16a837f400b85f707189d97827137f0bcce8be3a' 'rebuild neat' 'build/neat'
 # .case(): Allow leaving out cases.
 at_revision '1102e5ff7a3196f8daf5cd80515b902b7b0c6119' 'rebuild neat' 'build/neat'
+# array casts, quoting tuples
+at_revision '4fbfe0956126328275f8eced2c27b8bce442ce30' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

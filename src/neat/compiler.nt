@@ -367,12 +367,12 @@ class CompilerImpl : CompilerBase
     override (Expression | fail Error) consume(
         Context context, Expression expr, (Expression | fail Error) delegate(Expression) dg)
     {
-        if (expr.info.ownership != Ownership.gifted)
+        if (expr.info.lifetime != Lifetime.gifted)
         {
             return dg(expr);
         }
         auto type = expr.type;
-        auto temp = new PairedTemporary(type, Ownership.owned);
+        auto temp = new PairedTemporary(type, Lifetime.ephemeral);
         auto assign = new InitializeTemporaryStatement(temp, expr);
         auto cleanup = type.endLifetime(context, temp);
         auto result = dg(temp)?;
@@ -381,12 +381,12 @@ class CompilerImpl : CompilerBase
 
     override Statement consumeStmt(Context context, Expression expr, Statement delegate(Expression) dg)
     {
-        if (expr.info.ownership != Ownership.gifted)
+        if (expr.info.lifetime != Lifetime.gifted)
         {
             return dg(expr);
         }
         auto type = expr.type;
-        auto temp = new PairedTemporary(type, Ownership.owned);
+        auto temp = new PairedTemporary(type, Lifetime.ephemeral);
         auto assign = new InitializeTemporaryStatement(temp, expr);
         auto cleanup = type.endLifetime(context, temp);
         auto result = dg(temp);
@@ -394,29 +394,18 @@ class CompilerImpl : CompilerBase
     }
 
     override (nullable Expression | fail Error) consumeTemporary(
-        Context context, bool allowRefReturn, bool mayUnwind, Expression expr,
+        Context context, bool allowRefReturn, Expression expr,
         (nullable Expression | fail Error) delegate(Reference) dg)
     {
         auto type = expr.type;
-        // "owned" by consumeTemporary()
-        auto temp = new PairedTemporary(type, Ownership.owned);
+        auto temp = new PairedTemporary(type, Lifetime.ephemeral);
         auto result = dg(temp)?;
         if (!result) return null;
         auto result = result.notNull;
 
-        mut bool doCleanup;
-        if (expr.info.ownership == Ownership.gifted) doCleanup = true;
+        bool doCleanup = expr.info.lifetime == Lifetime.gifted;
 
-        mut Statement assign = new InitializeTemporaryStatement(temp, expr);
-        // if `dg()` may not unwind, it doesn't matter that expr is borrowed
-        // since we never hit the unwind cleanup on our "owned" temp.
-        if (mayUnwind && expr.info.ownership == Ownership.borrowed) {
-            auto copyInto = type.copyInto(context, temp, expr)?;
-            if (copyInto) {
-                assign = sequence(new UninitializeTemporaryStatement(temp), copyInto);
-                doCleanup = true;
-            }
-        }
+        Statement assign = new InitializeTemporaryStatement(temp, expr);
         mut nullable Statement cleanup;
         if (doCleanup) {
             cleanup = type.endLifetime(context, temp);
@@ -430,24 +419,20 @@ class CompilerImpl : CompilerBase
         (nullable Statement | fail Error) delegate(Reference) dg)
     {
         auto type = expr.type;
-        /**
-         * Gifted expr -> owned temporary (so cleanup on return)
-         * Everything else -> non-owned non-gifted temporary (so no cleanup on return or use)
-         */
-        mut uninitialized Ownership tempOwnership;
-        if (expr.info.ownership == Ownership.gifted)
-            tempOwnership = Ownership.owned;
+        mut uninitialized Lifetime tempLifetime;
+        if (expr.info.lifetime == Lifetime.gifted)
+            tempLifetime = Lifetime.ephemeral;
         else
-            tempOwnership = Ownership.borrowed;
+            tempLifetime = expr.info.lifetime; // ephemeral, permanent, lexical
 
-        auto temp = new PairedTemporary(type, tempOwnership);
+        auto temp = new PairedTemporary(type, tempLifetime);
         auto result = dg(temp)?;
         if (!result) return null;
         auto result = result.notNull;
 
         Statement assign = new InitializeTemporaryStatement(temp, expr);
         mut nullable Statement cleanup;
-        if (expr.info.ownership == Ownership.gifted) {
+        if (tempLifetime == Lifetime.ephemeral) {
             cleanup = type.endLifetime(context, temp);
         }
         return .sequence(.sequence(assign, result), cleanup);
@@ -533,9 +518,10 @@ class CompilerImpl : CompilerBase
         return new SymbolAlias(parent, name, value);
     }
 
-    override DeclarationHolder variableDeclaration(nullable Namespace parent, string name, Type type, ExprInfo info, bool hidden)
+    override DeclarationHolder variableDeclaration(nullable Namespace parent, string name, Type type,
+                                                   bool mut, bool borrowed, bool hidden)
     {
-        return new VariableDeclaration(parent, name, type, info, hidden);
+        return new VariableDeclaration(parent, name, type, mut=mut, borrowed=borrowed, hidden);
     }
 
     override (Statement | fail Error) move(Context context, Reference target, Expression source)
@@ -546,11 +532,11 @@ class CompilerImpl : CompilerBase
     override (nullable Expression | fail Error) exprWithScratchspace(
         Type type, bool temporary, (nullable Statement | fail Error) delegate(Reference) callback)
     {
-        mut uninitialized Ownership tempOwnership;
-        if (temporary) tempOwnership = Ownership.gifted;
-        else tempOwnership = Ownership.owned;
+        mut uninitialized Lifetime tempLifetime;
+        if (temporary) tempLifetime = Lifetime.gifted;
+        else tempLifetime = Lifetime.lexical;
 
-        auto temp = new PairedTemporary(type, tempOwnership);
+        auto temp = new PairedTemporary(type, tempLifetime);
         auto initialize = new UninitializeTemporaryStatement(temp);
         auto stmt = callback(temp)?;
         if (!stmt) return null;
@@ -561,11 +547,11 @@ class CompilerImpl : CompilerBase
     override (nullable Statement | fail Error) stmtWithTemporary(
         Expression value, (nullable Statement | fail Error) delegate(Reference) callback)
     {
-        mut uninitialized Ownership tempOwnership;
-        if (value.info.ownership == Ownership.gifted) tempOwnership = Ownership.gifted;
-        else tempOwnership = Ownership.owned;
+        mut uninitialized Lifetime tempLifetime;
+        if (value.info.lifetime == Lifetime.gifted) tempLifetime = Lifetime.gifted;
+        else tempLifetime = Lifetime.lexical;
 
-        auto temp = new PairedTemporary(value.type, tempOwnership);
+        auto temp = new PairedTemporary(value.type, tempLifetime);
         auto start = new InitializeTemporaryStatement(temp, value);
         auto stmt = callback(temp)?;
         if (!stmt) return null;
@@ -579,11 +565,11 @@ class CompilerImpl : CompilerBase
         // TODO: the way gifted works here is almost certainly wrong,
         // cause the Reference can be read multiple times - that's
         // what it's for.
-        mut uninitialized Ownership tempOwnership;
-        if (value.info.ownership == Ownership.gifted) tempOwnership = Ownership.gifted;
-        else tempOwnership = Ownership.owned;
+        mut uninitialized Lifetime tempLifetime;
+        if (value.info.lifetime == Lifetime.gifted) tempLifetime = Lifetime.gifted;
+        else tempLifetime = Lifetime.lexical;
 
-        auto temp = new PairedTemporary(value.type, tempOwnership);
+        auto temp = new PairedTemporary(value.type, tempLifetime);
         auto start = new InitializeTemporaryStatement(temp, value);
         auto expr = callback(temp)?;
         if (!expr) return null;
@@ -596,13 +582,13 @@ class CompilerImpl : CompilerBase
     {
         // TODO: does endLifetime *really* need to take a Reference?
         // cause that's the only reason we need to stmtWithTemporary here.
-        if (value.info.ownership == Ownership.gifted) {
+        if (value.info.lifetime == Lifetime.gifted) {
             (nullable Statement | fail Error) do_(Reference ref_) {
                 return callback(ref_);
             }
             return stmtWithTemporary(value, &do_);
         }
-        auto temp = new PairedTemporaryExpr(value.type, value.info.ownership);
+        auto temp = new PairedTemporaryExpr(value.type, value.info.lifetime);
         auto start = new InitializeTemporaryExprStatement(temp, value);
         auto stmt = callback(temp)?;
         if (!stmt) return null;
@@ -614,13 +600,13 @@ class CompilerImpl : CompilerBase
         Expression value, (nullable Expression | fail Error) delegate(Expression) callback)
     {
         // see above
-        if (value.info.ownership == Ownership.gifted) {
+        if (value.info.lifetime == Lifetime.gifted) {
             (nullable Expression | fail Error) do_(Reference ref_) {
                 return callback(ref_);
             }
             return exprWithTemporary(value, &do_);
         }
-        auto temp = new PairedTemporaryExpr(value.type, value.info.ownership);
+        auto temp = new PairedTemporaryExpr(value.type, value.info.lifetime);
         auto start = new InitializeTemporaryExprStatement(temp, value);
         auto expr = callback(temp)?;
         if (!expr) return null;

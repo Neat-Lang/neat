@@ -91,7 +91,8 @@ class Function : FunctionDeclaration
             mut string framePtrName;
             if (this.hasThisArg) framePtrName = "this";
             thisDecl = new VariableDeclaration(
-                scope_, framePtrName, contextType, ExprInfo(false, Ownership.borrowed), framePtrName == "");
+                scope_, framePtrName, contextType,
+                mut=false, borrowed=true, hidden=framePtrName == "");
 
             Type voidp = once new Pointer(new Void);
 
@@ -122,9 +123,10 @@ class Function : FunctionDeclaration
                 else argAssignments[extra + i] = compiler.assignStatement(target, argExpr);
             } else {
                 if (param.mutable) {
-                    // we're mutable, but functions borrow the caller args - copy them, then declare the arg owned.
+                    // we're mutable, but functions borrow the caller args.
+                    // So despite being lexical, we copy them.
                     auto argDecl = new VariableDeclaration(
-                        scope_, param.name, param.type, ExprInfo(true, Ownership.owned), false);
+                        scope_, param.name, param.type, mut=true, borrowed=false, false);
                     auto target = argDecl.accessDecl(context.compiler);
 
                     if (auto assign = param.type.copyInto(context, target, argExpr)?)
@@ -133,7 +135,7 @@ class Function : FunctionDeclaration
                     scope_ = argDecl;
                 } else {
                     auto argDecl = new VariableDeclaration(
-                        scope_, param.name, param.type, ExprInfo(false, Ownership.borrowed), false);
+                        scope_, param.name, param.type, mut=false, borrowed=true, false);
 
                     argAssignments[extra + i] = compiler.assignStatement(argDecl.accessDecl(context.compiler), argExpr);
                     scope_ = argDecl;
@@ -214,9 +216,17 @@ class LatentVariable
 
     int offset;
 
+    bool mut;
+
+    bool borrowed;
+
     ExprInfo info;
 
-    this(this.name, this.stackFrameType, this.offset, this.info) { }
+    this(this.name, this.stackFrameType, this.offset, this.mut, this.borrowed) {
+        assert (!mut || !borrowed);
+        if (mut) this.info = ExprInfo(Lifetime.ephemeral);
+        else this.info = ExprInfo(Lifetime.lexical);
+    }
 }
 
 class FunctionScope : FunctionScopeBase
@@ -239,15 +249,17 @@ class FunctionScope : FunctionScopeBase
         this.isContextScope = true;
     }
 
-    LatentVariable declare(string name, Type type, ExprInfo info)
+    LatentVariable declare(string name, Type type, bool mut, bool borrowed)
     {
-        assert(info.ownership != Ownership.gifted);
-        assert(!info.mutable || info.ownership == Ownership.owned);
+        // borrowed == "no cleanup on scope exit".
+        // This is not safe in conjunction with mut (cleanup on reassign).
+        assert(!borrowed || !mut);
 
         this.variables ~= new StructMemberDeclaration(name, Protection.public_, type);
         this.structType = this.compiler.struct_("", this.variables, this.locRange, this.mangle_);
 
-        return new LatentVariable(name, this.structType, cast(int) this.variables.length - 1, info);
+        return new LatentVariable(name, this.structType, cast(int) this.variables.length - 1,
+                                  mut=mut, borrowed=borrowed);
     }
 
     override string mangle() { return this.mangle_; }
@@ -297,10 +309,14 @@ class VariableDeclaration : DeclarationHolder
 
     bool hidden;
 
-    this(this.parent, string name, Type type, ExprInfo info, this.hidden)
+    this(this.parent, string name, Type type, bool mut, bool borrowed, this.hidden)
     {
-        this.variable = findParent!FunctionScope(this).declare(name, type, info);
+        this.variable = findParent!FunctionScope(this).declare(name, type, mut=mut, borrowed=borrowed);
         this.isContextScope = true;
+    }
+
+    override bool freeOnExit() {
+        return !variable.borrowed;
     }
 
     override Reference accessDecl(CompilerBase compiler)
@@ -314,11 +330,7 @@ class VariableDeclaration : DeclarationHolder
         Type stackFrameType = variable.stackFrameType;
         auto frame = new PointerCast(new Pointer(stackFrameType), frame);
         auto reference = compiler.structMemberReference(compiler.dereference(frame), variable.offset);
-        // an argument, for instance
-        mut ExprInfo info = variable.info;
-        if (info.ownership != Ownership.borrowed)
-            info.ownership = Ownership.owned;
-        return new InfoReference(reference, info);
+        return new InfoReference(reference, variable.mut, variable.info);
     }
 
     override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange)
@@ -345,7 +357,13 @@ class StackFrame : Reference
 {
     Type targetType;
 
-    this(this.targetType) { this.type = this.targetType; this.info = ExprInfo(false, Ownership.owned); }
+    // why not mutable? Variable access will override the reference - at that point, mut should be enabled as required.
+    // If you somehow manage to get a raw reference to this class, by no means should you be able to write it!
+    this(this.targetType) {
+        this.type = this.targetType;
+        this.mutable = false;
+        this.info = ExprInfo(Lifetime.permanent);
+    }
 
     override int emit(Generator generator)
     {
@@ -366,7 +384,7 @@ class InfoReference : Reference
 {
     Reference base;
 
-    this(this.base, this.info) { this.type = base.type; }
+    this(this.base, this.mutable, this.info) { this.type = base.type; }
 
     override int emit(Generator output) { return base.emit(output); }
     override int emitLocation(Generator output) { return base.emitLocation(output); }
@@ -379,7 +397,7 @@ class ArgExpr : Expression
 {
     int index;
 
-    this(this.index, this.type) { this.info = ExprInfo(false, Ownership.borrowed); }
+    this(this.index, this.type) { this.info = ExprInfo(Lifetime.lexical); }
 
     override int emit(Generator output)
     {
@@ -398,7 +416,7 @@ class FunctionReference : FunctionReferenceBase
         if (this.fun.contextType) params = [Parameter.fromType(once new Pointer(new Void))] ~ params;
 
         this.type = new FunctionPointer(this.fun.ret, params);
-        this.info = ExprInfo(false, Ownership.owned);
+        this.info = ExprInfo(Lifetime.permanent);
     }
 
     override FunctionDeclaration getFunction() { return fun; }

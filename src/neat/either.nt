@@ -109,7 +109,7 @@ class EitherType : Expression
 
     this(this.value) {
         this.type = new Integer;
-        this.info = ExprInfo(false, Ownership.owned);
+        this.info = ExprInfo(Lifetime.permanent);
     }
 
     override int emit(Generator generator)
@@ -128,7 +128,8 @@ class EitherTypeReference : Reference
 
     this(this.base) {
         this.type = new Integer;
-        this.info = ExprInfo(false, Ownership.owned);
+        this.mutable = false; // should not be mutated by users
+        this.info = ExprInfo(Lifetime.permanent);
     }
 
     override int emitLocation(Generator output)
@@ -154,8 +155,9 @@ class EitherReference : Reference
 
     this(this.base, this.offset) {
         this.type = this.base.type.instanceOf(Either).types[this.offset].type;
+        this.mutable = false;
         // EitherReference should not participate in memory management
-        this.info = ExprInfo(false, Ownership.owned);
+        this.info = ExprInfo(Lifetime.permanent);
     }
 
     override int emitLocation(Generator output)
@@ -443,7 +445,7 @@ class ASTEitherCaseExpr : ASTSymbol
 
     override (Expression | fail Error) compile(Context context) {
         auto baseExpr = base.compile(context)?.beExpressionImplCall(context, locRange)?;
-        auto baseExprTemp = new PairedTemporary(baseExpr.type, Ownership.global);
+        auto baseExprTemp = new PairedTemporary(baseExpr.type, Lifetime.permanent);
         Statement baseExprInit = new InitializeTemporaryStatement(baseExprTemp, baseExpr);
 
         auto either = baseExpr.type.instanceOf(Either);
@@ -479,7 +481,7 @@ class ASTEitherCaseExpr : ASTSymbol
             if (case_.return_) continue;
 
             auto namespace = context.compiler.variableDeclaration(
-                context.namespace, case_.identifier, caseType, ExprInfo(mutable=false, Ownership.owned), false);
+                context.namespace, case_.identifier, caseType, mut=false, borrowed=false, false);
             auto subContext = context.withNamespace(namespace);
 
             Expression expr = case_.expr.compile(subContext)?.beExpressionImplCall(context, caseLoc)?;
@@ -504,7 +506,7 @@ class ASTEitherCaseExpr : ASTSymbol
             mergeType = new Either(members);
         }
         // as ASTReturn
-        auto resultVal = new PairedTemporary(mergeType, Ownership.gifted);
+        auto resultVal = new PairedTemporary(mergeType, Lifetime.gifted);
         Statement initResultVal = new UninitializeTemporaryStatement(resultVal);
         mut nullable Statement ifTree;
 
@@ -515,14 +517,10 @@ class ASTEitherCaseExpr : ASTSymbol
 
             mut Statement[] thenSteps;
 
-            Ownership varOwnership() {
-                if (baseExpr.info.ownership == Ownership.gifted)
-                    return Ownership.owned;
-                return Ownership.borrowed;
-            }
+            bool cleanup = baseExpr.info.lifetime == Lifetime.gifted;
 
             auto namespace = context.compiler.variableDeclaration(
-                context.namespace, case_.identifier, type, ExprInfo(mutable=false, varOwnership), false);
+                context.namespace, case_.identifier, type, mut=false, borrowed=!cleanup, false);
             auto context = context.withNamespace(namespace);
             // FIXME rename to accessDecl
             Reference variable = namespace.accessDecl2(context.compiler);
@@ -542,7 +540,7 @@ class ASTEitherCaseExpr : ASTSymbol
                 }
             }
             thenSteps ~= userStmt?;
-            if (varOwnership == Ownership.owned) {
+            if (cleanup) {
                 if (auto destroy = variable.type.endLifetime(context, variable)) {
                     thenSteps ~= destroy;
                 }
@@ -664,7 +662,7 @@ class ASTEitherCaseStmt : ASTStatement
         auto baseExpr = base.compile(context)?
             .beExpressionImplCall(context, locRange)?;
         // FIXME
-        // locRange.assert(baseExpr.info.ownership != Ownership.gifted, "TODO: Either base expr must not be gifted");
+        // locRange.assert(baseExpr.info.lifetime != Lifetime.gifted, "TODO: Either base expr must not be gifted");
         auto baseType = baseExpr.type;
         auto either = baseType.instanceOf(Either);
 
@@ -688,7 +686,7 @@ class ASTEitherCaseStmt : ASTStatement
 
                 with (context.compiler) {
                     auto namespace = variableDeclaration(
-                        context.namespace, case_.identifier, type, ExprInfo(mutable=false, Ownership.borrowed), false);
+                        context.namespace, case_.identifier, type, mut=false, borrowed=true, false);
                     // FIXME rename to accessDecl
                     Reference variable = namespace.accessDecl2(context.compiler);
                     Statement assignment = assignStatement(variable, new EitherMember(baseExpr, matched));

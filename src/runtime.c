@@ -330,7 +330,8 @@ void neat_runtime_refcount_inc(struct String s, long long int *ptr)
 {
     // long long int result = *ptr += 1;
     long long int result = __atomic_add_fetch(ptr, 1, __ATOMIC_ACQ_REL);
-    if (result <= 1) {
+    if (result <= 1)
+    {
         neat_runtime_refcount_violation(s, ptr);
     }
 }

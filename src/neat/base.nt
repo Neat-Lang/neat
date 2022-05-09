@@ -409,44 +409,35 @@ class Generator
 }
 
 /**
- * Gifted: an expression with an unmanaged lifetime that we can take over
- * Owned: an owning reference to a tracked lifetime.
- * Borrowed: a reference to a tracked lifetime not at the address referenced.
- * Global: a value that is not reference tracked, such as a literal.
+ * Gifted: An expression with an unmanaged lifetime that we must take over.
+ * Ephemeral: An expression that will be freed at some indeterminate point.
+ * Lexical: An expression that will be freed at the earliest when the scope ends.
+ * Permanent: An expression that will never be freed, or that does not participate in rc.
  *
  * Examples:
- * - Gifted: `new Class()`
- * - Owned: `Class obj;`
- * - Borrowed: `void foo(Class obj) { }`
- * - Global: `"string"`
- *
- * Because of "caller owns", Borrowed needs to be its own thing. What if we reassigned
- * obj? We couldn't clean it up, and the caller would double clean the argument.
- * So function arguments can be referenced, but not overwritten.
- *
- * NOTE: Called methods can overwrite fields. This is awkward.
- * TODO: Prevent it.
+ * - unique: `new Class()`
+ * - ephemeral: `foo.(that)`
+ * - lexical: `void foo(Class obj) { }` or `Class obj;`
+ * - permanent: `"string"`
  */
-enum Ownership
+enum Lifetime
 {
     gifted,
-    owned,
-    borrowed,
-    global,
+    ephemeral,
+    lexical,
+    permanent,
 }
 
 struct ExprInfo
 {
-    bool mutable;
-    Ownership ownership;
+    Lifetime lifetime;
 
     string repr() {
         mut string ret;
-        if (mutable) ret ~= "mut ";
-        if (ownership == Ownership.gifted) ret ~= "gifted";
-        else if (ownership == Ownership.owned) ret ~= "owned";
-        else if (ownership == Ownership.borrowed) ret ~= "borrowed";
-        else if (ownership == Ownership.global) ret ~= "global";
+        if (lifetime == Lifetime.gifted) ret ~= "gifted";
+        else if (lifetime == Lifetime.ephemeral) ret ~= "ephemeral";
+        else if (lifetime == Lifetime.lexical) ret ~= "lexical";
+        else if (lifetime == Lifetime.permanent) ret ~= "permanent";
         else assert(false);
         return ret;
     }
@@ -485,6 +476,7 @@ abstract class Expression : Symbol
 
 abstract class Reference : Expression
 {
+    bool mutable;
     abstract int emitLocation(Generator output);
 }
 
@@ -514,7 +506,7 @@ class PointerCast : Expression
 
 class NullExpr : Expression
 {
-    this(this.type) { this.info = ExprInfo(false, Ownership.global); }
+    this(this.type) { this.info = ExprInfo(Lifetime.permanent); }
 
     override int emit(Generator generator)
     {
@@ -561,7 +553,7 @@ class SymbolIdentifierType : Type
 class SymbolIdentifierExpression : Expression
 {
     string name;
-    this(this.name) { this.type = new SymbolIdentifierType(name); this.info = ExprInfo(false, Ownership.global); }
+    this(this.name) { this.type = new SymbolIdentifierType(name); this.info = ExprInfo(Lifetime.permanent); }
     override int emit(Generator output) { return output.fun.voidLiteral; }
     override void hash(Hash hash) { hash.adds("SymbolExpr"); hash.adds(name); }
 }
@@ -760,6 +752,8 @@ class MacroState
 // Something that should be cleaned up on unwind.
 abstract class DeclarationHolder : Namespace
 {
+    abstract bool freeOnExit();
+
     abstract Reference accessDecl(CompilerBase compiler);
 
     Reference accessDecl2(CompilerBase compiler) { return accessDecl(compiler); }
@@ -984,7 +978,7 @@ abstract class CompilerBase
     /// Set `mayUnwind` to true if `dg()` may unwind.
     /// in that case, borrowed `expr` must be copied.
     abstract (nullable Expression | fail Error) consumeTemporary(
-            Context context, bool allowRefReturn, bool mayUnwind, Expression expr,
+            Context context, bool allowRefReturn, Expression expr,
             (nullable Expression | fail Error) delegate(Reference) dg);
 
     abstract (nullable Statement | fail Error) consumeTemporaryStmt(
@@ -1060,7 +1054,7 @@ abstract class CompilerBase
     abstract Namespace symbolAlias(nullable Namespace parent, string name, Symbol value);
 
     abstract DeclarationHolder variableDeclaration(
-        nullable Namespace parent, string name, Type type, ExprInfo info, bool hidden);
+        nullable Namespace parent, string name, Type type, bool mut, bool borrowed, bool hidden);
 
     abstract Type nativeWordType(Platform platform);
 

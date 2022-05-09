@@ -18,9 +18,13 @@ class WithNamespace : DeclarationHolder, Unwindable
     // so we still need to go over a temporary variable.
     Reference temporary;
 
+    bool freeOnExit_;
+
     LocRange locRange;
 
-    this(this.parent, this.temporary, this.locRange) { this.isContextScope = parent.isContextScope; }
+    this(this.parent, this.freeOnExit_, this.temporary, this.locRange) { this.isContextScope = parent.isContextScope; }
+
+    override bool freeOnExit() { return this.freeOnExit_; }
 
     override (nullable Statement | fail Error) unwind(Context context) {
         if (auto exit = temporary.type.accessMember(
@@ -56,6 +60,8 @@ class ASTWithStatement : ASTStatement
     {
         Expression expr = this.expr.compile(context)?.beExpressionImplCall(context, this.expr.locRange)?;
 
+        bool freeOnExit = expr.info.lifetime == Lifetime.gifted;
+
         (nullable Statement | fail Error) do_(Reference temp)
         {
             mut nullable Statement prefix, suffix;
@@ -68,13 +74,13 @@ class ASTWithStatement : ASTStatement
                 suffix = context.compiler.exprStatement(exit.beExpressionImplCall(context, this.locRange)?);
             }
 
-            auto subContext = context.withNamespace(new WithNamespace(context.namespace, temp, this.locRange));
+            auto subContext = context.withNamespace(new WithNamespace(context.namespace, freeOnExit, temp, this.locRange));
             auto subStmtPair = this.stmt.compile(subContext)?;
             auto stmt = subStmtPair.statement;
 
             return context.compiler.(that.sequence(that.sequence2(prefix, stmt), suffix));
         }
-         auto stmt = context.compiler.consumeTemporaryStmt(context, expr, &do_)?.notNull;
+        auto stmt = context.compiler.consumeTemporaryStmt(context, expr, &do_)?.notNull;
 
         return StatementCompileResult(stmt, context);
     }

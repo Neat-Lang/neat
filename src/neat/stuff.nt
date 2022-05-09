@@ -339,7 +339,7 @@ class FuncPtrCall : Expression
     this(this.funcPtr, this.args, this.locRange) {
         this.type = this.funcPtr.type.instanceOf(FunctionPointer).ret;
         // we take over the returned value
-        this.info = ExprInfo(false, Ownership.gifted);
+        this.info = ExprInfo(Lifetime.gifted);
     }
 
     override int emit(Generator output)
@@ -382,7 +382,7 @@ class DelegateExpr : Expression
         assert(type.params.length >= 1);
         // TODO this smells.
         this.type = new NestedFunctionPointer(type.ret, [a.type for a in type.params[1 .. $]]);
-        this.info = ExprInfo(false, Ownership.owned);
+        this.info = ExprInfo(Lifetime.ephemeral);
     }
 
     override int emit(Generator output)
@@ -404,7 +404,7 @@ class DelegateDataPtr : Expression
 
     this(this.dg) {
         this.type = once new Pointer(new Void);
-        this.info = ExprInfo(false, Ownership.owned);
+        this.info = ExprInfo(Lifetime.permanent);
     }
 
     override int emit(Generator output)
@@ -427,7 +427,7 @@ class DelegateFuncPtr : Expression
         auto params = [Parameter.fromType(once new Pointer(new Void))]
             ~ [Parameter.fromType(a) for a in nestfp.params];
         this.type = new FunctionPointer(nestfp.ret, params);
-        this.info = ExprInfo(false, Ownership.owned);
+        this.info = ExprInfo(Lifetime.permanent);
     }
 
     override int emit(Generator output)
@@ -578,6 +578,7 @@ class WrapReference : Reference
     this(this.pre, this.reference, this.post) {
         this.type = reference.type;
         this.info = reference.info;
+        this.mutable = reference.mutable;
     }
 
     override int emit(Generator output)
@@ -605,9 +606,9 @@ class WrapReference : Reference
     }
 
     override string repr() {
-        if (pre && post) return "wrap($(pre.repr); $(reference.repr); $(post.repr))";
-        if (pre) return "wrap($(pre.repr); $(reference.repr); -)";
-        if (post) return "wrap(-; $(reference.repr); $(post.repr))";
+        if (pre && post) return "wrapRef($(pre.repr); $(reference.repr); $(post.repr))";
+        if (pre) return "wrapRef($(pre.repr); $(reference.repr); -)";
+        if (post) return "wrapRef(-; $(reference.repr); $(post.repr))";
         return reference.repr;
     }
 }
@@ -732,8 +733,8 @@ enum CallQuality
     for (i in 0 .. args.length) {
         mut Expression arg = args[i];
         // we must free arg after the call, so make a copy
-        if (arg.info.ownership == Ownership.gifted) {
-            auto temp = new PairedTemporary(arg.type, Ownership.owned);
+        if (arg.info.lifetime == Lifetime.gifted) {
+            auto temp = new PairedTemporary(arg.type, Lifetime.lexical);
             // no copyInto() because we're taking ownership.
             auto set = new InitializeTemporaryStatement(temp, arg);
             if (auto destructor = arg.type.endLifetime(context, temp)) {
@@ -778,7 +779,7 @@ enum CallQuality
     }
 
     nullable ClassMethodPtr method = target.instanceOf(ClassMethodPtr);
-    if (method && method.thisValue.info.ownership == Ownership.gifted) { // foo().bar()
+    if (method && method.thisValue.info.lifetime == Lifetime.gifted) { // foo().bar()
         mut nullable Statement setRef;
         void doRef(Reference tempThis) {
             if (Statement cleanupThis = method.thisValue.type.endLifetime(context, tempThis)) {
@@ -790,7 +791,7 @@ enum CallQuality
         if (auto ref_ = method.thisValue.instanceOf(Reference)) doRef(ref_);
         else {
             // create reference for endLifetime call
-            auto tempThis = new PairedTemporary(method.thisValue.type, Ownership.gifted);
+            auto tempThis = new PairedTemporary(method.thisValue.type, Lifetime.gifted);
             setRef = new InitializeTemporaryStatement(tempThis, method.thisValue);
             doRef(tempThis);
         }
@@ -931,7 +932,7 @@ class ASTIndexAccess : ASTSymbol
     override (Expression | fail Error) compile(Context context)
     {
         auto base = this.base.compile(context)?.beExpressionImplCall(context, this.locRange)?;
-        bool saveIndexValue = base.info.ownership == Ownership.gifted;
+        bool saveIndexValue = base.info.lifetime == Lifetime.gifted;
 
         (nullable Expression | fail Error) do_(Reference base) {
             mut uninitialized Expression indexExpr;
@@ -964,19 +965,22 @@ class ASTIndexAccess : ASTSymbol
             if (saveIndexValue)
             {
                 // This is a very silly idiom.
-                auto temp = new PairedTemporary(deref.type, Ownership.gifted);
+                // Hint: When is 'base' released? What if we're the last thing referencing 'base'
+                // and we're assigning an index?
+                // TODO better approach
+                auto temp = new PairedTemporary(deref.type, Lifetime.gifted);
                 auto init = new UninitializeTemporaryStatement(temp);
                 (Statement | fail Error) copyDeref() {
                     if (auto stmt = deref.type.copyInto(context, temp, deref)?)
                         return stmt;
                     return new AssignStatement(temp, deref);
                 }
-                return context.compiler.wrap(sequence(init, copyDeref?), temp, null);
+                return context.compiler.wrapRef(sequence(init, copyDeref?), deref, null);
             }
             return deref;
         }
         return context.compiler.consumeTemporary(
-                context, allowRefReturn=!saveIndexValue, mayUnwind=false, base, &do_)
+                context, allowRefReturn=!saveIndexValue, base, &do_)
             ?.notNull;
     }
 
@@ -1018,7 +1022,7 @@ class ASTArraySlice : ASTSymbol
                 this.locRange);
         }
         return context.compiler.consumeTemporary(
-                context, false, false, array, &do_)?.notNull;
+                context, allowRefReturn=false, array, &do_)?.notNull;
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -1079,7 +1083,7 @@ with (parser.transaction)
                 context, baseExpr, member, locRange, allowUndefined)?
             .instanceOf(Expression)
             .notNull;
-        auto tempRet = new PairedTemporary(ret.type, Ownership.gifted); // temporary since we copyInto
+        auto tempRet = new PairedTemporary(ret.type, Lifetime.gifted); // temporary since we copyInto
         auto initTemp = new UninitializeTemporaryStatement(tempRet);
         (Statement | fail Error) copyTemp() {
             if (auto stmt = ret.type.copyInto(context, tempRet, ret)?)
@@ -1099,7 +1103,7 @@ with (parser.transaction)
     // for instance with an ExprReturnType analogous to StatementReturnType, that gathers temp destructors
 
     // if lhs is nontemp, just use StructReference
-    if (baseExpr.info.ownership != Ownership.gifted) {
+    if (baseExpr.info.lifetime != Lifetime.gifted) {
         return accessMember(context, baseExpr, member, locRange, allowUndefined)?
             .instanceOf(Expression);
     }
@@ -1193,10 +1197,24 @@ class ParenPropertyNamespace : Namespace
     override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange)
     {
         if (name == "that") {
+            mut Symbol result = value;
             if (auto latent = this.value.instanceOf(LatentSymbol)) {
-                return latent.resolve(context);
+                result = latent.resolve(context);
             }
-            return value;
+            if (auto result = result.instanceOf(Expression)) {
+                assert(result.info.lifetime != Lifetime.gifted);
+                if (result.info.lifetime != Lifetime.ephemeral) return result;
+                // Ephemeral 'that', usually a temporization of a gifted expr: leak our caller a reference.
+                auto copiedRes = new PairedTemporary(result.type, Lifetime.gifted);
+                auto initCopy = new UninitializeTemporaryStatement(copiedRes);
+                (Statement | fail Error) fillCopy() {
+                    if (auto copyInto = result.type.copyInto(context, copiedRes, result)?)
+                        return copyInto;
+                    return new AssignStatement(copiedRes, result);
+                }
+                return new StatementExpression(sequence(initCopy, fillCopy?), copiedRes, false);
+            }
+            return result;
         }
         if (auto ret = accessMemberWithLifetime(
             context.withFramePointer(this.frame), value, name, locRange, allowUndefined=true)?)
@@ -1219,17 +1237,13 @@ class ASTParenPropertyExpression : ASTSymbol
 
     override (Symbol | fail Error) compile(Context context) {
         auto baseExpr = this.base.compile(context)?.beExpressionImplCall(context, this.locRange)?;
-        (Expression | fail Error) do2(Expression baseExpr) {
-            (nullable Expression | fail Error) do1(Expression baseExpr) {
-                assert(!!context.framePointer);
-                auto context = context.withNamespace(
-                    new ParenPropertyNamespace(context.namespace, context.framePointer.notNull, baseExpr));
-                return this.prop.compile(context)?.beExpressionImplCall(context, this.locRange);
-            }
-            if (auto ret = context.compiler.exprWithTemporaryExpr(baseExpr, &do1)?) return ret;
-            assert(false);
+        (Expression | fail Error) do1(Expression baseExpr) {
+            assert(!!context.framePointer);
+            auto context = context.withNamespace(
+                new ParenPropertyNamespace(context.namespace, context.framePointer.notNull, baseExpr));
+            return this.prop.compile(context)?.beExpressionImplCall(context, this.locRange);
         }
-        return context.compiler.consume(context, baseExpr, &do2);
+        return context.compiler.consume(context, baseExpr, &do1);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -1767,7 +1781,7 @@ class ASTBorrow : ASTSymbol
 
     override (Symbol | fail Error) compile(Context context) {
         auto source = this.source.compile(context)?.beExpression(this.locRange)?;
-        return new OverrideLifetimeExpr(source, ExprInfo(mutable=false, Ownership.borrowed));
+        return new OverrideLifetimeExpr(source, ExprInfo(Lifetime.lexical));
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -2252,11 +2266,12 @@ class ASTReturnStatement : ASTStatement
          * - unwind stack
          * - ret the alloca
          */
-        auto temp = new PairedTemporary(ret, Ownership.owned);
+        auto temp = new PairedTemporary(ret, Lifetime.lexical);
         auto init = new UninitializeTemporaryStatement(temp);
         (Statement | fail Error) escapeValueStmt()
         {
-            if (expr.info.ownership == Ownership.gifted || expr.info.ownership == Ownership.global)
+            // Only lexical and ephemeral must be copied here.
+            if (expr.info.lifetime == Lifetime.gifted || expr.info.lifetime == Lifetime.permanent)
                 return new AssignStatement(temp, expr);
             if (auto copyInto = ret.copyInto(context, temp, expr)?)
                 return copyInto;
@@ -2290,7 +2305,7 @@ class ASTVoidExpression : ASTSymbol
 
 class VoidExpression : Expression
 {
-    this() { this.type = once new Void; this.info = ExprInfo(false, Ownership.owned); }
+    this() { this.type = once new Void; this.info = ExprInfo(Lifetime.permanent); }
     override int emit(Generator generator)
     {
         return generator.fun.voidLiteral;
@@ -2331,8 +2346,8 @@ class VoidExpression : Expression
             result = sequence(result, unwindable.unwind(context)?);
         }
         if (auto declHolder = current.instanceOf(DeclarationHolder)) {
-            auto var = declHolder.accessDecl(context.compiler);
-            if (var.info.ownership == Ownership.owned) {
+            if (declHolder.freeOnExit) {
+                auto var = declHolder.accessDecl(context.compiler);
                 auto type = var.type;
                 if (auto destroy = type.endLifetime(context, var)) {
                     result = sequence(result, destroy);
@@ -2423,13 +2438,13 @@ class ASTIfStatement : ASTStatement
                 if (initial.type.zeroInitializable && context.compiler.isClassType(initial.type)) {
                     Type notNullableType = initial.type.makeNotNullable;
 
-                    auto tempInitial = new PairedTemporary(initial.type, initial.info.ownership);
+                    auto tempInitial = new PairedTemporary(initial.type, initial.info.lifetime);
                     auto initTemp = new InitializeTemporaryStatement(tempInitial, initial);
 
                     prelude = initTemp;
                     // don't worry about memory management - if it's non-null, we'll stick it in a variable,
                     // and that'll take care of refcounting for us.
-                    test = new InfoExpression(tempInitial, ExprInfo(false, Ownership.global));
+                    test = new InfoExpression(tempInitial, ExprInfo(Lifetime.permanent));
 
                     auto actualVarDecl = new ASTVarDeclStatement(
                         vardecl.name, mutable=vardecl.mutable, infer=false, uninitialized=false,
@@ -2463,7 +2478,7 @@ class ASTIfStatement : ASTStatement
                 extractdecl.locRange.assert(!!sourceType, "source of <- decl must be sumtype, not $(source.type.repr)")?;
                 auto sourceType = sourceType.notNull;
                 // FIXME check lifetime here
-                auto tempSource = new PairedTemporary(source.type, source.info.ownership);
+                auto tempSource = new PairedTemporary(source.type, source.info.lifetime);
                 auto initTemp = new InitializeTemporaryStatement(tempSource, source);
                 // check expected type
                 auto remainingType = typeWithoutFail(sourceType);
@@ -2480,7 +2495,7 @@ class ASTIfStatement : ASTStatement
 
                 auto value = pickEither(context, sourceType, tempSource, remainingType, extractdecl.locRange)?;
                 prelude = initTemp;
-                test = new InfoExpression(value, ExprInfo(false, Ownership.global));
+                test = new InfoExpression(value, ExprInfo(Lifetime.permanent));
 
                 auto actualVarDecl = new ASTVarDeclStatement(
                     extractdecl.name, mutable=extractdecl.mutable, infer=false, uninitialized=false,
@@ -2725,14 +2740,11 @@ class ASTAssignStatement : ASTStatement
         Symbol target = this.target.compile(context)?;
         nullable Reference targetref = target.instanceOf(Reference);
         this.locRange.assert(!!targetref, "target of assignment must be a reference")?;
-        this.locRange.assert(targetref.info.mutable, "target of assignment must be mutable")?;
+        this.locRange.assert(targetref.mutable, "target of assignment must be mutable: $(targetref.repr)")?;
         auto targetref = targetref.notNull;
         // Broadly, this check is the reason that 'borrowed' exists.
         // FIXME hasDestructor
         bool hasDtor = !!targetref.type.endLifetime(context, targetref);
-        this.locRange.assert(
-            targetref.info.ownership != Ownership.borrowed || !hasDtor,
-            "cannot reassign to borrowed value with destructor")?;
         auto type = targetref.type;
         value = expectImplicitConvertTo(context, value, type, this.locRange)?;
 
@@ -2833,17 +2845,16 @@ class ASTVarDeclStatement : ASTStatement
             }
             auto type = type.notNull;
 
-            // can we borrow the expression?
-            // ie. does its lifetime dominate our lifetime?
-            // for this, both we and it must have an uninterruptible, ie. non-mut lifetime.
-            if (initial.info.ownership.(that == Ownership.owned || that == Ownership.borrowed)
-                && !initial.info.mutable && !this.mutable)
+            // If the initial value is lexical, ie. a non-mutable variable or parameter,
+            // we know its lifetime will dominate ours.
+            // If we too are lexical, then we can just borrow it.
+            if (initial.info.lifetime == Lifetime.lexical && !this.mutable)
             {
                 // print("$(this.locRange.repr):$(initial.info.repr): borrowing $(initial.repr) for $(this.name)");
                 // don't double-own the value, it's covered by its own ownership
                 // we aren't mutable, so we can safely borrow the initializer.
                 auto decl = new VariableDeclaration(
-                    context.namespace, this.name, type, ExprInfo(false, Ownership.borrowed), false);
+                    context.namespace, this.name, type, mut=false, borrowed=true, hidden=false);
                 auto assign = context.compiler.assignStatement(decl.accessDecl(context.compiler), initial);
 
                 return StatementCompileResult(assign, context.withNamespace(decl));
@@ -2852,7 +2863,7 @@ class ASTVarDeclStatement : ASTStatement
             // print("$(this.locRange.repr):$(initial.info.repr): moving $(initial.repr) for $(this.name)");
             // otherwise we'll hold a reference ourselves.
             auto decl = new VariableDeclaration(
-                context.namespace, this.name, type, ExprInfo(mutable, Ownership.owned), false);
+                context.namespace, this.name, type, mut=this.mutable, borrowed=false, hidden=false);
 
             return StatementCompileResult(
                 move(context, decl.accessDecl(context.compiler), initial)?,
@@ -2862,7 +2873,7 @@ class ASTVarDeclStatement : ASTStatement
         {
             auto type = type.notNull;
             auto decl = new VariableDeclaration(
-                context.namespace, this.name, type, ExprInfo(mutable, Ownership.owned), hidden=false);
+                context.namespace, this.name, type, mut=this.mutable, borrowed=false, hidden=false);
 
             // Still zero-init.
             return StatementCompileResult(
@@ -2877,7 +2888,7 @@ class ASTVarDeclStatement : ASTStatement
                     "Cannot declare $(this.name) without initializer: $(type.repr) is not zero-initializable");
             }
             auto decl = new VariableDeclaration(
-                context.namespace, this.name, type, ExprInfo(mutable, Ownership.owned), hidden=false);
+                context.namespace, this.name, type, mut=this.mutable, borrowed=false, hidden=false);
 
             return StatementCompileResult(
                 new AssignStatement(decl.accessDecl(context.compiler), new NullExpr(type)),
@@ -2967,7 +2978,8 @@ class ASTVarDeclStatement : ASTStatement
         return null;
     }
     parser.commit;
-    return new ASTVarDeclStatement(name, mutable, infer, uninitialized=uninitialized, type, initial, parser.to(from));
+    return new ASTVarDeclStatement(name, mutable=mutable, infer=infer,
+                                   uninitialized=uninitialized, type, initial, parser.to(from));
 }
 
 (nullable ASTVarDeclStatement | fail Error) parseVarDecl(
@@ -3097,7 +3109,7 @@ class ASTVarExtractDeclStatement : ASTStatement
         }
 
         auto decl = new VariableDeclaration(
-            context.namespace, this.name, type, ExprInfo(mutable=this.mutable, Ownership.owned), false);
+            context.namespace, this.name, type, mut=this.mutable, borrowed=false, hidden=false);
         auto astType = new ASTSymbolHelper(type);
 
         mut ASTEitherCaseExprCase[] cases;
@@ -3139,7 +3151,7 @@ class ASTVarExtractDeclStatement : ASTStatement
             result;
         });
         auto decl = new VariableDeclaration(
-            context.namespace, this.name, type, ExprInfo(mutable=this.mutable, Ownership.owned), false);
+            context.namespace, this.name, type, mut=this.mutable, borrowed=false, hidden=false);
 
         context.pushErrorLoc(this.locRange);
         auto ret = StatementCompileResult(
@@ -3339,11 +3351,11 @@ class ASTStatementExpression : ASTSymbol
         auto resultType = resultValue.type;
 
         // as ASTReturn
-        auto temp = new PairedTemporary(resultType, Ownership.owned);
+        auto temp = new PairedTemporary(resultType, Lifetime.lexical);
         auto init = new UninitializeTemporaryStatement(temp);
 
         (Statement | fail Error) assignEscapeValue() {
-            if (resultValue.info.ownership == Ownership.gifted)
+            if (resultValue.info.lifetime == Lifetime.gifted)
                 return new AssignStatement(temp, resultValue);
             if (auto stmt = resultType.copyInto(context, temp, resultValue)?)
                 return stmt;
@@ -4311,7 +4323,7 @@ class ExternCVariable : Expression
 {
     string name;
 
-    this(this.type, this.name) { this.info = ExprInfo(true, Ownership.global); }
+    this(this.type, this.name) { this.info = ExprInfo(Lifetime.permanent); }
 
     override int emit(Generator output) {
         return output.fun.globalVar(this.name, this.type.emit(output.platform));

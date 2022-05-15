@@ -159,11 +159,18 @@ abstract class Task
 class Thread
 {
     pthread_t thr;
+    ThreadPool pool;
+    void delegate() runDg;
 
-    void delegate() run;
-    this(this.run) { }
+    this(this.pool) { runDg = &run; }
     void start() {
-        pthread_create(&thr, null, &call_thread_dg, &run);
+        pthread_create(&thr, null, &call_thread_dg, &runDg);
+    }
+    void run() {
+        while (true) {
+            pool.getTask.run;
+            pool.doneTasks.release;
+        }
     }
 }
 
@@ -181,18 +188,9 @@ class ThreadPool
         this.waitingTasks = new Semaphore(0);
         this.doneTasks = new Semaphore(0);
         for (j in 0 .. i) {
-            auto thread = new Thread(&run);
+            auto thread = new Thread(this);
             thread.start;
             threads ~= thread;
-        }
-    }
-    private void run() {
-        while (true) {
-            // TODO why is this broken, probably double calls getTask
-            // getTask.run;
-            auto task = getTask;
-            task.run;
-            this.doneTasks.release;
         }
     }
     void waitComplete(void delegate(float) progress) {
@@ -213,12 +211,45 @@ class ThreadPool
         }
         this.waitingTasks.release;
     }
-    private Task getTask()  {
+    Task getTask()  {
         this.waitingTasks.acquire;
         with (mutex.locked) {
             auto ret = tasks[$ - 1];
             tasks = tasks[0 .. $ - 1];
             return ret;
+        }
+    }
+}
+
+// TODO: null to function ptr
+void nothing(void*) { }
+
+template ThreadLocal(T) {
+    class ThreadLocal {
+        pthread_key_t key;
+        this() {
+            pthread_key_create(&key, &nothing);
+        }
+        void set(T value) {
+            import neat.runtime.stdlib : malloc, memcpy, memset;
+
+            mut auto memory = pthread_getspecific(key);
+            if (!memory) {
+                memory = malloc(sizeof(T));
+            }
+            // TODO: __leak()?
+            memcpy(memory, &value, sizeof(T));
+            // destroy the value without releasing it: cause a leak.
+            memset(&value, 0, sizeof(T));
+            pthread_setspecific(key, memory);
+        }
+        T get() {
+            auto memory = pthread_getspecific(key);
+            if (!memory) {
+                T t;
+                return t;
+            }
+            return *cast(T*) memory;
         }
     }
 }

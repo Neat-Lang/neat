@@ -19,8 +19,11 @@ class WorkPool : WorkPoolBase
 
     int threads;
 
+    ThreadLocal!string currentTask;
+
     this(this.pool, this.threads) {
         this.mutex = new Mutex;
+        this.currentTask = new ThreadLocal!string;
     }
 
     // Start task running if it isn't running yet.
@@ -30,7 +33,7 @@ class WorkPool : WorkPoolBase
             if ([any a.id == id for a in tasks]) {
                 return;
             }
-            entry = new TaskEntry(id, task);
+            entry = new TaskEntry(id, task, currentTask);
             tasks ~= entry;
         }
         if (threads > 0) pool.addTask(entry);
@@ -39,14 +42,24 @@ class WorkPool : WorkPoolBase
 
     override ITask wait(string id) {
         mut uninitialized TaskEntry task;
+        mut bool preempted;
         with (mutex.locked) {
             int offs = [first cast(int) i for i, a in tasks
                 where a.id == id
                 else -1];
             assert(offs != -1);
             task = tasks[offs];
+            preempted = task.tryPreempt;
         }
-        task.wait;
+        // print("$(currentTask.get) -> $id");
+        if (preempted) {
+            // The pool didn't get around to even starting the task yet.
+            // So we run it ourselves.
+            task.runDirectly;
+        } else {
+            task.wait_;
+        }
+        // print("$(currentTask.get) <- $id");
         return task.task;
     }
 }
@@ -57,59 +70,59 @@ private class TaskEntry : Task
 
     ITask task;
 
-    (:pending | :running | :done) state;
+    (:pending | :running | :preempted | :done) state;
 
     Mutex mutex;
 
     CondVar condvar;
 
-    this(this.id, this.task) {
+    ThreadLocal!string currentTask;
+
+    this(this.id, this.task, this.currentTask) {
         this.mutex = new Mutex;
         this.condvar = new CondVar(this.mutex);
         this.state = :pending;
     }
 
+    /**
+     * Returns true if the task was "preempted": that is, the task has not
+     * run yet, has not even started, and now it will never start.
+     */
+    bool tryPreempt() {
+        with (mutex.locked) {
+            if (state == :pending) {
+                state = :preempted;
+                return true;
+            }
+        }
+        return false;
+    }
+
     override void run() {
         with (mutex.locked) {
-            if (started) {
-                // sniped by wait()
-                return;
-            }
-            runImpl;
+            if (state == :preempted || state == :done) return;
+            assert(state == :pending);
+            state = :running;
         }
+        runDirectly;
     }
 
-    void wait() {
+    void runDirectly() {
+        auto prevTask = currentTask.get;
+        currentTask.set(id);
+        // print("+$id");
+        task.run;
+        // print("-$id");
+        currentTask.set(prevTask);
         with (mutex.locked) {
-            this.state.case {
-                (:pending):
-                    runImpl;
-                    return;
-                default: {}
-            }
-            // TODO while (this.state.has(:running))
-            while (true) {
-                this.state.case {
-                    (:running): this.condvar.wait;
-                    default: return;
-                }
-            }
+            state = :done;
+            condvar.broadcast;
         }
     }
 
-    void runImpl() {
-        this.state = :running;
-        with (mutex.unlocked) {
-            this.task.run;
+    void wait_() {
+        with (mutex.locked) {
+            while (this.state != :done) this.condvar.wait;
         }
-        this.state = :done;
-        this.condvar.broadcast;
-    }
-
-    bool started() {
-        return state.case(
-            (:pending): false,
-            (:running): true,
-            (:done): true);
     }
 }

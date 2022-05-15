@@ -584,8 +584,8 @@ at_revision '16a837f400b85f707189d97827137f0bcce8be3a' 'rebuild neat' 'build/nea
 at_revision '1102e5ff7a3196f8daf5cd80515b902b7b0c6119' 'rebuild neat' 'build/neat'
 # array casts, quoting tuples
 at_revision '4fbfe0956126328275f8eced2c27b8bce442ce30' 'rebuild neat' 'build/neat'
-# lifetime rewrite, v0.1.3
-at_revision '733e7bc8c86a09984fd8040b3b68575fc542871b' 'rebuild neat' 'build/neat'
+# lifetime rewrite, reduce chance of call asserts, alias-to-template
+at_revision '9b99a9a4a33e3262bc85a0fa331df6b34f67c917' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

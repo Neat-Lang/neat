@@ -95,25 +95,27 @@ class CompilationVisitor
     void visit(FinishedSymbol sym) {}
 }
 
-string hashBuild(string mangle, BuildSettings settings) {
+string idBuild(string mangle, BuildSettings settings) {
+    mut string result;
     auto hash = new Hash;
 
     hash.apply(compiler_hash_add, compiler_hash_mult);
-
     settings.backend.hash(hash);
-    if (settings.x86_32) hash.adds("m32");
-    if (settings.optimize) hash.adds("opt");
+
+    result ~= "compiler($(hash.text))";
+    if (settings.x86_32) result ~= " m32";
+    if (settings.optimize) result ~= " opt";
     // Macros and binaries must not share objects!
     // Macros have special magic to avoid dlopen issues.
-    if (settings.forMacro) hash.adds("macro");
-    for (ver in settings.versions) hash.adds("version=$(ver)");
+    if (settings.forMacro) result ~= " macro";
+    for (ver in settings.versions) result ~= "version=$(ver)";
+    result ~= mangle;
 
-    hash.adds(mangle);
-    return hash.text;
+    return result;
 }
 
 BackgroundCompilation emitModule(
-    Module module_, CompilationVisitor[] visitors, BuildSettings settings, Mutex visitorLock, string earlyHash)
+    Module module_, CompilationVisitor[] visitors, BuildSettings settings, Mutex visitorLock, string earlyId)
 {
     auto backendModule = settings.backend.createModule(
         settings.platform, module_.locRange.toBackendLoc, settings.forMacro);
@@ -144,7 +146,7 @@ BackgroundCompilation emitModule(
 
     auto hash = new Hash;
 
-    hash.adds(earlyHash);
+    hash.adds(earlyId);
 
     auto symbols = module_.finishedSymbols;
     [symbol.hash(hash) for symbol in symbols];
@@ -264,7 +266,7 @@ class CompilationTask : ITask
     BuildSettings settings;
     Mutex visitorLock;
     (:none | BackgroundCompilation) result;
-    string hash;
+    string id;
     bool done;
 
     BackgroundCompilation compilation() {
@@ -276,12 +278,12 @@ class CompilationTask : ITask
 
     this(this.module_, this.visitors, this.settings, this.visitorLock) {
         this.result = :none;
-        this.hash = hashBuild(module_.mangle, settings);
+        this.id = idBuild(module_.mangle, settings);
     }
 
     override void run() {
         this.result = emitModule(
-            this.module_, this.visitors, this.settings, this.visitorLock, this.hash);
+            this.module_, this.visitors, this.settings, this.visitorLock, this.id);
     }
 
     void waitDone() {
@@ -302,58 +304,89 @@ struct BuildResult
     Hash hash;
 }
 
+class ModulePostProcessorImpl : ModulePostProcessor
+{
+    CompilationVisitor[] visitors;
+
+    BuildSettings settings;
+
+    Mutex mutex;
+
+    ModuleSet allModules;
+
+    string[] taskIds;
+
+    this(this.visitors, this.settings) {
+        this.mutex = new Mutex;
+        this.allModules = new ModuleSet;
+    }
+
+    override void process(ModuleBase module_)
+    {
+        auto module_ = module_.instanceOf(Module).notNull;
+
+        queue(module_);
+    }
+
+    void queue(Module module_) {
+        bool add(Module module_) {
+            if (!this.allModules.add(module_)) return false;
+
+            auto task = new CompilationTask(module_, this.visitors, this.settings, this.mutex);
+
+            this.settings.pool.queue(task.id, task);
+            this.taskIds ~= task.id;
+
+            queue(module_);
+            return true;
+        }
+        module_.walkModules(&add);
+    }
+
+    void wait() {
+        int i;
+        while (i < this.taskIds.length) {
+            auto task = this.settings.pool.wait(taskIds[i]).instanceOf(CompilationTask);
+            i++;
+        }
+    }
+}
 
 (BuildResult | fail Error) buildAstModule(
     ASTModule astModule, BuildSettings settings, CompilationVisitor[] visitors, Options options)
 {
-    auto context = makeContext(settings.compiler, settings.platform, null, astModule.macroState);
+    auto postProcessor = new ModulePostProcessorImpl(visitors, settings);
+    auto context = makeContext(settings.compiler, settings.platform, null, astModule.macroState, postProcessor);
     Module module_ = compileModule(context, astModule, addDefaultImports=true)?;
 
-    mut string[] taskHashes;
-
-    auto allModules = new ModuleSet;
-    bool add(Module mod) {
-        return allModules.add(mod);
-    }
-    module_.walkModules(&add);
-
-    auto visitorLock = new Mutex;
-    mut auto remainingModules = allModules.array;
-    while (remainingModules.length > 0) {
-        for (remainingModule in remainingModules) {
-            auto task = new CompilationTask(remainingModule, visitors, settings, visitorLock);
-            settings.pool.queue(task.hash, task);
-            taskHashes ~= task.hash;
-        }
-        auto remainingSet = new ModuleSet;
-        auto currentSet = new ModuleSet; // loop breaker
-        // TODO add()
-        bool add2(Module mod) {
-            if (allModules.add(mod)) {
-                remainingSet.add(mod);
-            }
-            return currentSet.add(mod);
-        }
-        module_.walkModules(&add2);
-        remainingModules = remainingSet.array;
-    }
+    postProcessor.wait;
 
     mut int[] pids;
     mut string[] objFiles;
     mut string[] intermediateFiles;
     auto hash = new Hash;
     hash.addl(__GENERATION__);
-    for (hashStr in taskHashes) {
-        auto task = settings.pool.wait(hashStr).instanceOf(CompilationTask);
+    for (taskId in postProcessor.taskIds) {
+        auto task = settings.pool.wait(taskId).instanceOf(CompilationTask);
         auto compilation = task.compilation;
         objFiles ~= compilation.objFile;
         options.linkerArgs ~= ["-l$lib" for lib in compilation.extraLibs];
         intermediateFiles ~= compilation.srcFile;
+        // TODO ordering
         with (compilation.hash.state) hash.apply(add, mult);
         task.waitDone;
     }
 
     return BuildResult(objFiles, intermediateFiles, module_, hash);
+}
+
+class SimpleModulePostProcessor : ModulePostProcessor
+{
+    this() { }
+
+    override void process(ModuleBase module_)
+    {
+    }
 }
 
 class ParserHelperImpl : ParserHelper
@@ -382,7 +415,8 @@ class ParserHelperImpl : ParserHelper
         mut string baseCmd = baseCmd;
         if (settings.x86_32) baseCmd ~= " -m32";
 
-        auto simpleContext = makeContext(settings.compiler, settings.platform, null, new MacroState);
+        auto postProcessor = new SimpleModulePostProcessor;
+        auto simpleContext = makeContext(settings.compiler, settings.platform, null, new MacroState, postProcessor);
         auto fun = result.module_.lookup(function_, simpleContext, __RANGE__)?.instanceOf(Function);
         string name = fun.mangle;
         (string soname, string cmd) soCmd() {

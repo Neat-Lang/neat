@@ -3998,6 +3998,23 @@ class NotYetResolvedSymbol : PendingSymbol
         }
         return locRange.fail("Dependency cycle while resolving $(entry.name).");
     }
+    override void hash(Hash hash) {
+        auto entry = resolver.entries[index];
+        entry.resolution.case {
+            nullable Symbol sym:
+                if (auto sym = sym) {
+                    // TODO do we need to handle the other possible symbols?
+                    if (auto type = sym.instanceOf(Type)) {
+                        type.hash(hash);
+                        return;
+                    }
+                }
+            Error err:
+                return;
+        }
+        hash.adds("pending");
+        hash.addl(index);
+    }
 }
 
 struct ResolvingModuleEntry
@@ -4197,8 +4214,6 @@ class Module : ModuleBase
 
     override (void | fail Error) compile(Context context)
     {
-        auto compiler = context.compiler, platform = context.platform;
-
         this.resolver.resolveAll(context)?;
 
         (void | fail Error) walkSymbols((void | fail Error) delegate((Symbol | FinishedSymbol)) dg) {
@@ -4232,7 +4247,7 @@ class Module : ModuleBase
             symbol.case {
                 Symbol symbol: {
                     if (Function fun = symbol.instanceOf(Function)) {
-                        finishedSymbols ~= fun.compile(compiler, platform)?;
+                        finishedSymbols ~= fun.compile(context)?;
                     }
                     if (IntfType intfType = symbol.instanceOf(IntfType)) {
                         finishedSymbols ~= new DefineClassIntf(intfType.intf);
@@ -4240,11 +4255,11 @@ class Module : ModuleBase
                     if (ClassType classType = symbol.instanceOf(ClassType)) {
                         finishedSymbols ~= new DefineClassIntf(classType.class_);
                         for (method in classType.class_.methods)
-                            finishedSymbols ~= method.compile(compiler, platform)?;
+                            finishedSymbols ~= method.compile(context)?;
                     }
                     if (Struct struct_ = symbol.instanceOf(Struct)) {
                         for (method in struct_.methods)
-                            finishedSymbols ~= method.instanceOf(StructMethod).compile(compiler, platform)?;
+                            finishedSymbols ~= method.instanceOf(StructMethod).compile(context)?;
                     }
                 }
                 FinishedSymbol symbol:
@@ -4979,6 +4994,8 @@ class LexicalContextImpl : LexicalContext
     [handleEntry(entry)? for entry in astModule.entries];
 
     module_.compile(context)?;
+
+    context.modulePostProcessor.process(module_);
 
     return module_;
 }

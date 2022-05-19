@@ -3821,15 +3821,17 @@ class ASTStaticIfStatement : ASTStatement
 
 (nullable ASTDeclaration | fail Error) parseDeclaration(Parser parser, LexicalContext lexicalContext) {
     auto from = parser.from?;
-    if (auto importStmt = parseImportStatement(parser, lexicalContext)?) {
-        parser.to(from).assert(!importStmt.isMacroImport, "can't import macro in function")?;
-        auto pool = lexicalContext.compiler.workPool;
-        auto id = importStmt.repr(lexicalContext.pak.name);
-        auto task = new ImportTask(lexicalContext, importStmt);
-        auto import_ = new ASTImport(importStmt, (pool, id, task));
+    parseImportStatement(parser, lexicalContext)?.case {
+        (:none): {}
+        ASTImportStatement importStmt:
+            parser.to(from).assert(!importStmt.isMacroImport, "can't import macro in function")?;
+            auto pool = lexicalContext.compiler.workPool;
+            auto id = importStmt.repr(lexicalContext.pak.name);
+            auto task = new ImportTask(lexicalContext, importStmt);
+            auto import_ = new ASTImport(importStmt, (pool, id, task));
 
-        pool.queue(id, task);
-        return import_;
+            pool.queue(id, task);
+            return import_;
     }
     if (auto aliasDecl = parseAliasDecl(parser, lexicalContext)?) {
         return aliasDecl;
@@ -4627,7 +4629,7 @@ class ImportTask : ITask
     }
 }
 
-(nullable ASTImportStatement | fail Error) parseImportStatement(Parser parser, LexicalContext lexicalContext)
+(ASTImportStatement | :none | fail Error) parseImportStatement(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto from = parser.from?;
@@ -4635,7 +4637,7 @@ class ImportTask : ITask
     if (!acceptIdentifier(parser, "import")?)
     {
         parser.revert;
-        return null;
+        return :none;
     }
 
     mut uninitialized (:normal, string name, string pak | :macro_, ASTModuleBase module_) target;
@@ -4772,8 +4774,50 @@ class LexicalContextImpl : LexicalContext
     return null;
 }
 
+(Protection protection, ASTImport import_ | :none | fail Error) parseImport(
+    Parser parser, LexicalContext lexicalContext, bool toplevel)
+{
+    parser.begin;
+    mut Protection protection = Protection.public_;
+    if (parser.accept("public")?) {
+        protection = Protection.public_;
+    } else if (parser.accept("private")?) {
+        protection = Protection.private_;
+    }
+
+    parseImportStatement(parser, lexicalContext).case {
+        Error err:
+            parser.revert;
+            return err;
+        (:none):
+            parser.revert;
+            return (:none);
+        ASTImportStatement importStmt:
+            parser.commit;
+            if (!toplevel && importStmt.isMacroImport)
+            {
+                return parser.fail("macro import not allowed here");
+            }
+
+            auto pool = lexicalContext.compiler.workPool;
+            auto id = importStmt.repr(lexicalContext.pak.name);
+            auto task = new ImportTask(lexicalContext, importStmt);
+            auto import_ = new ASTImport(importStmt, (pool, id, task));
+
+            if (toplevel) pool.queue(id, task);
+
+            return (protection, import_);
+    }
+}
+
 (ASTModuleEntry | fail Error) parseModuleEntry(Parser parser, LexicalContext lexicalContext, bool toplevel)
 {
+    parseImport(parser, lexicalContext, toplevel)?.case {
+        (Protection protection, ASTImport import_):
+            return ASTModuleEntry(protection, import_);
+        (:none): {}
+    }
+
     mut (Protection | :none) protection = :none;
     if (parser.accept("public")?) {
         protection = Protection.public_;
@@ -4786,21 +4830,6 @@ class LexicalContextImpl : LexicalContext
             (:none): Protection.public_);
     }
 
-    if (auto importStmt = parseImportStatement(parser, lexicalContext)?) {
-        if (!toplevel && importStmt.isMacroImport)
-        {
-            return parser.fail("macro import not allowed here");
-        }
-
-        auto pool = lexicalContext.compiler.workPool;
-        auto id = importStmt.repr(lexicalContext.pak.name);
-        auto task = new ImportTask(lexicalContext, importStmt);
-        auto import_ = new ASTImport(importStmt, (pool, id, task));
-
-        if (toplevel) pool.queue(id, task);
-
-        return ASTModuleEntry(getProtection, import_);
-    }
     if (auto sym = parseTemplateContents(parser, lexicalContext)?) {
         return ASTModuleEntry(getProtection, sym);
     }
@@ -4847,33 +4876,70 @@ class LexicalContextImpl : LexicalContext
 {
     mut LexicalContext lexicalContext = new LexicalContextImpl(compiler, module_.pak, module_.macroState, helper, config);
 
+    /*
+     * Why is there a group of import statements?
+     * For performance reasons, it is advantageous to be able to dispatch lots of imports at once.
+     * It is elegant to put macro statements first, but every macro statement forces a break in
+     * parsing. To counteract this, we parse imports eagerly - we read as many statements as we can
+     * with the current parser, being reluctant to generate errors.
+     * Only when we can parse no further imports, do we flush to update the macro context.
+     * For this reason it is undefined behavior to write a macro that redefines the
+     * meaning of valid built-in import statements.
+     */
+    mut (Protection protection, ASTImport import_)[] importGroup;
+
+    (void | fail Error) flushImportGroup() {
+        for (entry in importGroup) {
+            auto protection = entry.protection;
+            auto import_ = entry.import_;
+            if (!import_.statement.isMacroImport) {
+                module_.entries ~= ASTModuleEntry(protection, import_);
+                continue;
+            }
+            auto id = import_.statement.repr(lexicalContext.pak.name);
+
+            module_.macroState = module_.macroState.dup;
+            lexicalContext = new LexicalContextImpl(compiler, module_.pak, module_.macroState, helper, config);
+
+            lexicalContext.macroState.addImport(
+                lexicalContext.compiler.workPool.wait(id)
+                    .instanceOf(ImportTask).module_?.macroState);
+        }
+        importGroup = null;
+    }
+
     while (!parser.eof?)
     {
         if (ASTModule submod = parseMacroContinuation(compiler, parser, helper, module_, config)?)
             return submod;
 
         auto loc = parser.loc;
+
+        auto import_ = parseImport(parser, lexicalContext, toplevel=true);
+
+        import_.case {
+            (Protection protection, ASTImport import_):
+                importGroup ~= (protection, import_);
+                continue;
+            Error error:
+                if (!importGroup.empty) {
+                    flushImportGroup?;
+                    continue;
+                } else return error;
+            (:none):
+                flushImportGroup?;
+        }
+
         auto entry = parseModuleEntry(parser, lexicalContext, true)?;
         loc.hardCheck(parser.level == 0, "parse rule imbalance");
 
         entry.symbol.case {
             ASTImport import_:
-                if (import_.statement.isMacroImport) {
-                    auto id = import_.statement.repr(lexicalContext.pak.name);
-
-                    module_.macroState = module_.macroState.dup;
-                    lexicalContext = new LexicalContextImpl(compiler, module_.pak, module_.macroState, helper, config);
-
-                    lexicalContext.macroState.addImport(
-                        lexicalContext.compiler.workPool.wait(id)
-                            .instanceOf(ImportTask).module_?.macroState);
-                    continue;
-                }
-            default: {}
+                assert(false);
+            default:
+                module_.entries ~= entry;
         }
-        module_.entries ~= entry;
     }
-    assert(parser.level == 0);
     return module_;
 }
 

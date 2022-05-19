@@ -310,13 +310,14 @@ class ModulePostProcessorImpl : ModulePostProcessor
 
     BuildSettings settings;
 
-    Mutex mutex;
+    Mutex mutex, visitorLock;
 
     ModuleSet allModules;
 
     string[] taskIds;
 
     this(this.visitors, this.settings) {
+        this.visitorLock = new Mutex;
         this.mutex = new Mutex;
         this.allModules = new ModuleSet;
     }
@@ -330,12 +331,14 @@ class ModulePostProcessorImpl : ModulePostProcessor
 
     void queue(Module module_) {
         bool add(Module module_) {
-            if (!this.allModules.add(module_)) return false;
+            with (this.mutex.locked) {
+                if (!this.allModules.add(module_)) return false;
 
-            auto task = new CompilationTask(module_, this.visitors, this.settings, this.mutex);
+                auto task = new CompilationTask(module_, this.visitors, this.settings, this.visitorLock);
 
-            this.settings.pool.queue(task.id, task);
-            this.taskIds ~= task.id;
+                this.settings.pool.queue(task.id, task);
+                this.taskIds ~= task.id;
+            }
 
             queue(module_);
             return true;
@@ -345,9 +348,15 @@ class ModulePostProcessorImpl : ModulePostProcessor
 
     void wait() {
         int i;
-        while (i < this.taskIds.length) {
-            auto task = this.settings.pool.wait(taskIds[i]).instanceOf(CompilationTask);
-            i++;
+        with (this.mutex.locked) {
+            while (i < this.taskIds.length) {
+                auto taskId = taskIds[i];
+
+                with (this.mutex.unlocked) {
+                    this.settings.pool.wait(taskId);
+                }
+                i++;
+            }
         }
     }
 }

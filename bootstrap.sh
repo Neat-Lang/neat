@@ -586,6 +586,8 @@ at_revision '1102e5ff7a3196f8daf5cd80515b902b7b0c6119' 'rebuild neat' 'build/nea
 at_revision '4fbfe0956126328275f8eced2c27b8bce442ce30' 'rebuild neat' 'build/neat'
 # lifetime rewrite, reduce chance of call asserts, alias-to-template
 at_revision 'c2504b9ad8d21e65a394e10eff35e2595bf1b0d3' 'rebuild neat' 'build/neat'
+# Move stuff required for cimport to neat.base.
+at_revision '60f6117f6ca0fb3f9864c51989e47c23b86320d7' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

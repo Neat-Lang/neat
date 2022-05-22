@@ -1,12 +1,15 @@
 module neat.macros.cimport;
 
+// IMPORTANT
+// Do not import neat.stuff here!
+// That package takes like a second to compile!
+// Extend CompilerBase instead!
 import package(compiler).neat.base;
 import package(compiler).neat.decl;
 import package(compiler).neat.expr;
 import package(compiler).neat.parser_base;
 import package(compiler).neat.parser;
 import package(compiler).neat.struct_;
-import package(compiler).neat.stuff;
 import package(compiler).neat.types;
 import package(compiler).helpers;
 
@@ -26,6 +29,7 @@ class CImportMacro : Macro
     (nullable ASTModuleBase | fail Error) parse(Parser parser, LexicalContext lexicalContext) {
         import std.string : replace;
 
+        auto compiler = lexicalContext.compiler;
         auto loc = parser.loc;
         if (!parser.acceptIdentifier("c_header")?)
             return null;
@@ -33,21 +37,21 @@ class CImportMacro : Macro
         // TODO move into neat.base
         auto from = parser.from?;
         parser.expect("\"")?;
-        auto includeSym = parser.parseStringLiteral(lexicalContext, "\"", from)?.instanceOf(ASTStringLiteral);
+        auto includeSym = compiler.parseStringLiteral(parser, lexicalContext, "\"", from)?.instanceOf(ASTStringLiteral);
         parser.assert_(!!includeSym, "string expected")?;
         mut string flags;
         if (parser.accept(",")?) {
             parser.expect("\"")?;
             auto from = parser.from?;
             parser.expect("\"")?;
-            auto flagsSym = parser.parseStringLiteral(lexicalContext, "\"", from)?.instanceOf(ASTStringLiteral);
+            auto flagsSym = compiler.parseStringLiteral(parser, lexicalContext, "\"", from)?.instanceOf(ASTStringLiteral);
             parser.assert_(!!flagsSym, "flags string expected")?;
             flags = flagsSym.text ~ " ";
         }
         parser.expect(")")?;
 
-        if (lexicalContext.compiler.cFlags.length > 0)
-            flags = (lexicalContext.compiler.cFlags ~ flags).join(" ");
+        if (compiler.cFlags.length > 0)
+            flags = (compiler.cFlags ~ flags).join(" ");
 
         string include = includeSym.text;
         string modName = include.replace("/", "_").replace(".", "_").replace("-", "_");
@@ -73,12 +77,12 @@ class CImportMacro : Macro
         auto cparserHelper = new CParserHelper(cparser);
 
         auto pak = new Package("c_header", "", []);
-        cparserHelper.mod = new ASTModule(modName, pak, new MacroState, cparser.loc.locRange, null);
+        cparserHelper.mod = compiler.astModule(modName, pak, new MacroState, cparser.loc.locRange, null);
 
-        void add(string name, (ASTExternFunction | ASTSymbol) symbol) {
+        void add(string name, (ASTExternFunctionBase | ASTSymbol) symbol) {
             if (false)
                 symbol.case {
-                    ASTExternFunction ex:
+                    ASTExternFunctionBase ex:
                         print("define " ~ ex.name ~ ": " ~ ex.repr);
                     ASTSymbol sym:
                         if (!sym.instanceOf(ASTIntLiteral)) {
@@ -86,10 +90,10 @@ class CImportMacro : Macro
                         }
                 }
             symbol.case {
-                ASTExternFunction a:
-                    cparserHelper.mod.entries ~= ASTModuleEntry(Protection.public_, a);
+                ASTExternFunctionBase a:
+                    cparserHelper.mod.addEntry(Protection.public_, a);
                 ASTSymbol sym: {
-                    if (!cparserHelper.mod.symbolAliases.has(name)) {
+                    if (!cparserHelper.mod.getSymbolAlias(name)) {
                         cparserHelper.mod.addAliasDecl(name, Protection.public_, sym);
                     }
                 }
@@ -120,7 +124,7 @@ class CImportMacro : Macro
                 || cparser.accept("# 0 \"<command-line>\"")?)) {
                 // start of actual include
                 cparserHelper.sysmod = cparserHelper.mod;
-                cparserHelper.mod = new ASTModule(modName, pak, new MacroState, cparser.loc.locRange, null);
+                cparserHelper.mod = compiler.astModule(modName, pak, new MacroState, cparser.loc.locRange, null);
             }
             if (cparser.accept("#define ")?) {
                 auto identifier = cparser.parseIdentifier?;
@@ -190,7 +194,7 @@ class CImportMacro : Macro
                                         params = [];
                                     }
                                 }
-                                add(retDecl.name, new ASTExternFunction(
+                                add(retDecl.name, compiler.astExternFunction(
                                     retDecl.name, notNull!ASTSymbol(retDecl.type), params, variadic=false, loc.locRange));
                                 success = true;
                                 break;
@@ -275,7 +279,7 @@ class CStaticArray : ASTSymbol
 class CParserHelper {
     Parser parser;
 
-    ASTModule mod, sysmod;
+    ASTModuleBase mod, sysmod;
 
     this(this.parser) { }
 

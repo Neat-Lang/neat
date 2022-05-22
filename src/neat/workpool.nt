@@ -4,6 +4,7 @@ macro import neat.macros.listcomprehension;
 
 import neat.base;
 import std.thread;
+import std.time;
 
 /*
  * Threadpool for pure tasks identified by a string.
@@ -19,11 +20,47 @@ class WorkPool : WorkPoolBase
 
     int threads;
 
-    ThreadLocal!string currentTask;
+    Stopwatch total;
+
+    ThreadLocal!string currentTaskId;
 
     this(this.pool, this.threads) {
         this.mutex = new Mutex;
-        this.currentTask = new ThreadLocal!string;
+        this.currentTaskId = new ThreadLocal!string;
+        // Represents the "main" thread.
+        auto main = new TaskEntry("", new FailITask, currentTaskId);
+
+        // For comparison with CPA.
+        this.total = new Stopwatch;
+        this.total.start;
+
+        this.tasks ~= main;
+        main.slice.start;
+    }
+
+    void report() {
+        auto main = this.tasks[0];
+        main.slice.stop;
+        this.total.stop;
+        mut TaskSlice[] criticalPath;
+        mut nullable TaskSlice currentSlice = main.slice;
+        while (currentSlice) {
+            if (auto a = currentSlice) criticalPath ~= a;
+            currentSlice = currentSlice.criticalPathParent;
+        }
+        auto results = criticalPath.retro.combineSlices;
+        print("Critical Path Report:");
+        mut float cpSum = 0;
+        for (i, result in results) {
+            print("#$(i): $(result.repr)");
+            cpSum += result.seconds;
+        }
+        print("Sum: $cpSum (actual time: $(this.total.seconds))");
+    }
+
+    TaskEntry currentTask() {
+        auto id = this.currentTaskId.get;
+        return [first a for a in tasks where a.id == id];
     }
 
     // Start task running if it isn't running yet.
@@ -33,11 +70,12 @@ class WorkPool : WorkPoolBase
             if ([any a.id == id for a in tasks]) {
                 return;
             }
-            entry = new TaskEntry(id, task, currentTask);
+            entry = new TaskEntry(id, task, currentTaskId);
             tasks ~= entry;
         }
-        if (threads > 0) pool.addTask(entry);
-        else entry.run;
+        auto oldSlice = currentTask.splitSlice;
+        entry.slice.criticalPathParent = oldSlice;
+        pool.addTask(entry);
     }
 
     override ITask wait(string id) {
@@ -51,16 +89,79 @@ class WorkPool : WorkPoolBase
             task = tasks[offs];
             preempted = task.tryPreempt;
         }
-        // print("$(currentTask.get) -> $id");
+        mut bool waited;
         if (preempted) {
             // The pool didn't get around to even starting the task yet.
             // So we run it ourselves.
             task.runDirectly;
+            waited = true;
         } else {
-            task.wait_;
+            waited = task.wait_;
         }
-        // print("$(currentTask.get) <- $id");
+        if (waited) {
+            assert(task.slice.time.stopped);
+            // TODO should be able to assign to reference in expression
+            auto ct = currentTask;
+            ct.splitSlice;
+            ct.slice.criticalPathParent = task.slice;
+        }
         return task.task;
+    }
+}
+
+struct Result
+{
+    string id;
+    int indexFrom, indexTo;
+    float seconds;
+
+    string repr() {
+        mut string id = this.id;
+        if (id.empty) id = "main";
+        if (indexFrom == indexTo) return "$(seconds) $id[$indexFrom]";
+        return "$(seconds) $id[$indexFrom-$indexTo]";
+    }
+}
+
+Result[] combineSlices(TaskSlice[] slices) {
+    mut Result[] result;
+    for (slice in slices) {
+        if (!result.empty && result[$ - 1].id == slice.id) {
+            result[$ - 1].indexTo = slice.index;
+            result[$ - 1].seconds += slice.time.seconds;
+        } else {
+            result ~= Result(slice.id, slice.index, slice.index, slice.time.seconds);
+        }
+    }
+    return result;
+}
+
+TaskSlice[] retro(TaskSlice[] array) {
+    return [array[$ - i - 1] for i, _ in array];
+}
+
+/**
+ * Represents a slice of time that a task was active.
+ * Forms the core of the Critical Path Analysis logic.
+ */
+private class TaskSlice
+{
+    string id;
+
+    int index;
+
+    Stopwatch time;
+
+    nullable TaskSlice criticalPathParent;
+
+    this(this.id, this.index, this.time) { }
+
+    void start() {
+        this.time.start;
+    }
+
+    void stop() {
+        this.time.stop;
     }
 }
 
@@ -76,12 +177,15 @@ private class TaskEntry : Task
 
     CondVar condvar;
 
-    ThreadLocal!string currentTask;
+    ThreadLocal!string currentTaskId;
 
-    this(this.id, this.task, this.currentTask) {
+    TaskSlice slice;
+
+    this(this.id, this.task, this.currentTaskId) {
         this.mutex = new Mutex;
         this.condvar = new CondVar(this.mutex);
         this.state = :pending;
+        this.slice = new TaskSlice(this.id, 0, new Stopwatch);
     }
 
     /**
@@ -98,6 +202,16 @@ private class TaskEntry : Task
         return false;
     }
 
+    TaskSlice splitSlice() {
+        auto oldSlice = this.slice;
+        import neat.runtime.stdlib : memset;
+        memset(&this.slice, 0, 8); // Extremely dirty hack until the lifetime bug here is fixed.
+        this.slice = new TaskSlice(this.id, oldSlice.index + 1, oldSlice.time);
+        this.slice.criticalPathParent = oldSlice;
+        oldSlice.time = slice.time.split;
+        return oldSlice;
+    }
+
     override void run() {
         with (mutex.locked) {
             if (state == :preempted || state == :done) return;
@@ -108,21 +222,31 @@ private class TaskEntry : Task
     }
 
     void runDirectly() {
-        auto prevTask = currentTask.get;
-        currentTask.set(id);
-        // print("+$id");
+        this.slice.start;
+        auto prevTask = currentTaskId.get;
+        currentTaskId.set(id);
         task.run;
-        // print("-$id");
-        currentTask.set(prevTask);
+        currentTaskId.set(prevTask);
+        this.slice.stop;
         with (mutex.locked) {
             state = :done;
             condvar.broadcast;
         }
     }
 
-    void wait_() {
+    bool wait_() {
         with (mutex.locked) {
+            if (this.state == :done) return false;
             while (this.state != :done) this.condvar.wait;
+            return true;
         }
+    }
+}
+
+class FailITask : ITask
+{
+    this() { }
+    override void run() {
+        assert(false);
     }
 }

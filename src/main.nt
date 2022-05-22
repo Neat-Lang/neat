@@ -95,25 +95,6 @@ class CompilationVisitor
     void visit(FinishedSymbol sym) {}
 }
 
-string idBuild(string mangle, BuildSettings settings) {
-    mut string result;
-    auto hash = new Hash;
-
-    hash.apply(compiler_hash_add, compiler_hash_mult);
-    settings.backend.hash(hash);
-
-    result ~= "compiler($(hash.text))";
-    if (settings.x86_32) result ~= " m32";
-    if (settings.optimize) result ~= " opt";
-    // Macros and binaries must not share objects!
-    // Macros have special magic to avoid dlopen issues.
-    if (settings.forMacro) result ~= " macro";
-    for (ver in settings.versions) result ~= "version=$(ver)";
-    result ~= mangle;
-
-    return result;
-}
-
 BackgroundCompilation emitModule(
     Module module_, CompilationVisitor[] visitors, BuildSettings settings, Mutex visitorLock, string earlyId)
 {
@@ -146,6 +127,16 @@ BackgroundCompilation emitModule(
 
     auto hash = new Hash;
 
+    hash.apply(compiler_hash_add, compiler_hash_mult);
+    settings.backend.hash(hash);
+
+    hash.adds("compiler($(hash.text))");
+    if (settings.x86_32) hash.adds("m32");
+    if (settings.optimize) hash.adds("opt");
+    // Macros and binaries must not share objects!
+    // Macros have special magic to avoid dlopen issues.
+    if (settings.forMacro) hash.adds("macro");
+    for (ver in settings.versions) hash.adds("version=$(ver)");
     hash.adds(earlyId);
 
     auto symbols = module_.finishedSymbols;
@@ -278,7 +269,8 @@ class CompilationTask : ITask
 
     this(this.module_, this.visitors, this.settings, this.visitorLock) {
         this.result = :none;
-        this.id = idBuild(module_.mangle, settings);
+        if (settings.forMacro) this.id = "emit $(module_.mangle) macro";
+        else this.id = "emit $(module_.mangle)";
     }
 
     override void run() {
@@ -696,6 +688,7 @@ class Options
     string umlFile;
     bool unittest_;
     bool noMain;
+    bool cpr; // critical path report
     PlatformFlags platformFlags, macroPlatformFlags;
     string[] cFlags; // for neat.macros.cimport
     string[] versions, macroVersions;
@@ -800,6 +793,8 @@ class Options
                 this.unittest_ = true;
             } else if (arg == "-no-main") {
                 this.noMain = true;
+            } else if (arg == "-cpr") {
+                this.cpr = true;
             } else if (arg == "-dump-intermediates") {
                 // Dump list of intermediate sources into a file.
                 // Used for C release generation.
@@ -971,6 +966,7 @@ long long int compiler_hash_mult() { return $(mult)LL; }
     if (options.dontLink) {
         compiler.clear;
         clearOnceCache;
+        if (options.cpr) workPool.report;
         return;
     }
 
@@ -998,6 +994,7 @@ long long int compiler_hash_mult() { return $(mult)LL; }
     neat_runtime_system(cmd);
     compiler.clear;
     clearOnceCache;
+    if (options.cpr) workPool.report;
 }
 
 void main(mut string[] args)

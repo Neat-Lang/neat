@@ -1,4 +1,5 @@
 .. _manual:
+.. highlight:: d
 
 The Neat Language
 =================
@@ -38,18 +39,26 @@ Every file must begin with the module declaration. For instance, a file `src/hel
 Packages
 --------
 
-Neat does not use includes but packages. A package is a folder associated with a name::
+.. highlight:: none
+
+Neat does not use includes, but instead packages. A package is a folder associated with a name::
 
     $ # -P<name>:<folder>[:<dependency>[,<dependency]*]
     $ neat -Proot:src src/hello/world.nt
+
+.. highlight:: d
+
+This defines the folder `./src` to be the package `root`. The file passed will be the module
+`hello.world`, because its name will be relative to `src`.
 
 Packages cannot access modules in other packages. To allow a package access, explicitly
 list the packages that it has access to::
 
     $ neat -Proot:src:dep1,dep2 -Pdep1:include/dep1 -Pdep2:include/dep2
 
-This allows the modules in `src/` to import the modules in `dep1` and `dep2`.
-Because depdencies are explicitly listed, accidental import of modules from
+This allows the modules from package `root` in `src/` to import the modules
+in `dep1` and `dep2`.
+Because dependencies are explicitly listed, accidental import of modules from
 an unrelated package is impossible.
 
 Module-Level Statements
@@ -65,6 +74,14 @@ A module can import another module::
     import std.stdio;
 
 Import is non-transitive, ie. symbols from modules imported by `std.stdio` are invisible.
+
+Modules can be imported transitively::
+
+    module first;
+
+    public import second;
+
+Now all modules that import `first` will also see the symbols in `second`.
 
 Symbols can be imported by name: `import std.stdio : print;`.
 
@@ -126,18 +143,18 @@ Functions
 
 A function is a series of statements operating on a list of parameters, culminating in a return value::
 
-    ReturnType functionName(ParameterType parameterName, ParameterType2 parameterName2) {
+    ReturnType functionName(ParameterType parameterName) {
         statement;
         statement;
         statement;
         return 5;
     }
     ...
-        ReturnType ret = functionName(1, foo);
+        ReturnType ret = functionName(foo);
 
 When a function is called with `name(arg, arg)`, the arguments are passed to the parameters and
 control passes to the function. The statements of the function are then executed, until control
-returns to the caller.
+returns to the caller when the function exits, by explicit `return` or reaching its end.
 
 Call
 ^^^^
@@ -157,21 +174,37 @@ called implicitly::
 
 This also allows struct or class methods that look like properties.
 
+Uniform Function Call Syntax
+############################
+
+As in D, "uniform function call syntax" may be used. That is, if a call of the form `a.method(b)`
+did not find a method `a.method` to call, it will instead be interpreted as `method(a, b)`.
+This allows easily defining global functions that can be called as if they are member functions of `a`.
+
 Nested functions
 ^^^^^^^^^^^^^^^^
 
 Functions may be nested inside other functions. They remain valid while the surrounding function is running,
-and can access variables and parameters of the containing function.
+and can access variables and parameters of the containing function, that were declared before them::
+
+    int double(int a) {
+        int add(int b) {
+            return a + b;
+        }
+        return add(a);
+    }
+
+Note that calling the nested function after the surrounding function has returned will lead to a crash!
 
 main
 ^^^^
 
-Every program must have a function with this signature::
+Every program must contain a function with this signature::
 
     void main(string[] args) {
     }
 
-This function will be called when the program is run.
+This function will be called when the program is executed.
 
 Statements
 ----------
@@ -203,10 +236,14 @@ When an expression is a sumtype, a subset or a single type may be extracted as s
     // `Error` will be returned if `foo` is not `int`.
     int bar <- foo;
 
+.. note::
+    This syntax is disabled pending renovations!
+    The new error propagation syntax `foo?.bar` has made it superfluous.
+
 Block statement
 ^^^^^^^^^^^^^^^
 
-Multiple statements can be combined into one::
+Multiple statements can be combined into one block::
 
     {
         print("Hello");
@@ -232,7 +269,8 @@ Any reference may be assigned a new value::
     a = 5;
     assert(a == 5);
 
-Note that only mutable (`mut`) values or parameters can be reassigned.
+Note that only mutable (`mut`) variables or parameters can be reassigned. As this allows
+some optimizations to reference counting, non-mutable variables should be preferred.
 
 If test
 ^^^^^^^
@@ -245,18 +283,17 @@ If a condition is true, execute one statement, else the other::
         print("sanity has deserted us");
     }
 
-The condition of the `if` statement may be a variable declaration or variable extraction.
-In that case, the condition is true if the value of the variable is true, or if the
-extraction succeeds. The variable will only be visible inside the `if` block::
+The condition of the `if` statement may be a variable declaration.
+In that case, the condition is true if the value of the variable is true.
+The variable will only be visible inside the `if` block::
 
-    if (nullable Foo foo = getFoo()) {
+    if (Foo foo = getFoo()) {
         // do foo things here
     }
-    (int | Error) bar;
-    if (int i <- bar) { }
 
-If the condition extracts a type, then if the condition fails, execution continues after the `if` -
-the other types are not implicitly returned!
+`nullable Class` types are true if the class is non-null. In that case, the type
+of the tested variable can be `Class`. This is the only way in which `nullable Class`
+types can be converted to `Class`.
 
 While loop
 ^^^^^^^^^^
@@ -269,7 +306,7 @@ While a condition is true, execute a statement::
 For loop
 ^^^^^^^^
 
-A range expression can be looped over::
+You can loop over a range expression::
 
     // prints 2, then 3
     for (size_t i in 2 .. 4) {
@@ -324,7 +361,7 @@ It consists of a pointer, a length and a reference to the array object.
 
 `T.length` is the length of the array.
 
-`[2]` is an array of ints, allocated on the heap.
+`[2]` is an array of ints (`int[]`), allocated on the heap.
 
 `array ~ array` is the concatenation of two arrays.
 
@@ -340,6 +377,9 @@ Tuple
 `(2, 3.0f)` is an expression of type `(int, float)`.
 
 `tuple[0]` is the first member of the tuple. The index value must be an int literal.
+
+Tuple members can be named: `(int i, float f)`. This allows accessing the member with `value.i`.
+From a type system view, this is purely decorative.
 
 Sum type
 ^^^^^^^^
@@ -359,16 +399,13 @@ Sum type
             print(ftoa(f));
     }
 
-    if (i in a) {
-        print(i);
-    }
-
 Members of a sumtype can be marked as "fail", enabling error return::
 
     (int | fail FileNotFound) foo() { return "test".readAll?.itoa; }
 
-    // if foo returns a FileNotFound, it will be automatically returned at the '?'.
     int i = foo()?;
+
+If foo returns a `FileNotFound`, it will be automatically returned at the `?`.
 
 Struct
 ^^^^^^
@@ -423,7 +460,8 @@ allocated class, not of the type of the reference::
 
     class Bar : Foo
     {
-        // "override" must be specified, to indicate that a parent method is being redefined
+        // "override" must be specified, to indicate
+        // that a parent method is being redefined.
         override int get() { return 7; }
     }
 
@@ -462,6 +500,15 @@ nullable::
     assert(!foo);
     Foo bar = foo; // errors
 
+`typeof`
+^^^^^^^^
+
+Given an expression, the type of the expression can be used as a type with `typeof`::
+
+    typeof(a + b) sum = a + b
+
+Since `auto` exists, this is mostly used for return and parameter types.
+
 .. _covariance and contravariance: https://en.wikipedia.org/wiki/Covariance_and_contravariance_(computer_science)
 
 Unittest
@@ -479,18 +526,74 @@ Unittest blocks will be compiled and run when the compiler is called with `-unit
 Templates
 ---------
 
-TODO!
+A template is a wrapper around a declaration that allows parameterizing it.
+The syntax is::
+
+    template max(T) {
+        T max(T first, T second) {
+            if (first > second) return first;
+            return second;
+        }
+    }
+
+Here, `T` is the "template parameter".
+
+The symbol in the template must be *eponymous*, ie. have the same name as the template. To call it,
+instantiate the template: `max!int(2, 3)` or `max!float(2.5, 3)`. Here, `max!int` is "the function `max`
+in the version of the template `max` where `T` is `int`."
+
+Multiple parameters are passed in parentheses: `templ!(int, float)`.
+
+If the template is called directly, the types of the parameters will be used as template
+parameters. This behavior is a placeholder.
 
 Ranges
 ------
 
-TODO!
+If a type `T` has the properties `bool empty`, `T next` and `E front`, then it is called a "range over `E`".
+
+Arrays are an example of such.
+
+Another example is range expressions: `from .. to`.
+
+If you define these properties in a data type, you can use it as the source of a loop.
 
 Lambdas
 -------
 
-TODO!
+A lambda is a templated nested function reference. They can be assigned to a value. When called, they
+are implicitly instantiated.
+
+Example::
+
+    int a = 5;
+    auto add = b => a + b;
+    assert(add(2) == 7);
+
+Every lambda has a unique type. Because of this, they cannot be stored in data structures.
+Their primary purpose is being passed to templated functions::
+
+    auto a = (0 .. 10).filter(a => a & 1 == 0).map(a => a / 2).array;
+
+    assert(a == [0, 1, 2, 3, 4]);
 
 Macros
 ------
-TODO!
+
+.. note::
+    For this feature, compiler knowledge is required!
+
+When `macro(function)` is called, `function` is loaded into the compiler and executed with a macro state
+parameter. This allows modifying the macro state of the compiler to add a macro class instance.
+Macro classes can extend the compiler with new functionality using a set of hooks:
+
+- calls: `a(b, c)`
+- expressions: `2 ★ 2`
+- properties: `a.b<property goes here>`
+- statements: `macroThing;`
+- imports: `import github("http://github.com/neat-lang/example").module;`
+
+Look at `neat.macros.*` for examples.
+
+The entire compiler is available for importing and reuse in macros. However, it is recommended
+to limit yourself to the functionality in `neat.base`. This will also keep compile times down.

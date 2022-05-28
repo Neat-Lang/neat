@@ -1,10 +1,11 @@
 # Neat
 
-Neat is a compiler for NeatLang, a D1-like language with macros.
+Neat is a compiler for Neat, a D1-like language with macros.
 
-# Documentation
+Please read the language documentation on <https://neat-lang.github.io/>.
 
-- TODO LOL
+# In-repo documentation
+
 - [Compiler Internals](./doc/index.md)
 - [The testcases](./test/runnable/)
 - [The demo(s)](./demos/)

@@ -92,6 +92,17 @@ Structs, classes, templates and functions can be declared by name.
 Every declaration can be marked as `public` or `private`; they are `public` by default.
 Private declarations cannot be seen when the module is imported.
 
+Extern(C)
+^^^^^^^^^
+
+A function can be declared as `extern(C)`. This will ensure that it matches the calling convention of the platform's native C compiler.
+
+For example::
+
+    extern(C) void* memcpy(void* dest, void* src, size_t n);
+
+Note: instead of declaring lots of extern(C) functions manually, try using the `neat.macros.cimport` built-in macro! (Grep for examples.)
+
 Expressions
 -----------
 
@@ -167,7 +178,7 @@ A function, class method or struct method can be called with a comma-separated l
 
     class.method();
 
-When a function does not have any parameters, the empty parents can be left out, and the function will be
+When a function does not have any parameters, the empty parens can be left out, and the function will be
 called implicitly::
 
     doWork;
@@ -180,6 +191,17 @@ Uniform Function Call Syntax
 As in D, "uniform function call syntax" may be used. That is, if a call of the form `a.method(b)`
 did not find a method `a.method` to call, it will instead be interpreted as `method(a, b)`.
 This allows easily defining global functions that can be called as if they are member functions of `a`.
+
+Named Arguments
+###############
+
+The value of every parameter on a call may be assigned by name::
+
+    int twice(int x) { return x + x; }
+    assert(twice(x=2) == 4);
+
+This feature does not allow reordering parameters! It is purely intended to improve call readability, and to
+ensure that arguments are passed to the intended parameter.
 
 Nested functions
 ^^^^^^^^^^^^^^^^
@@ -347,6 +369,7 @@ int    32-bit signed integer
 short  16-bit signed integer
 byte   8-bit signed integer
 char   8-bit UTF-8 code unit
+long   64-bit signed integer
 void   0-bit empty data
 size_t platform-dependent unsigned word
 float  32-bit IEEE floating point number
@@ -499,6 +522,18 @@ nullable::
     nullable Foo foo = null;
     assert(!foo);
     Foo bar = foo; // errors
+
+Symbol Identifier
+^^^^^^^^^^^^^^^^^
+
+A symbol identifier takes the form `:name`.
+
+It is both a type and an expression. The type `:name` has one value, which is also `:name`.
+
+This feature can be used to "type-tag" entries in sumtypes, to differentiate identically
+typed entries, such as `(:centimeters, int | :meters, int)`.
+
+It is also used to construct "value-less" sumtype entries, such as `(int | :none)`.
 
 `typeof`
 ^^^^^^^^

@@ -17,9 +17,9 @@ Have some example code! Here's a program that prints the longest line in a file:
     import std.string;
 
     void main(string[] args) {
-        auto text = cast(string) readFile(args[1]);
+        auto text = readText(args[1]);
         string longestLine = [
-            argmax(line.length) line
+            argmax(line.strip.length) line
             for line in text.split("\n")];
         print(longestLine);
     }

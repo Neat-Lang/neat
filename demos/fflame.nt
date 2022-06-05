@@ -91,7 +91,7 @@ struct AffineTransform
         mut auto p = Point(a * p.x + b * p.y + c, d * p.x + e * p.y + f);
         if (symmetry) {
             int i = ii % symmetry;
-            ii += 1;
+            ii = (ii + 1) % 65521;
             p = Point(p.x * symc[i] - p.y * syms[i], p.x * syms[i] + p.y * symc[i]);
         }
         return p;
@@ -206,8 +206,8 @@ struct Metafunction
 
     Point apply(Point p) {
         Point result;
-        for (i in 0 .. entries.length) {
-            result.weightAdd(entries[i].f.apply(p), entries[i].weight);
+        for (entry in entries) {
+            result.weightAdd(entry.f.apply(p), entry.weight);
         }
         return affine.apply(result);
     }
@@ -252,11 +252,11 @@ final class ChaosGame
         for (mut int i = 0; i < functions.length; i += 1) {
             if (f < transitions[from][i]) return i;
         }
-        return cast(int) (rng.rand() % functions.length);
+        return 0;
     }
 
-    void apply(RangeCache cache, long steps) {
-        auto rng = new XorShift(23);
+    void apply(RangeCache cache, long l, long steps) {
+        auto rng = new XorShift(l);
         mut Point p = Point(rng.randf, rng.randf);
         mut Color color = Color(0, 0, 0);
         mut int index = 0;
@@ -331,9 +331,9 @@ class Buffer
                 // float r = max(1 - color.r * i, 0);
                 // float g = max(1 - color.g * i, 0);
                 // float b = max(1 - color.b * i, 0);
-                float r = min(color.r * i * adjf, 1);
-                float g = min(color.g * i * adjf, 1);
-                float b = min(color.b * i * adjf, 1);
+                float r = min(color.r * i * adjf, 1.0f);
+                float g = min(color.g * i * adjf, 1.0f);
+                float b = min(color.b * i * adjf, 1.0f);
                 int rgb =
                       (cast(int)(r * 0xff) & 0xff * 0x10000)
                     + (cast(int)(g * 0xff) & 0xff * 0x100)
@@ -381,14 +381,15 @@ class RenderGame : Task
     ChaosGame game;
     RangeCache cache;
     Buffer buffer;
+    long index;
     long steps;
 
-    this(this.game, this.buffer, this.steps) {
+    this(this.game, this.buffer, this.index, this.steps) {
         this.cache = new RangeCache(buffer);
     }
 
     override void run() {
-        game.apply(cache, steps);
+        game.apply(cache, index, steps);
         cache.flush;
     }
 }
@@ -542,7 +543,7 @@ void main(mut string[] args) {
     mut int subtasks = 100;
     if (width < 400 && height < 400) subtasks = 4;
 
-    auto pool = new ThreadPool(8);
+    auto pool = new ThreadPool(7);
 
     auto game = new ChaosGame;
     int limit = 1 + rng.irand % 7;
@@ -555,7 +556,7 @@ void main(mut string[] args) {
     Buffer buffer = new Buffer(width, height);
 
     for (j in 0 .. subtasks) {
-        auto task = new RenderGame(game, buffer, iters / subtasks);
+        auto task = new RenderGame(game, buffer, j, iters / subtasks);
         pool.addTask(task);
     }
 

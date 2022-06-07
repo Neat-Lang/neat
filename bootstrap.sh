@@ -590,6 +590,8 @@ at_revision 'c2504b9ad8d21e65a394e10eff35e2595bf1b0d3' 'rebuild neat' 'build/nea
 at_revision '60f6117f6ca0fb3f9864c51989e47c23b86320d7' 'rebuild neat' 'build/neat'
 # correctly mark class fields as "mutable ephemeral".
 at_revision 'cd8310140aad5d09ece97625f8a1b99540c443d6' 'rebuild neat' 'build/neat'
+# use correct types for array cast math
+at_revision '92dd35d3e9c8f26ac93e427531c00a45378a38f4' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

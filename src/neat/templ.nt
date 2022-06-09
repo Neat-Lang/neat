@@ -151,12 +151,11 @@ class TemplateDecl : LatentSymbol
         string mangle(Type[] types) {
             return "$(types.length)" ~ [join "_$(type.mangle)" for type in types];
         }
-        auto contextModule = findParent!ModuleBase(context.namespace);
 
         with (this.mutex.locked) {
             for (entry in this.instantiations) {
                 if (entry.types.areSame(parameters)) {
-                    contextModule.addModuleDependency(entry.mod);
+                    context.compilingModule.addModuleDependency(entry.mod);
                     if (auto latent = entry.value.instanceOf(LatentSymbol)) {
                         return latent.resolve(context);
                     }
@@ -164,9 +163,6 @@ class TemplateDecl : LatentSymbol
                 }
             }
         }
-        context = context.withNamespace(new TemplateInstantiationNamespace(
-            this.parent, this.decl.typeParameterNames, parameters));
-        Symbol value = this.decl.content.compile(context)?;
 
         /*
          * Emit instance into new module.
@@ -175,6 +171,12 @@ class TemplateDecl : LatentSymbol
          */
         string moduleMangle = this.mangle ~ "_instance_" ~ parameters.mangle;
         ModuleBase module_ = context.compiler.createModule(this.decl.name, moduleMangle, locRange, null);
+
+        auto instanceContext = context
+            .withNamespace(new TemplateInstantiationNamespace(
+                this.parent, this.decl.typeParameterNames, parameters))
+            .withCompilingModule(module_);
+        Symbol value = this.decl.content.compile(instanceContext)?;
 
         with (this.mutex.locked) {
             this.instantiations ~= (module_, parameters, value);
@@ -191,9 +193,10 @@ class TemplateDecl : LatentSymbol
         module_.track(resolvedValue);
 
         // after append, to break recursion loops
-        module_.compile(context)?;
+        module_.compile(instanceContext)?;
 
-        contextModule.addModuleDependency(module_);
+        // print("template hooking: add $(module_.mangledName) to $(context.compilingModule.mangledName)");
+        context.compilingModule.addModuleDependency(module_);
         return resolvedValue;
     }
 }

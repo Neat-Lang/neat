@@ -4225,6 +4225,8 @@ class Module : ModuleBase
 
     override (void | fail Error) compile(Context context)
     {
+        auto context = context.withCompilingModule(this);
+
         this.resolver.resolveAll(context)?;
 
         (void | fail Error) walkSymbols((void | fail Error) delegate((Symbol | FinishedSymbol)) dg) {
@@ -4532,9 +4534,10 @@ class AstCompileTask : ITask
 {
     ASTModule astModule;
     (:none | Module | Error) result;
-    Context context;
 
-    this(this.astModule, this.context) {
+    ImmutableContext icontext;
+
+    this(this.astModule, this.icontext) {
         this.result = :none;
     }
 
@@ -4547,7 +4550,8 @@ class AstCompileTask : ITask
     }
 
     override void run() {
-        this.result = compileModule(context, astModule, true);
+        this.result = compileModule(
+            astModule, this.icontext, true);
         this.result.case {
             Module m: m.mangledName;
             Error error: {}
@@ -4581,7 +4585,7 @@ class ASTImport : ASTDeclaration
     override (Context | fail Error) compile(Context context) {
         auto astModule_ = this.module_?;
         auto id = "compile platform $(context.platform.ident) ast $(astModule_.mangledName)";
-        auto task = new AstCompileTask(astModule_, context);
+        auto task = new AstCompileTask(astModule_, context.data);
 
         context.compiler.workPool.queue(id, task);
         auto module_ = context.compiler.workPool.wait(id)
@@ -4971,16 +4975,19 @@ class LexicalContextImpl : LexicalContext
         compiler, moduleToFile(target.name), pak, true, helper, config, import_.locRange);
 }
 
-(Module | fail Error) compileModule(Context context, ASTModule astModule, bool addDefaultImports)
+(Module | fail Error) compileModule(ASTModule astModule, ImmutableContext icontext, bool addDefaultImports)
 {
     mut nullable Module parent = null;
     if (auto astParent = astModule.parent)
     {
-        parent = compileModule(context, astParent, addDefaultImports)?;
+        parent = compileModule(astParent, icontext, addDefaultImports)?;
     }
 
     Module module_ = new Module(astModule.name, astModule.mangledName, astModule.locRange, parent);
-    auto context = context.withNamespace(module_);
+    auto icontext = makeIContext(
+        icontext.compiler, icontext.platform, astModule.macroState,
+        icontext.modulePostProcessor);
+    auto context = makeContext(icontext, module_);
 
     if (addDefaultImports) {
         context.compiler.addDefaultImports(context, module_)?;
@@ -4992,7 +4999,7 @@ class LexicalContextImpl : LexicalContext
             ASTImport import_:
                 auto mod = import_.module_?;
                 auto id = "compile platform $(context.platform.ident) ast $(mod.mangledName)";
-                auto task = new AstCompileTask(mod, context);
+                auto task = new AstCompileTask(mod, icontext);
                 context.compiler.workPool.queue(id, task);
             default: {}
         }
@@ -5005,7 +5012,7 @@ class LexicalContextImpl : LexicalContext
                 // requeue in case it was in a version()
                 auto mod = import_.module_?;
                 auto id = "compile platform $(context.platform.ident) ast $(mod.mangledName)";
-                auto task = new AstCompileTask(mod, context);
+                auto task = new AstCompileTask(mod, icontext);
                 context.compiler.workPool.queue(id, task);
 
                 auto importedModule = context.compiler.workPool.wait(id)

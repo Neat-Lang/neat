@@ -13,7 +13,7 @@ FLAGS="-O"
 
 if [ \! -z ${FAST+x} ]
 then
-    FLAGS=""
+    FLAGS="-j8"
 fi
 
 LLVM_CONFIG="/usr/lib/llvm/12/bin/llvm-config"

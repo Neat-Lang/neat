@@ -36,3 +36,4 @@ Have some example code! Here's a program that prints the longest line in a file:
    getstarted
    intro
    manual
+   std

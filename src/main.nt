@@ -18,12 +18,14 @@ import neat.hash;
 import neat.packages;
 import neat.parser_base;
 import neat.stuff;
+import neat.templ;
 import neat.types;
 import neat.unittest_;
 import neat.workpool;
+import std.algorithm;
 import std.file;
 import std.json;
-import std.string : startsWith;
+import std.string;
 import std.thread;
 
 extern(C) int getpid();
@@ -91,9 +93,14 @@ struct BackgroundCompilation
     string[] extraLibs;
 }
 
-class CompilationVisitor
+abstract class CompilationVisitor
 {
-    void visit(FinishedSymbol sym) {}
+    abstract void visit(FinishedSymbol sym);
+}
+
+abstract class ASTModuleVisitor
+{
+    abstract void visit(ASTModule mod);
 }
 
 BackgroundCompilation emitModule(
@@ -297,6 +304,19 @@ struct BuildResult
     Hash hash;
 }
 
+class ModulePreProcessorImpl : ModulePreProcessor
+{
+    ASTModuleVisitor[] visitors;
+
+    this(this.visitors) { }
+
+    override void process(ASTModuleBase module_) {
+        auto module_ = module_.instanceOf(ASTModule).notNull;
+
+        [visitor.visit(module_) for visitor in visitors];
+    }
+}
+
 class ModulePostProcessorImpl : ModulePostProcessor
 {
     CompilationVisitor[] visitors;
@@ -354,47 +374,18 @@ class ModulePostProcessorImpl : ModulePostProcessor
     }
 }
 
-bool greater(string a, string b) {
-    size_t min(size_t a, size_t b) {
-        if (a < b) return a;
-        return b;
-    }
-    for (i in 0 .. min(a.length, b.length)) {
-        if (a[i] > b[i]) return true;
-        if (a[i] < b[i]) return false;
-    }
-    return a.length > b.length;
-}
-
-string[] sort(string[] array) {
-    // blatantly ripped off from https://en.wikipedia.org/wiki/Shellsort
-    auto gaps = [701, 301, 132, 57, 23, 10, 4, 1];  // Ciura gap sequence
-
-    mut auto result = [a for a in array];
-    for (gap in gaps) {
-        for (mut int i = gap; i < array.length; i+=1) {
-            auto temp = result[i];
-            mut int j = i;
-            while (j >= gap && greater(result[j - gap], temp)) {
-                result[j] = result[j - gap];
-                j -= gap;
-            }
-            result[j] = temp;
-       }
-    }
-    return result;
-}
-
 (BuildResult | fail Error) buildAstModule(
     ASTModule astModule, BuildSettings settings,
-    CompilationVisitor[] compilationVisitors,
+    ASTModuleVisitor[] moduleVisitors, CompilationVisitor[] compilationVisitors,
     Options options)
 {
+    auto preProcessor = new ModulePreProcessorImpl(moduleVisitors);
     auto postProcessor = new ModulePostProcessorImpl(compilationVisitors, settings);
+    preProcessor.process(astModule);
 
     auto icontext = makeIContext(
         settings.compiler, settings.platform, astModule.macroState,
-        postProcessor);
+        preProcessor, postProcessor);
     Module module_ = compileModule(astModule, icontext, addDefaultImports=true)?;
 
     postProcessor.wait;
@@ -404,7 +395,7 @@ string[] sort(string[] array) {
     mut string[] intermediateFiles;
     auto hash = new Hash;
     hash.addl(__GENERATION__);
-    for (taskId in postProcessor.taskIds.sort) {
+    for (taskId in postProcessor.taskIds.sort((a, b) => a.lexicallyBefore(b))) {
         auto task = settings.pool.wait(taskId).instanceOf(CompilationTask);
         auto compilation = task.compilation;
         objFiles ~= compilation.objFile;
@@ -416,6 +407,15 @@ string[] sort(string[] array) {
     }
 
     return BuildResult(objFiles, intermediateFiles, module_, hash);
+}
+
+class SimpleModulePreProcessor : ModulePreProcessor
+{
+    this() { }
+
+    override void process(ASTModuleBase module_)
+    {
+    }
 }
 
 class SimpleModulePostProcessor : ModulePostProcessor
@@ -438,7 +438,7 @@ class ParserHelperImpl : ParserHelper
         print("# stageM $function_");
         // ignore pragma(lib) in macro (what are you doing)
         auto dummyOptions = new Options;
-        auto result = buildAstModule(astModule, this.settings, [], dummyOptions)?;
+        auto result = buildAstModule(astModule, this.settings, [], [], dummyOptions)?;
         string objFiles = [join " " ~ a for a in result.objFiles];
 
         string baseCmd() {
@@ -453,10 +453,11 @@ class ParserHelperImpl : ParserHelper
         mut string baseCmd = baseCmd;
         if (settings.x86_32) baseCmd ~= " -m32";
 
+        auto preProcessor = new SimpleModulePreProcessor;
         auto postProcessor = new SimpleModulePostProcessor;
         auto icontext = makeIContext(
             settings.compiler, settings.platform, new MacroState,
-            postProcessor);
+            preProcessor, postProcessor);
         auto simpleContext = makeContext(icontext, result.module_);
         auto fun = result.module_.lookup(function_, simpleContext, __RANGE__)?.instanceOf(Function);
         string name = fun.mangle;
@@ -608,6 +609,226 @@ class UmlVisitor : CompilationVisitor
     }
 }
 
+struct DocEntry
+{
+    string modName;
+
+    string name;
+
+    string shortRepr, longRepr;
+
+    string comment;
+
+    string[] examples;
+
+    (:fun | :class_, DocEntry[] methods) data;
+}
+
+class DocGenVisitor : ASTModuleVisitor
+{
+    DocEntry[] entries;
+
+    // unittests directly after a function are examples.
+    bool lastEntryWasFunction;
+
+    this() { reset; }
+
+    void reset() { this.lastEntryWasFunction = false; }
+
+    void visitFunction(string modName, mut string comment, (:templateArgs, string[] args | :none) extra, ASTFunction fun) {
+        if (comment.empty) comment = "/// TODO: document";
+
+        auto isDocComment = comment.startsWith("/**") || comment.startsWith("///");
+        if (!isDocComment) return;
+
+        /**
+         * Strip the wrapping / * and * / of a comment.
+         */
+        string peel(mut string comment) {
+            if (comment.startsWith("/*")) comment = comment[2 .. $];
+            if (comment.endsWith("*/")) comment = comment[0 .. $ - 2];
+            return comment;
+        }
+        string removeStart(string line) {
+            if (line.startsWith("* ")) return line[2 .. $].strip;
+            if (line.startsWith("*")) return line[1 .. $].strip;
+            if (line.startsWith("/// ")) return line[3 .. $].strip;
+            if (line.startsWith("// ")) return line[2 .. $].strip;
+            return line;
+        }
+
+        auto comment = comment
+            .peel
+            .split("\n")
+            .map(a => a.strip.removeStart)
+            .array
+            .trimEmpty
+            .join("\n");
+        auto shortRepr = "$(fun.name)(" ~ [join with ", " param.name for param in fun.params] ~ ")";
+        string templateArgs = extra.case(
+            (:templateArgs, string[] args): "(" ~ args.join(", ") ~ ")",
+            :none: "");
+        auto longRepr = "$(fun.ret.repr) $(fun.name)$templateArgs("
+            ~ [join with ", " "$(param.type.repr) $(param.name)" for param in fun.params]
+            ~ ")";
+        entries ~= DocEntry(modName, fun.name, shortRepr, longRepr, comment, [], :fun);
+        lastEntryWasFunction = true;
+    }
+
+    void visitUnittest(ASTUnitTest ut) {
+        if (!lastEntryWasFunction) return;
+        // TODO unittest doc comment
+        auto utSrc = ut.bodyText.split("\n").dedent.trimEmpty.join("\n");
+
+        entries[$ - 1].examples ~= utSrc;
+    }
+
+    override void visit(ASTModule module_) {
+        reset;
+        // FIXME look at parent
+        for (auto entry in module_.entries) {
+            entry.symbol.case {
+                ASTUnitTest ut: {}
+                default:
+                    reset;
+            }
+            if (entry.protection == Protection.private_) {
+                continue;
+            }
+            entry.symbol.case {
+                ASTUnitTest ut:
+                    visitUnittest(ut);
+                ASTDeclaration decl:
+                    if (auto templ = decl.instanceOf(ASTTemplateDecl)) {
+                        if (auto fun = templ.content.instanceOf(ASTFunction)) {
+                            visitFunction(
+                                module_.name,
+                                templ.comment,
+                                (:templateArgs, templ.typeParameterNames),
+                                fun,
+                            );
+                        }
+                    }
+                ASTSymbol sym:
+                    if (auto fun = sym.instanceOf(ASTFunction)) {
+                        visitFunction(module_.name, fun.comment, :none, fun);
+                    }
+                default: {}
+            }
+        }
+    }
+
+    void writeTo(string folder) {
+        auto modNames = entries.unique(a => a.modName);
+        for (modName in modNames) {
+            auto modEntries = this.entries
+                .filter(a => a.modName == modName)
+                .array
+                .sort((a, b) => a.name.lexicallyBefore(b.name));
+            auto folderParts = folder.split("/").trimEmpty;
+            auto modParts = modName.split(".").trimEmpty;
+            for (i in 0 .. modParts.length) {
+                mkdir((folderParts ~ modParts[0 .. i]).join("/"));
+            }
+            auto fileName = (folderParts ~ modParts).join("/") ~ ".rst";
+            auto modLabel = modParts.join("_");
+            string dashes(size_t length) { return ["-" for i in 0 .. length].join(""); }
+            string linkTo(DocEntry entry) {
+                entry.data.case {
+                    :fun: return ":func:`$(entry.name)`";
+                    (:class_, DocEntry[] methods): return ":class:`$(entry.name)`";
+                }
+            }
+            string entryLinks = [join with ", " linkTo(entry) for entry in modEntries];
+
+            mut string[] text = "
+                .. _$modLabel:
+                .. highlight:: d
+
+                $modName
+                $(dashes(modName.length))
+
+                .. c:namespace:: $modName
+
+                Module entries: $entryLinks".split("\n").trimEmpty.dedent;
+            for (entry in modEntries) {
+                text ~= "
+                    .. function:: $(entry.shortRepr)
+
+                        `$(entry.longRepr)`
+                ".split("\n").dedent;
+                text ~= entry.comment.split("\n").indent(4);
+                for (example in entry.examples) {
+                    text ~= ["", "    Example::", ""];
+                    text ~= example.split("\n").indent(8);
+                }
+            }
+            fileName.writeText(text.join("\n") ~ "\n");
+        }
+    }
+}
+
+template sort(T, U) {
+    T sort(T array, U smaller) {
+        // quick (but horribly memory inefficient) sort
+        if (array.length <= 1) return array;
+        auto partition = array[$ / 2];
+        auto left = [a for a in array where smaller(a, partition)];
+        auto mid = [a for a in array where !smaller(a, partition) && !smaller(partition, a)];
+        auto right = [a for a in array where smaller(partition, a)];
+        return left.sort(smaller) ~ mid ~ right.sort(smaller);
+    }
+}
+
+bool lexicallyBefore(string a, string b) {
+    import std.math : min;
+
+    for (i in 0 .. min(a.length, b.length)) {
+        if (a[i] < b[i]) return true;
+        if (a[i] > b[i]) return false;
+    }
+    return a.length < b.length;
+}
+
+template unique(T, U) {
+    typeof(right(left.front))[] unique(T left, U right) {
+        mut typeof(right(left.front))[] res;
+        for (entry in left) {
+            auto value = right(entry);
+            if ([any a == value for a in res]) continue;
+            res ~= value;
+        }
+        return res;
+    }
+}
+
+string[] indent(string[] lines, int depth) {
+    auto space = [join " " for i in 0 .. depth];
+    string patch(string line) {
+        if (line.strip.empty) return "";
+        return space ~ line;
+    }
+    return [line.patch for line in lines];
+}
+
+string[] dedent(string[] lines) {
+    int startSpaces(string line) {
+        return [count ch in line while ch == " "[0]];
+    }
+    int indent = [min(line.startSpaces) for line in lines where !line.strip.empty];
+    string patch(string line) {
+        if (line.strip.empty) return "";
+        return line[indent .. $];
+    }
+    return [line.patch for line in lines];
+}
+
+string[] trimEmpty(mut string[] lines) {
+    while (!lines.empty && lines[0].strip.empty) lines = lines[1 .. $];
+    while (!lines.empty && lines[$ - 1].strip.empty) lines = lines[0 .. $ - 1];
+    return lines;
+}
+
 class ModuleSet
 {
     Module[string] store;
@@ -701,6 +922,7 @@ class Options
     PlatformFlags platformFlags, macroPlatformFlags;
     string[] cFlags; // for neat.macros.cimport
     string[] versions, macroVersions;
+    string docGenFolder;
     string runningCompilerVersion;
     string requestedCompilerVersion;
     int threads;
@@ -797,6 +1019,10 @@ class Options
             } else if (arg == "-uml") {
                 assert(i + 1 < args.length);
                 this.umlFile = args[i + 1];
+                i += 1;
+            } else if (arg == "-docgen") {
+                assert(i + 1 < args.length);
+                this.docGenFolder = args[i + 1];
                 i += 1;
             } else if (arg == "-unittest") {
                 this.unittest_ = true;
@@ -914,6 +1140,7 @@ void buildBinary(Options options, string mainFile, string execPath, Package[] pa
     // FIXME break reference loop
     compiler.helper = helper;
     mut CompilationVisitor[] compilationVisitors;
+    mut ASTModuleVisitor[] moduleVisitors;
 
     auto unittestVisitor = new UnittestVisitor;
     if (options.unittest_) {
@@ -925,10 +1152,15 @@ void buildBinary(Options options, string mainFile, string execPath, Package[] pa
         compilationVisitors ~= umlVisitor;
     }
 
+    auto docGenVisitor = new DocGenVisitor;
+    if (options.docGenFolder != "") {
+        moduleVisitors ~= docGenVisitor;
+    }
+
     auto astModule = getModule(compiler, mainFile, null, false, helper, modParseConfig, __RANGE__).case(
         ASTModule mod: mod,
         Error err: exitWithError!ASTModule(err));
-    auto result = buildAstModule(astModule, settings, compilationVisitors, options).case(
+    auto result = buildAstModule(astModule, settings, moduleVisitors, compilationVisitors, options).case(
         BuildResult result: result,
         Error err: exitWithError!BuildResult(err));
     mut string fileArgs = [join " " ~ a for a in result.objFiles];
@@ -936,6 +1168,9 @@ void buildBinary(Options options, string mainFile, string execPath, Package[] pa
 
     if (options.umlFile != "") {
         umlVisitor.writeTo(options.umlFile);
+    }
+    if (options.docGenFolder != "") {
+        docGenVisitor.writeTo(options.docGenFolder);
     }
 
     string binHashOutput = ".obj/hash_$(result.hash.text).c";

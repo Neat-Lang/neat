@@ -1,0 +1,359 @@
+module neat.docgen;
+
+macro import neat.macros.listcomprehension;
+
+import neat.base;
+import neat.class_;
+import neat.function_;
+import neat.struct_;
+import neat.stuff;
+import neat.templ;
+import neat.unittest_;
+import std.algorithm;
+import std.file;
+import std.string;
+
+class DocGenVisitor : ASTModuleVisitor
+{
+    DocEntry[] entries;
+
+    // unittests directly after a DocEntry symbol are examples.
+    bool lastEntryWasDocumentable;
+
+    this() { reset; }
+
+    void reset() { this.lastEntryWasDocumentable = false; }
+
+    alias ExtraArgs = (:templateArgs, string[] args | :none);
+
+    (string shortRepr, string longRepr, string comment) transformFunction(
+        string comment, ExtraArgs extra,
+        string funName, ASTSymbol ret, (ASTParameter | ASTThisAssignment)[] params)
+    {
+        string[] paramNames = [param.case(
+            ASTParameter p: p.name,
+            ASTThisAssignment ass: ass.name
+        ) for param in params];
+        string[] paramRepr = [param.case(
+            ASTParameter p: "$(p.type.repr) $(p.name)",
+            ASTThisAssignment ass: "this.$(ass.name)"
+        ) for param in params];
+        auto comment = comment.transform;
+        auto shortRepr = "$funName(" ~ [join with ", " name for name in paramNames] ~ ")";
+        string templateArgs = extra.case(
+            (:templateArgs, string[] args): "(" ~ args.join(", ") ~ ")",
+            :none: "");
+        string longRepr() {
+            if (funName == "this") {
+                return "this$templateArgs("
+                    ~ paramRepr.join(", ")
+                    ~ ")";
+            }
+            return "$(ret.repr) $funName$templateArgs("
+                ~ paramRepr.join(", ")
+                ~ ")";
+        }
+
+        return (shortRepr, longRepr, comment);
+    }
+
+    void visitFunction(string modName, mut string comment, ExtraArgs extra, ASTFunction fun) {
+        if (comment.empty) comment = "/// TODO: document";
+        if (!comment.isDocComment) return;
+        auto comment = comment.transform;
+
+        // FIXME implconv operator
+        with (transformFunction(
+            comment, extra, fun.name, fun.ret,
+            [cast((ASTParameter | ASTThisAssignment)) param for param in fun.params]))
+        {
+            entries ~= DocEntry(modName, fun.name, shortRepr, longRepr, comment, [], :fun);
+        }
+        lastEntryWasDocumentable = true;
+    }
+
+    void visitStruct(string modName, string name, mut string comment, DocEntry[] methods) {
+        if (comment.empty) comment = "/// TODO: document";
+        if (!comment.isDocComment) return;
+        auto comment = comment.transform;
+
+        entries ~= DocEntry(modName, name, name, name, comment, [], (:class_, methods));
+        lastEntryWasDocumentable = true;
+    }
+
+    void visitClass(string modName, ASTClassDecl class_, mut string comment, DocEntry[] methods) {
+        if (comment.empty) comment = "/// TODO: document";
+        if (!comment.isDocComment) return;
+        auto comment = comment.transform;
+
+        string name = class_.name;
+        entries ~= DocEntry(modName, name, name, name, comment, [], (:class_, methods));
+        lastEntryWasDocumentable = true;
+    }
+
+    void visitUnittest(ASTUnitTest ut) {
+        if (!lastEntryWasDocumentable) return;
+        // TODO unittest doc comment
+        auto utSrc = ut.bodyText.split("\n").dedent.trimEmpty.join("\n");
+
+        entries[$ - 1].examples ~= utSrc;
+    }
+
+    override void visit(ASTModuleBase module_) {
+        auto module_ = module_.instanceOf(ASTModule);
+        reset;
+        // FIXME look at parent
+        for (auto entry in module_.entries) {
+            entry.symbol.case {
+                ASTUnitTest ut: {}
+                default:
+                    reset;
+            }
+            if (entry.protection == Protection.private_) {
+                continue;
+            }
+            entry.symbol.case {
+                ASTUnitTest ut:
+                    visitUnittest(ut);
+                ASTDeclaration decl:
+                    if (auto templ = decl.instanceOf(ASTTemplateDecl)) {
+                        if (auto fun = templ.content.instanceOf(ASTFunction)) {
+                            visitFunction(
+                                module_.name,
+                                templ.comment,
+                                (:templateArgs, templ.typeParameterNames),
+                                fun,
+                            );
+                        }
+                    }
+                ASTSymbol sym:
+                    if (auto fun = sym.instanceOf(ASTFunction)) {
+                        visitFunction(module_.name, fun.comment, :none, fun);
+                    }
+                    if (auto struct_ = sym.instanceOf(ASTStruct)) {
+                        mut DocEntry[] methods;
+                        for (entry in struct_.entries) {
+                            entry.case {
+                                ASTStructMethod method:
+                                    if (method.protection != Protection.private_)
+                                        methods ~= transformStructMethod(module_.name, method);
+                                default: {}
+                            }
+                        }
+                        visitStruct(module_.name, struct_.name, struct_.comment, methods);
+                    }
+                    if (auto classDecl = sym.instanceOf(ASTClassDecl)) {
+                        mut DocEntry[] methods;
+                        for (member in classDecl.members) {
+                            member.case {
+                                ASTClassDeclMethod method:
+                                    if (method.protection != Protection.private_)
+                                        methods ~= transformClassMethod(module_.name, method);
+                                default: {}
+                            }
+                        }
+                        visitClass(module_.name, classDecl, classDecl.comment, methods);
+                    }
+                default: {}
+            }
+        }
+    }
+
+    private DocEntry transformClassMethod(string modName, ASTClassDeclMethod method) {
+        string methodName() {
+            if (method.name == "__ctor") return "this";
+            return method.name;
+        }
+        with (transformFunction(method.comment, :none, methodName, method.ret, method.params)) {
+            return DocEntry(modName, methodName, shortRepr, longRepr, comment, [], :fun);
+        }
+    }
+
+    private DocEntry transformStructMethod(string modName, ASTStructMethod method) {
+        string methodName() {
+            if (method.name == "__ctor") return "this";
+            return method.name;
+        }
+        with (transformFunction(method.comment, :none, methodName, method.ret, method.params)) {
+            return DocEntry(modName, methodName, shortRepr, longRepr, comment, [], :fun);
+        }
+    }
+
+    void writeTo(string folder) {
+        auto modNames = entries.unique(a => a.modName);
+        for (modName in modNames) {
+            auto modEntries = this.entries
+                .filter(a => a.modName == modName)
+                .array
+                .sort((a, b) => a.name.lexicallyBefore(b.name));
+            auto folderParts = folder.split("/").trimEmpty;
+            auto modParts = modName.split(".").trimEmpty;
+            for (i in 0 .. modParts.length) {
+                mkdir((folderParts ~ modParts[0 .. i]).join("/"));
+            }
+            auto fileName = (folderParts ~ modParts).join("/") ~ ".rst";
+            auto modLabel = modParts.join("_");
+            string dashes(size_t length) { return ["-" for i in 0 .. length].join(""); }
+            string linkTo(DocEntry entry) {
+                entry.data.case {
+                    :fun: return ":func:`$(entry.name)`";
+                    (:class_, DocEntry[] methods): return ":class:`$(entry.name)`";
+                }
+            }
+            string entryLinks = [join with ", " linkTo(entry) for entry in modEntries];
+
+            mut string[] text = "
+                .. _$modLabel:
+                .. highlight:: d
+
+                $modName
+                $(dashes(modName.length))
+
+                .. c:namespace:: $modName
+
+                Module entries: $entryLinks".split("\n").trimEmpty.dedent;
+            for (entry in modEntries) {
+                void addExamples(string[] examples, int depth) {
+                    for (example in examples) {
+                        text ~= ["", "    Example::", ""];
+                        text ~= example.split("\n").indent(depth);
+                    }
+                }
+                void addMethod(DocEntry entry) {
+                    text ~= "
+                        .. method:: $(entry.shortRepr)
+
+                            `$(entry.longRepr)`
+                    ".split("\n").dedent.indent(4);
+                    text ~= entry.comment.split("\n").indent(8);
+                    addExamples(entry.examples, 12);
+                }
+                entry.data.case {
+                    :fun:
+                        text ~= "
+                            .. function:: $(entry.shortRepr)
+
+                                `$(entry.longRepr)`
+                        ".split("\n").dedent;
+                        text ~= entry.comment.split("\n").indent(4);
+                        addExamples(entry.examples, 8);
+                    (:class_, DocEntry[] methods):
+                        text ~= "
+                            .. class:: $(entry.shortRepr)
+                        ".split("\n").dedent;
+                        text ~= entry.comment.split("\n").indent(4);
+                        addExamples(entry.examples, 8);
+                        [addMethod(method) for method in methods];
+                }
+            }
+            fileName.writeText(text.join("\n") ~ "\n");
+        }
+    }
+}
+
+private bool isDocComment(string comment) {
+    return comment.startsWith("/**") || comment.startsWith("///");
+}
+
+struct DocEntry
+{
+    string modName;
+
+    string name;
+
+    string shortRepr, longRepr;
+
+    string comment;
+
+    string[] examples;
+
+    (:fun | :class_, DocEntry[] methods) data;
+}
+
+private string transform(string comment) {
+    return comment
+        .peel
+        .split("\n")
+        .map(a => a.strip.removeStart)
+        .array
+        .trimEmpty
+        .join("\n");
+}
+
+/**
+ * Strip the wrapping / * and * / of a comment.
+ */
+private string peel(mut string comment) {
+    if (comment.startsWith("/*")) comment = comment[2 .. $];
+    if (comment.endsWith("*/")) comment = comment[0 .. $ - 2];
+    return comment;
+}
+
+private string removeStart(string line) {
+    if (line.startsWith("* ")) return line[2 .. $].strip;
+    if (line.startsWith("*")) return line[1 .. $].strip;
+    if (line.startsWith("/// ")) return line[3 .. $].strip;
+    if (line.startsWith("// ")) return line[2 .. $].strip;
+    return line;
+}
+
+bool lexicallyBefore(string a, string b) {
+    import std.math : min;
+
+    for (i in 0 .. min(a.length, b.length)) {
+        if (a[i] < b[i]) return true;
+        if (a[i] > b[i]) return false;
+    }
+    return a.length < b.length;
+}
+
+template unique(T, U) {
+    typeof(right(left.front))[] unique(T left, U right) {
+        mut typeof(right(left.front))[] res;
+        for (entry in left) {
+            auto value = right(entry);
+            if ([any a == value for a in res]) continue;
+            res ~= value;
+        }
+        return res;
+    }
+}
+
+string[] indent(string[] lines, int depth) {
+    auto space = [join " " for i in 0 .. depth];
+    string patch(string line) {
+        if (line.strip.empty) return "";
+        return space ~ line;
+    }
+    return [line.patch for line in lines];
+}
+
+string[] dedent(string[] lines) {
+    int startSpaces(string line) {
+        return [count ch in line while ch == " "[0]];
+    }
+    int indent = [min(line.startSpaces) for line in lines where !line.strip.empty];
+    string patch(string line) {
+        if (line.strip.empty) return "";
+        return line[indent .. $];
+    }
+    return [line.patch for line in lines];
+}
+
+string[] trimEmpty(mut string[] lines) {
+    while (!lines.empty && lines[0].strip.empty) lines = lines[1 .. $];
+    while (!lines.empty && lines[$ - 1].strip.empty) lines = lines[0 .. $ - 1];
+    return lines;
+}
+
+template sort(T, U) {
+    T sort(T array, U smaller) {
+        // quick (but horribly memory inefficient) sort
+        if (array.length <= 1) return array;
+        auto partition = array[$ / 2];
+        auto left = [a for a in array where smaller(a, partition)];
+        auto mid = [a for a in array where !smaller(a, partition) && !smaller(partition, a)];
+        auto right = [a for a in array where smaller(partition, a)];
+        return left.sort(smaller) ~ mid ~ right.sort(smaller);
+    }
+}

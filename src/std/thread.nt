@@ -6,6 +6,13 @@ import std.stdio;
 
 pragma(lib, "pthread");
 
+/**
+ * This class implements mutual exclusion.
+ *
+ * `lock` and `unlock` calls must be paired. Only one thread may be between `lock`
+ * and `unlock` at the same time. To enforce this, the second thread's `lock` will
+ * block until the first thread calls `unlock`.
+ */
 class Mutex
 {
     pthread_mutex_t mutex;
@@ -18,6 +25,8 @@ class Mutex
         pthread_mutex_init(&mutex, &attrs);
         isLocked = false;
     }
+
+    /// Lock the mutex.
     void lock() {
         int ret = pthread_mutex_lock(&mutex);
         if (ret) {
@@ -28,12 +37,19 @@ class Mutex
         assert(!isLocked);
         isLocked = true;
     }
+    /// Scope guard that automatically calls lock on scope entry and unlock on scope exit.
     LockGuard locked() {
         return LockGuard(this);
     }
+    /**
+     * Scope guard that automatically calls unlock on scope entry and lock on scope exit.
+     *
+     * Used to implement work loops that want to release their lock to do some task.
+     */
     UnlockGuard unlocked() {
         return UnlockGuard(this);
     }
+    /// Unlock the mutex.
     void unlock() {
         assert(isLocked);
         isLocked = false;
@@ -46,27 +62,6 @@ class Mutex
     }
 }
 
-struct LockGuard
-{
-    Mutex mutex;
-    void onEnter() {
-        mutex.lock;
-    }
-    void onExit() {
-        mutex.unlock;
-    }
-}
-
-struct UnlockGuard
-{
-    Mutex mutex;
-    void onEnter() {
-        mutex.unlock;
-    }
-    void onExit() {
-        mutex.lock;
-    }
-}
 
 unittest
 {
@@ -92,6 +87,35 @@ unittest
     assert(!mutex.isLocked);
 }
 
+private struct LockGuard
+{
+    Mutex mutex;
+    void onEnter() {
+        mutex.lock;
+    }
+    void onExit() {
+        mutex.unlock;
+    }
+}
+
+private struct UnlockGuard
+{
+    Mutex mutex;
+    void onEnter() {
+        mutex.unlock;
+    }
+    void onExit() {
+        mutex.lock;
+    }
+}
+
+/**
+ * This class implements condition variables.
+ *
+ * A condition variable allows a thread to wait until a condition is signaled.
+ * The provided mutex must be locked when `wait` is called. It will be locked
+ * when wait returns, but be unlocked for the intermediate time.
+ */
 class CondVar
 {
     pthread_cond_t cond;
@@ -99,6 +123,8 @@ class CondVar
     Mutex mutex;
 
     this(this.mutex) { pthread_cond_init(&cond, null); }
+
+    /// Wait for a thread to signal us.
     void wait() {
         assert(mutex.isLocked);
         mutex.isLocked = false;
@@ -111,6 +137,8 @@ class CondVar
         assert(!mutex.isLocked);
         mutex.isLocked = true;
     }
+
+    /// Wake up (at least) one waiting thread.
     void signal() {
         int ret = pthread_cond_signal(&cond);
         if (ret) {
@@ -119,6 +147,8 @@ class CondVar
             exit(1);
         }
     }
+
+    /// Wake up all waiting threads.
     void broadcast() {
         int ret = pthread_cond_broadcast(&cond);
         if (ret) {
@@ -129,6 +159,10 @@ class CondVar
     }
 }
 
+/**
+ * A convenience wrapper around CondVar that allows waiting
+ * for the outcome of an operation.
+ */
 template Waitable(T)
 {
     class Waitable
@@ -136,26 +170,31 @@ template Waitable(T)
         Mutex mutex;
         CondVar signal;
         T value;
+        /// Create the class with an initial value.
         this(this.value) {
             this.mutex = new Mutex;
             this.signal = new CondVar(this.mutex);
         }
+        /// Set the stored value to a new value.
         void set(T value) {
             with (mutex.locked) {
                 this.value = value;
                 signal.broadcast;
             }
         }
+        /// Provide an action that updates the stored value.
         void update(T delegate(T) action) {
             with (mutex.locked) {
                 this.value = action(this.value);
                 signal.broadcast;
             }
         }
+        /// Wait for the stored value to fulfill the condition.
         void waitFor(bool delegate(T) condition) {
             T id(T value) { return value; }
             waitReact(condition, &id);
         }
+        /// Wait for the stored value to fulfill the condition, then modify it.
         void waitReact(bool delegate(T) condition, T delegate(T) react) {
             with (mutex.locked) while (true) {
                 if (condition(this.value)) {
@@ -169,29 +208,42 @@ template Waitable(T)
     }
 }
 
+/**
+ * This class implements a counting semaphore.
+ *
+ * `acquire` will only return when a matching number
+ * of `release` calls has taken place.
+ */
 class Semaphore
 {
     Waitable!int waitable;
 
+    /// Initialize the class with a number of available tokens.
     this(int i) { this.waitable = new Waitable!int(i); }
 
+    /// Consume a token if available; block if not.
     void acquire() {
         bool greaterZero(int i) { return i > 0; }
         int decrement(int i) { return i - 1; }
         waitable.waitReact(&greaterZero, &decrement);
     }
+
+    /// Provide a token.
     void release() {
         int increment(int i) { return i + 1; }
         waitable.update(&increment);
     }
 }
 
+/**
+ * The superclass for a task that can be scheduled to run on a thread pool.
+ */
 abstract class Task
 {
     abstract void run();
 }
 
-class Thread
+private class Thread
 {
     pthread_t thr;
     ThreadPool pool;
@@ -209,6 +261,11 @@ class Thread
     }
 }
 
+
+/**
+ * A thread pool decouples threads and units of action. It manages multiple threads
+ * and keeps a queue of tasks, which are distributed over threads as they become available.
+ */
 class ThreadPool
 {
     Mutex mutex;
@@ -218,6 +275,7 @@ class ThreadPool
     Semaphore waitingTasks;
     Semaphore doneTasks;
 
+    /// Create a thread pool with a number of threads.
     this(int i) {
         this.mutex = new Mutex;
         this.waitingTasks = new Semaphore(0);
@@ -228,6 +286,11 @@ class ThreadPool
             threads ~= thread;
         }
     }
+    /**
+     * Returns when all queued tasks have completed.
+     * The callback will be invoked with a number between 0 and 1, indicating progress.
+     * Intended for standalone tools that want to present a progress bar.
+     */
     void waitComplete(void delegate(float) progress) {
         mut int tasks;
         with (this.mutex.locked) {
@@ -239,6 +302,9 @@ class ThreadPool
             progress((cast(int) i + 1) * 1.0f / tasks);
         }
     }
+    /**
+     * Add a task to the pool's task queue.
+     */
     void addTask(Task task) {
         with (mutex.locked) {
             tasks ~= task;
@@ -246,6 +312,9 @@ class ThreadPool
         }
         this.waitingTasks.release;
     }
+    /**
+     * For internal use, returns a task when one has been queued.
+     */
     Task getTask()  {
         this.waitingTasks.acquire;
         with (mutex.locked) {
@@ -257,14 +326,22 @@ class ThreadPool
 }
 
 // TODO: null to function ptr
-void nothing(void*) { }
+private void nothing(void*) { }
 
+// TODO: tomorrow, class in template docgen!
+/**
+ * This class wraps a value that is unique per thread accessing it.
+ */
 template ThreadLocal(T) {
     class ThreadLocal {
         pthread_key_t key;
+        /// Initialize a `ThreadLocal`.
         this() {
             pthread_key_create(&key, &nothing);
         }
+        /**
+         * Set the `ThreadLocal` to a new value.
+         */
         void set(mut T value) {
             import neat.runtime.stdlib : malloc, memcpy, memset;
 
@@ -278,6 +355,11 @@ template ThreadLocal(T) {
             // destroy the value without releasing it: cause a leak.
             memset(&value, 0, sizeof(T));
         }
+        /**
+         * Get the value stored in the `ThreadLocal`.
+         * If `set` has not been called, the default value for the type
+         * is returned.
+         */
         T get() {
             import neat.runtime.stdlib : memcpy, memset;
 

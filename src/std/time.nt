@@ -3,13 +3,18 @@ module std.time;
 import c.sys.time;
 import neat.runtime : assert;
 
+/**
+ * This type describes a time without a timezone.
+ */
 struct Time
 {
     timeval val;
+    /// The number of fractional seconds from another time to this one.
     float secondsSince(Time other) {
         return cast(int) (val.time_t - other.val.time_t)
-            + (cast(int) val.suseconds_t - cast(int) other.val.suseconds_t) / 1000000.0f;
+            + cast(int) (val.suseconds_t - other.val.suseconds_t) / 1000000.0f;
     }
+    /// The current time in the system timezone.
     static Time now() {
         Time res;
         gettimeofday(&res.val, null);
@@ -17,22 +22,37 @@ struct Time
     }
 }
 
+/**
+ * This class allows measuring time taken by some task.
+ *
+ * The stopwatch starts out stopped.
+ */
 class Stopwatch {
-    // Seconds from previous runs.
-    float seconds;
+    /// Seconds from previous runs.
+    float seconds_;
     (:running, Time | :stopped) state;
+    /// Instantiate the class.
     this() {
-        this.seconds = 0;
+        this.seconds_ = 0;
         this.state = :stopped;
     }
-    /// Stop the stopwatch.
+    /// True if the stopwatch is stopped.
     bool stopped() {
         return this.state == :stopped;
     }
+    /**
+     * The number of seconds accumulated on the stopwatch.
+     * Note that the stopwatch must be stopped to access this property.
+     */
+    float seconds() {
+        return this.seconds_;
+    }
+    /// Start the stopwatch.
     void start() {
         assert(stopped);
         state = (:running, Time.now);
     }
+    /// Stop the stopwatch.
     void stop() {
         assert(!stopped);
         // TODO: __undefined
@@ -40,21 +60,30 @@ class Stopwatch {
         auto startTime = state.case((:running, Time t): t, :stopped: __undefined);
         auto stopTime = Time.now;
         state = :stopped;
-        seconds += stopTime.secondsSince(startTime);
+        seconds_ += stopTime.secondsSince(startTime);
     }
-    /// Resets the stopwatch; returns another stopwatch stopped at the previous time.
+    /**
+     * Split and reset the stopwatch.
+     *
+     * This method returns another stopwatch stopped at the previous time.
+     * If the stopwatch is still running, by the time it is stopped, the sum
+     * of the returned stopwatch's seconds and this one's will be the same
+     * as if the stopwatch had not been split.
+     *
+     * So this function allows atomically taking a "checkpoint" of the stopwatch.
+     */
     Stopwatch split() {
         this.state.case {
             (:stopped):
                 auto copy = new Stopwatch;
-                copy.seconds = this.seconds;
-                this.seconds = 0;
+                copy.seconds_ = this.seconds_;
+                this.seconds_ = 0;
                 return copy;
             (:running, Time start):
                 auto splitPoint = Time.now;
                 auto result = new Stopwatch;
-                result.seconds = this.seconds + splitPoint.secondsSince(start);
-                this.seconds = 0;
+                result.seconds_ = this.seconds_ + splitPoint.secondsSince(start);
+                this.seconds_ = 0;
                 this.state = (:running, splitPoint);
                 return result;
         }

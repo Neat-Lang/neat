@@ -8,11 +8,17 @@ import package(compiler).neat.parser_base;
 
 import std.string;
 
+/**
+ * This type represents a JSON value.
+ */
 struct JSONValue
 {
     // TODO: Write dedicated JSON parser instead of hijacking neat's parsing.
     (:false | :true | int | string | JSONValue[] | (string key, JSONValue value)[]) value;
 
+    /**
+     * Parse a JSON value from a string.
+     */
     static JSONValue parse(string str) {
         auto parser = new Parser("", str);
         (JSONValue | fail Error) result() {
@@ -26,6 +32,9 @@ struct JSONValue
         }
     }
 
+    /**
+     * Load a JSON value from a file.
+     */
     static JSONValue loadFile(string file) {
         import std.file : readText;
 
@@ -42,52 +51,68 @@ struct JSONValue
         }
     }
 
-    ((string key, JSONValue value)[] | :wrongType) object() {
-        return value.case(
-            (:false): :wrongType, (:true): :wrongType, int: :wrongType, string: :wrongType, JSONValue[]: :wrongType,
-            (string key, JSONValue value)[] obj: obj);
+    /// Interprets a JSON value as an object.
+    (string key, JSONValue value)[] object() {
+        value
+            .case(
+                (:false): :wrongType, (:true): :wrongType, int: :wrongType, string: :wrongType, JSONValue[]: :wrongType,
+                (string key, JSONValue value)[] obj: obj)
+            .case {
+                (:wrongType): assert(false);
+                (string key, JSONValue value)[] obj: return obj;
+            }
     }
 
+    /// Returns true if the JSON value is an object.
     bool isObject() {
-        // FIXME object.case() once fix built
-        return object().case(
-            (:wrongType): false,
-            (string key, JSONValue value)[]: true);
+        value.case {
+            (string key, JSONValue value)[] obj: return true;
+            default: return false;
+        }
     }
 
+    /// Returns the JSON value for a key.
     JSONValue get(string key) {
-        object.case {
-            (:wrongType): assert(false);
-            (string key, JSONValue value)[] obj: {
-                assert([any a.key == key for a in obj]);
-                return [first a.value for a in obj where a.key == key else ({ assert(false); JSONValue(:false); })];
+        auto obj = object;
+        assert([any a.key == key for a in obj]);
+        return [first a.value for a in obj where a.key == key else ({ assert(false); JSONValue(:false); })];
+    }
+
+    /// Returns true if the JSON value, which must be an object, contains the key.
+    bool has(string key) {
+        return [any a.key == key for a in object];
+    }
+
+    /**
+     * Sets the given key to a value.
+     */
+    void set(string key, JSONValue value) {
+        auto obj = object;
+        for (i, k in obj) {
+            if (k.key == key) {
+                this.value = obj[0 .. i] ~ (key, value) ~ obj[i + 1 .. $];
+                return;
             }
         }
+        this.value = object ~ (key, value);
     }
 
-    bool has(string key) {
-        object.case {
-            (:wrongType): assert(false);
-            (string key, JSONValue value)[] obj:
-                return [any a.key == key for a in obj];
-        }
-    }
-
-    void set(string key, JSONValue value) {
-        object().case {
-            (:wrongType): assert(false);
-            (string key, JSONValue value)[] arr: this.value = arr ~ (key, value);
-        }
-    }
-
+    /// Given the value is an object, returns an array of string keys.
     string[] keys() {
-        object.case {
-            (:wrongType): assert(false);
-            (string key, JSONValue value)[] obj: return [a.key for a in obj];
-        }
+        return [a.key for a in object];
     }
 }
 
+unittest
+{
+    auto value = JSONValue([("Hello", JSONValue("World"))]);
+    assert(value.str == "{\"Hello\": \"World\"}");
+    assert(JSONValue.parse("{\"Hello\": \"World\"}").str == "{\"Hello\": \"World\"}");
+    // TODO
+    // auto value = JSONValue({ "Hello": "World" });
+}
+
+/// For internal (re)use!
 (JSONValue | fail Error) jsonParseImpl(Parser parser) {
     if (parser.accept("\"")?) {
         return JSONValue(parseStringLiteral(parser)?);
@@ -120,7 +145,8 @@ struct JSONValue
     }
     return parser.fail("unexpected input: " ~ parser.text);
 }
-(string | fail Error) parseStringLiteral(Parser parser)
+
+private (string | fail Error) parseStringLiteral(Parser parser)
 {
     mut int matchLen;
     auto loc = parser.loc;
@@ -144,7 +170,7 @@ struct JSONValue
     return replaceEscapes(str);
 }
 
-(:failure | int | fail Error) parseNumber(Parser parser)
+private (:failure | int | fail Error) parseNumber(Parser parser)
 {
     parser.begin;
     mut bool negative = parser.accept("-")?;
@@ -168,15 +194,9 @@ struct JSONValue
     return i;
 }
 
-unittest
-{
-    auto value = JSONValue([("Hello", JSONValue("World"))]);
-    assert(value.str == "{\"Hello\": \"World\"}");
-    assert(JSONValue.parse("{\"Hello\": \"World\"}").str == "{\"Hello\": \"World\"}");
-    // TODO
-    // auto value = JSONValue({ "Hello": "World" });
-}
-
+/**
+ * Converts a JSON value to a string.
+ */
 string str(JSONValue jv) {
     jv.value.case {
         (:false): return "false";
@@ -190,7 +210,7 @@ string str(JSONValue jv) {
     }
 }
 
-string quote(string s) {
+private string quote(string s) {
     mut string quoted;
     for (ch in s) {
         if (ch == "\""[0]) quoted ~= "\\\"";
@@ -199,7 +219,7 @@ string quote(string s) {
     return "\"" ~ quoted ~ "\"";
 }
 
-string replaceEscapes(string text) {
+private string replaceEscapes(string text) {
     mut string result;
     mut int i;
     while (i < text.length) {

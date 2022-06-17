@@ -72,21 +72,50 @@ class DocGenVisitor : ASTModuleVisitor
         lastEntryWasDocumentable = true;
     }
 
-    void visitStruct(string modName, string name, mut string comment, DocEntry[] methods) {
+    void visitStruct(string modName, mut string comment, ExtraArgs extra, ASTStruct struct_) {
         if (comment.empty) comment = "/// TODO: document";
         if (!comment.isDocComment) return;
         auto comment = comment.transform;
 
-        entries ~= DocEntry(modName, name, name, name, comment, [], (:class_, methods));
+        mut DocEntry[] methods;
+        for (entry in struct_.entries) {
+            entry.case {
+                ASTStructMethod method:
+                    if (method.protection != Protection.private_)
+                        methods ~= transformStructMethod(modName, method);
+                default: {}
+            }
+        }
+
+        string templateArgs = extra.case(
+            (:templateArgs, string[] args): "(" ~ args.join(", ") ~ ")",
+            :none: "");
+        string name = struct_.name;
+        string repr = name ~ templateArgs;
+        entries ~= DocEntry(modName, name, repr, repr, comment, [], (:class_, methods));
         lastEntryWasDocumentable = true;
     }
 
-    void visitClass(string modName, ASTClassDecl class_, mut string comment, DocEntry[] methods) {
+    void visitClass(string modName, mut string comment, ExtraArgs extra, ASTClassDecl classDecl) {
         if (comment.empty) comment = "/// TODO: document";
         if (!comment.isDocComment) return;
         auto comment = comment.transform;
 
-        string name = class_.name;
+        mut DocEntry[] methods;
+        for (member in classDecl.members) {
+            member.case {
+                ASTClassDeclMethod method:
+                    if (method.protection != Protection.private_)
+                        methods ~= transformClassMethod(modName, method);
+                default: {}
+            }
+        }
+
+        string templateArgs = extra.case(
+            (:templateArgs, string[] args): "(" ~ args.join(", ") ~ ")",
+            :none: "");
+        string name = classDecl.name;
+        string repr = name ~ templateArgs;
         entries ~= DocEntry(modName, name, name, name, comment, [], (:class_, methods));
         lastEntryWasDocumentable = true;
     }
@@ -117,13 +146,15 @@ class DocGenVisitor : ASTModuleVisitor
                     visitUnittest(ut);
                 ASTDeclaration decl:
                     if (auto templ = decl.instanceOf(ASTTemplateDecl)) {
+                        auto extra = (:templateArgs, templ.typeParameterNames);
                         if (auto fun = templ.content.instanceOf(ASTFunction)) {
-                            visitFunction(
-                                module_.name,
-                                templ.comment,
-                                (:templateArgs, templ.typeParameterNames),
-                                fun,
-                            );
+                            visitFunction(module_.name, templ.comment, extra, fun);
+                        }
+                        if (auto struct_ = templ.content.instanceOf(ASTStruct)) {
+                            visitStruct(module_.name, templ.comment, extra, struct_);
+                        }
+                        if (auto classDecl = templ.content.instanceOf(ASTClassDecl)) {
+                            visitClass(module_.name, templ.comment, extra, classDecl);
                         }
                     }
                 ASTSymbol sym:
@@ -131,28 +162,10 @@ class DocGenVisitor : ASTModuleVisitor
                         visitFunction(module_.name, fun.comment, :none, fun);
                     }
                     if (auto struct_ = sym.instanceOf(ASTStruct)) {
-                        mut DocEntry[] methods;
-                        for (entry in struct_.entries) {
-                            entry.case {
-                                ASTStructMethod method:
-                                    if (method.protection != Protection.private_)
-                                        methods ~= transformStructMethod(module_.name, method);
-                                default: {}
-                            }
-                        }
-                        visitStruct(module_.name, struct_.name, struct_.comment, methods);
+                        visitStruct(module_.name, struct_.comment, :none, struct_);
                     }
                     if (auto classDecl = sym.instanceOf(ASTClassDecl)) {
-                        mut DocEntry[] methods;
-                        for (member in classDecl.members) {
-                            member.case {
-                                ASTClassDeclMethod method:
-                                    if (method.protection != Protection.private_)
-                                        methods ~= transformClassMethod(module_.name, method);
-                                default: {}
-                            }
-                        }
-                        visitClass(module_.name, classDecl, classDecl.comment, methods);
+                        visitClass(module_.name, classDecl.comment, :none, classDecl);
                     }
                 default: {}
             }
@@ -344,16 +357,4 @@ string[] trimEmpty(mut string[] lines) {
     while (!lines.empty && lines[0].strip.empty) lines = lines[1 .. $];
     while (!lines.empty && lines[$ - 1].strip.empty) lines = lines[0 .. $ - 1];
     return lines;
-}
-
-template sort(T, U) {
-    T sort(T array, U smaller) {
-        // quick (but horribly memory inefficient) sort
-        if (array.length <= 1) return array;
-        auto partition = array[$ / 2];
-        auto left = [a for a in array where smaller(a, partition)];
-        auto mid = [a for a in array where !smaller(a, partition) && !smaller(partition, a)];
-        auto right = [a for a in array where smaller(partition, a)];
-        return left.sort(smaller) ~ mid ~ right.sort(smaller);
-    }
 }

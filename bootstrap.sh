@@ -604,6 +604,8 @@ at_revision 'a98d2a2efb70dc19dfa01461fc6f12f08a3d49e3' 'rebuild neat' 'build/nea
 at_revision '139ce2c8c2a763eb943e334c060d4ba83d297818' 'rebuild neat' 'build/neat'
 # Capture error return from lambda expression.
 at_revision '226f68d29e6d798555b9ba142019486d32ba6218' 'rebuild neat' 'build/neat'
+# Default arguments.
+at_revision 'ec4a2b8954239f14ce2bc8d7c641acc646639d1a' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

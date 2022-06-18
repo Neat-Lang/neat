@@ -224,14 +224,20 @@ class ASTTypeof : ASTSymbol
 {
     ASTSymbol value;
 
-    this(this.value, this.locRange) { }
+    bool captureImplicitReturn;
+
+    this(this.value, this.captureImplicitReturn, this.locRange) { }
 
     override (Type | fail Error) compile(Context context)
     {
-        // right now, declarations in typeof() will be tracked in the stackframe and take up space,
-        // even if they're never initialized.
-        // TODO prevent this via terminal context merging.
-        return this.value.compile(context)?.beExpressionImplCall(context, this.locRange)?.type;
+        auto scope_ = new TypeofScope(context.namespace, context.namespace.isContextScope);
+        auto context = context.withNamespace(scope_);
+        auto type = this.value.compile(context)?.beExpressionImplCall(context, this.locRange)?.type;
+
+        if (captureImplicitReturn)
+            return mergeTypes(context.compiler, [(type, false)] ~ scope_.proposedTypes);
+        else
+            return type;
     }
 
     override string repr() {
@@ -240,6 +246,65 @@ class ASTTypeof : ASTSymbol
 
     override ASTSymbol quote(Quoter quoter) {
         return quoter.compilerCall("astTypeOf", [value.quote(quoter)], locRange);
+    }
+}
+
+Type mergeTypes(CompilerBase compiler, (Type type, bool fail)[] types)
+{
+    assert(types.length > 0);
+
+    // TODO implicitConvertTo should only require Type - ie. return a Expression function(Expression), or something.
+    // Then we could do merging on implicit here.
+    mut (bool fail, Type type)[] eitherEntries;
+    for (entry in types) {
+        mut bool found = false;
+        for (eitherEntry in eitherEntries)
+            if (eitherEntry.fail == entry.fail && eitherEntry.type.same(entry.type))
+                found = true;
+        if (!found) eitherEntries ~= (entry.fail, entry.type);
+    }
+
+    if (eitherEntries.length == 1 && !eitherEntries[0].fail)
+        return eitherEntries[0].type;
+
+    return compiler.eitherType(eitherEntries);
+}
+
+class TypeofScope : Namespace, Returnable, Declarable
+{
+    (Type type, bool fail)[] proposedTypes;
+
+    this(this.parent, this.isContextScope) { }
+
+    override LatentVariable declare(string name, Type type, bool mut, bool borrowed)
+    {
+        return new StubLatentVariable(type);
+    }
+
+    override string mangle() { return ""; } // Doesn't matter.
+
+    override Type mergeReturnType(Type proposed, bool failProp) {
+        this.proposedTypes ~= (proposed, failProp);
+        return proposed;
+    }
+
+    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange) {
+        return this.parent.lookup(name, context, locRange)?;
+    }
+}
+
+class StubLatentVariable : LatentVariable
+{
+    Type type;
+
+    this(this.type) { }
+
+    override Expression localStackFrame(CompilerBase compiler) {
+        return new NullExpr(new Void);
+    }
+
+    override Reference access(CompilerBase compiler, Expression frame) {
+        return compiler.dereference(new NullExpr(new Pointer(this.type)));
     }
 }
 

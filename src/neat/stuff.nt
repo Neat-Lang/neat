@@ -286,7 +286,7 @@ with (parser.transaction)
             if (!expr) return parser.fail("expression expected");
             parser.expect(")")?;
             commit;
-            return new ASTTypeof(expr.notNull, parser.to(from));
+            return new ASTTypeof(expr.notNull, captureImplicitReturn=false, parser.to(from));
         }
 
         if (parser.accept(":")?) {
@@ -1296,6 +1296,7 @@ class ASTPropagateFailureExpr : ASTSymbol
                 new ASTSymbolHelper(v.type),
                 "a",
                 return_=v.fail,
+                fail=v.fail,
                 expr=new ASTIdentifier("a", false, __RANGE__)
             );
         }
@@ -1552,8 +1553,8 @@ class ASTLambdaExpr : ASTSymbol
                 paramName, mutable=true, infer=false, uninitialized=true,
                 type=new ASTIdentifier("T$i", false, __RANGE__), initial=null, __RANGE__);
         auto typeofProbe = new ASTStatementExpression(declareUninitializedParams, value, __RANGE__);
-        auto typeofLambda = new ASTTypeof(typeofProbe, __RANGE__);
-        auto returnLambdaExpr = new ASTReturnStatement(value, __RANGE__);
+        auto typeofLambda = new ASTTypeof(typeofProbe, captureImplicitReturn=true, __RANGE__);
+        auto returnLambdaExpr = new ASTReturnStatement(value, failProp=false, __RANGE__);
         // Hax: Every compilation is unique!
         string lambdaName = "__lambda_$(this.locRange.from.row)_$(context.getLabel)";
         auto astParameters = [
@@ -2287,12 +2288,14 @@ class ASTReturnStatement : ASTStatement
 {
     ASTSymbol value;
 
-    this(this.value, this.locRange) { }
+    bool failProp;
+
+    this(this.value, this.failProp, this.locRange) { }
 
     override (StatementCompileResult | fail Error) compile(Context context)
     {
         mut Expression expr = this.value.compile(context)?.beExpressionImplCall(context, this.locRange)?;
-        Type ret = findParent!FunctionScope(context.namespace).ret;
+        Type ret = findParent!Returnable(context.namespace).mergeReturnType(expr.type, failProp=this.failProp);
         expr = expectImplicitConvertTo(context, expr, ret, this.locRange)?;
 
         /**
@@ -2322,7 +2325,10 @@ class ASTReturnStatement : ASTStatement
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astReturn", [value.quote(quoter)], locRange);
+        return quoter.compilerCall("astReturn", [
+            value.quote(quoter),
+            quoter.compiler.astBoolLiteral(this.failProp, __RANGE__),
+        ], locRange);
     }
 }
 
@@ -2370,7 +2376,7 @@ class VoidExpression : Expression
         parser.expect(";")?;
     }
     parser.commit;
-    return new ASTReturnStatement(expr, parser.to(from));
+    return new ASTReturnStatement(expr, failProp=false, parser.to(from));
 }
 
 (Statement | fail Error) unwindScope(Context context, nullable Namespace target, Statement body_)
@@ -2407,6 +2413,7 @@ class VoidExpression : Expression
             new ASTSymbolHelper(v.type),
             "a",
             return_=return_,
+            fail=v.fail,
             expr=new ASTIdentifier("a", false, __RANGE__));
     }
 
@@ -3161,6 +3168,7 @@ class ASTVarExtractDeclStatement : ASTStatement
                 type=new ASTSymbolHelper(sourceMemberType),
                 identifier="a",
                 return_=return_,
+                fail=entry.fail,
                 expr=expr);
         }
 
@@ -4440,8 +4448,16 @@ class ASTExternFunction : ASTExternFunctionBase
 
     (FunctionDeclaration | fail Error) compile(Context context)
     {
+        (Type | fail Error) type(ASTParameter param) {
+            return param.type.compile(context)?.beType2(param.locRange)?;
+        }
+        (nullable Expression | fail Error) defaultValue(ASTParameter param) {
+            if (!param.defaultValue) return null;
+            auto context = context.withNamespace(findParent!ModuleBase(context.namespace));
+            return param.defaultValue.compile(context)?.beExpressionImplCall(context, param.locRange)?;
+        }
         auto params = [
-            Parameter(false, param.name, false, param.type.compile(context)?.beType2(param.locRange)?)
+            Parameter(false, param.name, false, type=type(param)?, defaultValue=defaultValue(param)?)
             for param in this.params];
 
         auto decl = new FunctionDeclaration(this.name, this.ret.compile(context)?.beType2(this.retLocRange)?, params);

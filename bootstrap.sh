@@ -600,6 +600,8 @@ at_revision 'a27e2dc77f28ca60e37e0330e647664ffd19b225' 'rebuild neat' 'build/nea
 at_revision '2389c7a73e7ef90598a0bff20f7bac5295e7a5a2' 'rebuild neat' 'build/neat'
 # emit runtime functions into the compiling module.
 at_revision 'a98d2a2efb70dc19dfa01461fc6f12f08a3d49e3' 'rebuild neat' 'build/neat'
+# default value field for ASTParameter. Other prep work.
+at_revision '139ce2c8c2a763eb943e334c060d4ba83d297818' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

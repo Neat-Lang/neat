@@ -418,7 +418,7 @@ class Either : Type
                             new ASTSymbolHelper(rhsMember), __RANGE__);
 
                         eqCases ~= ASTEitherCaseExprCase(
-                            __RANGE__, new ASTSymbolHelper(entry.type), "a", return_=false, memberEq);
+                            __RANGE__, new ASTSymbolHelper(entry.type), "a", return_=false, fail=false, memberEq);
                     }
                     auto eqTest = new ASTEitherCaseExpr(__RANGE__, new ASTSymbolHelper(lhs), eqCases);
                     auto combinedExpr = context.compiler.astBinaryOp("&&", typeEq, eqTest, __RANGE__);
@@ -445,6 +445,8 @@ struct ASTEitherCaseExprCase
     string identifier;
 
     bool return_;
+
+    bool fail; // Helper: used for returning failure.
 
     ASTSymbol expr;
 }
@@ -544,10 +546,14 @@ class ASTEitherCaseExpr : ASTSymbol
                 .beExpressionImplCall(context, caseLoc)?;
             (Statement | fail Error) userStmt() {
                 if (case_.return_) {
-                    Type ret = findParent!FunctionScopeBase(context.namespace).ret;
-                    auto userExpr = context.compiler.expectImplicitConvertTo(context, userExpr, ret, this.locRange)?;
-                    return context.compiler.astReturn(new ASTSymbolHelper(userExpr), __RANGE__).compile(context)?
-                         .statement;
+                    version (firstpass) {
+                        return context.compiler.astReturn(new ASTSymbolHelper(userExpr), this.locRange).compile(context)?
+                            .statement;
+                    } else {
+                        return context.compiler.astReturn(
+                            new ASTSymbolHelper(userExpr), failProp=case_.fail, this.locRange
+                        ).compile(context)?.statement;
+                    }
                 } else {
                     Expression expr = context.compiler.expectImplicitConvertTo(context, userExpr, mergeType, caseLoc)?;
                     return context.compiler.move(context, resultVal, expr);
@@ -581,6 +587,7 @@ class ASTEitherCaseExpr : ASTSymbol
                     new ASTSymbolHelper(either.types[i].type),
                     "a",
                     return_=false,
+                    fail=false,
                     new ASTIdentifier("a", moduleLevel=false, __RANGE__));
                 handleCase(passthroughCase, i)?;
             }
@@ -604,6 +611,7 @@ class ASTEitherCaseExpr : ASTSymbol
                     case_.type.quote(quoter),
                     quoter.compiler.astStringLiteral(case_.identifier, __RANGE__),
                     quoteBool(case_.return_),
+                    quoteBool(case_.fail),
                     case_.expr.quote(quoter)], __RANGE__);
         }
         return quoter.compiler.astNewExpression(
@@ -637,7 +645,7 @@ class ASTEitherCaseExpr : ASTSymbol
         bool return_ = parser.acceptIdentifier("return")?;
         ASTSymbol expr = lexicalContext.compiler.parseExpression(parser, lexicalContext)?
             .notNull;
-        cases ~= ASTEitherCaseExprCase(parser.to(from), type.notNull, identifier, return_, expr);
+        cases ~= ASTEitherCaseExprCase(parser.to(from), type.notNull, identifier, return_, false, expr);
     }
     return new ASTEitherCaseExpr(parser.to(from), current, cases);
 }

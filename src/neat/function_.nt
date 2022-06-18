@@ -213,31 +213,11 @@ class CompiledFunction : FinishedSymbol
     }
 }
 
-// variable without stackframe
-class LatentVariable
-{
-    string name;
-
-    Type stackFrameType;
-
-    int offset;
-
-    bool mut;
-
-    bool borrowed;
-
-    ExprInfo info;
-
-    this(this.name, this.stackFrameType, this.offset, this.mut, this.borrowed) {
-        assert (!mut || !borrowed);
-        if (mut) this.info = ExprInfo(Lifetime.ephemeral);
-        else this.info = ExprInfo(Lifetime.lexical);
-    }
-}
-
-class FunctionScope : FunctionScopeBase
+class FunctionScope : Namespace, Returnable, Declarable
 {
     CompilerBase compiler;
+
+    Type ret;
 
     nullable Type extra;
 
@@ -255,7 +235,7 @@ class FunctionScope : FunctionScopeBase
         this.isContextScope = true;
     }
 
-    LatentVariable declare(string name, Type type, bool mut, bool borrowed)
+    override LatentVariable declare(string name, Type type, bool mut, bool borrowed)
     {
         // borrowed == "no cleanup on scope exit".
         // This is not safe in conjunction with mut (cleanup on reassign).
@@ -264,14 +244,17 @@ class FunctionScope : FunctionScopeBase
         this.variables ~= new StructMemberDeclaration(name, Protection.public_, type);
         this.structType = this.compiler.struct_("", this.variables, this.locRange, this.mangle_);
 
-        return new LatentVariable(name, this.structType, cast(int) this.variables.length - 1,
+        return new LatentVariableImpl(name, this.structType, cast(int) this.variables.length - 1,
                                   mut=mut, borrowed=borrowed);
     }
 
     override string mangle() { return this.mangle_; }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange)
-    {
+    override Type mergeReturnType(Type proposed, bool failProp) {
+        return this.ret;
+    }
+
+    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange) {
         assert(!!this.parent);
 
         mut nullable Expression nextFramePointer = null;
@@ -309,6 +292,38 @@ class ReturnTypeNamespace : Namespace
     }
 }
 
+class LatentVariableImpl : LatentVariable
+{
+    string name;
+
+    Type stackFrameType;
+
+    int offset;
+
+    bool mut;
+
+    bool borrowed;
+
+    ExprInfo info;
+
+    this(this.name, this.stackFrameType, this.offset, this.mut, this.borrowed) {
+        assert (!mut || !borrowed);
+        if (mut) this.info = ExprInfo(Lifetime.ephemeral);
+        else this.info = ExprInfo(Lifetime.lexical);
+    }
+
+    override Expression localStackFrame(CompilerBase compiler) {
+        return compiler.reference(new StackFrame(stackFrameType));
+    }
+
+    override Reference access(CompilerBase compiler, Expression frame)
+    {
+        auto frame = new PointerCast(new Pointer(stackFrameType), frame);
+        auto reference = compiler.structMemberReference(compiler.dereference(frame), offset);
+        return new InfoReference(reference, mut, info);
+    }
+}
+
 class VariableDeclaration : DeclarationHolder
 {
     string name;
@@ -319,39 +334,37 @@ class VariableDeclaration : DeclarationHolder
 
     bool mut;
 
-    this(this.parent, string name, Type type, bool mut, bool borrowed, this.hidden)
+    bool borrowed;
+
+    this(this.parent, this.name, Type type, bool mut, this.borrowed, this.hidden)
     {
-        this.variable = findParent!FunctionScope(this).declare(name, type, mut=mut, borrowed=borrowed);
+        this.variable = findParent!Declarable(this).notNull.declare(name, type, mut=mut, borrowed=borrowed);
         this.isContextScope = true;
     }
 
     override bool freeOnExit() {
-        return !variable.borrowed;
+        return !borrowed;
     }
 
     override Reference accessDecl(CompilerBase compiler)
     {
-        Expression frame = compiler.reference(new StackFrame(variable.stackFrameType));
-        return access(compiler, frame);
+        return access(compiler, this.variable.localStackFrame(compiler));
     }
 
     Reference access(CompilerBase compiler, Expression frame)
     {
-        Type stackFrameType = variable.stackFrameType;
-        auto frame = new PointerCast(new Pointer(stackFrameType), frame);
-        auto reference = compiler.structMemberReference(compiler.dereference(frame), variable.offset);
-        return new InfoReference(reference, variable.mut, variable.info);
+        return this.variable.access(compiler, frame);
     }
 
     override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange)
     {
         // Frame may be null for struct nested in function.
         if (auto frame = context.framePointer) {
-            if (this.variable.name == name) {
+            if (this.name == name) {
                 return access(context.compiler, frame);
             }
             // soft destructuring
-            if (!hidden && this.variable.name == "") {
+            if (!hidden && this.name == "") {
                 auto unnamedVar = access(context.compiler, frame);
                 auto target = context.compiler.accessMemberWithLifetime(
                         context, unnamedVar, name, locRange, true)?;
@@ -489,8 +502,16 @@ class ASTFunction : ASTSymbol
 
     override (Symbol | fail Error) compile(Context context)
     {
+        (Type | fail Error) type(ASTParameter param) {
+            return param.type.compile(context)?.beType2(param.locRange)?;
+        }
+        (nullable Expression | fail Error) defaultValue(ASTParameter param) {
+            if (!param.defaultValue) return null;
+            auto context = context.withNamespace(findParent!ModuleBase(context.namespace));
+            return param.defaultValue.compile(context)?.beExpressionImplCall(context, param.locRange)?;
+        }
         auto params = [
-            Parameter(false, param.name, param.mutable, param.type.compile(context)?.beType2(param.locRange)?)
+            Parameter(false, param.name, param.mutable, type=type(param)?, defaultValue=defaultValue(param)?)
             for param in this.params];
 
         // It's nice to be able to reference the function
@@ -613,6 +634,7 @@ class ASTFunction : ASTSymbol
             }
         }
         auto from = parser.from?;
+        mut bool hadDefaultValue = false;
         if (parser.accept("this.")?)
         {
             string argname = parseIdentifier(parser)?;
@@ -626,7 +648,21 @@ class ASTFunction : ASTSymbol
             parser.assert_(!!argtype, "argument type expected")?;
             string argname = parseIdentifier(parser)?;
             parser.assert_(argname.length > 0, "argument name expected")?;
-            params ~= ASTParameter(name=argname, mutable, argtype.notNull, defaultValue=null, parser.to(from));
+            mut nullable ASTSymbol defaultValue;
+            if (parser.accept("=")?) {
+                defaultValue = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
+                if (!defaultValue) return parser.fail("default argument expected");
+                hadDefaultValue = true;
+            } else if (hadDefaultValue) {
+                return parser.fail("only default parameters allowed after default parameter");
+            }
+
+            params ~= ASTParameter(
+                name=argname,
+                mutable,
+                type=argtype.notNull,
+                defaultValue=defaultValue,
+                parser.to(from));
         }
     }
     return params;

@@ -247,9 +247,16 @@ class CompilerImpl : CompilerBase
         return new ASTVarExtractDeclStatement(name, mutable, infer, type, source, locRange);
     }
 
-    override ASTStatement astReturn(ASTSymbol value, LocRange locRange)
-    {
-        return new ASTReturnStatement(value, locRange);
+    version (firstpass) {
+        override ASTStatement astReturn(ASTSymbol value, LocRange locRange)
+        {
+            return new ASTReturnStatement(value, false, locRange);
+        }
+    } else {
+        override ASTStatement astReturn(ASTSymbol value, bool failProp, LocRange locRange)
+        {
+            return new ASTReturnStatement(value, failProp, locRange);
+        }
     }
 
     override ASTSymbol astArray(ASTSymbol elementType, LocRange locRange)
@@ -264,7 +271,7 @@ class CompilerImpl : CompilerBase
 
     override ASTSymbol astTypeOf(ASTSymbol value, LocRange locRange)
     {
-        return new ASTTypeof(value, locRange);
+        return new ASTTypeof(value, captureImplicitReturn=false, locRange);
     }
 
     override ASTSymbol astPointer(ASTSymbol target, LocRange locRange)
@@ -683,27 +690,23 @@ class CompilerImpl : CompilerBase
             }
         }
 
-        Parameter parameter(string name, Type type) {
-            return Parameter(false, name, false, type);
-        }
-
         auto fun = new Function(mangledName, ret, params, makeBody(), context.macroState, false, __RANGE__);
         auto pak = new Package("rt_" ~ mangledName, "", []);
         auto rtMod = new Module(name, mangleModuleName(name, pak, 0), __RANGE__, null);
         rtMod.register("free", Protection.public_, once new FunctionDeclaration(
-            "free", new Void, [parameter("", new Pointer(new Void))]));
+            "free", new Void, [Parameter.fromType(new Pointer(new Void))]));
         rtMod.register("print", Protection.public_, once new FunctionDeclaration(
-            "print", new Void, [parameter("", new Array(new Character))]));
+            "print", new Void, [Parameter.fromType(new Array(new Character))]));
         rtMod.register("neat_runtime_alloc", Protection.public_, once new FunctionDeclaration(
-            "neat_runtime_alloc", new Pointer(new Void), [parameter("", context.nativeWordType)]));
+            "neat_runtime_alloc", new Pointer(new Void), [Parameter.fromType(context.nativeWordType)]));
         rtMod.register("neat_runtime_refcount_inc", Protection.public_, once new FunctionDeclaration(
             "neat_runtime_refcount_inc", new Void, [
-                parameter("label", new Array(new Character)),
-                parameter("ptr", new Pointer(new Void))]));
+                Parameter.simple("label", new Array(new Character)),
+                Parameter.simple("ptr", new Pointer(new Void))]));
         rtMod.register("neat_runtime_refcount_dec", Protection.public_, once new FunctionDeclaration(
             "neat_runtime_refcount_dec", new Integer, [
-                parameter("label", new Array(new Character)),
-                parameter("ptr", new Pointer(new Void))]));
+                Parameter.simple("label", new Array(new Character)),
+                Parameter.simple("ptr", new Pointer(new Void))]));
 
         fun.parent = rtMod;
         rtMod.track(fun);
@@ -736,6 +739,11 @@ class CompilerImpl : CompilerBase
     override Type struct_(string name, StructMemberDeclaration[] members, LocRange locRange, string manglePrefix)
     {
         return new Struct(name, members, locRange, manglePrefix);
+    }
+
+    override Type eitherType((bool fail, Type type)[] types)
+    {
+        return new Either(types);
     }
 
     override bool isClassType(Type type) {

@@ -176,13 +176,13 @@ class Struct : Type
             else null];
     }
 
-    nullable Statement callAutoDtor(Context context, Reference ref_)
+    nullable Statement callAutoDtor(Context context, Expression expr)
     {
-        (nullable Statement | fail Error) do_(Expression refptr) {
+        (nullable Statement | fail Error) do_(Expression expr) {
             auto compiler = context.compiler;
             mut Statement[] destructors;
             for (i, entry in members) {
-                auto member = new StructMemberReference(context.compiler.dereference(refptr), i);
+                auto member = new StructMember(expr, i);
                 if (auto destroy = entry.type.endLifetime(context, member)) {
                     destructors ~= destroy;
                 }
@@ -190,7 +190,7 @@ class Struct : Type
             if (!destructors.length) return null;
             return compiler.sequenceStatement(destructors);
         }
-        context.compiler.stmtWithTemporaryExpr(context.compiler.reference(ref_), &do_).case {
+        context.compiler.stmtWithTemporaryExpr(expr, &do_).case {
             nullable Statement stmt: return stmt;
             Error err: assert(false);
         }
@@ -242,13 +242,16 @@ class Struct : Type
         return null;
     }
 
-    override nullable Statement endLifetime(Context context, Reference ref_)
+    override nullable Statement endLifetime(Context context, Expression expr)
     {
-        Expression ptr = context.compiler.castTo(new Pointer(new Void), new ReferenceExpression(ref_));
-        nullable Statement callAutoDtor_ = callAutoDtor(context, ref_);
+        nullable Statement callAutoDtor_ = callAutoDtor(context, expr);
         if (auto destructor = getDtor) {
+            auto ref_ = new PairedTemporary(expr.type, expr.info.lifetime);
+            auto initRef = new InitializeTemporaryStatement(ref_, expr);
+            auto refptr = new ReferenceExpression(ref_);
+            Expression ptr = context.compiler.castTo(new Pointer(new Void), refptr);
             auto callDtor = new ExprStatement(new Call(destructor, [ptr], this.locRange));
-            return sequence(callDtor, callAutoDtor_);
+            return sequence(sequence(initRef, callDtor), callAutoDtor(context, expr));
         }
         return callAutoDtor_;
     }

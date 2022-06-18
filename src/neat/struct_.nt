@@ -264,14 +264,13 @@ class Struct : Type
                 type=member.type,
                 defaultValue=null,
             ) for member in this.members];
-        validateCall(params, args, "$(this.name).this()", variadic=false, locRange)?;
+        auto result = validateCall(context, params, args, "$(this.name).this()", variadic=false, locRange)?.case(
+            (:mismatch, Error err): return err,
+            (:argCastError, Error err): return err);
 
         auto temp = new PairedTemporary(this, Lifetime.gifted);
         mut Statement initialize = new UninitializeTemporaryStatement(temp);
-        for (i, arg in args) {
-            Expression arg = arg.sym.compile(context)?.beExpressionImplCall(context, locRange)?;
-            Expression arg = expectImplicitConvertTo(context, arg, this.members[i].type, locRange)?;
-
+        for (i, arg in result.args) {
             auto field = new StructMemberReference(temp, i);
             mut auto stmt = context.compiler.move(context, field, arg)?;
             if (!stmt) stmt = new AssignStatement(field, arg);
@@ -865,12 +864,13 @@ class ASTStructDecl : ASTDeclaration
     auto locRange = parser.to(from);
     if (parser.accept("(")?) // method
     {
-        auto params = parseParamList(parser, lexicalContext)?;
+        auto params = parseParameterList(parser, lexicalContext, variadic=false, thisAssignment=true)?;
+        assert(!params.variadic);
         parser.assert_(
-            memberName != "__dtor" || params.length == 0, "destructor cannot take parameters")?;
+            memberName != "__dtor" || params.params.length == 0, "destructor cannot take parameters")?;
         ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
         entries ~= ASTStructMethod(
-            static_, protection, memberName, memberType.notNull, params, stmt, locRange, comment);
+            static_, protection, memberName, memberType.notNull, params.params, stmt, locRange, comment);
     }
     else
     {

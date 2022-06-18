@@ -502,17 +502,23 @@ class ASTFunction : ASTSymbol
 
     override (Symbol | fail Error) compile(Context context)
     {
-        (Type | fail Error) type(ASTParameter param) {
-            return param.type.compile(context)?.beType2(param.locRange)?;
+        mut Parameter[] params;
+        for (param in this.params) {
+            auto type = param.type.compile(context)?.beType2(param.locRange)?;
+            (nullable Expression | fail Error) defaultValue() {
+                if (!param.defaultValue) return null;
+                auto context = context.withNamespace(findParent!ModuleBase(context.namespace));
+                auto value = param.defaultValue.compile(context)?.beExpressionImplCall(context, param.locRange)?;
+                return expectImplicitConvertTo(context, value, type, param.defaultValue.locRange)?;
+            }
+            params ~= Parameter(
+                false,
+                param.name,
+                param.mutable,
+                type=type,
+                defaultValue=defaultValue?,
+            );
         }
-        (nullable Expression | fail Error) defaultValue(ASTParameter param) {
-            if (!param.defaultValue) return null;
-            auto context = context.withNamespace(findParent!ModuleBase(context.namespace));
-            return param.defaultValue.compile(context)?.beExpressionImplCall(context, param.locRange)?;
-        }
-        auto params = [
-            Parameter(false, param.name, param.mutable, type=type(param)?, defaultValue=defaultValue(param)?)
-            for param in this.params];
 
         // It's nice to be able to reference the function
         // parameters in a typeof() in the return type.
@@ -578,52 +584,26 @@ class ASTFunction : ASTSymbol
         return null;
     }
     parser.commit;
-    // FIXME
-    // auto params = parseIdentifierList(parser, lexicalContext, variadics=false).params;
-    auto params = parseIdentifierList(parser, lexicalContext, variadics=false)?;
+    auto params = parseParameterList(parser, lexicalContext, variadic=false, thisAssignment=false)?;
+    assert(!params.variadic);
+    ASTParameter pick((ASTParameter | ASTThisAssignment) value) {
+        value.case {
+            ASTParameter p: return p;
+            ASTThisAssignment a: assert(false);
+        }
+    }
+    auto params = [pick(entry) for entry in params.params];
     ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
     return new ASTFunction(
-        name, ret.notNull, params.params, false, locRange, stmt, lexicalContext.macroState, comment);
+        name, ret.notNull, params, false, locRange, stmt, lexicalContext.macroState, comment);
 }
 
-(ASTParameter[] params, bool variadic | fail Error) parseIdentifierList(
-    Parser parser, LexicalContext lexicalContext, bool variadics)
-{
-    mut ASTParameter[] params;
-    mut bool variadic = false;
-    while (!parser.accept(")")?)
-    {
-        if (params.length) {
-            if (!parser.accept(",")?) {
-                return parser.fail("',' or ')' expected");
-            }
-        }
-        auto from = parser.from?;
-        if (variadics) {
-            parser.begin;
-            if (parser.accept("...")? && parser.accept(")")?) {
-                parser.commit;
-                variadic = true;
-                break;
-            }
-            parser.revert;
-        }
-
-        mut bool mutable;
-        if (parser.acceptIdentifier("mut")?) mutable = true;
-        nullable ASTSymbol paramType = lexicalContext.compiler.parseType(parser, lexicalContext)?;
-        if (!paramType) {
-            return parser.fail("type expected");
-        }
-        string paramName = parser.parseIdentifier?;
-        params ~= ASTParameter(paramName, mutable, paramType.notNull, defaultValue=null, parser.to(from));
-    }
-    return (params, variadic);
-}
-
-((ASTParameter | ASTThisAssignment)[] | fail Error) parseParamList(Parser parser, LexicalContext lexicalContext)
+((ASTParameter | ASTThisAssignment)[] params, bool variadic | fail Error) parseParameterList(
+    Parser parser, LexicalContext lexicalContext, bool variadic, bool thisAssignment)
 {
     mut (ASTParameter | ASTThisAssignment)[] params;
+    mut bool haveVariadic = false;
+    mut bool hadDefaultValue = false;
     while (!parser.accept(")")?)
     {
         if (params.length > 0)
@@ -634,36 +614,42 @@ class ASTFunction : ASTSymbol
             }
         }
         auto from = parser.from?;
-        mut bool hadDefaultValue = false;
-        if (parser.accept("this.")?)
-        {
-            string argname = parseIdentifier(parser)?;
-            params ~= ASTThisAssignment(argname, parser.to(from));
-        }
-        else
-        {
-            mut bool mutable;
-            if (parser.acceptIdentifier("mut")?) mutable = true;
-            nullable ASTSymbol argtype = lexicalContext.compiler.parseType(parser, lexicalContext)?;
-            parser.assert_(!!argtype, "argument type expected")?;
-            string argname = parseIdentifier(parser)?;
-            parser.assert_(argname.length > 0, "argument name expected")?;
-            mut nullable ASTSymbol defaultValue;
-            if (parser.accept("=")?) {
-                defaultValue = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
-                if (!defaultValue) return parser.fail("default argument expected");
-                hadDefaultValue = true;
-            } else if (hadDefaultValue) {
-                return parser.fail("only default parameters allowed after default parameter");
+        if (variadic) {
+            parser.begin;
+            if (parser.accept("...")? && parser.accept(")")?) {
+                parser.commit;
+                haveVariadic = true;
+                break;
             }
-
-            params ~= ASTParameter(
-                name=argname,
-                mutable,
-                type=argtype.notNull,
-                defaultValue=defaultValue,
-                parser.to(from));
+            parser.revert;
         }
+        if (thisAssignment && parser.accept("this.")?)
+        {
+            string paramName = parseIdentifier(parser)?;
+            params ~= ASTThisAssignment(paramName, parser.to(from));
+            continue;
+        }
+        mut bool mutable;
+        if (parser.acceptIdentifier("mut")?) mutable = true;
+        nullable ASTSymbol argtype = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+        parser.assert_(!!argtype, "parameter type expected")?;
+        string paramName = parseIdentifier(parser)?;
+        // parser.assert_(paramName.length > 0, "parameter name expected")?;
+        mut nullable ASTSymbol defaultValue;
+        if (parser.accept("=")?) {
+            defaultValue = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
+            if (!defaultValue) return parser.fail("default parameter value expected");
+            hadDefaultValue = true;
+        } else if (hadDefaultValue) {
+            return parser.fail("only default parameters allowed after default parameter");
+        }
+
+        params ~= ASTParameter(
+            name=paramName,
+            mutable,
+            type=argtype.notNull,
+            defaultValue=defaultValue,
+            parser.to(from));
     }
-    return params;
+    return (params, haveVariadic);
 }

@@ -714,29 +714,6 @@ class FunctionDeclaration : Symbol
     }
 }
 
-(void | fail Error) validateCall(Parameter[] params, ASTArgument[] args, string name, bool variadic, LocRange locRange)
-{
-    if (variadic) {
-        if (args.length < params.length) {
-            return locRange.fail(
-                "unexpected number of arguments to $(name): expected at least $(params.length), but got $(args.length)");
-        }
-    } else {
-        if (params.length != args.length) {
-            return locRange.fail(
-                "unexpected number of arguments to $(name): expected $(params.length), but got $(args.length)");
-        }
-    }
-    for (i, arg in args[0 .. params.length]) {
-        if (arg.name.length > 0 && arg.name != params[i].name) {
-            return arg.locRange.fail(
-                "expected parameter named '$(params[i].name)', but got '$(arg.name)'");
-        }
-    }
-    // TODO can we omit this pls
-    return;
-}
-
 /**
  * This is in base because it's circular with Context.
  */
@@ -893,11 +870,7 @@ abstract class CompilerBase
     abstract ASTStatement astDeclareTypedVar(
         string name, bool mutable, bool uninitialized, ASTSymbol type, nullable ASTSymbol initial, LocRange locRange);
 
-    version (firstpass) {
-        abstract ASTStatement astReturn(ASTSymbol value, LocRange locRange);
-    } else {
-        abstract ASTStatement astReturn(ASTSymbol value, bool failProp, LocRange locRange);
-    }
+    abstract ASTStatement astReturn(ASTSymbol value, bool failProp, LocRange locRange);
 
     abstract ASTSymbol astBinaryOp(string op, ASTSymbol left, ASTSymbol right, LocRange locRange);
 
@@ -993,11 +966,17 @@ abstract class CompilerBase
 
     abstract Reference stackFrame(Type type);
 
-    abstract (nullable Expression | fail Error) plainCall(
-        Context context, Symbol sym, Expression[] args, LocRange locRange, bool isImplCall);
-
     abstract (nullable Expression | fail Error) call(
         Context context, ASTSymbol target, ASTArgument[] args, LocRange locRange, bool isImplCall);
+
+    (nullable Expression | fail Error) simpleCall(
+        Context context, Symbol sym, Expression[] args, LocRange locRange)
+    {
+        mut ASTArgument[] astArgs;
+        for (arg in args)
+            astArgs ~= ASTArgument(new ASTSymbolHelper(arg), "", locRange);
+        return call(context, new ASTSymbolHelper(sym), astArgs, locRange, false);
+    }
 
     abstract Expression mkCall(Symbol target, Expression[] args, LocRange locRange);
 
@@ -1129,6 +1108,13 @@ abstract class CompilerBase
     abstract ModuleBase createModule(string name, string mangle, LocRange locRange, nullable ModuleBase parent);
 }
 
+(Expression | fail Error) expectImplicitConvertTo(Context context, Expression from, Type to, LocRange locRange)
+{
+    locRange.assert(!!to, "no implconv target type")?;
+    if (auto result = context.compiler.implicitConvertTo(context, from, to)) return result;
+    context.assert2(false, locRange, "Cannot convert to $(to.repr): $(from.type.repr)")?;
+}
+
 abstract class WorkPoolBase
 {
     abstract void queue(string id, ITask task) { }
@@ -1256,7 +1242,6 @@ struct Context
     // implicit function calls
     // TODO check if we should propagate this upcall
     auto astSymbol = new ASTSymbolHelper(symbol);
-    // if (auto expr = context.compiler.plainCall(context, symbol, [], locRange, true)?)
     if (auto expr = context.compiler.call(context, astSymbol, [], locRange, true)?)
         return expr;
     return symbol.instanceOf(Expression);

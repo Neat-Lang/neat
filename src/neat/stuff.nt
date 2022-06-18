@@ -442,92 +442,6 @@ class DelegateFuncPtr : Expression
     override void hash(Hash hash) { hash.adds("DelegateFuncPtr"); this.dg.hash(hash); }
 }
 
-/**
- * "Plain" call without lifetime handling.
- * An :argCastError is an error that occurred while converting the arguments.
- * These errors may be tolerated if an overload exists that does not cause an error.
- */
-(Expression, CallQuality | :mismatch | (:argCastError, Error) | fail Error) plainCall(
-    Context context, Symbol target, mut Expression[] args, LocRange locRange, bool isImplCall)
-{
-    if (auto fundecl = target.instanceOf(FunctionDeclaration))
-    {
-        // skip variadic args
-        auto argTypes = [param.type for param in fundecl.params];
-        auto castResult = castArgs(context, args[0 .. argTypes.length], argTypes, locRange)?.case(
-            (:argCastError, Error err): return (:argCastError, err));
-        args = castResult.args ~ args[argTypes.length .. $];
-        return (new Call(fundecl, args, locRange), castResult.quality);
-    }
-    if (ClassMethodPtr method = target.instanceOf(ClassMethodPtr))
-    {
-        mut CallQuality quality = CallQuality.match;
-        if (auto funcptr = method.funcPtr.type.instanceOf(FunctionPointer)) {
-            // this ptr
-            if (args.length != funcptr.params.length - 1)
-                return locRange.fail("wrong number of arguments: expected $(funcptr.params.length - 1) but got $(args.length)");
-            auto argTypes = [funcptr.params[i+1].type for i, _ in args];
-            auto result = castArgs(context, args[0 .. argTypes.length], argTypes, locRange)?.case(
-                (:argCastError, Error err): return (:argCastError, err));
-            args = result.args;
-            quality = result.quality;
-        } else {
-            return locRange.fail("function reference or funcptr expected? but is '$(method.funcPtr.type.repr)'");
-        }
-        (nullable Expression | fail Error) doPtr(Expression thisPtr) {
-            auto voidp = once new Pointer(new Void);
-            mut Expression[] combinedArgs;
-            combinedArgs ~= new PointerCast(voidp, thisPtr);
-            combinedArgs ~= args;
-            return new FuncPtrCall(method.funcPtr, combinedArgs, locRange);
-        }
-        (nullable Expression | fail Error) doRef(Reference thisValue) {
-            return doPtr(context.compiler.reference(thisValue));
-        }
-
-        if (method.valueIsPtr) {
-            if (auto ret = context.compiler.exprWithTemporaryExpr(method.thisValue, &doPtr)?)
-                return (ret, quality);
-        } else if (auto ref_ = method.thisValue.instanceOf(Reference)) {
-            auto ptr = context.compiler.reference(ref_);
-            if (auto ret = context.compiler.exprWithTemporaryExpr(ptr, &doPtr)?)
-                return (ret, quality);
-        } else {
-            if (auto ret = context.compiler.exprWithTemporary(method.thisValue, &doRef)?)
-                return (ret, quality);
-        }
-        return :mismatch;
-    }
-    if (isImplCall) return :mismatch;
-    nullable Expression expr = target.instanceOf(Expression);
-    // TODO
-    // auto funcptr = expr?.type.instanceOf(FunctionPointer);
-    mut nullable FunctionPointer funcptr;
-    if (expr) funcptr = expr.type.instanceOf(FunctionPointer);
-    if (expr && funcptr) {
-        auto argTypes = [funcptr.params[i].type for i, _ in args];
-        auto result = castArgs(context, args[0 .. argTypes.length], argTypes, locRange)?.case(
-            (:argCastError, Error err): return (:argCastError, err));
-        return (new FuncPtrCall(expr.notNull, result.args, locRange), result.quality);
-    }
-    mut nullable NestedFunctionPointer nestedfuncptr;
-    if (expr) nestedfuncptr = expr.type.instanceOf(NestedFunctionPointer);
-    if (expr && nestedfuncptr) {
-        auto expr = expr.notNull;
-        auto argTypes = [nestedfuncptr.params[i] for i, _ in args];
-        auto result = castArgs(context, args[0 .. argTypes.length], argTypes, locRange)?.case(
-            (:argCastError, Error err): return (:argCastError, err));
-        // TODO cache delegate
-        auto funcPtr = new DelegateFuncPtr(expr);
-        auto thisPtr = new DelegateDataPtr(expr);
-        mut Expression[] combinedArgs;
-        combinedArgs ~= thisPtr;
-        combinedArgs ~= result.args;
-        return (new FuncPtrCall(funcPtr, combinedArgs, locRange), result.quality);
-    }
-    return locRange.fail("unknown call target");
-}
-
 class WrapExpression : Expression
 {
     nullable Statement pre;
@@ -656,24 +570,9 @@ class WrapReference : Reference
         }
     }
 
-    // FIXME push the validation down into overload checking
-    if (auto fundecl = target.instanceOf(FunctionDeclaration)) {
-        validateCall(fundecl.params, astArgs, fundecl.name, variadic=fundecl.variadic, locRange)?;
-    }
-    if (auto method = target.instanceOf(ClassMethodPtr)) {
-        if (auto funcptr = method.funcPtr.type.instanceOf(FunctionPointer)) {
-            // skip "this"
-            validateCall(funcptr.params[1 .. $], astArgs, method.name, variadic=false, locRange)?;
-        }
-    }
-
-    auto args = [
-        arg.sym.compile(context)?.beExpressionImplCall(context, locRange)?
-        for arg in astArgs];
-
     if (auto overload = target.instanceOf(Overload)) {
         // TODO transpose macro!
-        auto possibleCalls = [callResolved(context, target, astArgs, args, locRange, autoCall)?
+        auto possibleCalls = [callResolved(context, target, astArgs, locRange, autoCall)?
             for target in overload.parts];
 
         auto matches = possibleCalls.pickMatches;
@@ -687,37 +586,34 @@ class WrapReference : Reference
         locRange.assert(false, "no overload matched call: $(overload.repr)")?;
     }
 
-    callResolved(context, target, astArgs, args, locRange, autoCall)?.case {
+    callResolved(context, target, astArgs, locRange, autoCall)?.case {
         (Expression expr, CallQuality quality): return expr;
         (:argCastError, Error err): return err;
-        (:mismatch): context.assert2(false, locRange, "call mismatch")?;
+        (:mismatch, Error err): return err;
     }
 }
 
 // TODO: find a better way to metaprogram this!
 (Expression expr, CallQuality quality)[] pickMatches(
-    (Expression expr, CallQuality quality | :mismatch | (:argCastError, Error))[] args)
+    (Expression expr, CallQuality quality | :mismatch, Error | :argCastError, Error)[] args)
 {
     mut (Expression expr, CallQuality quality)[] ret;
     for (arg in args) arg.case {
         (Expression, CallQuality) match: ret ~= match;
         (:argCastError, Error): {} // TODO report errors better
-        (:mismatch): {}
+        (:mismatch, Error): {}
     }
     return ret;
 }
 
-enum CallQuality
-{
-    match,
-    convRequired,
-}
-
-(Expression expr, CallQuality quality | :mismatch | (:argCastError, Error) | fail Error) callResolved(
-    Context context, mut Symbol target, ASTArgument[] astArgs, Expression[] args, LocRange locRange, bool autoCall)
+(Expression expr, CallQuality quality | (:mismatch, Error) | (:argCastError, Error) | fail Error) callResolved(
+    Context context, mut Symbol target, ASTArgument[] astArgs, LocRange locRange, bool autoCall)
 {
     if (auto templ = target.instanceOf(ScopeBoundTemplateDecl)) {
         // Simplest conceivable IFTI
+        auto args = [
+            arg.sym.compile(context)?.beExpressionImplCall(context, locRange)?
+            for arg in astArgs];
         auto types = [arg.type for arg in args];
         // Some types, like Lambda, generate different types every time they're compiled.
         auto repackagedArgs = [
@@ -731,36 +627,43 @@ enum CallQuality
     }
 
     mut nullable Statement pre, post;
-    Expression[] args_ = new Expression[](args.length);
-    for (i in 0 .. args.length) {
-        mut Expression arg = args[i];
-        // we must free arg after the call, so make a copy
-        if (arg.info.lifetime == Lifetime.gifted) {
-            auto temp = new PairedTemporary(arg.type, Lifetime.lexical);
-            // no copyInto() because we're taking ownership.
-            auto set = new InitializeTemporaryStatement(temp, arg);
-            if (auto destructor = arg.type.endLifetime(context, temp)) {
-                pre = sequence2(pre, set);
-                post = sequence(destructor, post);
-                arg = temp;
+    Expression[] addLifetime(Expression[] args) {
+        Expression[] result = new Expression[](args.length);
+        for (i in 0 .. args.length) {
+            mut Expression arg = args[i];
+            // we must free arg after the call, so make a copy
+            if (arg.info.lifetime == Lifetime.gifted) {
+                auto temp = new PairedTemporary(arg.type, Lifetime.lexical);
+                // no copyInto() because we're taking ownership.
+                auto set = new InitializeTemporaryStatement(temp, arg);
+                if (auto destructor = arg.type.endLifetime(context, temp)) {
+                    pre = sequence2(pre, set);
+                    post = sequence(destructor, post);
+                    arg = temp;
+                }
             }
+            result[i] = arg;
         }
-        args_[i] = arg;
+        return result;
     }
-    auto args = args_;
+    WrapExpression wrap(Expression call) {
+        return new WrapExpression(pre, call, post);
+    }
 
     if (auto lateSym = target.instanceOf(LateSymbol)) {
-        // completely bypass plainCall with a FuncPtrCall
         mut CallQuality quality = CallQuality.match;
         (nullable Expression | fail Error) do1(Expression baseExpr) {
             auto funcPtr = lateSym.resolve(context, baseExpr);
-            mut Expression[] args = args;
+            mut Expression[] args;
 
             if (auto funcPtr = funcPtr.type.instanceOf(FunctionPointer)) {
-                validateCall(funcPtr.params[1 .. $], astArgs, "function pointer", variadic=false, locRange)?;
-                auto result = castArgs(context, args, [funcPtr.params[i+1].type for i, _ in args], locRange)?
-                    .case((:argCastError, Error err): return err);
-                args = result.args;
+                // TODO support arg cast error here? (... for what overload?)
+                auto result = validateCall(
+                    context, funcPtr.params[1 .. $], astArgs, "function pointer", variadic=false, locRange
+                )?.case(
+                    (:argCastError, Error err): return err,
+                    (:mismatch, Error err): return err);
+                args = result.args.addLifetime;
                 quality = result.quality;
             } else {
                 return locRange.fail("function reference or funcptr expected? but is '$(funcPtr.type.repr)'");
@@ -777,7 +680,7 @@ enum CallQuality
         }
         auto fpCall = context.compiler.consume(context, lateSym.baseExpr, &do2)?;
 
-        return (new WrapExpression(pre, fpCall, post), quality);
+        return (wrap(fpCall), quality);
     }
 
     nullable ClassMethodPtr method = target.instanceOf(ClassMethodPtr);
@@ -798,32 +701,84 @@ enum CallQuality
             doRef(tempThis);
         }
     }
-    return plainCall(context, target, args, locRange, autoCall)?.case(
-        (Expression expr, CallQuality quality): (new WrapExpression(pre, expr, post), quality),
-        (:argCastError, Error err): (:argCastError, err),
-        (:mismatch): :mismatch);
-}
 
-(Expression[] args, CallQuality quality | (:argCastError, Error) | fail Error) castArgs(
-    Context context, Expression[] args, Type[] types, LocRange locRange)
-{
-    mut Expression[] result;
-    mut bool withConv = false;
-    for (i, arg in args) {
-        auto type = types[i];
-        if (arg.type.same(type)) {
-            result ~= arg;
-            continue;
-        }
-        if (auto ret = implicitConvertTo(context, arg, type)) {
-            result ~= ret;
-            withConv = true;
-        } else {
-            return (:argCastError, locRange.fail("cannot implicitly convert $(arg.type.repr) to $(type.repr)"));
-        }
+    if (auto fundecl = target.instanceOf(FunctionDeclaration)) {
+        auto result = validateCall(context, fundecl.params, astArgs, "", variadic=fundecl.variadic, locRange)?
+            .case(
+                (:argCastError, Error err): return (:argCastError, err),
+                (:mismatch, Error err): return (:mismatch, err));
+        return (wrap(new Call(fundecl, result.args.addLifetime, locRange)), result.quality);
     }
-    if (withConv) return (result, CallQuality.convRequired);
-    return (result, CallQuality.match);
+    if (ClassMethodPtr method = target.instanceOf(ClassMethodPtr))
+    {
+        mut CallQuality quality = CallQuality.match;
+        mut Expression[] args;
+        if (auto funcptr = method.funcPtr.type.instanceOf(FunctionPointer)) {
+            // this ptr
+            if (astArgs.length != funcptr.params.length - 1)
+                return locRange.fail(
+                    "wrong number of arguments: expected $(funcptr.params.length - 1) but got $(astArgs.length)");
+            auto result = validateCall(context, funcptr.params[1 .. $], astArgs, "", variadic=false, locRange)?.case(
+                (:argCastError, Error err): return (:argCastError, err),
+                (:mismatch, Error err): return (:mismatch, err));
+            args = result.args.addLifetime;
+            quality = result.quality;
+        } else {
+            return locRange.fail("function reference or funcptr expected? but is '$(method.funcPtr.type.repr)'");
+        }
+        (nullable Expression | fail Error) doPtr(Expression thisPtr) {
+            auto voidp = once new Pointer(new Void);
+            mut Expression[] combinedArgs;
+            combinedArgs ~= new PointerCast(voidp, thisPtr);
+            combinedArgs ~= args;
+            return new FuncPtrCall(method.funcPtr, combinedArgs, locRange);
+        }
+        (nullable Expression | fail Error) doRef(Reference thisValue) {
+            return doPtr(context.compiler.reference(thisValue));
+        }
+
+        if (method.valueIsPtr) {
+            if (auto ret = context.compiler.exprWithTemporaryExpr(method.thisValue, &doPtr)?)
+                return (wrap(ret), quality);
+        } else if (auto ref_ = method.thisValue.instanceOf(Reference)) {
+            auto ptr = context.compiler.reference(ref_);
+            if (auto ret = context.compiler.exprWithTemporaryExpr(ptr, &doPtr)?)
+                return (wrap(ret), quality);
+        } else {
+            if (auto ret = context.compiler.exprWithTemporary(method.thisValue, &doRef)?)
+                return (wrap(ret), quality);
+        }
+        return (:mismatch, locRange.fail("something went wrong in call"));
+    }
+    if (autoCall) return (:mismatch, locRange.fail("cannot call"));
+    nullable Expression expr = target.instanceOf(Expression);
+    // TODO
+    // auto funcptr = expr?.type.instanceOf(FunctionPointer);
+    mut nullable FunctionPointer funcptr;
+    if (expr) funcptr = expr.type.instanceOf(FunctionPointer);
+    if (expr && funcptr) {
+        auto result = validateCall(context, funcptr.params, astArgs, "", variadic=false, locRange)?.case(
+            (:argCastError, Error err): return (:argCastError, err),
+            (:mismatch, Error err): return (:mismatch, err));
+        return (wrap(new FuncPtrCall(expr.notNull, result.args.addLifetime, locRange)), result.quality);
+    }
+    mut nullable NestedFunctionPointer nestedfuncptr;
+    if (expr) nestedfuncptr = expr.type.instanceOf(NestedFunctionPointer);
+    if (expr && nestedfuncptr) {
+        auto expr = expr.notNull;
+        auto params = [Parameter.fromType(type) for type in nestedfuncptr.params];
+        auto result = validateCall(context, params, astArgs, "", variadic=false, locRange)?.case(
+            (:argCastError, Error err): return (:argCastError, err),
+            (:mismatch, Error err): return (:mismatch, err));
+        // TODO cache delegate
+        auto funcPtr = new DelegateFuncPtr(expr);
+        auto thisPtr = new DelegateDataPtr(expr);
+        mut Expression[] combinedArgs;
+        combinedArgs ~= thisPtr;
+        combinedArgs ~= result.args.addLifetime;
+        return (wrap(new FuncPtrCall(funcPtr, combinedArgs, locRange)), result.quality);
+    }
+    return locRange.fail("unknown call target");
 }
 
 /**
@@ -833,7 +788,8 @@ enum CallQuality
 bool previewCanCallImplicit(Symbol target) {
     return target.instanceOf(FunctionDeclaration)
         || target.instanceOf(ClassMethodPtr)
-        || target.instanceOf(LateSymbol);
+        || target.instanceOf(LateSymbol)
+        || target.instanceOf(Overload);
 }
 
 class ASTCall : ASTSymbol
@@ -4448,9 +4404,7 @@ class ASTExternFunction : ASTExternFunctionBase
 
     (FunctionDeclaration | fail Error) compile(Context context)
     {
-        (Type | fail Error) type(ASTParameter param) {
-            return param.type.compile(context)?.beType2(param.locRange)?;
-        }
+        auto type = param => param.type.compile(context)?.beType2(param.locRange)?;
         (nullable Expression | fail Error) defaultValue(ASTParameter param) {
             if (!param.defaultValue) return null;
             auto context = context.withNamespace(findParent!ModuleBase(context.namespace));
@@ -4494,9 +4448,16 @@ class ASTExternFunction : ASTExternFunctionBase
     string name = parser.parseIdentifier?;
     if (!name.length) return parser.fail("identifier expected");
     if (parser.accept("(")?) {
-        auto params = parseIdentifierList(parser, lexicalContext, variadics=true)?;
+        auto paramList = parseParameterList(parser, lexicalContext, variadic=true, thisAssignment=false)?;
+        ASTParameter pick((ASTParameter | ASTThisAssignment) value) {
+            value.case {
+                ASTParameter p: return p;
+                ASTThisAssignment a: assert(false);
+            }
+        }
+        auto params = [pick(entry) for entry in paramList.params];
         parser.expect(";")?;
-        return new ASTExternFunction(name, type, params=params.params, variadic=params.variadic, retLocRange);
+        return new ASTExternFunction(name, type, params=params, variadic=paramList.variadic, retLocRange);
     } else {
         parser.accept(";")?;
         return new ASTExternVariable(type, name, parser.to(from));

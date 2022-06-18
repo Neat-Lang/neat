@@ -12,13 +12,6 @@ import neat.parser;
 import neat.parser_base;
 import neat.types;
 
-(Expression | fail Error) expectImplicitConvertTo(Context context, Expression from, Type to, LocRange locRange)
-{
-    locRange.assert(!!to, "no implconv target type")?;
-    if (auto result = implicitConvertTo(context, from, to)) return result;
-    context.assert2(false, locRange, "Cannot convert to $(to.repr): $(from.type.repr)")?;
-}
-
 // TODO implicitConvertTo should only require Type - ie. return a Expression function(Expression).
 nullable Expression implicitConvertTo(Context context, Expression from, Type to)
 {
@@ -609,6 +602,58 @@ class Call : Expression
         }
         return ret ~ ")";
     }
+}
+
+enum CallQuality
+{
+    match,
+    convRequired,
+}
+
+(Expression[] args, CallQuality quality | :argCastError, Error | :mismatch, Error | fail Error) validateCall(
+    Context context, Parameter[] params, ASTArgument[] args, string name, bool variadic, LocRange locRange)
+{
+    mut string info = "";
+    if (!name.empty) info = "$(name): ";
+    mut Expression[] finalArgs;
+    mut bool withConv = false;
+    for (i, param in params) {
+        if (i >= args.length) {
+            if (auto defaultValue = param.defaultValue) {
+                finalArgs ~= defaultValue;
+                continue;
+            }
+            else return (:mismatch, locRange.fail("$(info)missing argument '$(param.name)'"));
+        }
+        ASTArgument arg = args[i];
+        if (arg.name != "" && arg.name != param.name) {
+            return (:mismatch,
+                arg.locRange.fail("$(info)expected parameter named '$(param.name)', but got '$(arg.name)'"));
+        }
+        Expression argExpr = arg.sym.compile(context)?.beExpressionImplCall(context, arg.locRange)?;
+        if (argExpr.type.same(param.type)) {
+            finalArgs ~= argExpr;
+        }
+        else if (auto conv = implicitConvertTo(context, argExpr, param.type)) {
+            finalArgs ~= conv;
+            withConv = true;
+        } else {
+            return (:argCastError,
+                locRange.fail("$(info)cannot implicitly convert $(argExpr.type.repr) to $(param.type.repr)"));
+        }
+    }
+    if (variadic) {
+        for (arg in args[params.length .. $]) {
+            finalArgs ~= arg.sym.compile(context)?.beExpressionImplCall(context, arg.locRange)?;
+        }
+    } else {
+        if (args.length > params.length) {
+            return (:mismatch,
+                args[params.length].locRange.fail("$(info)extraneous argument, only $(params.length) expected"));
+        }
+    }
+    if (withConv) return (finalArgs, CallQuality.convRequired);
+    return (finalArgs, CallQuality.match);
 }
 
 (Expression | fail Error) truthy(Context context, Expression value, LocRange locRange) {

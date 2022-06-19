@@ -633,9 +633,9 @@ class WrapReference : Reference
             mut Expression arg = args[i];
             // we must free arg after the call, so make a copy
             if (arg.info.lifetime == Lifetime.gifted) {
-                auto temp = new PairedTemporary(arg.type, Lifetime.lexical);
-                // no copyInto() because we're taking ownership.
-                auto set = new InitializeTemporaryStatement(temp, arg);
+                auto temp = new PairedTemporaryExpr(arg.type, Lifetime.lexical);
+                // no copy() because we're taking ownership.
+                auto set = new InitializeTemporaryExprStatement(temp, arg);
                 if (auto destructor = arg.type.endLifetime(context, temp)) {
                     pre = sequence2(pre, set);
                     post = sequence(destructor, post);
@@ -685,20 +685,14 @@ class WrapReference : Reference
 
     nullable ClassMethodPtr method = target.instanceOf(ClassMethodPtr);
     if (method && method.thisValue.info.lifetime == Lifetime.gifted) { // foo().bar()
-        mut nullable Statement setRef;
-        void doRef(Reference tempThis) {
-            if (Statement cleanupThis = method.thisValue.type.endLifetime(context, tempThis)) {
-                if (Statement setRef = setRef) pre = sequence2(pre, setRef);
-                post = sequence(cleanupThis, post);
-                target = new ClassMethodPtr(method.funcPtr, tempThis, method.valueIsPtr, method.name);
-            }
-        }
-        if (auto ref_ = method.thisValue.instanceOf(Reference)) doRef(ref_);
-        else {
-            // create reference for endLifetime call
-            auto tempThis = new PairedTemporary(method.thisValue.type, Lifetime.gifted);
-            setRef = new InitializeTemporaryStatement(tempThis, method.thisValue);
-            doRef(tempThis);
+        // create temporary
+        // create temporary for endLifetime call
+        auto tempThis = new PairedTemporaryExpr(method.thisValue.type, Lifetime.gifted);
+        if (Statement cleanupThis = method.thisValue.type.endLifetime(context, tempThis)) {
+            auto setTemp = new InitializeTemporaryExprStatement(tempThis, method.thisValue);
+            pre = sequence2(pre, setTemp);
+            post = sequence(cleanupThis, post);
+            target = new ClassMethodPtr(method.funcPtr, tempThis, method.valueIsPtr, method.name);
         }
     }
 
@@ -892,7 +886,7 @@ class ASTIndexAccess : ASTSymbol
         auto base = this.base.compile(context)?.beExpressionImplCall(context, this.locRange)?;
         bool saveIndexValue = base.info.lifetime == Lifetime.gifted;
 
-        (nullable Expression | fail Error) do_(Reference base) {
+        (nullable Expression | fail Error) do_(Expression base) {
             mut uninitialized Expression indexExpr;
             mut uninitialized Expression ptrBase;
 
@@ -928,12 +922,9 @@ class ASTIndexAccess : ASTSymbol
                 // TODO better approach
                 auto temp = new PairedTemporary(deref.type, Lifetime.gifted);
                 auto init = new UninitializeTemporaryStatement(temp);
-                (Statement | fail Error) copyDeref() {
-                    if (auto stmt = deref.type.copyInto(context, temp, deref)?)
-                        return stmt;
-                    return new AssignStatement(temp, deref);
-                }
-                return context.compiler.wrapRef(sequence(init, copyDeref?), deref, null);
+                return context.compiler.wrapRef(
+                    sequence(init, new AssignStatement(temp, deref.copy(context)?)),
+                    deref, null);
             }
             return deref;
         }
@@ -962,7 +953,7 @@ class ASTArraySlice : ASTSymbol
         Type sizeT = context.nativeWordType;
         auto array = this.array.compile(context)?.beExpressionImplCall(context, this.locRange)?;
 
-        (nullable Expression | fail Error) do_(Reference array)
+        (nullable Expression | fail Error) do_(Expression array)
         {
             auto context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, "__array", array));
@@ -1033,7 +1024,7 @@ with (parser.transaction)
     if (!ret || !ret.instanceOf(Expression)) return ret;
     /**
      * - temporize lhs
-     * - copyInto member
+     * - copy member
      * - destroy lhs
      */
     (nullable Expression | fail Error) do_(Reference baseExpr) {
@@ -1041,17 +1032,13 @@ with (parser.transaction)
                 context, baseExpr, member, locRange, allowUndefined)?
             .instanceOf(Expression)
             .notNull;
-        auto tempRet = new PairedTemporary(ret.type, Lifetime.gifted); // temporary since we copyInto
+        auto tempRet = new PairedTemporary(ret.type, Lifetime.gifted); // temporary since we copy
         auto initTemp = new UninitializeTemporaryStatement(tempRet);
-        (Statement | fail Error) copyTemp() {
-            if (auto stmt = ret.type.copyInto(context, tempRet, ret)?)
-                return stmt;
-            return new AssignStatement(tempRet, ret);
-        }
+        auto copyTemp = new AssignStatement(tempRet, ret.copy(context)?);
 
         nullable Statement endLifetime = baseType.endLifetime(context, baseExpr);
 
-        return new WrapExpression(sequence(initTemp, copyTemp?), tempRet, endLifetime);
+        return new WrapExpression(sequence(initTemp, copyTemp), tempRet, endLifetime);
     }
     // SHIT
     // we need a reference on the lhs for assignments
@@ -1165,12 +1152,8 @@ class ParenPropertyNamespace : Namespace
                 // Ephemeral 'that', usually a temporization of a gifted expr: leak our caller a reference.
                 auto copiedRes = new PairedTemporary(result.type, Lifetime.gifted);
                 auto initCopy = new UninitializeTemporaryStatement(copiedRes);
-                (Statement | fail Error) fillCopy() {
-                    if (auto copyInto = result.type.copyInto(context, copiedRes, result)?)
-                        return copyInto;
-                    return new AssignStatement(copiedRes, result);
-                }
-                return new StatementExpression(sequence(initCopy, fillCopy?), copiedRes, false);
+                auto fillCopy = new AssignStatement(copiedRes, result.copy(context)?);
+                return new StatementExpression(sequence(initCopy, fillCopy), copiedRes, false);
             }
             return result;
         }
@@ -2272,23 +2255,15 @@ class ASTReturnStatement : ASTStatement
 
         /**
          * - alloca
-         *   - copyInto the value
+         *   - copy the value
          *   - or assign the value (if it's a temporary and we can steal its reference)
          * - unwind stack
          * - ret the alloca
          */
         auto temp = new PairedTemporary(ret, Lifetime.lexical);
         auto init = new UninitializeTemporaryStatement(temp);
-        (Statement | fail Error) escapeValueStmt()
-        {
-            // Only lexical and ephemeral must be copied here.
-            if (expr.info.lifetime == Lifetime.gifted || expr.info.lifetime == Lifetime.permanent)
-                return new AssignStatement(temp, expr);
-            if (auto copyInto = ret.copyInto(context, temp, expr)?)
-                return copyInto;
-            return new AssignStatement(temp, expr);
-        }
-        mut Statement returnStmt = sequence(init, escapeValueStmt?);
+        auto escapeValueStmt = new AssignStatement(temp, expr.take(context)?);
+        mut Statement returnStmt = sequence(init, escapeValueStmt);
         returnStmt = unwindScope(context, findParent!FunctionScope(context.namespace), returnStmt)?;
         returnStmt = sequence(returnStmt, new ReturnStatement(temp));
         // no need for stack cleanup after a return.
@@ -2453,12 +2428,11 @@ class ASTIfStatement : ASTStatement
                 if (initial.type.zeroInitializable && context.compiler.isClassType(initial.type)) {
                     Type notNullableType = initial.type.makeNotNullable;
 
-                    auto tempInitial = new PairedTemporary(initial.type, initial.info.lifetime);
-                    auto initTemp = new InitializeTemporaryStatement(tempInitial, initial);
+                    auto tempInitial = new PairedTemporaryExpr(initial.type, initial.info.lifetime);
+                    auto initTemp = new InitializeTemporaryExprStatement(tempInitial, initial);
 
                     prelude = initTemp;
-                    // don't worry about memory management - if it's non-null, we'll stick it in a variable,
-                    // and that'll take care of refcounting for us.
+                    // don't worry about memory management - we're just doing a null test.
                     test = new InfoExpression(tempInitial, ExprInfo(Lifetime.permanent));
 
                     auto actualVarDecl = new ASTVarDeclStatement(
@@ -2493,8 +2467,8 @@ class ASTIfStatement : ASTStatement
                 extractdecl.locRange.assert(!!sourceType, "source of <- decl must be sumtype, not $(source.type.repr)")?;
                 auto sourceType = sourceType.notNull;
                 // FIXME check lifetime here
-                auto tempSource = new PairedTemporary(source.type, source.info.lifetime);
-                auto initTemp = new InitializeTemporaryStatement(tempSource, source);
+                auto tempSource = new PairedTemporaryExpr(source.type, source.info.lifetime);
+                auto initTemp = new InitializeTemporaryExprStatement(tempSource, source);
                 // check expected type
                 auto remainingType = typeWithoutFail(sourceType);
                 mut Type testedType = remainingType;
@@ -2510,6 +2484,7 @@ class ASTIfStatement : ASTStatement
 
                 auto value = pickEither(context, sourceType, tempSource, remainingType, extractdecl.locRange)?;
                 prelude = initTemp;
+                // ignore lifetime, it's just a null check
                 test = new InfoExpression(value, ExprInfo(Lifetime.permanent));
 
                 auto actualVarDecl = new ASTVarDeclStatement(
@@ -3373,9 +3348,7 @@ class ASTStatementExpression : ASTSymbol
         (Statement | fail Error) assignEscapeValue() {
             if (resultValue.info.lifetime == Lifetime.gifted)
                 return new AssignStatement(temp, resultValue);
-            if (auto stmt = resultType.copyInto(context, temp, resultValue)?)
-                return stmt;
-            return new AssignStatement(temp, resultValue);
+            return new AssignStatement(temp, resultValue.copy(context)?);
         }
         auto initAndCopy = sequence(init, assignEscapeValue?);
 

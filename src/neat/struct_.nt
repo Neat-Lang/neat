@@ -43,6 +43,8 @@ class Struct : Type
         this.mangledName = manglePrefix ~ "_struct_" ~ this.name;
         this.zeroInitializable = [
             all member.type.zeroInitializable for member in this.members];
+        this.hasElaborateCopyConstructor = [
+            any member.type.hasElaborateCopyConstructor for member in this.members];
         this.validMethods = this.methods.length;
         this.mutex = new Mutex;
         this.preHash = new Hash;
@@ -50,6 +52,7 @@ class Struct : Type
         this.preHash.adds(mangledName);
         this.preHash.addl(members.length);
         [member.type.hash(this.preHash) for member in this.members];
+        this.hasElaborateCopyConstructor = this.hasElaborateCopyConstructor || !!getCopyCtor;
     }
 
     override bool same(Type other) {
@@ -196,50 +199,31 @@ class Struct : Type
         }
     }
 
-    nullable Statement copyRecursive(Context context, Reference target, Expression source)
-    {
+    override (Expression | fail Error) copy(Context context, Expression source) {
         auto compiler = context.compiler;
 
-        (nullable Statement | fail Error) do1(Expression targetptr) {
-            auto target = compiler.dereference(targetptr);
-            (nullable Statement | fail Error) do2(Expression source) {
-                mut Statement[] assigns;
-                mut bool anySpecialAssignments;
-                for (i, member in members) {
-                    auto targetField = new StructMemberReference(target, i);
-                    auto sourceField = new StructMember(source, i);
-                    (Statement | fail Error) copyInto() {
-                        if (auto stmt = member.type.copyInto(context, targetField, sourceField)?) {
-                            anySpecialAssignments = true;
-                            return stmt;
-                        }
-                        return compiler.assignStatement(targetField, sourceField);
-                    }
-                    assigns ~= copyInto?;
-                }
-                if (!anySpecialAssignments) return null;
-                return compiler.sequenceStatement(assigns);
-            }
-            return context.compiler.stmtWithTemporaryExpr(source, &do2);
+        if (FunctionDeclaration copyCtor = getCopyCtor) {
+            auto temp = new PairedTemporary(source.type, Lifetime.gifted);
+            auto initTemp = new InitializeTemporaryStatement(temp, source);
+            Expression tempPtr = compiler.castTo(new Pointer(new Void), new ReferenceExpression(temp));
+            auto call = new Call(copyCtor, [tempPtr, source], this.locRange);
+            auto callStmt = new ExprStatement(call);
+            auto stmt = sequence(initTemp, callStmt);
+            return compiler.statementExpression(stmt, temp);
         }
-        context.compiler.stmtWithTemporaryExpr(compiler.reference(target), &do1).case {
-            nullable Statement stmt: return stmt;
-            Error err: assert(false);
-        }
-    }
 
-    override (nullable Statement | fail Error) copyInto(Context context, Reference target, Expression source)
-    {
-        FunctionDeclaration copyCtor = getCopyCtor;
-        if (copyCtor) {
-            Expression targetPtr = context.compiler.castTo(new Pointer(new Void), new ReferenceExpression(target));
-            auto call = new Call(copyCtor, [targetPtr, source], this.locRange);
-            return new ExprStatement(call);
+        if (!hasElaborateCopyConstructor)
+            return source;
+
+        (nullable Expression | fail Error) do_(Expression source) {
+            mut Expression[] exprs;
+            for (i, member in members) {
+                auto sourceField = new StructMember(source, i);
+                exprs ~= sourceField.type.copy(context, sourceField)?;
+            }
+            return new StructLiteral(this, ExprInfo(Lifetime.gifted), exprs);
         }
-        auto copyStmt = copyRecursive(context, target, source);
-        if (copyStmt)
-            return copyStmt;
-        return null;
+        return compiler.exprWithTemporaryExpr(source, &do_)?.notNull;
     }
 
     override nullable Statement endLifetime(Context context, Expression expr)
@@ -701,6 +685,32 @@ class ASTStruct : ASTSymbol
     }
 
     override string repr() { return "repr(ASTStruct)"; }
+}
+
+class StructLiteral : Expression
+{
+    Expression[] members;
+
+    this(this.type, this.info, this.members) {
+        auto struct_ = this.type.instanceOf(Struct).notNull;
+        assert(this.members.length == struct_.members.length);
+    }
+
+    override int emit(Generator output) {
+        auto type = this.type.emit(output.platform);
+        return output.fun.structLiteral(
+            type,
+            [member.emit(output) for member in members]);
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("StructLiteral");
+        [member.hash(hash) for member in members];
+    }
+
+    override string repr() {
+        return "{" ~ [join with ", " member.repr for member in members] ~ "}";
+    }
 }
 
 class ASTStructDecl : ASTDeclaration

@@ -12,17 +12,21 @@ import neat.parser_base;
 
 (Expression | fail Error) makeTuple(Context context, LocRange locRange, TupleType type, Expression[] fields) {
     assert(type.members.length == fields.length);
-    (nullable Statement | fail Error) do_(Reference target) {
-        mut nullable Statement init;
-        for (int i, field in fields) {
-            init = context.compiler.sequence2(init,
-                context.compiler.move(context, new TupleMemberRef(locRange, target, i), field)?);
-        }
-        return init;
+
+    auto newFields = [expr.take(context)? for expr in fields];
+    // why not just this?
+    // return new TupleLiteral(type, ExprInfo(Lifetime.gifted), newFields);
+
+    auto temp = new PairedTemporary(type, Lifetime.gifted);
+    auto initialize = new UninitializeTemporaryStatement(temp);
+
+    mut Statement[] assigns;
+    for (int i, newField in newFields) {
+        assigns ~= context.compiler.assignStatement(
+            new TupleMemberRef(locRange, temp, i), newField);
     }
-    return context.compiler.exprWithScratchspace(type, true, &do_).case(
-        nullable Expression expr: expr.notNull,
-        Error err: err);
+    auto assign = context.compiler.sequenceStatement(assigns);
+    return context.compiler.statementExpression(context.compiler.sequence(initialize, assign), temp);
 }
 
 class ASTTupleExpr : ASTSymbol
@@ -168,6 +172,8 @@ class TupleType : Type
     this(this.members) {
         this.zeroInitializable = [
             all a.type.zeroInitializable for a in this.members];
+        this.hasElaborateCopyConstructor = [
+            any a.type.hasElaborateCopyConstructor for a in this.members];
     }
 
     override BackendType emit(Platform platform) {
@@ -206,31 +212,19 @@ class TupleType : Type
     }
 
     // basically just like struct
-    override (nullable Statement | fail Error) copyInto(Context context, Reference target, Expression source)
-    {
-        (nullable Statement | fail Error) do1(Expression targetptr) {
-            auto target = context.compiler.dereference(targetptr);
-            (nullable Statement | fail Error) do2(Expression source) {
-                mut Statement[] assigns;
-                mut bool anySpecialAssignments;
-                for (int i, member in members) {
-                    auto targetField = new TupleMemberRef(__RANGE__, target, i);
-                    auto sourceField = new TupleMemberExpr(__RANGE__, source, i);
-                    (Statement | fail Error) copyInto() {
-                        if (auto copyInto = member.type.copyInto(context, targetField, sourceField)?) {
-                            anySpecialAssignments = true;
-                            return copyInto;
-                        }
-                        return context.compiler.assignStatement(targetField, sourceField);
-                    }
-                    assigns ~= copyInto?;
-                }
-                if (!anySpecialAssignments) return null;
-                return context.compiler.sequenceStatement(assigns);
+    override (Expression | fail Error) copy(Context context, Expression source) {
+        if (!hasElaborateCopyConstructor)
+            return source;
+
+        (nullable Expression | fail Error) do_(Expression source) {
+            mut Expression[] exprs;
+            for (int i, member in members) {
+                auto sourceField = new TupleMemberExpr(__RANGE__, source, i);
+                exprs ~= .copy(sourceField, context)?;
             }
-            return context.compiler.stmtWithTemporaryExpr(source, &do2);
+            return new TupleLiteral(this, ExprInfo(Lifetime.gifted), exprs);
         }
-        return context.compiler.stmtWithTemporaryExpr(context.compiler.reference(target), &do1);
+        return context.compiler.exprWithTemporaryExpr(source, &do_)?.notNull;
     }
 
     // also like struct
@@ -335,6 +329,32 @@ class TupleType : Type
         hash.adds("tuple");
         hash.addl(this.members.length);
         [member.type.hash(hash) for member in this.members];
+    }
+}
+
+class TupleLiteral : Expression
+{
+    Expression[] members;
+
+    this(this.type, this.info, this.members) {
+        auto tuple = this.type.instanceOf(TupleType).notNull;
+        assert(this.members.length == tuple.members.length);
+    }
+
+    override int emit(Generator output) {
+        auto type = this.type.emit(output.platform);
+        return output.fun.structLiteral(
+            type,
+            [member.emit(output) for member in members]);
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("TupleLiteral");
+        [member.hash(hash) for member in members];
+    }
+
+    override string repr() {
+        return "{" ~ [join with ", " member.repr for member in members] ~ "}";
     }
 }
 

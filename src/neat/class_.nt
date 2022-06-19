@@ -477,6 +477,7 @@ class ClassType : Type
         if (this.zeroInitializable)
             this.mangledName = "nullable_" ~ this.class_.mangledName;
         else this.mangledName = this.class_.mangledName;
+        this.hasElaborateCopyConstructor = true;
     }
 
     ClassType makeNullable() {
@@ -648,10 +649,10 @@ class ClassType : Type
         hash.applyHash(this.class_.cachedHash);
     }
 
-    override (nullable Statement | fail Error) copyInto(Context context, Reference target, Expression source)
+    override (Expression | fail Error) copy(Context context, Expression source)
     {
-        mut Context context = context;
-        (nullable Statement | fail Error) do_(Expression source) {
+        (nullable Expression | fail Error) do_(Expression source) {
+            mut auto context = context;
             auto sizeT = context.nativeWordType;
             auto refCountIncFun = once new FunctionDeclaration(
                 "neat_runtime_refcount_inc", new Void, [
@@ -673,10 +674,9 @@ class ClassType : Type
             if (!!this) {
                 neat_runtime_refcount_inc(inc_name, &(cast(size_t*) this)[1]);
             };
-            auto assign = context.compiler.assignStatement(target, source);
-            return context.compiler.sequence(incref.compile(context)?.statement, assign);
+            return context.compiler.statementExpression(incref.compile(context)?.statement, source);
         }
-        return context.compiler.stmtWithTemporaryExpr(source, &do_);
+        return context.compiler.exprWithTemporaryExpr(source, &do_)?.notNull;
     }
 
     override nullable Statement endLifetime(Context context, Expression expr)
@@ -686,8 +686,8 @@ class ClassType : Type
         // (otherwise we get an infinite cycle when the compiler
         // tries to clean up 'this' after the __destroy() call by
         // ending its lifetime (ad infinitum).
-        auto tempThis = new PairedTemporary(expr.type, Lifetime.permanent);
-        auto initTemp = new InitializeTemporaryStatement(tempThis, expr);
+        auto tempThis = new PairedTemporaryExpr(expr.type, Lifetime.permanent);
+        auto initTemp = new InitializeTemporaryExprStatement(tempThis, expr);
 
         auto sizeT = context.nativeWordType;
         context = context.withNamespace(
@@ -884,7 +884,9 @@ class IntfType : Type
 {
     Intf intf;
 
-    this(this.intf, this.zeroInitializable) { }
+    this(this.intf, this.zeroInitializable) {
+        this.hasElaborateCopyConstructor = true;
+    }
 
     override string mangle() {
         if (this.zeroInitializable)
@@ -1029,10 +1031,10 @@ class IntfType : Type
         hash.apply(intf.mangledHash.add, intf.mangledHash.mult);
     }
 
-    override (nullable Statement | fail Error) copyInto(Context context, Reference target, Expression source)
+    override (Expression | fail Error) copy(Context context, Expression source)
     {
         mut Context context = context;
-        (nullable Statement | fail Error) do_(Expression source) {
+        (nullable Expression | fail Error) do_(Expression source) {
             auto sizeT = context.nativeWordType;
             auto refCountIncFun = once new FunctionDeclaration(
                 "neat_runtime_refcount_inc", new Void, [
@@ -1056,10 +1058,11 @@ class IntfType : Type
                 auto object = &(cast(char*) this)[-baseOffset];
                 neat_runtime_refcount_inc(inc_name, &(cast(size_t*) object)[1]);
             };
-            auto assign = context.compiler.assignStatement(target, source);
-            return context.compiler.sequence(incref.compile(context)?.statement, assign);
+            return context.compiler.statementExpression(
+                incref.compile(context)?.statement,
+                source);
         }
-        return context.compiler.stmtWithTemporaryExpr(source, &do_);
+        return context.compiler.exprWithTemporaryExpr(source, &do_)?.notNull;
     }
 
     override nullable Statement endLifetime(Context context, Expression expr)
@@ -1069,8 +1072,8 @@ class IntfType : Type
         // (otherwise we get an infinite cycle when the compiler
         // tries to clean up 'this' after the __destroy() call by
         // ending its lifetime (ad infinitum).
-        auto tempThis = new PairedTemporary(expr.type, Lifetime.permanent);
-        auto initTemp = new InitializeTemporaryStatement(tempThis, expr);
+        auto tempThis = new PairedTemporaryExpr(expr.type, Lifetime.permanent);
+        auto initTemp = new InitializeTemporaryExprStatement(tempThis, expr);
 
         auto sizeT = context.nativeWordType;
         context = context.withNamespace(

@@ -230,6 +230,11 @@ class Either : Type
 
     this(this.types) {
         this.zeroInitializable = false;
+        this.hasElaborateCopyConstructor = false;
+        for (entry in this.types) if (entry.type.hasElaborateCopyConstructor) {
+            this.hasElaborateCopyConstructor = true;
+            break;
+        }
     }
 
     override BackendType emit(Platform platform) {
@@ -327,12 +332,17 @@ class Either : Type
     }
 
     /**
-     * Called to create a copy of an expression in a target.
+     * Called to create a copy of an expression.
      */
-    override (nullable Statement | fail Error) copyInto(Context context, Reference target, Expression source)
-    {
-        (nullable Statement | fail Error) do_(Expression source) {
+    override (Expression | fail Error) copy(Context context, Expression source) {
+        if (!this.hasElaborateCopyConstructor) {
+            return source;
+        }
+        (nullable Expression | fail Error) do_(Expression source) {
             auto sourceType = new EitherType(source);
+            // TODO use phi node instead
+            auto target = new PairedTemporary(source.type, Lifetime.gifted);
+            auto initTarget = new UninitializeTemporaryStatement(target);
             auto targetType = new EitherTypeReference(target);
             auto typeAssignment = context.compiler.assignStatement(targetType, sourceType);
 
@@ -341,23 +351,19 @@ class Either : Type
                 auto targetMember = new EitherReference(target, i);
                 auto sourceMember = new EitherMember(source, i);
 
-                (Statement | fail Error) copy() {
-                    if (auto copyInto = entry.type.copyInto(context, targetMember, sourceMember)?)
-                        return copyInto;
-                    return context.compiler.assignStatement(targetMember, sourceMember);
-                }
+                Statement copy = context.compiler.assignStatement(
+                    targetMember,
+                    sourceMember.type.copy(context, sourceMember)?);
                 Expression test = context.compiler.binaryOp(
                     "==", context, sourceType, context.compiler.intLiteral(i + 1), __RANGE__)?;
-                ifTree = context.compiler.ifStatement(test, copy?, ifTree);
+                ifTree = context.compiler.ifStatement(test, copy, ifTree);
             }
-            if (auto ifTree = ifTree)
-                return context.compiler.sequenceStatement([typeAssignment, ifTree]);
-            return null; // no copyInto for any member
+            // afaics this cannot be null... empty Either??
+            auto ifTree = ifTree.notNull;
+            auto stmt = context.compiler.sequenceStatement([initTarget, typeAssignment, ifTree]);
+            return context.compiler.statementExpression(stmt, target);
         }
-        // TODO tmpize `target`
-        if (auto ret = context.compiler.stmtWithTemporaryExpr(source, &do_)?)
-            return ret;
-        assert(false);
+        return context.compiler.exprWithTemporaryExpr(source, &do_)?.notNull;
     }
 
     /**
@@ -460,8 +466,8 @@ class ASTEitherCaseExpr : ASTSymbol
 
     override (Expression | fail Error) compile(Context context) {
         auto baseExpr = base.compile(context)?.beExpressionImplCall(context, locRange)?;
-        auto baseExprTemp = new PairedTemporary(baseExpr.type, Lifetime.permanent);
-        Statement baseExprInit = new InitializeTemporaryStatement(baseExprTemp, baseExpr);
+        auto baseExprTemp = new PairedTemporaryExpr(baseExpr.type, Lifetime.permanent);
+        Statement baseExprInit = new InitializeTemporaryExprStatement(baseExprTemp, baseExpr);
 
         auto either = baseExpr.type.instanceOf(Either);
 

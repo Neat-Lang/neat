@@ -99,6 +99,8 @@ class EitherExpr : Expression
 
     override int emit(Generator generator)
     {
+        int value = this.value.emit(generator);
+
         BackendType eitherType = either.emit(generator.platform);
         int reg = generator.fun.staticAlloca(eitherType);
         int offsetTarget = generator.fun.fieldOffset(eitherType, reg, 0);
@@ -106,7 +108,6 @@ class EitherExpr : Expression
         int rawValueTarget = generator.fun.fieldOffset(eitherType, reg, 1);
         BackendType backendValueType = either.types[offset].type.emit(generator.platform);
         int valueTarget = generator.fun.bitcast(rawValueTarget, new BackendPointerType(backendValueType));
-        int value = this.value.emit(generator);
 
         generator.fun.store(new BackendIntType, offsetTarget, offsetValue);
         generator.fun.store(backendValueType, valueTarget, value);
@@ -339,29 +340,14 @@ class Either : Type
             return source;
         }
         (nullable Expression | fail Error) do_(Expression source) {
-            auto sourceType = new EitherType(source);
-            // TODO use phi node instead
-            auto target = new PairedTemporary(source.type, Lifetime.gifted);
-            auto initTarget = new UninitializeTemporaryStatement(target);
-            auto targetType = new EitherTypeReference(target);
-            auto typeAssignment = context.compiler.assignStatement(targetType, sourceType);
-
-            mut nullable Statement ifTree;
+            mut (int, Expression)[] branches;
             for (int i, entry in types) {
-                auto targetMember = new EitherReference(target, i);
                 auto sourceMember = new EitherMember(source, i);
-
-                Statement copy = context.compiler.assignStatement(
-                    targetMember,
-                    sourceMember.type.copy(context, sourceMember)?);
-                Expression test = context.compiler.binaryOp(
-                    "==", context, sourceType, context.compiler.intLiteral(i + 1), __RANGE__)?;
-                ifTree = context.compiler.ifStatement(test, copy, ifTree);
+                auto newExpr = new EitherExpr(this, sourceMember.type.copy(context, sourceMember)?, i);
+                branches ~= (i + 1, newExpr);
             }
-            // afaics this cannot be null... empty Either??
-            auto ifTree = ifTree.notNull;
-            auto stmt = context.compiler.sequenceStatement([initTarget, typeAssignment, ifTree]);
-            return context.compiler.statementExpression(stmt, target);
+            auto sourceType = new EitherType(source);
+            return new SwitchExpr(source.type, ExprInfo(Lifetime.gifted), sourceType, branches, default_=source);
         }
         return context.compiler.exprWithTemporaryExpr(source, &do_)?.notNull;
     }
@@ -436,6 +422,79 @@ class Either : Type
         }
         return null;
     }
+}
+
+/// FIXME move to expr.nt
+/// Pick one expression from the available branches based on the value of sample (an int32).
+class SwitchExpr : Expression
+{
+    Expression sample;
+
+    Expression default_;
+
+    (int case_, Expression expr)[] branches;
+
+    this(this.type, this.info, this.sample, this.branches, this.default_) {}
+
+    override int emit(Generator output)
+    {
+        string label = output.fun.getLabel;
+        string dest = label ~ "_done";
+        string defaultLabel = label ~ "_default";
+        mut string[] branchLabels;
+        mut (int, string)[] targets;
+        for (i, branch in branches) {
+            auto brLabel = label ~ "_br$i";
+            branchLabels ~= brLabel;
+            targets ~= (branch.case_, brLabel);
+        }
+
+        auto resultType = this.type.emit(output.platform);
+        if (auto phiFun = output.fun.instanceOf(PhiCapable)) {
+            int sample = this.sample.emit(output);
+            output.fun.switch_(sample, targets, defaultLabel);
+            mut (string pred, int reg)[] sourceRegs;
+            for (i, branch in branches) {
+                output.fun.setLabel(branchLabels[i]);
+                int reg = branch.expr.emit(output);
+                sourceRegs ~= (output.fun.getCurrentLabel, reg);
+                output.fun.branch(dest);
+            }
+            output.fun.setLabel(defaultLabel);
+            auto defaultReg = default_.emit(output);
+            sourceRegs ~= (output.fun.getCurrentLabel, defaultReg);
+            output.fun.branch(dest);
+            output.fun.setLabel(dest);
+            return phiFun.phi(resultType, sourceRegs);
+        } else {
+            int target = output.fun.staticAlloca(resultType);
+            int sample = this.sample.emit(output);
+            output.fun.switch_(sample, targets, defaultLabel);
+            for (i, branch in branches) {
+                output.fun.setLabel(branchLabels[i]);
+                int reg = branch.expr.emit(output);
+                output.fun.store(resultType, target, reg);
+                output.fun.branch(dest);
+            }
+            output.fun.setLabel(defaultLabel);
+            auto defaultReg = default_.emit(output);
+            output.fun.store(resultType, target, defaultReg);
+            output.fun.branch(dest);
+            output.fun.setLabel(dest);
+            return output.fun.load(resultType, target);
+        }
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("switch");
+        hash.addl(branches.length);
+        for (branch in branches) {
+            hash.addl(branch.case_);
+            branch.expr.hash(hash);
+        }
+    }
+
+    override string repr() { return "switch(...)"; }
 }
 
 /**

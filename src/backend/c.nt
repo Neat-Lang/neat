@@ -267,6 +267,7 @@ alias Instr = (
     | :setLabel, string label
     | :branch, string label
     | :testBranch, int reg, string thenLabel, string elseLabel
+    | :switch_, int reg, (int value, string label)[] targets, string defaultLabel
 );
 
 /**
@@ -345,7 +346,11 @@ class CBackendFunction : BackendFunction {
     override string getLabel() {
         return "Label" ~ itoa(this.blockId);
     }
+    override string getCurrentLabel() {
+        return this.labels[$ - 1];
+    }
     override void setLabel(string label) {
+        if (!labels.empty && labels[$ - 1] == label) return;
         if ([any a == label for a in labels]) {
             .print("duplicate label $label");
             assert(false);
@@ -482,6 +487,11 @@ class CBackendFunction : BackendFunction {
     override void testBranch(int reg, string thenLabel, string elseLabel) {
         useReg(reg);
         addBlockEnderInstr((:testBranch, reg, thenLabel, elseLabel));
+        this.blockId = this.blockId + 1;
+    }
+    override void switch_(int reg, (int value, string label)[] targets, string defaultLabel) {
+        useReg(reg);
+        addBlockEnderInstr((:switch_, reg, targets, defaultLabel));
         this.blockId = this.blockId + 1;
     }
     void flush() {
@@ -679,9 +689,15 @@ class CBackendFunction : BackendFunction {
                     }
                 }
                 (:load, BackendType type, int regId): {
+                    import std.string : startsWith;
                     if (type.size(mod.platform) > 0) {
                         string type = typeFmt(mod, type);
-                        ret = Value(type, "*" ~ reg(regId), exactType=true);
+                        string value = reg(regId);
+                        if (value.startsWith("&")) {
+                            ret = Value(type, value[1 .. $], exactType=true);
+                        } else {
+                            ret = Value(type, "*" ~ value, exactType=true);
+                        }
                     } else ret = Value.none;
                 }
                 (:staticAlloca, BackendType type): {
@@ -729,12 +745,16 @@ class CBackendFunction : BackendFunction {
                 }
                 (:store, BackendType type, int targetReg, int valueReg): {
                     if (type.size(mod.platform) > 0) {
-                        auto targetReg = reg(targetReg);
+                        auto targetReg = regExt(targetReg);
                         auto valueReg = reg(valueReg);
                         flushRegs;
                         string typeStr = typeFmt(mod, type);
-                        this.print("*(" ~ typeStr ~ "*) " ~ targetReg
-                            ~ " = " ~ valueReg ~ ";");
+                        if (targetReg.type == typeStr) {
+                            this.print("*" ~ targetReg.value ~ " = " ~ valueReg ~ ";");
+                        } else {
+                            this.print("*(" ~ typeStr ~ "*) " ~ targetReg.value
+                                ~ " = " ~ valueReg ~ ";");
+                        }
                     }
                     ret = Value.none;
                 }
@@ -757,14 +777,23 @@ class CBackendFunction : BackendFunction {
                     this.print("goto " ~ label ~ ";");
                     ret = Value.none;
                 }
-                (:testBranch, int regId, string thenLabel, string elseLabel): {
+                (:testBranch, int regId, string thenLabel, string elseLabel):
                     auto testReg = reg(regId);
                     flushRegs;
                     this.print("if (" ~ testReg ~ ") "
                         ~ "goto " ~ thenLabel ~ "; "
                         ~ "else goto " ~ elseLabel ~ ";");
                     ret = Value.none;
-                }
+                (:switch_, int regId, (int value, string label)[] targets, string defaultLabel):
+                    auto testReg = reg(regId);
+                    flushRegs;
+                    this.print("switch ($testReg) {");
+                    for (target in targets) {
+                        this.print("  case $(target.value): goto $(target.label);");
+                    }
+                    this.print("  default: goto $(defaultLabel);");
+                    this.print("}");
+                    ret = Value.none;
             }
             return ret;
         }

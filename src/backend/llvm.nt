@@ -202,8 +202,8 @@ class LLVMBackendModule : BackendModule {
     void writeOutput(string file) {
         import std.string : cToString, endsWith;
 
+        // LLVMPrintModuleToFile(this.module_, (file ~ ".ll").toStringz, null);
         if (file.endsWith(".bc")) {
-            // LLVMPrintModuleToFile(this.module_, (file ~ ".ll").toStringz, null);
             LLVMWriteBitcodeToFile(this.module_, file.toStringz);
             LLVMContextDispose(this.context);
             return;
@@ -374,7 +374,7 @@ struct RegDefines
 
 extern(C) LLVMBuilderRef LLVMCreateNoFolderBuilderInContext(LLVMContextRef C);
 
-class LLVMBackendFunction : BackendFunction {
+class LLVMBackendFunction : BackendFunction, PhiCapable {
     string name;
     LLVMBackendModule mod;
     BackendType ret_;
@@ -493,6 +493,9 @@ class LLVMBackendFunction : BackendFunction {
     }
     override string getLabel() {
         return "Label" ~ itoa(this.blockId);
+    }
+    override string getCurrentLabel() {
+        return curLabel;
     }
     override void setLabel(string label) {
         curLabel = label;
@@ -1014,6 +1017,27 @@ class LLVMBackendFunction : BackendFunction {
         auto llIcmp = LLVMBuildICmp(this.builder, LLVMIntNE, llReg(reg), llZero, "reg$testReg".toStringz);
         LLVMBuildCondBr(this.builder, llIcmp, llLabel(thenLabel), llLabel(elseLabel));
         this.blockId += 1;
+    }
+    override void switch_(int reg, (int value, string label)[] targets, string defaultTarget) {
+        auto lli32 = LLVMInt32TypeInContext(this.mod.context);
+        auto switchInstr = LLVMBuildSwitch(
+            this.builder, llReg(reg), llLabel(defaultTarget), cast(int) targets.length);
+        for (target in targets) {
+            LLVMAddCase(switchInstr, LLVMConstInt(lli32, target.value, false), llLabel(target.label));
+        }
+        this.blockId += 1;
+    }
+    override int phi(BackendType backendType, (string pred, int reg)[] sources) {
+        auto phiType = this.mod.translate(backendType, false);
+        int reg = this.nextReg;
+        auto llPhi = LLVMBuildPhi(this.builder, phiType, "reg$reg".toStringz);
+        for (source in sources) {
+            auto sourceBlock = llLabel(source.pred);
+            auto sourceReg = llReg(source.reg);
+            LLVMAddIncoming(llPhi, &sourceReg, &sourceBlock, 1);
+        }
+        this.defReg2(reg, backendType, llPhi);
+        return reg;
     }
     override void done() {
         LLVMBuildBr(this.entryBuilder, llLabel("first"));

@@ -1027,7 +1027,7 @@ with (parser.transaction)
      * - copy member
      * - destroy lhs
      */
-    (nullable Expression | fail Error) do_(Reference baseExpr) {
+    (nullable Expression | fail Error) do_(Expression baseExpr) {
         auto ret = accessMember(
                 context, baseExpr, member, locRange, allowUndefined)?
             .instanceOf(Expression)
@@ -1052,7 +1052,7 @@ with (parser.transaction)
         return accessMember(context, baseExpr, member, locRange, allowUndefined)?
             .instanceOf(Expression);
     }
-    return context.compiler.exprWithTemporary(baseExpr, &do_);
+    return context.compiler.exprWithTemporaryExpr(baseExpr, &do_);
 }
 
 (nullable Symbol | fail Error) accessMember(
@@ -2254,17 +2254,13 @@ class ASTReturnStatement : ASTStatement
         expr = expectImplicitConvertTo(context, expr, ret, this.locRange)?;
 
         /**
-         * - alloca
-         *   - copy the value
-         *   - or assign the value (if it's a temporary and we can steal its reference)
+         * - save the value
          * - unwind stack
-         * - ret the alloca
+         * - ret the saved value
          */
-        auto temp = new PairedTemporary(ret, Lifetime.lexical);
-        auto init = new UninitializeTemporaryStatement(temp);
-        auto escapeValueStmt = new AssignStatement(temp, expr.take(context)?);
-        mut Statement returnStmt = sequence(init, escapeValueStmt);
-        returnStmt = unwindScope(context, findParent!FunctionScope(context.namespace), returnStmt)?;
+        auto temp = new PairedTemporaryExpr(ret, Lifetime.lexical);
+        auto init = new InitializeTemporaryExprStatement(temp, expr.take(context)?);
+        mut Statement returnStmt = unwindScope(context, findParent!FunctionScope(context.namespace), init)?;
         returnStmt = sequence(returnStmt, new ReturnStatement(temp));
         // no need for stack cleanup after a return.
 
@@ -2765,13 +2761,13 @@ class ASTAssignStatement : ASTStatement
             (nullable Statement | fail Error) do2(Expression tmpLhsPtr) {
                 auto tmpLhs = compiler.dereference(tmpLhsPtr);
 
-                (nullable Statement | fail Error) do3(Reference oldLhs) {
+                (nullable Statement | fail Error) do3(Expression oldLhs) {
                     auto reassign = compiler.move(context, tmpLhs, tmpValue)?;
                     auto cleanup = oldLhs.type.endLifetime(context, oldLhs);
 
                     return sequence(reassign, cleanup);
                 }
-                return compiler.stmtWithTemporary(tmpLhs, &do3);
+                return compiler.stmtWithTemporaryExpr(tmpLhs, &do3);
             }
             return compiler.stmtWithTemporaryExpr(compiler.reference(targetref), &do2);
         }

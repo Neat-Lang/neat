@@ -348,6 +348,22 @@ int neat_runtime_refcount_dec(struct String s, long long int *ptr)
     return result == 0;
 }
 
+void neat_runtime_class_refcount_inc(long long int *ptr) {
+    if (!ptr) return;
+    neat_runtime_refcount_inc((struct String){5, "class", NULL}, &ptr[1]);
+}
+
+void neat_runtime_class_refcount_dec(long long int *ptr) {
+    if (!ptr) return;
+    if (neat_runtime_refcount_dec((struct String){5, "class", NULL}, &ptr[1]))
+    {
+        void (**vtable)(void*) = *(void(***)(void*)) ptr;
+        void (*destroy)(void*) = vtable[1];
+        destroy(ptr);
+        free(ptr);
+    }
+}
+
 void neat_runtime_refcount_set(long long int *ptr, long long int value)
 {
     // *ptr = value;

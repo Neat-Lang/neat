@@ -2663,7 +2663,7 @@ class ASTSequenceStatement : ASTStatement
     return new ASTScopeStatement(statements, parser.to(from));
 }
 
-(nullable ASTAssignStatement | fail Error) parseAssignment(
+(nullable ASTStatement | fail Error) parseAssignment(
     Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
@@ -2683,6 +2683,8 @@ class ASTSequenceStatement : ASTStatement
     else if (parser.accept("&=")?) operator = "&";
     else if (parser.accept("|=")?) operator = "|";
     else if (parser.accept("^=")?) operator = "^";
+    else if (parser.accept("&&=")?) operator = "&&";
+    else if (parser.accept("||=")?) operator = "||";
     else {
         parser.revert;
         return null;
@@ -2694,10 +2696,51 @@ class ASTSequenceStatement : ASTStatement
     mut ASTSymbol expr = expr.notNull;
     parser.commit;
     if (operator.length) {
-        // TODO separate AST construct - avoid double compiling lhs?
-        expr = new ASTBinaryOp(operator, lhs.notNull, expr, parser.to(from));
+        return new ASTOpAssignStatement(lhs.notNull, operator, expr, parser.to(from));
     }
     return new ASTAssignStatement(lhs.notNull, expr, parser.to(from));
+}
+
+class ASTOpAssignStatement : ASTStatement
+{
+    ASTSymbol left;
+
+    string op;
+
+    ASTSymbol right;
+
+    this(this.left, this.op, this.right, this.locRange) { }
+
+    override (StatementCompileResult | fail Error) compile(Context context)
+    {
+        auto fallback = new ASTAssignStatement(left, new ASTBinaryOp(op, left, right, locRange), locRange);
+
+        Expression left = this.left.compile(context)?.beExpressionImplCall(context, left.locRange)?;
+        Expression right = this.right.compile(context)?.beExpressionImplCall(context, right.locRange)?;
+        if (op == "~" && left.info.lifetime == Lifetime.lexical) {
+            if (auto rLeft = left.instanceOf(Reference)) {
+                if (auto leftArray = left.type.instanceOf(Array)) {
+                    // special performance optimization for a ~= b
+                    if (auto converted = implicitConvertTo(context, right, leftArray.elementType)) {
+                        return StatementCompileResult(
+                            arrayCatAssign(context, rLeft, converted, this.locRange)?,
+                            context);
+                    }
+                    return StatementCompileResult(
+                        arrayCatAssign(context, rLeft, right, this.locRange)?,
+                        context);
+                }
+            }
+        }
+        return fallback.compile(context);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compilerCall("astOpAssign", [
+            left.quote(quoter),
+            quoter.compiler.astStringLiteral(op, __RANGE__),
+            right.quote(quoter)], locRange);
+    }
 }
 
 class ASTAssignStatement : ASTStatement
@@ -2710,9 +2753,11 @@ class ASTAssignStatement : ASTStatement
 
     override (StatementCompileResult | fail Error) compile(Context context)
     {
-        mut Expression value = this.value.compile(context)?.beExpressionImplCall(context, this.locRange)?;
+        mut Expression value = this.value.compile(context)?.beExpressionImplCall(context, this.value.locRange)?;
 
         // `a[b] = c` special handling
+        // FIXME This is the wrong place for this! There needs to be a principled way to assign
+        // a value to a subfield.
         if (auto astIndex = target.instanceOf(ASTIndexAccess))
         {
             auto base = astIndex.base.compile(context)?.beExpressionImplCall(context, astIndex.locRange)?;
@@ -2781,7 +2826,7 @@ class ASTAssignStatement : ASTStatement
     }
 }
 
-(nullable ASTAssignStatement | fail Error) parseAssignStatement(
+(nullable ASTStatement | fail Error) parseAssignStatement(
     Parser parser, LexicalContext lexicalContext)
 {
     if (auto ret = parseAssignment(parser, lexicalContext)?)
@@ -3446,7 +3491,7 @@ class ASTForLoop : ASTStatement
     parser.expect(";")?;
     nullable ASTSymbol condition = parseExpression(parser, lexicalContext)?;
     parser.expect(";")?;
-    nullable ASTAssignStatement step = parseAssignment(parser, lexicalContext)?;
+    nullable ASTStatement step = parseAssignment(parser, lexicalContext)?;
     parser.expect(")")?;
     ASTStatement body_ = parseStatement(parser, lexicalContext)?;
 

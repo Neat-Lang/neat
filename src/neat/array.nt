@@ -544,7 +544,7 @@ Expression releaseArray(Context context, Expression value) {
             };
         } else assert(false);
     }
-    auto fn = compiler.createRuntimeFunction(context, "arrayappend", leftArray, params, &body_);
+    auto fn = compiler.createRuntimeFunction(context, "arrayCat", leftArray, params, &body_);
     auto astFn = new ASTSymbolHelper(fn);
     auto astLeft = new ASTSymbolHelper(left);
     auto astRight = new ASTSymbolHelper(right);
@@ -554,6 +554,80 @@ Expression releaseArray(Context context, Expression value) {
                 ASTArgument(astLeft, "", __RANGE__), ASTArgument(astRight, "", __RANGE__)],
             locRange, false)?
         .notNull;
+}
+
+(Statement | fail Error) arrayCatAssign(Context context, Reference left, Expression right, LocRange locRange) {
+    auto compiler = context.compiler;
+
+    Array leftArray = left.type.instanceOf(Array).notNull;
+    bool appendElementType = leftArray.elementType.same(right.type)
+        || leftArray.elementType.implicitConvertFrom(context, right);
+    bool appendArrays = leftArray.same(right.type);
+
+    if (!appendElementType && !appendArrays) {
+        return locRange.fail("incompatible types for '~=': " ~ leftArray.repr ~ " and " ~ right.type.repr);
+    }
+
+    ASTStatement body_() {
+        if (appendElementType) {
+            return compiler.$stmt {
+                auto left = *leftp;
+                if (left.base) {
+                    size_t prevCap = (cast(size_t*) left.base)[1];
+                    size_t* prevUsed = &(cast(size_t*) left.base)[2];
+                    auto prevFrontier = &(cast(typeof(left.ptr)) &(cast(size_t*) left.base)[3])[*prevUsed];
+                    if (&left.ptr[left.length] is prevFrontier && *prevUsed < prevCap) {
+                        *prevUsed += 1;
+                        prevFrontier[0] = right;
+                        *leftp = left[0 .. $ + 1];
+                        return;
+                    }
+                }
+                auto result = new typeof(left)(left.length * 2 + 1);
+                for (i, src in left) result[i] = src;
+                result[left.length] = right;
+                // used
+                (cast(size_t*) result.base)[2] = left.length + 1;
+                *leftp = result[0 .. left.length + 1];
+            };
+        } else if (appendArrays) {
+            return compiler.$stmt {
+                // TODO don't try freeing result[i] on move-into
+                auto left = *leftp;
+                auto newLength = left.length + right.length;
+                if (left.base) {
+                    size_t prevCap = (cast(size_t*) left.base)[1];
+                    size_t* prevUsed = &(cast(size_t*) left.base)[2];
+                    auto prevFrontier = &(cast(typeof(left.ptr)) &(cast(size_t*) left.base)[3])[*prevUsed];
+                    if (&left.ptr[left.length] is prevFrontier && *prevUsed + right.length <= prevCap) {
+                        *prevUsed += right.length;
+                        for (i, value in right) prevFrontier[i] = value;
+                        *leftp = left[0 .. newLength];
+                        return;
+                    }
+                }
+                auto result = new typeof(left)(left.length * 2 + right.length);
+                for (i, value in left) result[i] = value;
+                for (i, value in right) result[left.length + i] = value;
+                (cast(size_t*) result.base)[2] = newLength;
+                *leftp = result[0 .. newLength];
+            };
+        } else assert(false);
+    }
+    Parameter[] params = [
+        Parameter.simple("leftp", new Pointer(leftArray)),
+        Parameter.simple("right", right.type)];
+    auto fn = compiler.createRuntimeFunction(context, "arrayCatAssign", new Void, params, &body_);
+    auto astFn = new ASTSymbolHelper(fn);
+    auto astLeftPtr = new ASTSymbolHelper(compiler.reference(left));
+    auto astRight = new ASTSymbolHelper(right);
+
+    return compiler.call(
+            context, astFn, [
+                ASTArgument(astLeftPtr, "", __RANGE__), ASTArgument(astRight, "", __RANGE__)],
+            locRange, false)?
+        .notNull
+        .(compiler.exprStatement(that));
 }
 
 (nullable ASTSymbol | fail Error) parseArrayLiteral(Parser parser, LexicalContext lexicalContext)

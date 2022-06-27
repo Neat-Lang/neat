@@ -1,0 +1,586 @@
+// some stuff that was removed from neat.base
+module neat.util;
+
+import neat.base;
+import backend.base;
+import helpers;
+import neat.hash;
+
+void assert2s(int test, string msg) { if (!test) { print(msg); exit(1); } }
+void assert2s2(int test, string a, string b) { if (!test) { print(a ~ b); exit(1); } }
+void assert2s3(int test, string a, string b, string c) { if (!test) { print(a ~ b ~ c); exit(1); } }
+void assert2s4(int test, string a, string b, string c, string d) {
+    if (!test) { print(a ~ b ~ c ~ d); exit(1); } }
+void assert2s5(int test, string a, string b, string c, string d, string e) {
+    if (!test) { print(a ~ b ~ c ~ d ~ e); exit(1); } }
+
+class ASTImportStatement : ASTImportStatementBase
+{
+    (:normal, string name, string pak | :macro_, ASTModuleBase module_) target;
+
+    bool isMacroImport;
+
+    string[] symbols;
+
+    LocRange locRange;
+
+    this(this.target, this.isMacroImport, this.symbols, this.locRange) { }
+
+    string repr(string pak) {
+        this.target.case {
+            (:normal, string name, string importPak): {
+                if (importPak.length) return "import package($importPak).$name";
+                return "import package($pak).$name";
+            }
+            (:macro_, ASTModuleBase module_): {
+                return "macro import package($pak) $(module_.mangledName)";
+            }
+        }
+    }
+}
+
+/**
+ * Delineates a region of control flow in which 'break;' and 'continue;' may be used.
+ */
+abstract class LoopScope : Namespace
+{
+    abstract (Statement | fail Error) breakFrom(Context context);
+    abstract (Statement | fail Error) continueFrom(Context context);
+    // purely a marker
+    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange) {
+        return this.parent.lookup(name, context, locRange);
+    }
+}
+
+// helper for binding values for stuff like compiler.$stmt
+class SymbolAlias : Namespace
+{
+    string name;
+
+    Symbol value;
+
+    this(this.parent, this.name, this.value) { this.isContextScope = parent.isContextScope; }
+
+    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange)
+    {
+        if (this.name == name) {
+            if (auto latent = this.value.instanceOf(LatentSymbol)) {
+                return latent.resolve(context);
+            }
+            return value;
+        }
+        if (this.parent) return this.parent.lookup(name, context, locRange);
+        return null;
+    }
+}
+
+template findParent(T) {
+    nullable T findParent(nullable Namespace namespace) {
+        if (auto namespace = namespace) {
+            if (auto hit = namespace.instanceOf(T)) return hit;
+            if (auto parent = namespace.parent) return findParent!T(parent);
+        }
+        return null;
+    }
+}
+
+abstract class ASTMemberBase : ASTSymbol
+{
+    ASTSymbol base;
+
+    string member;
+
+    this(this.base, this.member, this.locRange) { }
+
+    override string repr() {
+        return "$(this.base.repr).$member";
+    }
+}
+
+/// Copy the source expression.
+(Expression | fail Error) copy(Expression source, Context context) {
+    return source.type.copy(context, source)?;
+}
+
+/// Take ownership of the source expression.
+(Expression | fail Error) take(Expression source, Context context) {
+    if (source.info.lifetime == Lifetime.gifted || source.info.lifetime == Lifetime.permanent) {
+        return source;
+    }
+    return source.copy(context)?;
+}
+
+class Void : Type
+{
+    this() {
+        // because it has no size, it needs no initializer.
+        this.zeroInitializable = true;
+    }
+
+    override BackendType emit(Platform platform) { return platform.void_; }
+
+    override bool same(Type other) { return !!other.instanceOf(Void); }
+
+    override string repr() { return "void"; }
+
+    override string mangle() { return "void"; }
+
+    override void hash(Hash hash) { hash.adds("void"); }
+}
+
+class Pointer : Type
+{
+    Type target;
+
+    this(this.target) {
+        // TODO nullable qualifier
+        this.zeroInitializable = true;
+    }
+
+    override BackendType emit(Platform platform)
+    {
+        return new BackendPointerType(this.target.emit(platform));
+    }
+
+    override bool same(Type other)
+    {
+        if (auto otherPtr = other.instanceOf(Pointer))
+            return this.target.same(otherPtr.target);
+        return false;
+    }
+
+    override string repr() { return this.target.repr ~ "*"; }
+
+    override string mangle() { return "ptr_" ~ this.target.mangle; }
+
+    override void hash(Hash hash) { hash.adds("pointer"); target.hash(hash); }
+}
+
+class NoopStatement : Statement
+{
+    this() { }
+
+    override void emit(Generator generator)
+    {
+    }
+
+    override void hash(Hash hash) { hash.adds("NoopStatement"); }
+}
+
+(Expression | fail Error) beExpression(Symbol symbol, LocRange locRange)
+{
+    if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
+        return new SymbolIdentifierExpression(symbolIdent.name);
+    if (auto expr = symbol.instanceOf(Expression))
+        return expr;
+    return locRange.fail("expression expected");
+}
+
+(Type | fail Error) beType(Symbol symbol, LocRange locRange)
+{
+    if (auto type = symbol.instanceOf(Type))
+        return type;
+    if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
+        return new SymbolIdentifierType(symbolIdent.name);
+    return locRange.fail("type expected");
+}
+
+class PointerCast : Expression
+{
+    Type target;
+
+    Expression value;
+
+    this(this.target, this.value) {
+        this.type = this.target;
+        assert(!!target);
+        assert(!!value);
+        this.info = this.value.info;
+    }
+
+    override int emit(Generator output)
+    {
+        int reg = this.value.emit(output);
+        return output.fun.bitcast(reg, this.target.emit(output.platform));
+    }
+
+    override void hash(Hash hash) { hash.adds("ptrcast"); target.hash(hash); value.hash(hash); }
+
+    override string repr() { return "cast($(target.repr)) $(value.repr)"; }
+}
+
+class NullExpr : Expression
+{
+    this(this.type) { this.info = ExprInfo(Lifetime.permanent); }
+
+    override int emit(Generator generator)
+    {
+        return generator.fun.zeroLiteral(this.type.emit(generator.platform));
+    }
+    override void hash(Hash hash) { hash.adds("NullExpr"); type.hash(hash); }
+    override string repr() { return "null"; }
+}
+
+/**
+ * `SymbolIdentifier` is the core of the :name symbol type impl.
+ * Because :foo a = :foo; and we can't double inherit,
+ * `SymbolIdentifier` has special handling in `beType` and `beExpression`.
+ */
+class SymbolIdentifier : Symbol
+{
+    string name;
+    this(this.name) { }
+}
+
+class SymbolIdentifierType : Type
+{
+    string name;
+    this(this.name) { }
+    override BackendType emit(Platform platform) { return new BackendVoidType; }
+    override bool same(Type type) {
+        if (auto other = type.instanceOf(SymbolIdentifierType))
+            return other.name == this.name;
+        return false;
+    }
+    override string repr() { return ":" ~ this.name; }
+    override string mangle() { return "symbol_" ~ name; }
+    override void hash(Hash hash) { hash.adds("SymbolType"); hash.adds(name); }
+    override (nullable Expression | fail Error) binaryOp(
+        Context context, string op, Expression lhs, Expression rhs, LocRange locRange)
+    {
+        if (op == "==" && rhs.type.same(lhs.type)) {
+            return context.compiler.boolLiteral(true);
+        }
+        return null;
+    }
+}
+
+class SymbolIdentifierExpression : Expression
+{
+    string name;
+    this(this.name) { this.type = new SymbolIdentifierType(name); this.info = ExprInfo(Lifetime.permanent); }
+    override int emit(Generator output) { return output.fun.voidLiteral; }
+    override void hash(Hash hash) { hash.adds("SymbolExpr"); hash.adds(name); }
+}
+
+// this(this.name)
+struct ASTThisAssignment
+{
+    string name;
+
+    LocRange locRange;
+}
+
+/**
+ * A value being passed to a callable parameter.
+ */
+struct Argument
+{
+    Expression value;
+
+    string name;
+}
+
+// Namespace with unwind side effect, such as onExit call.
+// Evaluated before declaration cleanup.
+interface Unwindable
+{
+    (nullable Statement | fail Error) unwind(Context context);
+}
+
+ASTSymbol quoteExtForVarDecl(ExtForVarDecl decl, Quoter quoter) {
+    mut ASTSymbol[] tupleArgs;
+    tupleArgs ~= decl.type.case(
+            (:auto_): new ASTSymbolIdentifier("auto_", __RANGE__),
+            (:none): new ASTSymbolIdentifier("none", __RANGE__),
+            ASTSymbol sym: sym.quote(quoter));
+    tupleArgs ~= quoter.quoteLocRange(decl.locRange);
+    // auto $foo => (..., foo)
+    if (decl.name.length > 0 && decl.name[0 .. 1] == "\$") {
+        tupleArgs ~= quoter.compiler.astIdentifier(decl.name[1 .. $], __RANGE__);
+    } else {
+        tupleArgs ~= quoter.compiler.astStringLiteral(decl.name, __RANGE__);
+    }
+
+    return quoter.compiler.astTupleLiteral(tupleArgs, __RANGE__);
+}
+
+(Expression | fail Error) expectImplicitConvertTo(Context context, Expression from, Type to, LocRange locRange)
+{
+    locRange.assert(!!to, "no implconv target type")?;
+    if (auto result = context.compiler.implicitConvertTo(context, from, to)) return result;
+    context.assert2(false, locRange, "Cannot convert to $(to.repr): $(from.type.repr)")?;
+}
+
+(nullable Expression | fail Error) isExpressionImplCall(Symbol symbol, Context context, LocRange locRange)
+{
+    if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
+        return new SymbolIdentifierExpression(symbolIdent.name);
+
+    // implicit function calls
+    // TODO check if we should propagate this upcall
+    auto astSymbol = new ASTSymbolHelper(symbol);
+    if (auto expr = context.compiler.call(context, astSymbol, [], locRange, true)?)
+        return expr;
+    return symbol.instanceOf(Expression);
+}
+
+(Expression | fail Error) beExpressionImplCall(Symbol symbol, Context context, LocRange locRange)
+{
+    if (auto expr = symbol.isExpressionImplCall(context, locRange)?)
+        return expr;
+    return locRange.fail("expression expected");
+}
+
+ImmutableContext makeIContext(
+    CompilerBase compiler, Platform platform, MacroState macroState,
+    ModulePreProcessor modulePreProcessor, ModulePostProcessor modulePostProcessor)
+{
+    return new ImmutableContext(compiler, platform, macroState, compiler.nativeWordType(platform),
+        new IdCounter, [], modulePreProcessor, modulePostProcessor);
+}
+
+Context makeContext(ImmutableContext icontext, ModuleBase compilingModule, Namespace namespace)
+{
+    return Context(namespace, null, compilingModule, icontext);
+}
+
+// Glue between ASTDeclaration and ASTStatement.
+class ASTDeclarationStatement : ASTStatement
+{
+    ASTDeclaration decl;
+
+    this(this.decl) { }
+
+    override (StatementCompileResult | fail Error) compile(Context context) {
+        return this.decl.compile(context).case(
+            Context ctx: StatementCompileResult(new NoopStatement, ctx),
+            Error err: err);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compilerCall("astDeclarationStatement", [
+            this.decl.quote(quoter)], __RANGE__);
+    }
+}
+
+class ASTIdentifier : ASTSymbol
+{
+    string name;
+
+    bool moduleLevel; // .name
+
+    this(this.name, this.moduleLevel, this.locRange) { }
+
+    override (Symbol | fail Error) compile(Context context)
+    {
+        (nullable Symbol | fail Error) resolve() {
+            if (this.moduleLevel) {
+                auto module_ = findParent!ModuleBase(context.namespace);
+                return module_.lookup(this.name, context.withFramePointer(null), locRange);
+            } else if (context.namespace.isContextScope) {
+                return context.namespace.lookup(this.name, context, locRange);
+            } else {
+                return context.namespace.lookup(this.name, context.withFramePointer(null), locRange);
+            }
+        }
+        nullable Symbol symbol = resolve?;
+        if (!symbol) return this.locRange.fail("'$(this.name)' not found");
+        return symbol.notNull;
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        assert(!moduleLevel);
+        // $foo is quoted as 'foo'
+        if (name[0 .. 1] == "\$") {
+            return quoter.compiler.astIdentifier(name[1 .. $], locRange);
+        }
+        return quoter.compilerCall("astIdentifier", [
+            quoter.compiler.astStringLiteral(this.name, locRange)
+        ], locRange);
+    }
+
+    override string repr() {
+        if (this.moduleLevel)
+            return ".$(this.name)";
+        return this.name;
+    }
+}
+
+// :name
+class ASTSymbolIdentifier : ASTSymbol
+{
+    string name;
+
+    this(this.name, this.locRange) { }
+
+    override (SymbolIdentifier | fail Error) compile(Context context) {
+        return new SymbolIdentifier(this.name);
+    }
+
+    override string repr() { return ":$name"; }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compiler.astNewExpression(
+            quoter.compiler.astIdentifier("ASTSymbolIdentifier", __RANGE__), [
+                quoter.compiler.astStringLiteral(this.name, __RANGE__),
+                quoter.quoteLocRange(this.locRange)], __RANGE__);
+    }
+}
+
+(nullable Expression | fail Error) simpleCall(
+    Context context, Symbol sym, Expression[] args, LocRange locRange)
+{
+    mut ASTArgument[] astArgs;
+    for (arg in args)
+        astArgs ~= ASTArgument(new ASTSymbolHelper(arg), "", locRange);
+    return context.compiler.call(context, new ASTSymbolHelper(sym), astArgs, locRange, false);
+}
+
+/**
+ * A symbol that depends on some sort of expression:
+ *
+ * - class method (this)
+ * - struct method (this) NOT IMPLEMENTED
+ * - nested function (stackframe) NOT IMPLEMENTED
+ *
+ * The symbol is being used in some way, such as a function call. To facilitate this,
+ * temporize the contained expression and pass it into resolve() to get a raw
+ * function pointer. The temporized possession must be passed as the first parameter
+ * to that pointer.
+ *
+ * LateSymbol may also patch the expression before the call, for instance for interfaces.
+ */
+abstract class LateSymbol : Symbol
+{
+    Expression baseExpr;
+
+    abstract Expression resolve(Context context, Expression baseExpr);
+
+    Expression patchContext(Context context, Expression baseExpr) { return baseExpr; }
+}
+
+/**
+ * A symbol that may be interested in a frame pointer to complete it.
+ * When looked up, should be glued together with the frame pointer of the lookup.
+ * Usually, LatentSymbol -> LateSymbol, but this whole flow needs reconsideration.
+ */
+abstract class LatentSymbol : Symbol
+{
+    abstract Symbol resolve(Context context);
+}
+
+// class.member
+// here so we can destructure on it later
+// TODO fold this into LateSymbol
+class ClassMethodPtr : Symbol
+{
+    Expression funcPtr;
+
+    // must only be evaluated once!
+    Expression thisValue;
+
+    // if not, tmpize and take the address
+    bool valueIsPtr;
+
+    string name;
+
+    this(this.funcPtr, this.thisValue, this.valueIsPtr, this.name) { }
+
+    override string repr() {
+        return name;
+    }
+}
+
+// here so we can destructure on it later
+abstract class FunctionReferenceBase : Expression
+{
+    abstract FunctionDeclarationBase getFunction();
+}
+
+// here so we can destructure on it later
+abstract class StringLiteralBase : Expression
+{
+    string text;
+
+    this(this.text) { }
+
+    // TODO: escaping
+    override string repr() { return "\"$(this.text)\""; }
+}
+
+// Helper for quasiquoted AST blocks that need to reference back to an already resolved symbol.
+class ASTSymbolHelper : ASTSymbol
+{
+    Symbol symbol;
+
+    this(this.symbol) { }
+
+    override (Symbol | fail Error) compile(Context context) { return this.symbol; }
+
+    override string repr() { return symbol.repr; }
+}
+
+abstract class CompilationVisitor
+{
+    abstract void visit(FinishedSymbol sym);
+}
+
+abstract class ASTModuleVisitor
+{
+    abstract void visit(ASTModuleBase mod);
+}
+
+/**
+ * Symbol that is currently being compiled
+ */
+abstract class PendingSymbol : Symbol
+{
+    abstract (Symbol | fail Error) resolve();
+    // Allow hashing the pending without resolving and potentially triggering a hash loop.
+    abstract void hash(Hash hash);
+}
+
+class FunctionDeclaration : FunctionDeclarationBase
+{
+    this(this.name, this.ret, this.params)
+    {
+        this.contextType = null;
+    }
+
+    size_t numArgs()
+    {
+        mut size_t ret = this.params.length;
+        if (!!contextType) ret += 1;
+        return ret;
+    }
+
+    override string mangle() { return this.name; } // TODO extern
+
+    override void declare(Generator generator)
+    {
+        if (generator.mod.declared(this.mangle))
+            return;
+
+        Type voidp = new Pointer(new Void);
+        mut int extra = 0;
+        if (this.contextType) extra = 1;
+
+        auto paramTypes = new BackendType[](numArgs);
+        if (this.contextType) paramTypes[0] = voidp.emit(generator.platform);
+        for (i, param in this.params)
+            paramTypes[extra + i] = param.type.emit(generator.platform);
+
+        generator.mod.declare(
+            this.mangle,
+            this.ret.emit(generator.platform),
+            paramTypes,
+            variadic=this.variadic
+        );
+    }
+
+    override string repr()
+    {
+        return this.name;
+    }
+}

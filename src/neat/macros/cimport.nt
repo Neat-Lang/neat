@@ -7,11 +7,18 @@ module neat.macros.cimport;
 import package(compiler).neat.base;
 import package(compiler).neat.decl;
 import package(compiler).neat.expr;
-import package(compiler).neat.parser_base;
 import package(compiler).neat.parser;
 import package(compiler).neat.struct_;
 import package(compiler).neat.types;
 import package(compiler).helpers;
+
+// FIXME remove all this
+version (firstpassmacro) {
+    LocRange loc2(Parser parser) { return parser.loc.locRange; }
+} else {
+    import package(compiler).neat.util;
+    LocRange loc2(Parser parser) { return parser.loc; }
+}
 
 extern(C) void neat_runtime_system(string command);
 
@@ -30,18 +37,17 @@ class CImportMacro : Macro
         import std.string : replace;
 
         auto compiler = lexicalContext.compiler;
-        auto loc = parser.loc;
         if (!parser.acceptIdentifier("c_header")?)
             return null;
         parser.expect("(")?;
         // TODO move into neat.base
-        auto from = parser.from?;
+        auto from = parser.loc2;
         parser.expect("\"")?;
         auto includeSym = compiler.parseStringLiteral(parser, lexicalContext, "\"", from)?.instanceOf(ASTStringLiteral);
         parser.assert_(!!includeSym, "string expected")?;
         mut string flags;
         if (parser.accept(",")?) {
-            auto from = parser.from?;
+            auto from = parser.loc2;
             parser.expect("\"")?;
             auto flagsSym = compiler.parseStringLiteral(parser, lexicalContext, "\"", from)?.instanceOf(ASTStringLiteral);
             parser.assert_(!!flagsSym, "flags string expected")?;
@@ -71,12 +77,16 @@ class CImportMacro : Macro
         // do not count references on the file source - it will end
         // up with lots of small inc/decs to fragments that we never free anyway
         (cast(size_t*) &csource)[2] = 0;
-        auto cparser = new Parser(headerName ~ ".out", csource);
+        version (firstpassmacro)
+            auto cparser = new Parser(headerName ~ ".out", csource);
+        else
+            auto cparser = lexicalContext.compiler.createParser(headerName ~ ".out", csource);
+
 
         auto cparserHelper = new CParserHelper(cparser);
 
         auto pak = new Package("c_header", "", []);
-        cparserHelper.mod = compiler.astModule(modName, pak, new MacroState, cparser.loc.locRange, null);
+        cparserHelper.mod = compiler.astModule(modName, pak, new MacroState, cparser.loc2, null);
 
         void add(string name, (ASTExternFunctionBase | ASTSymbol) symbol) {
             if (false)
@@ -123,12 +133,12 @@ class CImportMacro : Macro
                 || cparser.accept("# 0 \"<command-line>\"")?)) {
                 // start of actual include
                 cparserHelper.sysmod = cparserHelper.mod;
-                cparserHelper.mod = compiler.astModule(modName, pak, new MacroState, cparser.loc.locRange, null);
+                cparserHelper.mod = compiler.astModule(modName, pak, new MacroState, cparser.loc2, null);
             }
             if (cparser.accept("#define ")?) {
                 auto identifier = cparser.parseIdentifier?;
                 if (cparser.accept("(")?) { cparser.eatline; continue; }
-                auto loc = cparser.loc;
+                auto start = cparser.loc2;
                 auto num = cparserHelper.parseCNumber?;
                 if (cparser.accept(",")?) { // comma expression?!
                     cparser.eatline;
@@ -136,7 +146,7 @@ class CImportMacro : Macro
                 }
                 num.case {
                     (:failure): { cparser.eatline; continue; }
-                    (:success, int i): add(identifier, new ASTIntLiteral(i, loc.locRange));
+                    (:success, int i): add(identifier, new ASTIntLiteral(i, start));
                 }
                 cparser.assert_(cparser.text.startsWith("\n"), "unknown text")?;
                 // cparser.expect("\n");
@@ -177,7 +187,7 @@ class CImportMacro : Macro
                     eatAttribute?;
                     return cparser.accept(";")?;
                 }
-                auto loc = cparser.loc;
+                auto start = cparser.loc2;
                 cparser.begin;
                 if (auto retBase = cparserHelper.parseType?) {
                     auto retDecl = cparserHelper.parseTypedDecl(retBase)?;
@@ -194,12 +204,12 @@ class CImportMacro : Macro
                                     }
                                 }
                                 add(retDecl.name, compiler.astExternFunction(
-                                    retDecl.name, notNull!ASTSymbol(retDecl.type), params, variadic=false, loc.locRange));
+                                    retDecl.name, notNull!ASTSymbol(retDecl.type), params, variadic=false, start));
                                 success = true;
                                 break;
                             }
                             if (params.length && !cparser.accept(",")?) break;
-                            auto argloc = cparser.loc;
+                            auto argloc = cparser.loc2;
                             if (auto argBasetype = cparserHelper.parseType?) {
                                 auto argDecl = cparserHelper.parseTypedDecl(argBasetype)?;
                                 if (!argDecl.type) break;
@@ -207,7 +217,7 @@ class CImportMacro : Macro
                                     argDecl.name, false,
                                     type=notNull!ASTSymbol(argDecl.type),
                                     defaultValue=null,
-                                    argloc.locRange);
+                                    argloc);
                             } else break;
                         }
                         if (success) continue;
@@ -269,7 +279,7 @@ class CStaticArray : ASTSymbol
         mut StructMemberDeclaration[] members;
         for (i in 0 .. count)
             members ~= new StructMemberDeclaration(
-                "_" ~ ltoa(i), Protection.public_, type.compile(context)?.beType2(this.locRange)?);
+                "_" ~ ltoa(i), Protection.public_, type.compile(context)?.beType(this.locRange)?);
 
         return new Struct("SA_hack", members, this.locRange, context.namespace.mangle);
     }
@@ -310,10 +320,10 @@ class CParserHelper {
         assert(!!current);
         // TODO polysemous null type
         nullable ASTSymbol nullSymbol;
-        auto loc = parser.loc;
+        auto start = parser.loc2;
         while (true) {
             if (parser.accept("*")? || parser.accept("[]")?) {
-                current = new ASTPointer(current, parser.loc.locRange);
+                current = new ASTPointer(current, parser.loc2);
                 parser.accept("const")?;
                 parser.accept("restrict")?;
                 parser.accept("__restrict")?;
@@ -346,17 +356,17 @@ class CParserHelper {
                     params ~= notNull!ASTSymbol(arg.type);
                 }
                 parser.commit;
-                return (new ASTFunctionPointer(current, params, loc), name);
+                return (new ASTFunctionPointer(current, params, start), name);
             }
             parser.revert;
             break;
         }
         // name can be empty!
         auto name = parser.parseIdentifier?;
-        auto loc = parser.loc.locRange;
+        auto start = parser.loc2;
         while (parser.accept("[")?) {
             if (parser.accept("]")?) {
-                current = new ASTPointer(current, parser.loc.locRange);
+                current = new ASTPointer(current, parser.loc2);
                 continue;
             }
             auto n = parseCNumber?; auto num = n.case(
@@ -364,7 +374,7 @@ class CParserHelper {
                 (:success, int i): i);
             // parser.expect("]")?;
             if (!parser.accept("]")?) return (nullSymbol, "");
-            current = new CStaticArray(current, num, loc);
+            current = new CStaticArray(current, num, start);
         }
         return (current, name);
     }
@@ -407,10 +417,10 @@ class CParserHelper {
     }
 
     (ASTSymbol | fail Error) parseStructType() {
-        auto loc = parser.loc;
+        auto start = parser.loc2;
         auto name = parser.parseIdentifier?;
         mut ASTStructEntry[] entries;
-        auto emptyStruct = new ASTStructDeclSym(new ASTStructDecl(name, [], loc)); // opaque
+        auto emptyStruct = new ASTStructDeclSym(new ASTStructDecl(name, [], start)); // opaque
         if (!parser.accept("{")?) {
             if (auto definedSym = this.mod.getSymbolAlias(name)) return definedSym;
             if (auto definedSym = this.sysmod.getSymbolAlias(name)) return definedSym;
@@ -453,12 +463,12 @@ class CParserHelper {
             if (!parser.accept(";")?) { parser.revert; scanToClosingBracket; return emptyStruct; }
             parser.commit;
         }
-        return new ASTStructDeclSym(new ASTStructDecl(name, entries, loc));
+        return new ASTStructDeclSym(new ASTStructDecl(name, entries, start));
     }
 
     (nullable ASTSymbol | fail Error) parseEnumType() {
         // TODO export enum members as aliases
-        auto loc = parser.loc.locRange;
+        auto start = parser.loc2;
         parser.parseIdentifier?;
         if (!parser.accept("{")?) return null; // wat
         mut int lastNum = -1;
@@ -470,19 +480,19 @@ class CParserHelper {
                 num.case {
                     (:failure): break;
                     (:success, int i): {
-                        mod.addAliasDecl(name, Protection.public_, new ASTIntLiteral(i, loc));
+                        mod.addAliasDecl(name, Protection.public_, new ASTIntLiteral(i, start));
                         lastNum = i;
                     }
                 }
             } else {
-                mod.addAliasDecl(name, Protection.public_, new ASTIntLiteral(lastNum + 1, loc));
+                mod.addAliasDecl(name, Protection.public_, new ASTIntLiteral(lastNum + 1, start));
                 lastNum++;
             }
             parser.accept(",")?;
         }
         auto close = parser.text.find("}");
         parser.drop(close + 1);
-        return new ASTBasicType("int", loc);
+        return new ASTBasicType("int", start);
     }
 
     (:failure | :success, int i | fail Error) parseCNumber() {

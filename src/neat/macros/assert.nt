@@ -2,14 +2,71 @@ module neat.macros.assert;
 
 macro import neat.macros.quasiquoting;
 
-import package(compiler).helpers;
-import package(compiler).neat.array;
-import package(compiler).neat.base;
-import package(compiler).neat.decl;
-import package(compiler).neat.expr;
-import package(compiler).neat.parser_base;
-import package(compiler).neat.statements;
-import package(compiler).neat.types;
+version (firstpassmacro) {
+    import package(compiler).helpers;
+    import package(compiler).neat.array;
+    import package(compiler).neat.base;
+    import package(compiler).neat.decl;
+    import package(compiler).neat.expr;
+    import package(compiler).neat.parser_base;
+    import package(compiler).neat.statements;
+    import package(compiler).neat.types;
+    (string | :none) destructAstIdentifier(CompilerBase, ASTSymbol sym) {
+        if (auto ident = sym.instanceOf(ASTIdentifier)) {
+            return ident.name;
+        }
+        return :none;
+    }
+    (ASTSymbol | :none) destructAstNegation(CompilerBase, ASTSymbol sym) {
+        if (auto neg = sym.instanceOf(ASTNegation)) {
+            return neg.next;
+        }
+    }
+    (ASTSymbol left, string op, ASTSymbol right | :none) destructAstBinaryOp(CompilerBase, ASTSymbol sym) {
+        if (auto binOp = sym.instanceOf(ASTBinaryOp)) {
+            return (binOp.left, binOp.op, binOp.right);
+        }
+        return :none;
+    }
+    (ASTSymbol base, string member | :none) destructAstMember(CompilerBase, ASTSymbol sym) {
+        if (auto astMember = sym.instanceOf(ASTMemberBase)) {
+            return (astMember.base, astMember.member);
+        }
+        return :none;
+    }
+    (int | :none) destructAstIntLiteral(CompilerBase, ASTSymbol sym) {
+        if (auto lit = sym.instanceOf(ASTIntLiteral)) {
+            return lit.value;
+        }
+        return :none;
+    }
+    (string | :none) destructAstStringLiteral(CompilerBase, ASTSymbol sym) {
+        if (auto lit = sym.instanceOf(ASTStringLiteral)) {
+            return lit.text;
+        }
+        return :none;
+    }
+    (Type | :none) isArrayType(CompilerBase, Type type) {
+        if (auto arr = type.instanceOf(Array)) return arr.elementType;
+        return :none;
+    }
+    (string | :none) isBasicType(CompilerBase, Type type) {
+        // see ASTBasicType
+        // TODO merge all these types
+        if (type.instanceOf(Integer)) return "int";
+        if (type.instanceOf(Long)) return "long";
+        if (type.instanceOf(Short)) return "short";
+        if (type.instanceOf(Character)) return "char";
+        if (type.instanceOf(UByte)) return "ubyte";
+        if (type.instanceOf(Boolean)) return "bool";
+        if (type.instanceOf(Void)) return "void";
+        if (type.instanceOf(Float)) return "float";
+        if (type.instanceOf(Double)) return "double";
+        return :none;
+    }
+} else {
+    import package(compiler).neat.base;
+}
 
 class ASTAssertion : ASTStatement
 {
@@ -21,20 +78,19 @@ class ASTAssertion : ASTStatement
 
     (Expression | fail Error) symbolTest(Context context, ASTSymbol sym) {
         auto context = context.withNamespace(context.compiler.exprAlias(
-                context.namespace, "identName", context.compiler.stringLiteral(repr(sym))));
+                context.namespace, "identName", context.compiler.stringLiteral(repr(sym, context))));
 
-        return (context.compiler.$expr ({
-            import package(compiler).neat.runtime : itoa;
-            identName ~ " = " ~ itoa(cast(int) $sym);
-        })).compile(context)?.instanceOf(Expression).notNull;
+        return (context.compiler.$expr "$identName = $(cast(int) $sym)")
+            .compile(context)?.instanceOf(Expression).notNull;
     }
 
-    (nullable Expression | fail Error) binopTest(mut Context context, ASTBinaryOp binop) {
+    (nullable Expression | fail Error) binopTest(mut Context context, ASTSymbol left, string op, ASTSymbol right) {
         void set(string name, Symbol value) {
             context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, name, value));
         }
-        string leftStr = repr(binop.left), rightStr = repr(binop.right);
+        (ASTSymbol left, string op, ASTSymbol right) binop = (left, op, right);
+        string leftStr = repr(binop.left, context), rightStr = repr(binop.right, context);
         set("leftStr", context.compiler.stringLiteral(leftStr));
         set("rightStr", context.compiler.stringLiteral(rightStr));
         auto
@@ -75,20 +131,40 @@ class ASTAssertion : ASTStatement
             })).compile(context)?.instanceOf(Expression);
         }
         bool isString(Type type) {
-            if (auto arr = type.instanceOf(Array))
-                return !!arr.elementType.instanceOf(Character);
-            return false;
+            context.compiler.isArrayType(type).case {
+                Type elementType:
+                    context.compiler.isBasicType(elementType).case {
+                        string type:
+                            return type == "char";
+                        (:none): return false;
+                    }
+                (:none): return false;
+            }
+        }
+        bool isFloat(Type type) {
+            context.compiler.isBasicType(type).case {
+                string type:
+                    return type == "float";
+                (:none):
+                    return false;
+            }
         }
         bool isIntCastable(Type type) {
-            return type.instanceOf(Integer) || type.instanceOf(Long)
-                || type.instanceOf(Character) || type.instanceOf(Short);
+            context.compiler.isBasicType(type).case {
+                string type:
+                    return type == "int" || type == "long" || type == "char" || type == "short";
+                (:none):
+                    return false;
+            }
         }
         if (left.type.isIntCastable && right.type.isIntCastable) {
-            if (right.instanceOf(IntLiteral)) {
-                return (context.compiler.$expr ({
-                    import package(compiler).neat.runtime : itoa;
-                    leftStr ~ " = " ~ itoa(cast(int) left);
-                })).compile(context)?.instanceOf(Expression);
+            context.compiler.destructAstIntLiteral(binop.right).case {
+                int value:
+                    return (context.compiler.$expr ({
+                        import package(compiler).neat.runtime : itoa;
+                        leftStr ~ " = " ~ itoa(cast(int) left);
+                    })).compile(context)?.instanceOf(Expression);
+                (:none): {}
             }
             return (context.compiler.$expr ({
                 import package(compiler).neat.runtime : itoa;
@@ -96,7 +172,7 @@ class ASTAssertion : ASTStatement
                 ~ " and " ~ rightStr ~ " = " ~ itoa(cast(int) right);
             })).compile(context)?.instanceOf(Expression);
         }
-        if (left.type.instanceOf(Float) && right.type.instanceOf(Float)) {
+        if (left.type.isFloat && right.type.isFloat) {
             return (context.compiler.$expr ({
                 import package(compiler).neat.runtime : ftoa;
                 leftStr ~ " = " ~ ftoa(left)
@@ -104,10 +180,12 @@ class ASTAssertion : ASTStatement
             })).compile(context)?.instanceOf(Expression);
         }
         if (left.type.isString && right.type.isString) {
-            if (right.instanceOf(StringLiteral)) {
-                return (
-                    context.compiler.$expr leftStr ~ " = \"" ~ left ~ "\""
-                ).compile(context)?.instanceOf(Expression);
+            context.compiler.destructAstStringLiteral(binop.right).case {
+                string text:
+                    return (
+                        context.compiler.$expr leftStr ~ " = \"" ~ left ~ "\""
+                    ).compile(context)?.instanceOf(Expression);
+                (:none): {}
             }
             return (
                 context.compiler.$expr
@@ -118,17 +196,17 @@ class ASTAssertion : ASTStatement
         return null;
     }
 
-    (nullable Expression | fail Error) negTest(mut Context context, ASTNegation astNegation)
+    (nullable Expression | fail Error) negTest(mut Context context, ASTSymbol next)
     {
         void set(string name, Symbol value) {
             context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, name, value));
         }
 
-        auto nextRecurse = dispatch(context, astNegation.next)?;
+        auto nextRecurse = dispatch(context, next)?;
         if (!nextRecurse) return null;
         set("nextRecurse", nextRecurse);
-        string nextStr = repr(astNegation.next);
+        string nextStr = repr(next, context);
         set("nextStr", context.compiler.stringLiteral(nextStr));
 
         return (
@@ -137,17 +215,23 @@ class ASTAssertion : ASTStatement
     }
 
     (nullable Expression | fail Error) dispatch(Context context, ASTSymbol sym) {
-        if (auto ident = sym.instanceOf(ASTIdentifier)) {
-            return symbolTest(context, ident);
+        context.compiler.destructAstIdentifier(sym).case {
+            string ident: return symbolTest(context, sym);
+            (:none): {}
         }
-        if (auto member = sym.instanceOf(ASTMemberBase)) {
-            return symbolTest(context, member);
+        context.compiler.destructAstMember(sym).case {
+            (ASTSymbol base, string member): return symbolTest(context, sym);
+            (:none): {}
         }
-        if (auto binop = sym.instanceOf(ASTBinaryOp)) {
-            return binopTest(context, binop);
+        context.compiler.destructAstBinaryOp(sym).case {
+            (ASTSymbol left, string op, ASTSymbol right):
+                return binopTest(context, left, op, right);
+            (:none): {}
         }
-        if (auto neg = sym.instanceOf(ASTNegation)) {
-            return negTest(context, neg);
+        context.compiler.destructAstNegation(sym).case {
+            ASTSymbol next:
+                return negTest(context, next);
+            (:none): {}
         }
         return null;
     }
@@ -155,23 +239,16 @@ class ASTAssertion : ASTStatement
     override (StatementCompileResult | fail Error) compile(Context context)
     {
         mut Context context = context;
-        auto printFun = new FunctionDeclaration(
-            "print", new Void, [Parameter.simple("str", new Array(new Character))]);
-        auto assertFun = new FunctionDeclaration(
-            "assert", new Void, [Parameter.simple("test", new Integer)]);
 
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "print", printFun));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "assert", assertFun));
-        string failedMsg = locRange.repr ~ ": assertion failed: " ~ exprText ~ ", because ";
         auto ifFailed = dispatch(context, test)?;
         if (auto ifFailed = ifFailed) {
+            string failedMsg = locRange.repr ~ ": assertion failed: " ~ exprText ~ ", because ";
             context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "ifFailed", ifFailed));
             context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "failedMsg", context.compiler.stringLiteral(failedMsg)));
             auto assertTest = context.compiler.$stmt {
+                import neat.runtime : assert, print;
                 if (!$test) {
                     print(failedMsg ~ ifFailed);
                     assert(false);
@@ -180,45 +257,18 @@ class ASTAssertion : ASTStatement
             auto assertTestStmt = assertTest.compile(context)?;
             return StatementCompileResult(assertTestStmt.statement, context);
         }
-
-        // fallback: old impl
-        // TODO quasiquote this
-        auto test = this.test.compile(context)?;
-        auto expr = test.beExpression(this.locRange)?;
-        auto texpr = context.compiler.truthy(context, expr, this.locRange)?;
-        // FIXME
-        version (next_compiler)
-            auto nexpr = context.compiler.binaryOp(
-                // "==", context, texpr, new BoolLiteral(false), this.locRange);
-                "==", context,
-                texpr,
-                (context.compiler.$expr false).compile(context)?.beExpression,
-                this.locRange)?;
-        else
-            auto nexpr = context.compiler.binaryOp(
-                // "==", context, texpr, new BoolLiteral(false), this.locRange);
-                "==", context,
-                texpr,
-                (context.compiler.$expr false).compile(context)?.beExpression(this.locRange)?,
-                this.locRange)?;
-
-        Expression failStr = context.compiler.binaryOp(
-                "~", context,
-                context.compiler.stringLiteral(this.locRange.repr),
-                context.compiler.stringLiteral(": '" ~ this.exprText ~ "' was false"),
-                this.locRange)?;
-        Expression false_ = context.compiler.intLiteral(0);
-        Statement printSt = context.compiler.exprStatement(
-            context.compiler.simpleCall(context, printFun, [failStr], this.locRange)?.notNull);
-        Statement failSt = context.compiler.exprStatement(
-            context.compiler.simpleCall(context, assertFun, [false_], this.locRange)?.notNull);
-        // `if (!$expression) { print($assertLocStr ~ ": '" ~ $exprText ~ "' was false."); assert(false); }`
-        return StatementCompileResult(
-            context.compiler.ifStatement(
-                nexpr,
-                context.compiler.sequenceStatement([printSt, failSt]),
-                null),
-            context);
+        string failedMsg = locRange.repr ~ ": assertion failed: '" ~ exprText ~ "' was false";
+        context = context.withNamespace(context.compiler.exprAlias(
+                context.namespace, "failedMsg", context.compiler.stringLiteral(failedMsg)));
+        auto assertTest = context.compiler.$stmt {
+            import neat.runtime : assert, print;
+            if (!$test) {
+                print(failedMsg);
+                assert(false);
+            }
+        };
+        auto assertTestStmt = assertTest.compile(context)?;
+        return StatementCompileResult(assertTestStmt.statement, context);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -230,25 +280,33 @@ class ASTAssertion : ASTStatement
     }
 }
 
-string repr(ASTSymbol expr) {
-    assert(!!expr);
-    if (auto ident = expr.instanceOf(ASTIdentifier)) {
-        return ident.name;
+string repr(ASTSymbol sym, Context context) {
+    import neat.runtime : assert;
+    assert(!!sym);
+    context.compiler.destructAstIdentifier(sym).case {
+        string ident: return ident;
+        (:none): {}
     }
-    if (auto neg = expr.instanceOf(ASTNegation)) {
-        return "!" ~ repr(neg.next);
+    context.compiler.destructAstMember(sym).case {
+        (ASTSymbol base, string member): repr(base, context) ~ "." ~ member;
+        (:none): {}
     }
-    if (auto member = expr.instanceOf(ASTMemberBase)) {
-        return repr(member.base) ~ "." ~ member.member;
+    context.compiler.destructAstBinaryOp(sym).case {
+        (ASTSymbol left, string op, ASTSymbol right):
+            return "(" ~ repr(left, context) ~ " $op " ~ repr(right, context) ~ ")";
+        (:none): {}
     }
-    if (auto binop = expr.instanceOf(ASTBinaryOp)) {
-        return "(" ~ repr(binop.left) ~ " " ~ binop.op ~ " " ~ repr(binop.right) ~ ")";
+    context.compiler.destructAstNegation(sym).case {
+        ASTSymbol next: return "!" ~ repr(next, context);
+        (:none): {}
     }
-    if (auto intl = expr.instanceOf(ASTIntLiteral)) {
-        return itoa(intl.value);
+    context.compiler.destructAstIntLiteral(sym).case {
+        int value: return "$value";
+        (:none): {}
     }
-    if (auto str = expr.instanceOf(ASTStringLiteral)) {
-        return "\"" ~ str.text ~ "\"";
+    context.compiler.destructAstStringLiteral(sym).case {
+        string text: return "\"$text\"";
+        (:none): {}
     }
     return "TODO";
 }

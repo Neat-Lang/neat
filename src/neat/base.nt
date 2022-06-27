@@ -3,15 +3,6 @@ module neat.base;
 import backend.base;
 import helpers;
 import neat.hash;
-import neat.parser_base;
-
-void assert2s(int test, string msg) { if (!test) { print(msg); exit(1); } }
-void assert2s2(int test, string a, string b) { if (!test) { print(a ~ b); exit(1); } }
-void assert2s3(int test, string a, string b, string c) { if (!test) { print(a ~ b ~ c); exit(1); } }
-void assert2s4(int test, string a, string b, string c, string d) {
-    if (!test) { print(a ~ b ~ c ~ d); exit(1); } }
-void assert2s5(int test, string a, string b, string c, string d, string e) {
-    if (!test) { print(a ~ b ~ c ~ d ~ e); exit(1); } }
 
 // something that can be referenced by a name
 abstract class Symbol
@@ -23,178 +14,46 @@ abstract class Symbol
 }
 
 /**
- * A namespace is a lexical environment that supports identifier lookup.
- * Note that this means "foo", not "a.foo".
+ * Gifted: An expression with an unmanaged lifetime that we must take over.
+ * Ephemeral: An expression that will be freed at some indeterminate point.
+ * Lexical: An expression that will be freed at the earliest when the scope ends.
+ * Permanent: An expression that will never be freed, or that does not participate in rc.
+ *
+ * Examples:
+ * - unique: `new Class()`
+ * - ephemeral: `foo.(that)`
+ * - lexical: `void foo(Class obj) { }` or `Class obj;`
+ * - permanent: `"string"`
  */
-abstract class Namespace
+enum Lifetime
 {
-    nullable Namespace parent; // lexical parent
-
-    bool isContextScope;
-
-    this(this.parent, this.isContextScope) { }
-
-    /**
-     * name:    The name being looked up.
-     *
-     * context: The compiler context originating the lookup.
-     *          The namespace in context is used as the provenance of the lookup,
-     *          meaning it decides whether private members may be read.
-     *
-     * loc:     The location of the symbol triggering the lookup.
-     */
-    abstract (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange);
-
-    string mangle() { return this.parent.mangle; }
+    gifted,
+    ephemeral,
+    lexical,
+    permanent,
 }
 
-/// Something that 'return' returns from.
-interface Returnable
+struct ExprInfo
 {
-    /// We want to return `proposed`, so give me a type you can be happy with.
-    Type mergeReturnType(Type proposed, bool failProp);
-}
+    Lifetime lifetime;
 
-/// Something that variables can be declared in.
-interface Declarable
-{
-    LatentVariable declare(string name, Type type, bool mut, bool borrowed);
-}
-
-// variable without stackframe
-interface LatentVariable
-{
-    Expression localStackFrame(CompilerBase compiler);
-
-    Reference access(CompilerBase compiler, Expression frame);
-}
-
-class ASTImportStatement
-{
-    (:normal, string name, string pak | :macro_, ASTModuleBase module_) target;
-
-    bool isMacroImport;
-
-    string[] symbols;
-
-    LocRange locRange;
-
-    this(this.target, this.isMacroImport, this.symbols, this.locRange) { }
-
-    string repr(string pak) {
-        this.target.case {
-            (:normal, string name, string importPak): {
-                if (importPak.length) return "import package($importPak).$name";
-                return "import package($pak).$name";
-            }
-            (:macro_, ASTModuleBase module_): {
-                return "macro import package($pak) $(module_.mangledName)";
-            }
-        }
+    string repr() {
+        mut string ret;
+        if (lifetime == Lifetime.gifted) ret ~= "gifted";
+        else if (lifetime == Lifetime.ephemeral) ret ~= "ephemeral";
+        else if (lifetime == Lifetime.lexical) ret ~= "lexical";
+        else if (lifetime == Lifetime.permanent) ret ~= "permanent";
+        else assert(false);
+        return ret;
     }
 }
 
-// bleh cycle
-abstract class ASTModuleBase
+abstract class Expression : Symbol
 {
-    string mangledName;
-
-    abstract void addEntry(Protection protection, (ASTExternFunctionBase | ASTSymbol) target);
-
-    abstract void addAliasDecl(string name, Protection protection, ASTSymbol target);
-
-    abstract nullable ASTSymbol getSymbolAlias(string name);
-}
-
-abstract class ASTExternFunctionBase
-{
-    string name;
-
-    abstract string repr();
-}
-
-abstract class LexicalContext
-{
-    CompilerBase compiler;
-
-    Package pak;
-
-    MacroState macroState;
-
-    // break an annoying dependency cycle
-    abstract (ASTModuleBase | fail Error) resolveImport(ASTImportStatement importStmt);
-
-    this(this.compiler, this.pak, this.macroState) { }
-}
-
-/**
- * Delineates a region of control flow in which 'break;' and 'continue;' may be used.
- */
-abstract class LoopScope : Namespace
-{
-    abstract (Statement | fail Error) breakFrom(Context context);
-    abstract (Statement | fail Error) continueFrom(Context context);
-    // purely a marker
-    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange) {
-        return this.parent.lookup(name, context, locRange);
-    }
-}
-
-// helper for binding values for stuff like compiler.$stmt
-class SymbolAlias : Namespace
-{
-    string name;
-
-    Symbol value;
-
-    this(this.parent, this.name, this.value) { this.isContextScope = parent.isContextScope; }
-
-    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange)
-    {
-        if (this.name == name) {
-            if (auto latent = this.value.instanceOf(LatentSymbol)) {
-                return latent.resolve(context);
-            }
-            return value;
-        }
-        if (this.parent) return this.parent.lookup(name, context, locRange);
-        return null;
-    }
-}
-
-template findParent(T) {
-    nullable T findParent(nullable Namespace namespace) {
-        if (auto namespace = namespace) {
-            if (auto hit = namespace.instanceOf(T)) return hit;
-            if (auto parent = namespace.parent) return findParent!T(parent);
-        }
-        return null;
-    }
-}
-
-abstract class ASTSymbol
-{
-    LocRange locRange;
-
-    abstract (Symbol | fail Error) compile(Context context);
-
-    ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTSymbol'! this=$(cast(size_t) this)"); assert(false); }
-
-    // TODO this.classname
-    string repr() { return "TODO repr(ASTSymbol): $(locRange.repr)"; }
-}
-
-abstract class ASTMemberBase : ASTSymbol
-{
-    ASTSymbol base;
-
-    string member;
-
-    this(this.base, this.member, this.locRange) { }
-
-    override string repr() {
-        return "$(this.base.repr).$member";
-    }
+    Type type;
+    ExprInfo info;
+    abstract int emit(Generator output);
+    abstract void hash(Hash hash);
 }
 
 abstract class Statement
@@ -202,6 +61,19 @@ abstract class Statement
     abstract void emit(Generator output);
     abstract void hash(Hash hash);
     string repr() { return "TODO Statement.repr"; }
+}
+
+abstract class Reference : Expression
+{
+    bool mutable;
+    abstract int emitLocation(Generator output);
+}
+
+enum Protection
+{
+    public_,
+    protected_,
+    private_
 }
 
 abstract class Type : Symbol
@@ -326,76 +198,6 @@ abstract class Type : Symbol
     }
 }
 
-/// Copy the source expression.
-(Expression | fail Error) copy(Expression source, Context context) {
-    return source.type.copy(context, source)?;
-}
-
-/// Take ownership of the source expression.
-(Expression | fail Error) take(Expression source, Context context) {
-    if (source.info.lifetime == Lifetime.gifted || source.info.lifetime == Lifetime.permanent) {
-        return source;
-    }
-    return source.copy(context)?;
-}
-
-class Void : Type
-{
-    this() {
-        // because it has no size, it needs no initializer.
-        this.zeroInitializable = true;
-    }
-
-    override BackendType emit(Platform platform) { return platform.void_; }
-
-    override bool same(Type other) { return !!other.instanceOf(Void); }
-
-    override string repr() { return "void"; }
-
-    override string mangle() { return "void"; }
-
-    override void hash(Hash hash) { hash.adds("void"); }
-}
-
-class Pointer : Type
-{
-    Type target;
-
-    this(this.target) {
-        // TODO nullable qualifier
-        this.zeroInitializable = true;
-    }
-
-    override BackendType emit(Platform platform)
-    {
-        return new BackendPointerType(this.target.emit(platform));
-    }
-
-    override bool same(Type other)
-    {
-        if (auto otherPtr = other.instanceOf(Pointer))
-            return this.target.same(otherPtr.target);
-        return false;
-    }
-
-    override string repr() { return this.target.repr ~ "*"; }
-
-    override string mangle() { return "ptr_" ~ this.target.mangle; }
-
-    override void hash(Hash hash) { hash.adds("pointer"); target.hash(hash); }
-}
-
-class NoopStatement : Statement
-{
-    this() { }
-
-    override void emit(Generator generator)
-    {
-    }
-
-    override void hash(Hash hash) { hash.adds("NoopStatement"); }
-}
-
 class Generator
 {
     BackendModule mod;
@@ -423,154 +225,288 @@ class Generator
     }
 }
 
-/**
- * Gifted: An expression with an unmanaged lifetime that we must take over.
- * Ephemeral: An expression that will be freed at some indeterminate point.
- * Lexical: An expression that will be freed at the earliest when the scope ends.
- * Permanent: An expression that will never be freed, or that does not participate in rc.
- *
- * Examples:
- * - unique: `new Class()`
- * - ephemeral: `foo.(that)`
- * - lexical: `void foo(Class obj) { }` or `Class obj;`
- * - permanent: `"string"`
- */
-enum Lifetime
+abstract class ASTSymbol
 {
-    gifted,
-    ephemeral,
-    lexical,
-    permanent,
+    LocRange locRange;
+
+    abstract (Symbol | fail Error) compile(Context context);
+
+    ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTSymbol'! this=$(cast(size_t) this)"); assert(false); }
+
+    // TODO this.classname
+    string repr() { return "TODO repr(ASTSymbol): $(locRange.repr)"; }
 }
 
-struct ExprInfo
+// TODO Statement, Context multi-return
+struct StatementCompileResult
 {
-    Lifetime lifetime;
+    Statement statement;
 
-    string repr() {
-        mut string ret;
-        if (lifetime == Lifetime.gifted) ret ~= "gifted";
-        else if (lifetime == Lifetime.ephemeral) ret ~= "ephemeral";
-        else if (lifetime == Lifetime.lexical) ret ~= "lexical";
-        else if (lifetime == Lifetime.permanent) ret ~= "permanent";
-        else assert(false);
+    Context context;
+}
+
+abstract class ASTStatement
+{
+    LocRange locRange;
+
+    abstract (StatementCompileResult | fail Error) compile(Context context);
+
+    ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTStatement'!"); assert(false); }
+}
+
+/**
+ * Something that updates a namespace without behavioral side effects:
+ *
+ * - import
+ * - alias
+ * - struct decl
+ * - class decl
+ *
+ * Ironically, a variable declaration is not an ASTDeclaration.
+ * Find a better name?
+ */
+abstract class ASTDeclaration
+{
+    abstract (Context | fail Error) compile(Context context);
+
+    abstract ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTDeclaration'!"); assert(false); }
+
+    // TODO this.classname
+    string repr() { return "TODO repr(ASTDeclaration)"; }
+}
+
+alias ExtForVarDecl = ((:auto_ | ASTSymbol | :none) type, LocRange locRange, string name);
+
+/**
+ * A namespace is a lexical environment that supports identifier lookup.
+ * Note that this means "foo", not "a.foo".
+ */
+abstract class Namespace
+{
+    nullable Namespace parent; // lexical parent
+
+    bool isContextScope;
+
+    this(this.parent, this.isContextScope) { }
+
+    /**
+     * name:    The name being looked up.
+     *
+     * context: The compiler context originating the lookup.
+     *          The namespace in context is used as the provenance of the lookup,
+     *          meaning it decides whether private members may be read.
+     *
+     * loc:     The location of the symbol triggering the lookup.
+     */
+    abstract (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange);
+
+    string mangle() { return this.parent.mangle; }
+}
+
+/// Something that 'return' returns from.
+interface Returnable
+{
+    /// We want to return `proposed`, so give me a type you can be happy with.
+    Type mergeReturnType(Type proposed, bool failProp);
+}
+
+/// Something that variables can be declared in.
+interface Declarable
+{
+    LatentVariable declare(string name, Type type, bool mut, bool borrowed);
+}
+
+// variable without stackframe
+interface LatentVariable
+{
+    Expression localStackFrame(CompilerBase compiler);
+
+    Reference access(CompilerBase compiler, Expression frame);
+}
+
+// Something that should be cleaned up on unwind.
+abstract class DeclarationHolder : Namespace
+{
+    abstract bool freeOnExit();
+
+    abstract Reference accessDecl(CompilerBase compiler);
+
+    Reference accessDecl2(CompilerBase compiler) { return accessDecl(compiler); }
+}
+
+/**
+ * This contains the parts of Context that are rarely modified,
+ * and should thus be hidden behind a pointer.
+ */
+class ImmutableContext
+{
+    CompilerBase compiler;
+
+    Platform platform;
+
+    MacroState macroState;
+
+    // here for caching reasons
+    // TODO replace with once
+    Type nativeWordType;
+
+    IdCounter idCounter;
+
+    LocRange[] errorStack;
+
+    ModulePreProcessor modulePreProcessor;
+
+    ModulePostProcessor modulePostProcessor;
+
+    this(this.compiler, this.platform, this.macroState, this.nativeWordType, this.idCounter, this.errorStack,
+        this.modulePreProcessor, this.modulePostProcessor) { }
+}
+
+class IdCounter
+{
+    int count;
+
+    this() { }
+
+    int next() {
+        int ret = this.count;
+        this.count += 1;
         return ret;
     }
 }
 
-abstract class Expression : Symbol
+// Used by main to analyze the AST tree (docgen)
+interface ModulePreProcessor
 {
-    Type type;
-    ExprInfo info;
-    abstract int emit(Generator output);
-    abstract void hash(Hash hash);
+    void process(ASTModuleBase astModule_);
 }
 
-(Expression | fail Error) beExpression(Symbol symbol, LocRange locRange)
+// Will be used by main to start emitting modules as soon as they finish.
+interface ModulePostProcessor
 {
-    if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
-        return new SymbolIdentifierExpression(symbolIdent.name);
-    if (auto expr = symbol.instanceOf(Expression))
-        return expr;
-    return locRange.fail("expression expected");
-}
-
-(Type | fail Error) beType(Symbol symbol, LocRange locRange)
-{
-    if (auto type = symbol.instanceOf(Type))
-        return type;
-    if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
-        return new SymbolIdentifierType(symbolIdent.name);
-    return locRange.fail("type expected");
-}
-
-(Type | fail Error) beType2(Symbol symbol, LocRange locRange)
-{
-    return beType(symbol, locRange);
-}
-
-abstract class Reference : Expression
-{
-    bool mutable;
-    abstract int emitLocation(Generator output);
-}
-
-class PointerCast : Expression
-{
-    Type target;
-
-    Expression value;
-
-    this(this.target, this.value) {
-        this.type = this.target;
-        assert(!!target);
-        assert(!!value);
-        this.info = this.value.info;
-    }
-
-    override int emit(Generator output)
-    {
-        int reg = this.value.emit(output);
-        return output.fun.bitcast(reg, this.target.emit(output.platform));
-    }
-
-    override void hash(Hash hash) { hash.adds("ptrcast"); target.hash(hash); value.hash(hash); }
-
-    override string repr() { return "cast($(target.repr)) $(value.repr)"; }
-}
-
-class NullExpr : Expression
-{
-    this(this.type) { this.info = ExprInfo(Lifetime.permanent); }
-
-    override int emit(Generator generator)
-    {
-        return generator.fun.zeroLiteral(this.type.emit(generator.platform));
-    }
-    override void hash(Hash hash) { hash.adds("NullExpr"); type.hash(hash); }
-    override string repr() { return "null"; }
+    void process(ModuleBase module_);
 }
 
 /**
- * `SymbolIdentifier` is the core of the :name symbol type impl.
- * Because :foo a = :foo; and we can't double inherit,
- * `SymbolIdentifier` has special handling in `beType` and `beExpression`.
+ * Context used when transforming an AST into a semantic tree.
+ *
+ * TODO figure out how to reduce refcounts on this.
  */
-class SymbolIdentifier : Symbol
+struct Context
 {
-    string name;
-    this(this.name) { }
+    Namespace namespace;
+
+    // the reference by which free variables are resolved.
+    nullable Expression framePointer;
+
+    ModuleBase compilingModule;
+
+    ImmutableContext data;
+
+    Context withNamespace(Namespace namespace) {
+        return Context(namespace, this.framePointer, this.compilingModule, this.data);
+    }
+
+    Context withFramePointer(nullable Expression framePointer) {
+        return Context(this.namespace, framePointer, this.compilingModule, this.data);
+    }
+
+    Context withCompilingModule(ModuleBase compilingModule) {
+        return Context(this.namespace, framePointer, compilingModule, this.data);
+    }
+
+    // TODO alias, this is a bit too reliant on the inliner
+    CompilerBase compiler() { return data.compiler; }
+
+    Platform platform() { return data.platform; }
+
+    MacroState macroState() { return data.macroState; }
+
+    Type nativeWordType() { return data.nativeWordType; }
+
+    ModulePreProcessor modulePreProcessor() { return data.modulePreProcessor; }
+
+    ModulePostProcessor modulePostProcessor() { return data.modulePostProcessor; }
+
+    void pushErrorLoc(LocRange locRange) {
+        this.data.errorStack ~= locRange;
+    }
+
+    void popErrorLoc() {
+        this.data.errorStack = this.data.errorStack[0 .. $ - 1];
+    }
+
+    (void | fail Error) assert2(bool test, LocRange locRange, string msg) {
+        if (test) return;
+        return new Error(data.errorStack ~ locRange, msg);
+    }
+
+    string getLabel() { return "uniq$(data.idCounter.next)"; }
 }
 
-class SymbolIdentifierType : Type
+// bleh cycle
+abstract class ASTModuleBase
 {
-    string name;
-    this(this.name) { }
-    override BackendType emit(Platform platform) { return new BackendVoidType; }
-    override bool same(Type type) {
-        if (auto other = type.instanceOf(SymbolIdentifierType))
-            return other.name == this.name;
-        return false;
-    }
-    override string repr() { return ":" ~ this.name; }
-    override string mangle() { return "symbol_" ~ name; }
-    override void hash(Hash hash) { hash.adds("SymbolType"); hash.adds(name); }
-    override (nullable Expression | fail Error) binaryOp(
-        Context context, string op, Expression lhs, Expression rhs, LocRange locRange)
-    {
-        if (op == "==" && rhs.type.same(lhs.type)) {
-            return context.compiler.boolLiteral(true);
-        }
-        return null;
-    }
+    string mangledName;
+
+    abstract void addEntry(Protection protection, (ASTExternFunctionBase | ASTSymbol) target);
+
+    abstract void addAliasDecl(string name, Protection protection, ASTSymbol target);
+
+    abstract nullable ASTSymbol getSymbolAlias(string name);
 }
 
-class SymbolIdentifierExpression : Expression
+abstract class ASTExternFunctionBase
 {
     string name;
-    this(this.name) { this.type = new SymbolIdentifierType(name); this.info = ExprInfo(Lifetime.permanent); }
-    override int emit(Generator output) { return output.fun.voidLiteral; }
-    override void hash(Hash hash) { hash.adds("SymbolExpr"); hash.adds(name); }
+
+    abstract string repr();
+}
+
+// TODO clear all this up
+abstract class FinishedSymbol
+{
+    abstract void emit(Generator generator);
+    abstract void hash(Hash hash);
+}
+
+// cycle breaker helper: needed for CompilerBase
+abstract class ModuleBase : Namespace
+{
+    string name;
+
+    string mangledName;
+
+    abstract void addImport(ModuleBase module_, bool public_, string[] symbols);
+
+    abstract void addModuleDependency(ModuleBase module_);
+
+    abstract (void | fail Error) compile(Context context);
+
+    // Add symbol to list of anonymous symbols that will be emitted.
+    abstract void track((Symbol | FinishedSymbol) sym);
+}
+
+struct ASTArgument
+{
+    ASTSymbol sym;
+
+    string name;
+
+    LocRange locRange;
+}
+
+struct ASTParameter
+{
+    string name;
+
+    bool mutable;
+
+    ASTSymbol type;
+
+    nullable ASTSymbol defaultValue;
+
+    LocRange locRange;
 }
 
 /*
@@ -606,198 +542,9 @@ struct Parameter
     }
 }
 
-struct ASTParameter
+// FIXME class Object
+class ASTImportStatementBase
 {
-    string name;
-
-    bool mutable;
-
-    ASTSymbol type;
-
-    nullable ASTSymbol defaultValue;
-
-    LocRange locRange;
-}
-
-// this(this.name)
-struct ASTThisAssignment
-{
-    string name;
-
-    LocRange locRange;
-}
-
-/**
- * A value being passed to a callable parameter.
- */
-struct Argument
-{
-    Expression value;
-
-    string name;
-}
-
-struct ASTArgument
-{
-    ASTSymbol sym;
-
-    string name;
-
-    LocRange locRange;
-}
-
-class FunctionDeclaration : Symbol
-{
-    string name;
-
-    Type ret;
-
-    Parameter[] params;
-
-    bool variadic;
-
-    nullable Type contextType; // must be a pointer
-
-    this(this.name, this.ret, this.params)
-    {
-        this.contextType = null;
-    }
-
-    size_t numArgs()
-    {
-        mut size_t ret = this.params.length;
-        if (!!contextType) ret += 1;
-        return ret;
-    }
-
-    string mangle() { return this.name; } // TODO extern
-
-    void declare(Generator generator)
-    {
-        if (generator.mod.declared(this.mangle))
-            return;
-
-        Type voidp = new Pointer(new Void);
-        mut int extra = 0;
-        if (this.contextType) extra = 1;
-
-        auto paramTypes = new BackendType[](numArgs);
-        if (this.contextType) paramTypes[0] = voidp.emit(generator.platform);
-        for (i, param in this.params)
-            paramTypes[extra + i] = param.type.emit(generator.platform);
-
-        generator.mod.declare(
-            this.mangle,
-            this.ret.emit(generator.platform),
-            paramTypes,
-            variadic=this.variadic
-        );
-    }
-
-    override string repr()
-    {
-        return this.name;
-    }
-}
-
-/**
- * This is in base because it's circular with Context.
- */
-class MacroState
-{
-    Macro[] macros;
-
-    MacroState[] imports;
-
-    this() { }
-
-    MacroState dup() {
-        auto newState = new MacroState;
-        newState.macros = new Macro[](this.macros.length);
-        for (i, macro_ in this.macros)
-            newState.macros[i] = macro_;
-        newState.imports = new MacroState[](this.imports.length);
-        for (i, import_ in this.imports)
-            newState.imports[i] = import_;
-        return newState;
-    }
-
-    void applyMacro(MacroArgs args) {
-        this.applyMacroExported(args);
-        if (args.done) return;
-        for (import_ in this.imports) {
-            import_.applyMacroExported(args);
-            if (args.done) return;
-        }
-    }
-
-    void applyMacroExported(MacroArgs args) {
-        for (macro_ in this.macros) {
-            macro_.apply(args);
-            if (args.done) return;
-        }
-    }
-
-    void addImport(MacroState target) {
-        this.imports ~= target;
-    }
-
-    void addMacro(Macro macro_) {
-        this.macros ~= macro_;
-    }
-}
-
-// Something that should be cleaned up on unwind.
-abstract class DeclarationHolder : Namespace
-{
-    abstract bool freeOnExit();
-
-    abstract Reference accessDecl(CompilerBase compiler);
-
-    Reference accessDecl2(CompilerBase compiler) { return accessDecl(compiler); }
-}
-
-// Namespace with unwind side effect, such as onExit call.
-// Evaluated before declaration cleanup.
-interface Unwindable
-{
-    (nullable Statement | fail Error) unwind(Context context);
-}
-
-// cycle breaker helper: needed for CompilerBase
-abstract class ModuleBase : Namespace
-{
-    string name;
-
-    string mangledName;
-
-    abstract void addImport(ModuleBase module_, bool public_, string[] symbols);
-
-    abstract void addModuleDependency(ModuleBase module_);
-
-    abstract (void | fail Error) compile(Context context);
-
-    // Add symbol to list of anonymous symbols that will be emitted.
-    abstract void track((Symbol | FinishedSymbol) sym);
-}
-
-alias ExtForVarDecl = ((:auto_ | ASTSymbol | :none) type, LocRange locRange, string name);
-
-ASTSymbol quoteExtForVarDecl(ExtForVarDecl decl, Quoter quoter) {
-    mut ASTSymbol[] tupleArgs;
-    tupleArgs ~= decl.type.case(
-            (:auto_): new ASTSymbolIdentifier("auto_", __RANGE__),
-            (:none): new ASTSymbolIdentifier("none", __RANGE__),
-            ASTSymbol sym: sym.quote(quoter));
-    tupleArgs ~= quoter.quoteLocRange(decl.locRange);
-    // auto $foo => (..., foo)
-    if (decl.name.length > 0 && decl.name[0 .. 1] == "\$") {
-        tupleArgs ~= quoter.compiler.astIdentifier(decl.name[1 .. $], __RANGE__);
-    } else {
-        tupleArgs ~= quoter.compiler.astStringLiteral(decl.name, __RANGE__);
-    }
-
-    return quoter.compiler.astTupleLiteral(tupleArgs, __RANGE__);
 }
 
 /**
@@ -811,6 +558,8 @@ abstract class CompilerBase
     string[] cFlags;
 
     // parser
+    abstract Parser createParser(string filename, string fulltext);
+
     abstract (nullable ASTSymbol | fail Error) parseExpression(
         Parser parser, LexicalContext lexicalContext);
 
@@ -865,11 +614,15 @@ abstract class CompilerBase
 
     abstract ASTSymbol astBinaryOp(string op, ASTSymbol left, ASTSymbol right, LocRange locRange);
 
+    abstract (ASTSymbol left, string op, ASTSymbol right | :none) destructAstBinaryOp(ASTSymbol sym);
+
     abstract ASTSymbol astCast(ASTSymbol target, ASTSymbol value, LocRange locRange);
 
     abstract ASTSymbol astIndex(ASTSymbol base, ASTSymbol index, LocRange locRange);
 
     abstract ASTSymbol astMember(ASTSymbol base, string name, LocRange locRange);
+
+    abstract (ASTSymbol base, string member | :none) destructAstMember(ASTSymbol astMember);
 
     abstract ASTSymbol astReference(ASTSymbol value, LocRange locRange);
 
@@ -877,9 +630,13 @@ abstract class CompilerBase
 
     abstract ASTSymbol astIntLiteral(int value, LocRange locRange);
 
+    abstract (int | :none) destructAstIntLiteral(ASTSymbol sym);
+
     abstract ASTSymbol astLongLiteral(long value, LocRange locRange);
 
     abstract ASTSymbol astStringLiteral(string text, LocRange locRange);
+
+    abstract (string | :none) destructAstStringLiteral(ASTSymbol sym);
 
     abstract ASTSymbol astFormatString(ASTSymbol[] parts, LocRange locRange);
 
@@ -905,7 +662,11 @@ abstract class CompilerBase
 
     abstract ASTSymbol astIdentifier(string name, LocRange locRange);
 
+    abstract (string | :none) destructAstIdentifier(ASTSymbol sym);
+
     abstract ASTSymbol astNegation(ASTSymbol value, LocRange locRange);
+
+    abstract (ASTSymbol | :none) destructAstNegation(ASTSymbol sym);
 
     abstract ASTSymbol astCall(ASTSymbol target, ASTSymbol[] args, LocRange locRange);
 
@@ -933,11 +694,11 @@ abstract class CompilerBase
     abstract ASTModuleBase astModule(
         string name, Package pak, MacroState macroState, LocRange locRange, nullable ASTModuleBase parent);
 
-    abstract ASTDeclaration astImport(ASTImportStatement import_, ASTModuleBase module_, LocRange locRange);
+    abstract ASTDeclaration astImport(string name, string pak, string[] symbols, LocRange locRange);
 
     abstract ASTDeclaration astImport2(string name, string pak, string[] symbols, LocRange locRange);
 
-    abstract ASTModuleBase resolveImport(string pak, ASTImportStatement import_, LocRange locRange);
+    abstract ASTModuleBase resolveImport(string pak, ASTImportStatementBase import_, LocRange locRange);
 
     // expressions and statements
     abstract nullable Expression implicitConvertTo(Context context, Expression from, Type to);
@@ -963,15 +724,6 @@ abstract class CompilerBase
 
     abstract (nullable Expression | fail Error) call(
         Context context, ASTSymbol target, ASTArgument[] args, LocRange locRange, bool isImplCall);
-
-    (nullable Expression | fail Error) simpleCall(
-        Context context, Symbol sym, Expression[] args, LocRange locRange)
-    {
-        mut ASTArgument[] astArgs;
-        for (arg in args)
-            astArgs ~= ASTArgument(new ASTSymbolHelper(arg), "", locRange);
-        return call(context, new ASTSymbolHelper(sym), astArgs, locRange, false);
-    }
 
     abstract Expression mkCall(Symbol target, Expression[] args, LocRange locRange);
 
@@ -1061,14 +813,14 @@ abstract class CompilerBase
     abstract (nullable Expression | fail Error) exprWithTemporaryExpr(
         Expression value, (nullable Expression | fail Error) delegate(Expression) callback);
 
-    abstract Expression referenceFunction(FunctionDeclaration decl);
+    abstract Expression referenceFunction(FunctionDeclarationBase decl);
 
     /**
     * Create a runtime function that, given some parameters, declares and calls the ASTStatement
     * provided.
     * The function will be automatically linked in.
     */
-    abstract FunctionDeclaration createRuntimeFunction(
+    abstract FunctionDeclarationBase createRuntimeFunction(
         Context context, string name, Type ret, Parameter[] params, ASTStatement delegate() makeBody);
 
     Namespace exprAlias(nullable Namespace parent, string name, Symbol value) {
@@ -1085,6 +837,10 @@ abstract class CompilerBase
     abstract Type struct_(string name, StructMemberDeclaration[] members, LocRange locRange, string manglePrefix);
 
     abstract Type eitherType((bool fail, Type type)[] types);
+
+    abstract (Type | :none) isArrayType(Type type);
+
+    abstract (string | :none) isBasicType(Type type);
 
     (Expression | fail Error) expectImplicitConvertTo(Context context, Expression from, Type to, LocRange locRange)
     {
@@ -1103,304 +859,68 @@ abstract class CompilerBase
     abstract ModuleBase createModule(string name, string mangle, LocRange locRange, nullable ModuleBase parent);
 }
 
-(Expression | fail Error) expectImplicitConvertTo(Context context, Expression from, Type to, LocRange locRange)
+abstract class FunctionDeclarationBase : Symbol
 {
-    locRange.assert(!!to, "no implconv target type")?;
-    if (auto result = context.compiler.implicitConvertTo(context, from, to)) return result;
-    context.assert2(false, locRange, "Cannot convert to $(to.repr): $(from.type.repr)")?;
+    string name;
+
+    Type ret;
+
+    Parameter[] params;
+
+    bool variadic;
+
+    nullable Type contextType; // must be a pointer
+
+    abstract void declare(Generator output);
+
+    abstract string mangle();
 }
 
-abstract class WorkPoolBase
+/**
+ * This is in base because it's circular with Context.
+ */
+class MacroState
 {
-    abstract void queue(string id, ITask task) { }
-    abstract ITask wait(string id) { }
-}
+    Macro[] macros;
 
-interface ITask
-{
-    void run();
-}
-
-class IdCounter
-{
-    int count;
+    MacroState[] imports;
 
     this() { }
 
-    int next() {
-        int ret = this.count;
-        this.count += 1;
-        return ret;
-    }
-}
-
-// Used by main to analyze the AST tree (docgen)
-interface ModulePreProcessor
-{
-    void process(ASTModuleBase astModule_);
-}
-
-// Will be used by main to start emitting modules as soon as they finish.
-interface ModulePostProcessor
-{
-    void process(ModuleBase module_);
-}
-
-/**
- * This contains the parts of Context that are rarely modified,
- * and should thus be hidden behind a pointer.
- */
-class ImmutableContext
-{
-    CompilerBase compiler;
-
-    Platform platform;
-
-    MacroState macroState;
-
-    // here for caching reasons
-    // TODO replace with once
-    Type nativeWordType;
-
-    IdCounter idCounter;
-
-    LocRange[] errorStack;
-
-    ModulePreProcessor modulePreProcessor;
-
-    ModulePostProcessor modulePostProcessor;
-
-    this(this.compiler, this.platform, this.macroState, this.nativeWordType, this.idCounter, this.errorStack,
-        this.modulePreProcessor, this.modulePostProcessor) { }
-}
-
-/**
- * Context used when transforming an AST into a semantic tree.
- *
- * TODO figure out how to reduce refcounts on this.
- */
-struct Context
-{
-    Namespace namespace;
-
-    // the reference by which free variables are resolved.
-    nullable Expression framePointer;
-
-    ModuleBase compilingModule;
-
-    ImmutableContext data;
-
-    Context withNamespace(Namespace namespace) {
-        return Context(namespace, this.framePointer, this.compilingModule, this.data);
+    MacroState dup() {
+        auto newState = new MacroState;
+        newState.macros = new Macro[](this.macros.length);
+        for (i, macro_ in this.macros)
+            newState.macros[i] = macro_;
+        newState.imports = new MacroState[](this.imports.length);
+        for (i, import_ in this.imports)
+            newState.imports[i] = import_;
+        return newState;
     }
 
-    Context withFramePointer(nullable Expression framePointer) {
-        return Context(this.namespace, framePointer, this.compilingModule, this.data);
-    }
-
-    Context withCompilingModule(ModuleBase compilingModule) {
-        return Context(this.namespace, framePointer, compilingModule, this.data);
-    }
-
-    // TODO alias, this is a bit too reliant on the inliner
-    CompilerBase compiler() { return data.compiler; }
-
-    Platform platform() { return data.platform; }
-
-    MacroState macroState() { return data.macroState; }
-
-    Type nativeWordType() { return data.nativeWordType; }
-
-    ModulePreProcessor modulePreProcessor() { return data.modulePreProcessor; }
-
-    ModulePostProcessor modulePostProcessor() { return data.modulePostProcessor; }
-
-    void pushErrorLoc(LocRange locRange) {
-        this.data.errorStack ~= locRange;
-    }
-
-    void popErrorLoc() {
-        this.data.errorStack = this.data.errorStack[0 .. $ - 1];
-    }
-
-    (void | fail Error) assert2(bool test, LocRange locRange, string msg) {
-        if (test) return;
-        return new Error(data.errorStack ~ locRange, msg);
-    }
-
-    string getLabel() { return "uniq$(data.idCounter.next)"; }
-}
-
-(nullable Expression | fail Error) isExpressionImplCall(Symbol symbol, Context context, LocRange locRange)
-{
-    if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
-        return new SymbolIdentifierExpression(symbolIdent.name);
-
-    // implicit function calls
-    // TODO check if we should propagate this upcall
-    auto astSymbol = new ASTSymbolHelper(symbol);
-    if (auto expr = context.compiler.call(context, astSymbol, [], locRange, true)?)
-        return expr;
-    return symbol.instanceOf(Expression);
-}
-
-(Expression | fail Error) beExpressionImplCall(Symbol symbol, Context context, LocRange locRange)
-{
-    if (auto expr = symbol.isExpressionImplCall(context, locRange)?)
-        return expr;
-    return locRange.fail("expression expected");
-}
-
-ImmutableContext makeIContext(
-    CompilerBase compiler, Platform platform, MacroState macroState,
-    ModulePreProcessor modulePreProcessor, ModulePostProcessor modulePostProcessor)
-{
-    return new ImmutableContext(compiler, platform, macroState, compiler.nativeWordType(platform),
-        new IdCounter, [], modulePreProcessor, modulePostProcessor);
-}
-
-Context makeContext(ImmutableContext icontext, ModuleBase compilingModule, Namespace namespace)
-{
-    return Context(namespace, null, compilingModule, icontext);
-}
-
-// TODO Statement, Context multi-return
-struct StatementCompileResult
-{
-    Statement statement;
-
-    Context context;
-}
-
-abstract class ASTStatement
-{
-    LocRange locRange;
-
-    abstract (StatementCompileResult | fail Error) compile(Context context);
-
-    ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTStatement'!"); assert(false); }
-}
-
-/**
- * Something that updates a namespace without behavioral side effects:
- *
- * - import
- * - alias
- * - struct decl
- * - class decl
- *
- * Ironically, a variable declaration is not an ASTDeclaration.
- * Find a better name?
- */
-abstract class ASTDeclaration
-{
-    abstract (Context | fail Error) compile(Context context);
-
-    abstract ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTDeclaration'!"); assert(false); }
-
-    // TODO this.classname
-    string repr() { return "TODO repr(ASTDeclaration)"; }
-}
-
-// Glue between ASTDeclaration and ASTStatement.
-class ASTDeclarationStatement : ASTStatement
-{
-    ASTDeclaration decl;
-
-    this(this.decl) { }
-
-    override (StatementCompileResult | fail Error) compile(Context context) {
-        return this.decl.compile(context).case(
-            Context ctx: StatementCompileResult(new NoopStatement, ctx),
-            Error err: err);
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astDeclarationStatement", [
-            this.decl.quote(quoter)], __RANGE__);
-    }
-}
-
-template notNull(T) {
-    nonnullable T notNull(nullable T arg) {
-        if (auto a = arg) return a;
-        assert(false);
-    }
-}
-
-class ASTIdentifier : ASTSymbol
-{
-    string name;
-
-    bool moduleLevel; // .name
-
-    this(this.name, this.moduleLevel, this.locRange) { }
-
-    override (Symbol | fail Error) compile(Context context)
-    {
-        (nullable Symbol | fail Error) resolve() {
-            if (this.moduleLevel) {
-                auto module_ = findParent!ModuleBase(context.namespace);
-                return module_.lookup(this.name, context.withFramePointer(null), locRange);
-            } else if (context.namespace.isContextScope) {
-                return context.namespace.lookup(this.name, context, locRange);
-            } else {
-                return context.namespace.lookup(this.name, context.withFramePointer(null), locRange);
-            }
+    void applyMacro(MacroArgs args) {
+        this.applyMacroExported(args);
+        if (args.done) return;
+        for (import_ in this.imports) {
+            import_.applyMacroExported(args);
+            if (args.done) return;
         }
-        nullable Symbol symbol = resolve?;
-        if (!symbol) return this.locRange.fail("'$(this.name)' not found");
-        return symbol.notNull;
     }
 
-    override ASTSymbol quote(Quoter quoter) {
-        assert(!moduleLevel);
-        // $foo is quoted as 'foo'
-        if (name[0 .. 1] == "\$") {
-            return quoter.compiler.astIdentifier(name[1 .. $], locRange);
+    void applyMacroExported(MacroArgs args) {
+        for (macro_ in this.macros) {
+            macro_.apply(args);
+            if (args.done) return;
         }
-        return quoter.compilerCall("astIdentifier", [
-            quoter.compiler.astStringLiteral(this.name, locRange)
-        ], locRange);
     }
 
-    override string repr() {
-        if (this.moduleLevel)
-            return ".$(this.name)";
-        return this.name;
-    }
-}
-
-// :name
-class ASTSymbolIdentifier : ASTSymbol
-{
-    string name;
-
-    this(this.name, this.locRange) { }
-
-    override (SymbolIdentifier | fail Error) compile(Context context) {
-        return new SymbolIdentifier(this.name);
+    void addImport(MacroState target) {
+        this.imports ~= target;
     }
 
-    override string repr() { return ":$name"; }
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compiler.astNewExpression(
-            quoter.compiler.astIdentifier("ASTSymbolIdentifier", __RANGE__), [
-                quoter.compiler.astStringLiteral(this.name, __RANGE__),
-                quoter.quoteLocRange(this.locRange)], __RANGE__);
+    void addMacro(Macro macro_) {
+        this.macros ~= macro_;
     }
-}
-
-/**
- * Helper class used for quasiquoting.
- * Transforms an AST* into an ASTSymbol representing a CompilerBase call producing this thing.
- */
-abstract class Quoter {
-    CompilerBase compiler; // for use by quote() methods
-
-    abstract ASTSymbol compilerCall(string name, ASTSymbol[] parameters, LocRange locRange);
-    abstract ASTSymbol quoteLocRange(LocRange locRange);
 }
 
 abstract class Macro
@@ -1488,6 +1008,122 @@ class ParseImportArgs : MacroArgs
     }
 }
 
+abstract class Parser
+{
+    abstract void begin();
+    abstract void commit();
+    abstract void revert();
+    abstract (bool | fail Error) accept(string match);
+    abstract Error fail(string message);
+    abstract LocRange loc();
+    abstract (LocRange | fail Error) from();
+    abstract LocRange to(LocRange from);
+    abstract (void | fail Error) strip();
+    abstract (string | fail Error) parseLastComment();
+    abstract string text();
+    abstract (bool | fail Error) eof();
+    abstract bool hard_eof();
+    abstract void dropOneCharNonNewline(size_t length);
+    abstract void drop(size_t length);
+    abstract string peekUniChar();
+    abstract (void | fail Error) verifyTransactions(string msg, (void | fail Error) delegate() dg);
+    abstract (string | fail Error) parseIdentifier();
+
+    (void | fail Error) assert_(bool flag, string message)
+    {
+        if (!flag) return this.fail(message);
+        return;
+    }
+
+    (void | fail Error) expect(string match)
+    {
+        if (this.accept(match)?)
+            return;
+        return this.fail("'" ~ match ~ "' expected");
+    }
+
+    (bool | fail Error) acceptIdentifier(string identifier)
+    with (transaction)
+    {
+        string nextIdent = parseIdentifier?;
+
+        if (nextIdent != identifier)
+        {
+            return false;
+        }
+        commit;
+        return true;
+    }
+
+    ParserTransaction transaction() {
+        return ParserTransaction(this, committed=false);
+    }
+
+    (bool | fail Error) acceptButNot(string match, string nomatch) {
+        // TODO peek?
+        begin;
+        bool fail = accept(nomatch)?;
+        revert;
+        return !fail && accept(match)?;
+    }
+
+    (bool | fail Error) acceptButNot2(string match, string nomatch1, string nomatch2) {
+        // TODO peek?
+        begin;
+        bool fail2 = accept(nomatch1)?;
+        revert;
+        begin;
+        bool fail1 = accept(nomatch2)?;
+        revert;
+        return !fail1 && !fail2 && accept(match)?;
+    }
+
+    bool isKeyword(string identifier) {
+        return identifier == "mut" || identifier == "auto";
+    }
+}
+
+struct ParserTransaction
+{
+    private Parser parser;
+    private bool committed;
+    void onEnter() {
+        parser.begin;
+    }
+    void onExit() {
+        if (!committed) parser.revert;
+    }
+    void commit() {
+        parser.commit;
+        committed = true;
+    }
+}
+
+class StructMemberDeclaration
+{
+    string name;
+
+    Protection protection;
+
+    Type type;
+
+    this(this.name, this.protection, this.type) { }
+}
+
+abstract class LexicalContext
+{
+    CompilerBase compiler;
+
+    Package pak;
+
+    MacroState macroState;
+
+    // break an annoying dependency cycle
+    abstract (ASTModuleBase | fail Error) resolveImport(ASTImportStatementBase importStmt);
+
+    this(this.compiler, this.pak, this.macroState) { }
+}
+
 class Package
 {
     string name;
@@ -1521,131 +1157,126 @@ class Package
     }
 }
 
-/**
- * A symbol that depends on some sort of expression:
- *
- * - class method (this)
- * - struct method (this) NOT IMPLEMENTED
- * - nested function (stackframe) NOT IMPLEMENTED
- *
- * The symbol is being used in some way, such as a function call. To facilitate this,
- * temporize the contained expression and pass it into resolve() to get a raw
- * function pointer. The temporized possession must be passed as the first parameter
- * to that pointer.
- *
- * LateSymbol may also patch the expression before the call, for instance for interfaces.
- */
-abstract class LateSymbol : Symbol
+abstract class WorkPoolBase
 {
-    Expression baseExpr;
+    abstract void queue(string id, ITask task) { }
+    abstract ITask wait(string id) { }
+}
 
-    abstract Expression resolve(Context context, Expression baseExpr);
-
-    Expression patchContext(Context context, Expression baseExpr) { return baseExpr; }
+interface ITask
+{
+    void run();
 }
 
 /**
- * A symbol that may be interested in a frame pointer to complete it.
- * When looked up, should be glued together with the frame pointer of the lookup.
- * Usually, LatentSymbol -> LateSymbol, but this whole flow needs reconsideration.
+ * Helper class used for quasiquoting.
+ * Transforms an AST* into an ASTSymbol representing a CompilerBase call producing this thing.
  */
-abstract class LatentSymbol : Symbol
-{
-    abstract Symbol resolve(Context context);
+abstract class Quoter {
+    CompilerBase compiler; // for use by quote() methods
+
+    abstract ASTSymbol compilerCall(string name, ASTSymbol[] parameters, LocRange locRange);
+    abstract ASTSymbol quoteLocRange(LocRange locRange);
 }
 
-// class.member
-// here so we can destructure on it later
-// TODO fold this into LateSymbol
-class ClassMethodPtr : Symbol
+class Error
 {
-    Expression funcPtr;
+    LocRange[] stack;
 
-    // must only be evaluated once!
-    Expression thisValue;
+    string msg;
 
-    // if not, tmpize and take the address
-    bool valueIsPtr;
+    this(this.stack, this.msg) { }
+}
 
-    string name;
+extern(C) void exit(int);
 
-    this(this.funcPtr, this.thisValue, this.valueIsPtr, this.name) { }
+struct LocRange {
+    string filename;
+    (int row, int column) from;
+    (int row, int column) to;
 
-    override string repr() {
-        return name;
+    // TODO version that prints line with underlined range, given a parser lookup dict
+    string repr() {
+        return filename ~ ":" ~ itoa(from.row + 1) ~ ":" ~ itoa(from.column + 1);
+    }
+
+    Error fail(string message) {
+        return new Error([*this], message);
+    }
+
+    // This should have been caught earlier.
+    void hardCheck(bool flag, string message) {
+        if (flag) return;
+        print("$(repr): Internal compiler error!");
+        print(message);
+        exit(1);
+    }
+
+    // TODO expand BackendLocation?
+    BackendLocation toBackendLoc() {
+        mut BackendLocation ret;
+        ret.file = filename;
+        ret.line = from.row;
+        ret.column = from.column;
+        return ret;
+    }
+
+    (void | fail Error) assert(bool test, string a) {
+        if (!test) return this.fail(a);
+    }
+    (void | fail Error) assert2(bool test, string a, string b) {
+        if (!test) return this.fail(a ~ b);
+    }
+    (void | fail Error) assert3(bool test, string a, string b, string c) {
+        if (!test) return this.fail(a ~ b ~ c);
+    }
+    (void | fail Error) assert4(bool test, string a, string b, string c, string d) {
+        if (!test) return this.fail(a ~ b ~ c ~ d);
+    }
+    (void | fail Error) assert5(bool test, string a, string b, string c, string d, string e) {
+        if (!test) return this.fail(a ~ b ~ c ~ d ~ e);
     }
 }
 
-// here so we can destructure on it later
-abstract class FunctionReferenceBase : Expression
-{
-    abstract FunctionDeclaration getFunction();
+template notNull(T) {
+    nonnullable T notNull(nullable T arg) {
+        if (auto a = arg) return a;
+        assert(false);
+    }
 }
 
-class StructMemberDeclaration
-{
-    string name;
-
-    Protection protection;
-
-    Type type;
-
-    this(this.name, this.protection, this.type) { }
+// TODO __bottom
+template exitWithError(T) {
+    T exitWithError(Error err) {
+        assert(err.stack.length > 0);
+        for (loc in err.stack[0 .. $ - 1])
+            print(loc.repr ~ ":");
+        printAtErrorLoc(err.stack[$ - 1], err.msg);
+        exit(1);
+    }
 }
 
-// here so we can destructure on it later
-abstract class StringLiteralBase : Expression
-{
-    string text;
-
-    this(this.text) { }
-
-    // TODO: escaping
-    override string repr() { return "\"$(this.text)\""; }
+void printAtErrorLoc(LocRange locRange, string message) {
+    if (!exists(locRange.filename)) {
+        print("$(locRange.filename):$(locRange.from.row + 1):$(locRange.from.column + 1): $message");
+        return;
+    }
+    auto text = read(locRange.filename);
+    print("$(locRange.filename):$(locRange.from.row + 1):");
+    auto line = text.getLine(locRange.from.row);
+    print(line);
+    if (locRange.(from.row != to.row || from.column == to.column)) {
+        mut string spacer;
+        for (i in 0 .. locRange.from.column) spacer ~= " ";
+        print("$spacer^ $message");
+    } else {
+        mut string wiggle;
+        for (i in 0 .. locRange.from.column) wiggle ~= " ";
+        for (i in locRange.from.column .. locRange.to.column) wiggle ~= "~";
+        print("$wiggle $message");
+    }
 }
 
-// Helper for quasiquoted AST blocks that need to reference back to an already resolved symbol.
-class ASTSymbolHelper : ASTSymbol
-{
-    Symbol symbol;
-
-    this(this.symbol) { }
-
-    override (Symbol | fail Error) compile(Context context) { return this.symbol; }
-
-    override string repr() { return symbol.repr; }
-}
-
-// TODO clear all this up
-abstract class FinishedSymbol
-{
-    abstract void emit(Generator generator);
-    abstract void hash(Hash hash);
-}
-
-abstract class CompilationVisitor
-{
-    abstract void visit(FinishedSymbol sym);
-}
-
-abstract class ASTModuleVisitor
-{
-    abstract void visit(ASTModuleBase mod);
-}
-
-/**
- * Symbol that is currently being compiled
- */
-abstract class PendingSymbol : Symbol
-{
-    abstract (Symbol | fail Error) resolve();
-    // Allow hashing the pending without resolving and potentially triggering a hash loop.
-    abstract void hash(Hash hash);
-}
-
-enum Protection
-{
-    public_,
-    protected_,
-    private_
+string getLine(string text, int line) {
+    return text.split("\n")[line];
 }

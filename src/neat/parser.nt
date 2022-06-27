@@ -1,8 +1,454 @@
 module neat.parser;
 
 import helpers;
+import backend.base;
+import helpers;
 import neat.base;
-public import neat.parser_base;
+
+/**
+ * Advance row/column by byte distance `distance`.
+ */
+StackEntry advance(mut StackEntry entry, string fulltext, size_t distance) {
+    mut auto skiptext = fulltext[entry.offset .. entry.offset + distance];
+    entry.offset += distance;
+
+    mut auto nl = skiptext.find("\n");
+    if (nl == -1) {
+        // TODO unicode count
+        entry.column += cast(int) distance;
+        return entry;
+    }
+    while (nl != -1) {
+        skiptext = skiptext[nl + 1 .. $];
+        entry.row += 1;
+        nl = skiptext.find("\n");
+    }
+    // no more newlines found, remainder are columns
+    // TODO unicode count
+    entry.column = cast(int) skiptext.length;
+    return entry;
+}
+
+struct StackEntry
+{
+    size_t offset;
+    int row, column;
+    bool stripped;
+
+    /**
+     * Advance row/column by byte distance `distance`, known to represent one character that is not a \n.
+     */
+    void advanceOneCharNonNewline(size_t distance) {
+        offset += distance;
+        column += 1;
+        stripped = false;
+    }
+}
+
+final class ParserImpl : Parser
+{
+    StackEntry[] stack;
+
+    StackEntry current;
+
+    int level;
+
+    string filename;
+
+    string fulltext;
+
+    this(this.filename, this.fulltext)
+    {
+        this.stack = new StackEntry[](0);
+        this.level = 0;
+        this.current = StackEntry(offset=0, row=0, column=0, stripped=false);
+        verify;
+    }
+
+    override LocRange loc() {
+        auto tuple = this.current.((row, column));
+        return LocRange(this.filename, tuple, tuple);
+    }
+
+    override (LocRange | fail Error) from() {
+        this.strip?;
+        auto tuple = this.current.((row, column));
+        return LocRange(this.filename, tuple, tuple);
+    }
+
+    override LocRange to(LocRange from) {
+        return LocRange(
+            this.filename,
+            from.from,
+            this.current.((row, column)),
+        );
+    }
+
+    override (void | fail Error) verifyTransactions(string msg, (void | fail Error) delegate() dg) {
+        auto locEntry = loc;
+        auto startLevel = level;
+        dg()?;
+        locEntry.hardCheck(level == startLevel, msg);
+    }
+
+    override (string | fail Error) parseIdentifier()
+    with (transaction)
+    {
+        strip?;
+        mut string identifier = "";
+        string startText = text;
+        {
+            if (hard_eof) {
+                return "";
+            }
+            string unichar = peekUniChar;
+            int codepoint = unichar.utf8Decode;
+            if (!isAlpha(codepoint)
+                && codepoint != cast(int) "_"[0] && codepoint != cast(int) "\$"[0])
+            {
+                return "";
+            }
+            identifier = startText[0 .. unichar.length];
+            dropOneCharNonNewline(unichar.length);
+        }
+
+        while (!hard_eof) {
+            string unichar = peekUniChar;
+            int codepoint = unichar.utf8Decode;
+            if (!isAlnum(codepoint)
+                && codepoint != cast(int) "_"[0])
+                break;
+            dropOneCharNonNewline(unichar.length);
+            identifier = startText[0 .. identifier.length + unichar.length];
+        }
+        commit;
+        return identifier;
+    }
+
+    void verify()
+    {
+        if (this.level < 0 || this.level > this.stack.length) {
+            print("parse stack violation: $(this.level), $(this.stack.length)");
+            exit(1);
+        }
+        if (this.stack.length > 1024) {
+            print("parse stack overflow");
+            exit(1);
+        }
+    }
+
+    override string text()
+    {
+        return this.fulltext[this.current.offset .. $];
+    }
+
+    override void begin()
+    {
+        this.verify;
+        if (this.level == this.stack.length)
+        {
+            StackEntry[] newStack = new StackEntry[](this.stack.length * 2 + 1);
+            for (i, stack in this.stack) newStack[i] = stack;
+            this.stack = newStack;
+        }
+        this.stack[this.level] = this.current;
+        this.level += 1;
+    }
+
+    override void commit()
+    {
+        assert(this.level > 0);
+        this.level -= 1;
+    }
+
+    override void revert()
+    {
+        this.verify;
+        this.level -= 1;
+        this.current = this.stack[this.level];
+    }
+
+    override void drop(size_t length)
+    {
+        this.current = this.current.advance(this.fulltext, length);
+        this.current.stripped = false;
+    }
+
+    override void dropOneCharNonNewline(size_t length)
+    {
+        this.current.advanceOneCharNonNewline(length);
+    }
+
+    override string peekUniChar()
+    {
+        auto text = this.text;
+        auto len = text.utf8NextLength;
+        return text[0 .. len];
+    }
+
+    override (bool | fail Error) accept(string match)
+    {
+        this.begin;
+        this.strip?;
+        auto text = this.text;
+        if (text.length < match.length)
+        {
+            this.revert;
+            return false;
+        }
+        if (text[0 .. match.length] == match)
+        {
+            this.drop(match.length);
+            this.commit;
+            return true;
+        }
+        this.revert;
+        return false;
+    }
+
+    // checks that the text is at the hard end of the file,
+    // ie. no more text at all.
+    override bool hard_eof()
+    {
+        return this.current.offset == this.fulltext.length;
+    }
+
+    // checks that the parser is at the "soft" end of the file,
+    // ie. no more meaningful content; only comments and whitespace.
+    override (bool | fail Error) eof()
+    {
+        this.begin;
+        this.strip?;
+        if (hard_eof)
+        {
+            this.commit;
+            return true;
+        }
+        this.revert;
+        return false;
+    }
+
+    override (void | fail Error) strip()
+    {
+        if (this.current.stripped) return;
+        parseLastComment?;
+        this.current.stripped = true;
+    }
+
+    // Accept many comments; return the last one.
+    override (string | fail Error) parseLastComment()
+    {
+        mut string lastComment;
+        while (true) {
+            /* this.text = this.text.strip; */
+            mut string text = this.text;
+            while (text.length > 0 && isWhitespace(text[0]))
+                text = text[1 .. $];
+            drop(this.text.length - text.length);
+            auto comment = parseComment?;
+            if (!comment.ptr) {
+                return lastComment;
+            }
+            lastComment = comment;
+        }
+    }
+
+    // Because it's called from strip(), this among all accept functions does not strip on its own.
+    (string | fail Error) parseComment()
+    {
+        if (startsWith(this.text, "//"))
+        {
+            int newline = find(this.text, "\n");
+            assert(newline != -1);
+            auto ret = this.text[0 .. newline];
+            drop(newline + 1);
+            return ret;
+        }
+        else if (startsWith(this.text, "/*"))
+        {
+            mut auto text = this.text;
+            text = text["/*".length .. $];
+            mut int commentLevel = 1;
+            while (commentLevel > 0)
+            {
+                int more = find(text, "/*");
+                int less = find(text, "*/");
+
+                if (more == -1 && less == -1) {
+                    drop(this.text.length - text.length);
+                    return this.fail("comment spans end of file");
+                }
+                if (less != -1 && (more == -1 || less < more))
+                {
+                    text = text[less + "*/".length .. $];
+                    commentLevel = commentLevel - 1;
+                }
+                if (more != -1 && (less == -1 || more < less))
+                {
+                    text = text[more + "/*".length .. $];
+                    commentLevel = commentLevel + 1;
+                }
+            }
+            auto offset = this.text.length - text.length;
+            auto ret = this.text[0 .. offset];
+            drop(offset);
+            return ret;
+        } else {
+            return null;
+        }
+    }
+
+    override Error fail(string message)
+    {
+        this.strip?;
+        return this.loc.fail(message);
+    }
+
+    (void | fail Error) assert2s2(int test, string a, string b) {
+        if (!test) return this.fail(a ~ b);
+        return;
+    }
+    (void | fail Error) assert2s3(int test, string a, string b, string c) {
+        if (!test) return this.fail(a ~ b ~ c);
+        return;
+    }
+    (void | fail Error) assert2s4(int test, string a, string b, string c, string d) {
+        if (!test) return this.fail(a ~ b ~ c ~ d);
+        return;
+    }
+    (void | fail Error) assert2s5(int test, string a, string b, string c, string d, string e) {
+        if (!test) return this.fail(a ~ b ~ c ~ d ~ e);
+        return;
+    }
+}
+
+bool isWhitespace(char c)
+{
+    return c == " "[0] || c == "\t"[0] || c == "\r"[0] || c == "\n"[0];
+}
+
+int utf8Decode(string ch)
+{
+    assert(ch.length > 0);
+    if (ch.length == 1) return ch[0];
+    if (ch.length == 2) return cast(int)(ch[0]) & 0x1f << 6 | cast(int)(ch[1]) & 0x3f;
+    if (ch.length == 3) return cast(int)(ch[0]) & 0x0f << 12 | cast(int)(ch[1]) & 0x3f << 6 | cast(int)(ch[2]) & 0x3f;
+    if (ch.length == 4)
+        return cast(int)(ch[0]) & 0x07 << 18 | cast(int)(ch[1]) & 0x3f << 12
+             | cast(int)(ch[2]) & 0x3f << 6 | cast(int)(ch[3]) & 0x3f;
+    if (ch.length == 5)
+        return cast(int)(ch[0]) & 0x03 << 24 | cast(int)(ch[1]) & 0x3f << 18
+             | cast(int)(ch[2]) & 0x3f << 12 | cast(int)(ch[3]) & 0x3f << 6 | cast(int)(ch[4]) & 0x3f;
+    return cast(int)(ch[0]) & 0x01 << 30 | cast(int)(ch[1]) & 0x3f << 24 | cast(int)(ch[2]) & 0x3f << 18
+         | cast(int)(ch[3]) & 0x3f << 12 | cast(int)(ch[4]) & 0x3f << 6 | cast(int)(ch[5]) & 0x3f;
+}
+
+int utf8NextLength(string text)
+{
+    // see https://en.wikipedia.org/wiki/UTF-8#FSS-UTF
+    if (text.length < 1) return 0;
+    int ch0 = text[0];
+    if (ch0 < 128) return 1;
+    assert(ch0 >= 192);
+    assert(text.length >= 2);
+    if (ch0 < 224) return 2;
+    assert(text.length >= 3);
+    if (ch0 < 240) return 3;
+    assert(text.length >= 4);
+    if (ch0 < 248) return 4;
+    assert(text.length >= 5);
+    if (ch0 < 252) return 5;
+    assert(text.length >= 6);
+    if (ch0 < 254) return 6;
+    assert(false);
+}
+
+bool startsWith(string haystack, string needle)
+{
+    if (needle.length == 1) {
+        return haystack.length >= 1 && haystack[0] == needle[0];
+    } else if (needle.length == 2) {
+        return haystack.length >= 2 && haystack[0] == needle[0] && haystack[1] == needle[1];
+    } else {
+        return haystack.length >= needle.length && haystack[0 .. needle.length] == needle;
+    }
+}
+
+int find(string haystack, string needle)
+{
+    if (needle.length == 1) {
+        for (i in 0 .. haystack.length) {
+            if (haystack[i] == needle[0]) return cast(int) i;
+        }
+    } else if (needle.length == 2) {
+        for (i in 0 .. haystack.length - 1) {
+            if (haystack[i] == needle[0] && haystack[i + 1] == needle[1]) return cast(int) i;
+        }
+    } else {
+        for (i in 0 .. haystack.length - needle.length) {
+            if (haystack[i .. i + needle.length] == needle) return cast(int) i;
+        }
+    }
+    return -1;
+}
+
+extern(C) void exit(int);
+
+struct Loc {
+    string filename;
+    int row, column;
+
+    BackendLocation toBackendLoc() {
+        mut BackendLocation ret;
+        ret.file = filename;
+        ret.line = row;
+        ret.column = column;
+        return ret;
+    }
+
+    string location() {
+        return filename ~ ":" ~ itoa(row + 1) ~ ":" ~ itoa(column + 1);
+    }
+
+    Error fail(string message) {
+        return new Error([locRange], message);
+    }
+
+    LocRange locRange() {
+        return LocRange(filename, (row, column), (row, column));
+    }
+
+    (void | fail Error) assert(bool flag, string message) {
+        if (!flag) {
+            return this.fail(message);
+        }
+    }
+
+    // This should have been caught earlier.
+    void hardCheck(bool flag, string message) {
+        if (flag) return;
+        print("$(location): Internal compiler error!");
+        print(message);
+        exit(1);
+    }
+
+    (void | fail Error) assert2s2(int test, string a, string b) {
+        if (!test) return this.fail(a ~ b);
+        return;
+    }
+    (void | fail Error) assert2s3(int test, string a, string b, string c) {
+        if (!test) return this.fail(a ~ b ~ c);
+        return;
+    }
+    (void | fail Error) assert2s4(int test, string a, string b, string c, string d) {
+        if (!test) return this.fail(a ~ b ~ c ~ d);
+        return;
+    }
+    (void | fail Error) assert2s5(int test, string a, string b, string c, string d, string e) {
+        if (!test) return this.fail(a ~ b ~ c ~ d ~ e);
+        return;
+    }
+}
 
 bool isAlpha(int ch) {
     // TODO support full unicode
@@ -161,55 +607,4 @@ with (parser.transaction)
 bool isAlnum(int ch)
 {
     return isAlpha(ch) || isDigit(ch);
-}
-
-(string | fail Error) parseIdentifier(Parser parser)
-with (parser.transaction)
-{
-    parser.strip?;
-    mut string identifier = "";
-    string startText = parser.text;
-    {
-        if (parser.hard_eof) {
-            return "";
-        }
-        string unichar = parser.peekUniChar;
-        int codepoint = unichar.utf8Decode;
-        if (!isAlpha(codepoint)
-            && codepoint != cast(int) "_"[0] && codepoint != cast(int) "\$"[0])
-        {
-            return "";
-        }
-        identifier = startText[0 .. unichar.length];
-        parser.dropOneCharNonNewline(unichar.length);
-    }
-
-    while (!parser.hard_eof) {
-        string unichar = parser.peekUniChar;
-        int codepoint = unichar.utf8Decode;
-        if (!isAlnum(codepoint)
-            && codepoint != cast(int) "_"[0])
-            break;
-        parser.dropOneCharNonNewline(unichar.length);
-        identifier = startText[0 .. identifier.length + unichar.length];
-    }
-    commit;
-    return identifier;
-}
-
-bool isKeyword(string identifier) {
-    return identifier == "mut" || identifier == "auto";
-}
-
-(bool | fail Error) acceptIdentifier(Parser parser, string identifier)
-with (parser.transaction)
-{
-    string nextIdent = parseIdentifier(parser)?;
-
-    if (nextIdent != identifier)
-    {
-        return false;
-    }
-    commit;
-    return true;
 }

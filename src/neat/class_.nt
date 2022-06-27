@@ -11,11 +11,10 @@ import neat.base;
 import neat.either;
 import neat.expr;
 import neat.hash;
-import neat.parser;
-import neat.parser_base;
 import neat.function_;
 import neat.struct_;
 import neat.types;
+import neat.util;
 
 class ClassMethod : Function
 {
@@ -1299,7 +1298,7 @@ class ASTClassDecl : ASTSymbol
         (void | fail Error) walk(ASTClassEntry entry) {
             entry.case {
                 ASTClassDeclMember member: {
-                    auto type = member.type.compile(currentContext)?.beType2(member.locRange)?;
+                    auto type = member.type.compile(currentContext)?.beType(member.locRange)?;
                     memberFields ~= (member.name, member.protection, type);
                 }
                 ASTClassDeclMethod method: {
@@ -1354,7 +1353,7 @@ class ASTClassDecl : ASTSymbol
                             false,
                             param.name,
                             param.mutable,
-                            type=param.type.compile(methodContext)?.beType2(param.locRange)?,
+                            type=param.type.compile(methodContext)?.beType(param.locRange)?,
                             null);
                 }
             }
@@ -1368,7 +1367,7 @@ class ASTClassDecl : ASTSymbol
                 method.override_,
                 method.abstract_,
                 method.name,
-                method.ret.compile(methodContext)?.beType2(method.locRange)?,
+                method.ret.compile(methodContext)?.beType(method.locRange)?,
                 methodParams,
                 method.body_,
                 this.macroState,
@@ -1437,14 +1436,14 @@ class ASTIntfDecl : ASTSymbol
                             false,
                             param.name,
                             param.mutable,
-                            type=param.type.compile(currentContext)?.beType2(param.locRange)?,
+                            type=param.type.compile(currentContext)?.beType(param.locRange)?,
                             null);
                     }
 
                     target.methods ~= new IntfMethod(
                         intfType,
                         method.name,
-                        method.ret.compile(currentContext)?.beType2(method.locRange)?,
+                        method.ret.compile(currentContext)?.beType(method.locRange)?,
                         methodParams);
                 }
                 ASTDeclaration astDecl: {
@@ -1467,29 +1466,29 @@ class ASTIntfDecl : ASTSymbol
     auto comment = parser.parseLastComment?;
     auto from = parser.from?;
     while (true) {
-        if (acceptIdentifier(parser, "abstract")?) {
+        if (parser.acceptIdentifier("abstract")?) {
             classAbstract = true;
             continue;
         }
-        if (acceptIdentifier(parser, "final")?) {
+        if (parser.acceptIdentifier("final")?) {
             classFinal = true;
             continue;
         }
         break;
     }
-    if (!acceptIdentifier(parser, "class")?)
+    if (!parser.acceptIdentifier("class")?)
     {
         parser.revert;
         return null;
     }
     parser.commit;
 
-    string name = parseIdentifier(parser)?;
+    string name = parser.parseIdentifier?;
     auto locRange = parser.to(from);
     mut string[] supers;
     if (parser.accept(":")?) {
         while (true) {
-            auto super_ = parseIdentifier(parser)?;
+            auto super_ = parser.parseIdentifier?;
             parser.assert_(super_.length > 0, "expected super class identifier")?;
             supers ~= super_;
             if (parser.accept(",")?) continue;
@@ -1500,10 +1499,10 @@ class ASTIntfDecl : ASTSymbol
     mut ASTClassEntry[] members;
     parser.expect("{")?;
     while (!parser.accept("}")?) {
-        auto locEntry = parser.loc;
-        auto startLevel = parser.level;
-        members ~= parseClassEntry(parser, lexicalContext, name)?;
-        locEntry.hardCheck(parser.level == startLevel, "parse rule imbalance");
+        (void | fail Error) do_() {
+            members ~= parseClassEntry(parser, lexicalContext, name)?;
+        }
+        parser.verifyTransactions("parse rule imbalance", &do_)?;
     }
     return new ASTClassDecl(
         name, supers, classFinal, classAbstract,
@@ -1546,25 +1545,25 @@ class ASTIntfDecl : ASTSymbol
     mut bool abstract_ = false;
     mut Protection protection = Protection.public_;
     while (true) {
-        if (acceptIdentifier(parser, "override")?) {
+        if (parser.acceptIdentifier("override")?) {
             override_ = true;
             continue;
         }
-        if (acceptIdentifier(parser, "abstract")?) {
+        if (parser.acceptIdentifier("abstract")?) {
             abstract_ = true;
             continue;
         }
         // FIXME only allow one
         // FIXME parseProtection?
-        if (acceptIdentifier(parser, "public")?) {
+        if (parser.acceptIdentifier("public")?) {
             protection = Protection.public_;
             continue;
         }
-        if (acceptIdentifier(parser, "private")?) {
+        if (parser.acceptIdentifier("private")?) {
             protection = Protection.private_;
             continue;
         }
-        if (acceptIdentifier(parser, "protected")?) {
+        if (parser.acceptIdentifier("protected")?) {
             protection = Protection.protected_;
             continue;
         }
@@ -1587,7 +1586,7 @@ class ASTIntfDecl : ASTSymbol
     {
         retType = lexicalContext.compiler.parseType(parser, lexicalContext)?;
         parser.assert_(!!retType, "expected member type")?;
-        string ident = parseIdentifier(parser)?;
+        string ident = parser.parseIdentifier?;
         memberName = ident;
         parser.assert_(memberName.length > 0, "expected member name")?;
     }
@@ -1641,19 +1640,19 @@ class ASTIntfDecl : ASTSymbol
     parser.begin;
     parser.strip?;
     auto from = parser.from?;
-    if (!acceptIdentifier(parser, "interface")?)
+    if (!parser.acceptIdentifier("interface")?)
     {
         parser.revert;
         return null;
     }
     parser.commit;
 
-    string name = parseIdentifier(parser)?;
+    string name = parser.parseIdentifier?;
     auto declLocRange = parser.to(from);
     mut string[] superIntfs;
     if (parser.accept(":")?) {
         while (true) {
-            string superIntf = parseIdentifier(parser)?;
+            string superIntf = parser.parseIdentifier?;
             parser.assert_(superIntf.length > 0, "expected super identifier identifier")?;
             superIntfs ~= superIntf;
             if (parser.accept(",")?) continue;
@@ -1673,7 +1672,7 @@ class ASTIntfDecl : ASTSymbol
 
         nullable ASTSymbol retType = lexicalContext.compiler.parseType(parser, lexicalContext)?;
         parser.to(from).assert(!!retType, "expected member type")?;
-        string memberName = parseIdentifier(parser)?;
+        string memberName = parser.parseIdentifier?;
         parser.to(from).assert(memberName.length > 0, "expected member name")?;
         auto locRange = parser.to(from);
         parser.expect("(")?;
@@ -1896,7 +1895,7 @@ class ASTNewExpression : ASTSymbol
 
     override (Symbol | fail Error) compile(Context context)
     {
-        Type type = this.type.compile(context)?.beType2(this.locRange)?;
+        Type type = this.type.compile(context)?.beType(this.locRange)?;
 
         if (auto classType = type.instanceOf(ClassType)) {
             Expression classptr = new NewClassExpression(classType);
@@ -2002,7 +2001,7 @@ class ASTNullable : ASTSymbol
     this(this.next, this.nullify, this.locRange) { }
 
     override (Symbol | fail Error) compile(Context context) {
-        auto next = this.next.compile(context)?.beType2(this.locRange)?;
+        auto next = this.next.compile(context)?.beType(this.locRange)?;
         if (nullify) {
             if (auto classType = next.instanceOf(ClassType))
                 return classType.makeNullable;

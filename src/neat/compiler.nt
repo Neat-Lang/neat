@@ -12,12 +12,13 @@ import neat.either;
 import neat.expr;
 import neat.formatstring;
 import neat.function_;
-import neat.parser_base;
+import neat.parser;
 import neat.statements;
 import neat.struct_;
 import neat.stuff;
 import neat.tuples;
 import neat.types;
+import neat.util;
 import std.thread;
 
 /**
@@ -47,40 +48,51 @@ class CompilerImpl : CompilerBase
     }
 
     // parser
+    override Parser createParser(string filename, string fulltext) {
+        return new ParserImpl(filename, fulltext);
+    }
+
     override (nullable ASTSymbol | fail Error) parseExpression(Parser parser, LexicalContext lexicalContext)
     {
-        return .parseExpression(parser, lexicalContext);
+        return .parseExpression(parser.instanceOf(Parser).notNull, lexicalContext);
     }
 
     override (nullable ASTSymbol | fail Error) parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
     {
-        return .parseExpressionLeaf(parser, lexicalContext);
+        return .parseExpressionLeaf(parser.instanceOf(Parser).notNull, lexicalContext);
     }
 
     override (ASTStatement | fail Error) parseStatement(Parser parser, LexicalContext lexicalContext)
     {
-        return .parseStatement(parser, lexicalContext);
+        return .parseStatement(parser.instanceOf(Parser).notNull, lexicalContext);
     }
 
     override (nullable ASTDeclaration | fail Error) parseDeclaration(Parser parser, LexicalContext lexicalContext)
     {
-        return .parseDeclaration(parser, lexicalContext);
+        return .parseDeclaration(parser.instanceOf(Parser).notNull, lexicalContext);
     }
 
     override (nullable ASTSymbol | fail Error) parseType(Parser parser, LexicalContext lexicalContext)
     {
-        return .parseType(parser, lexicalContext);
+        return .parseType(parser.instanceOf(Parser).notNull, lexicalContext);
     }
 
     override (ASTSymbol | fail Error) parseStringLiteral(
         Parser parser, LexicalContext lexicalContext, string endMarker, LocRange from)
     {
-        return .parseStringLiteral(parser, lexicalContext, endMarker, from);
+        return .parseStringLiteral(parser.instanceOf(Parser).notNull, lexicalContext, endMarker, from);
     }
 
     override ASTSymbol astBinaryOp(string op, ASTSymbol left, ASTSymbol right, LocRange locRange)
     {
         return new ASTBinaryOp(op, left, right, locRange);
+    }
+
+    override (ASTSymbol left, string op, ASTSymbol right | :none) destructAstBinaryOp(ASTSymbol sym) {
+        if (auto binOp = sym.instanceOf(ASTBinaryOp)) {
+            return (binOp.left, binOp.op, binOp.right);
+        }
+        return :none;
     }
 
     override ASTSymbol astIndex(ASTSymbol base, ASTSymbol index, LocRange locRange)
@@ -91,6 +103,13 @@ class CompilerImpl : CompilerBase
     override ASTSymbol astMember(ASTSymbol base, string member, LocRange locRange)
     {
         return new ASTMember(base, member, locRange);
+    }
+
+    override (ASTSymbol base, string member | :none) destructAstMember(ASTSymbol sym) {
+        if (auto astMember = sym.instanceOf(ASTMemberBase)) {
+            return (astMember.base, astMember.member);
+        }
+        return :none;
     }
 
     override ASTSymbol astReference(ASTSymbol value, LocRange locRange)
@@ -108,6 +127,13 @@ class CompilerImpl : CompilerBase
         return new ASTIntLiteral(value, locRange);
     }
 
+    override (int | :none) destructAstIntLiteral(ASTSymbol sym) {
+        if (auto lit = sym.instanceOf(ASTIntLiteral)) {
+            return lit.value;
+        }
+        return :none;
+    }
+
     override ASTSymbol astLongLiteral(long value, LocRange locRange)
     {
         return new ASTLongLiteral(value, locRange);
@@ -116,6 +142,13 @@ class CompilerImpl : CompilerBase
     override ASTSymbol astStringLiteral(string text, LocRange locRange)
     {
         return new ASTStringLiteral(text, locRange);
+    }
+
+    override (string | :none) destructAstStringLiteral(ASTSymbol sym) {
+        if (auto lit = sym.instanceOf(ASTStringLiteral)) {
+            return lit.text;
+        }
+        return :none;
     }
 
     override ASTSymbol astFormatString(ASTSymbol[] parts, LocRange locRange) {
@@ -152,9 +185,22 @@ class CompilerImpl : CompilerBase
         return new ASTIdentifier(name, false, locRange);
     }
 
+    override (string | :none) destructAstIdentifier(ASTSymbol sym) {
+        if (auto ident = sym.instanceOf(ASTIdentifier)) {
+            return ident.name;
+        }
+        return :none;
+    }
+
     override ASTSymbol astNegation(ASTSymbol value, LocRange locRange)
     {
         return new ASTNegation(value, locRange);
+    }
+
+    override (ASTSymbol | :none) destructAstNegation(ASTSymbol sym) {
+        if (auto neg = sym.instanceOf(ASTNegation)) {
+            return neg.next;
+        }
     }
 
     override ASTSymbol astCall(ASTSymbol target, ASTSymbol[] args, LocRange locRange)
@@ -310,9 +356,12 @@ class CompilerImpl : CompilerBase
         return new ASTModule(name, pak, macroState, locRange, parent.instanceOf(ASTModule));
     }
 
-    override ASTDeclaration astImport(ASTImportStatement import_, ASTModuleBase module_, LocRange locRange)
+    override ASTDeclaration astImport(string name, string pak, string[] symbols, LocRange locRange)
     {
-        return new ASTImport(import_, module_.instanceOf(ASTModule).notNull);
+        auto import_ = new ASTImportStatement((:normal, name, pak), isMacroImport=false, symbols, locRange);
+        auto mod = resolveImport(pak, import_, locRange);
+
+        return new ASTImport(import_, mod);
     }
 
     override ASTDeclaration astImport2(string name, string pak, string[] symbols, LocRange locRange)
@@ -323,12 +372,13 @@ class CompilerImpl : CompilerBase
         return new ASTImport(import_, mod);
     }
 
-    override ASTModule resolveImport(string pak, ASTImportStatement import_, LocRange locRange)
+    override ASTModule resolveImport(string pak, ASTImportStatementBase import_, LocRange locRange)
     {
-        .resolveImport(this, pak, import_, this.helper, this.modParseConfig).case {
-            ASTModule mod: return mod;
-            Error error: exitWithError!void(error);
-        }
+        .resolveImport(this, pak, import_.instanceOf(ASTImportStatement).notNull, this.helper, this.modParseConfig)
+            .case {
+                ASTModule mod: return mod;
+                Error error: exitWithError!void(error);
+            }
     }
 
     // expressions and statements
@@ -637,7 +687,7 @@ class CompilerImpl : CompilerBase
         return new StatementExpression(start, expr, false);
     }
 
-    override Expression referenceFunction(FunctionDeclaration decl)
+    override Expression referenceFunction(FunctionDeclarationBase decl)
     {
         return new FunctionReference(decl);
     }
@@ -736,6 +786,26 @@ class CompilerImpl : CompilerBase
     override Type eitherType((bool fail, Type type)[] types)
     {
         return new Either(types);
+    }
+
+    override (Type | :none) isArrayType(Type type) {
+        if (auto arr = type.instanceOf(Array)) return arr.elementType;
+        return :none;
+    }
+
+    override (string | :none) isBasicType(Type type) {
+        // see ASTBasicType
+        // TODO merge all these types
+        if (type.instanceOf(Integer)) return "int";
+        if (type.instanceOf(Long)) return "long";
+        if (type.instanceOf(Short)) return "short";
+        if (type.instanceOf(Character)) return "char";
+        if (type.instanceOf(UByte)) return "ubyte";
+        if (type.instanceOf(Boolean)) return "bool";
+        if (type.instanceOf(Void)) return "void";
+        if (type.instanceOf(Float)) return "float";
+        if (type.instanceOf(Double)) return "double";
+        return :none;
     }
 
     override bool isClassType(Type type) {

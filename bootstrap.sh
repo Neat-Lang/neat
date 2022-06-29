@@ -608,6 +608,8 @@ at_revision '226f68d29e6d798555b9ba142019486d32ba6218' 'rebuild neat' 'build/nea
 at_revision 'ec4a2b8954239f14ce2bc8d7c641acc646639d1a' 'rebuild neat' 'build/neat'
 # Propagate error, rewrite ASTImportStatement, ASTFormatString quoting.
 at_revision '9d89d88d718feddee58f33a51b2429c4250a4d1d' 'rebuild neat' 'build/neat'
+# neat.base/neat.util split
+at_revision '6c60f500e9fffd5a0b412faebf6413d9d872c3bd' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

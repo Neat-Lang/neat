@@ -40,9 +40,14 @@ fi
 cp src/runtime.c build/src/
 rm build/neat.ini || true
 
+# turn off pass version flags on the next pass to avoid re-running into them
+# use this opportunity to remove them
+PASSFLAGS="-version='firstpass' -macro-version='firstpassmacro'"
+if grep -qR 'firstpass' build/src; then PASSFLAGS=""; fi
+
 I=1
 NEXT=compiler$(($(build/neat -print-generation) + 1))
-build/neat $FLAGS -next-generation -version='firstpass' -macro-version='firstpassmacro' \
+build/neat $FLAGS -next-generation ${PASSFLAGS} \
     -P$NEXT:src -Pcompiler:build/src src/main.nt -o build/neat_test$I
 
 if [ \! -z ${FAST+x} ]

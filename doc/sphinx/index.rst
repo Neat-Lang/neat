@@ -10,7 +10,7 @@ Have some example code! Here's a program that prints the longest line in a file:
 
     module longestline;
 
-    macro import neat.macros.listcomprehension;
+    macro import std.macro.listcomprehension;
 
     import std.file;
     import std.stdio;

@@ -101,7 +101,8 @@ For example::
 
     extern(C) void* memcpy(void* dest, void* src, size_t n);
 
-Note: instead of declaring lots of extern(C) functions manually, try using the `neat.macros.cimport` built-in macro! (Grep for examples.)
+Note: instead of declaring lots of extern(C) functions manually, try using the
+`std.macro.cimport` built-in macro! (Grep for examples.)
 
 Expressions
 -----------
@@ -628,7 +629,7 @@ Macro classes can extend the compiler with new functionality using a set of hook
 - statements: `macroThing;`
 - imports: `import github("http://github.com/neat-lang/example").module;`
 
-Look at `neat.macros.*` for examples.
+Look at `std.macro.*` for examples.
 
 The entire compiler is available for importing and reuse in macros. However, it is recommended
 to limit yourself to the functionality in `neat.base`. This will also keep compile times down.

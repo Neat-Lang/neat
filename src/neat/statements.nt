@@ -15,7 +15,9 @@ class AssignStatement : Statement
 
     Expression value;
 
-    this(this.target, this.value) {
+    (LocRange | :none) locRange;
+
+    this(this.target, this.value, this.locRange) {
         if (!target.type.same(value.type)) {
             print("internal error: cannot assign $(value.type.repr) to $(target.type.repr)");
             assert(false);
@@ -24,6 +26,10 @@ class AssignStatement : Statement
 
     override void emit(Generator output)
     {
+        this.locRange.case {
+            LocRange locRange: output.fun.setLocation(locRange.toBackendLoc);
+            :none: {}
+        }
         Type valueType = this.value.type;
         int target_reg = this.target.emitLocation(output);
         int value_reg = this.value.emit(output);
@@ -39,10 +45,16 @@ class ReturnStatement : Statement
 {
     Expression value;
 
-    this(this.value) { }
+    (LocRange | :none) locRange;
+
+    this(this.value, this.locRange) { }
 
     override void emit(Generator output)
     {
+        this.locRange.case {
+            LocRange locRange: output.fun.setLocation(locRange.toBackendLoc);
+            :none: {}
+        }
         int reg = this.value.emit(output);
 
         output.fun.ret(reg);
@@ -61,10 +73,16 @@ class IfStatement : Statement
 
     nullable Statement else_;
 
-    this(this.test, this.then, this.else_) { }
+    (LocRange | :none) locRange;
+
+    this(this.test, this.then, this.else_, this.locRange) { }
 
     override void emit(Generator output)
     {
+        this.locRange.case {
+            LocRange locRange: output.fun.setLocation(locRange.toBackendLoc);
+            :none: {}
+        }
         int reg = this.test.emit(output);
 
         string label = output.fun.getLabel;
@@ -108,7 +126,7 @@ class ASTBreakStatement : ASTStatement
     {
         auto loopScope = findParent!LoopScope(context.namespace);
         locRange.assert(!!loopScope, "Cannot 'break': not in a loop.")?;
-        return StatementCompileResult(loopScope.breakFrom(context)?, context);
+        return StatementCompileResult(loopScope.breakFrom(context, locRange)?, context);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -126,7 +144,7 @@ class ASTContinueStatement : ASTStatement
     {
         auto loopScope = findParent!LoopScope(context.namespace);
         locRange.assert(!!loopScope, "Cannot 'continue': not in a loop.")?;
-        return StatementCompileResult(loopScope.continueFrom(context)?, context);
+        return StatementCompileResult(loopScope.continueFrom(context, locRange)?, context);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -140,10 +158,13 @@ class Branch : Statement
 {
     string label;
 
-    this(this.label) { }
+    LocRange locRange;
+
+    this(this.label, this.locRange) { }
 
     override void emit(Generator output)
     {
+        output.fun.setLocation(this.locRange.toBackendLoc);
         output.fun.branch(this.label);
         output.fun.setLabel(output.fun.getLabel);
     }
@@ -177,20 +198,26 @@ class ASTExprStatement : ASTStatement
 {
     if (source.info.lifetime == Lifetime.gifted) {
         // steal the reference
-        return new AssignStatement(target, source);
+        return new AssignStatement(target, source, :none);
     }
     auto type = target.type;
-    return new AssignStatement(target, source.copy(context)?);
+    return new AssignStatement(target, source.copy(context)?, :none);
 }
 
 class ExprStatement : Statement
 {
     Expression value;
 
-    this(this.value) { assert(!!value); }
+    (LocRange | :none) locRange;
+
+    this(this.value, this.locRange = :none) { assert(!!value); }
 
     override void emit(Generator output)
     {
+        this.locRange.case {
+            LocRange locRange: output.fun.setLocation(locRange.toBackendLoc);
+            :none: {}
+        }
         this.value.emit(output);
     }
 
@@ -198,14 +225,14 @@ class ExprStatement : Statement
     override string repr() { return "$(value.repr);"; }
 }
 
-Statement destroy(Context context, Expression expr)
+Statement destroy(Context context, Expression expr, LocRange locRange)
 {
     auto type = expr.type;
     if (auto endLifetime = type.endLifetime(context, expr)) {
         return endLifetime;
     }
     // Still evaluate expr.
-    return new ExprStatement(expr);
+    return new ExprStatement(expr, locRange);
 }
 
 (Statement | fail Error) discard(Context context, Expression expr, LocRange locRange)
@@ -213,9 +240,9 @@ Statement destroy(Context context, Expression expr)
     auto type = expr.type;
     context.compiler.discardErrorCheck(expr, locRange)?;
     if (expr.info.lifetime == Lifetime.gifted && !type.same(once new Void)) {
-        return destroy(context, expr);
+        return destroy(context, expr, locRange);
     } else {
-        return new ExprStatement(expr);
+        return new ExprStatement(expr, locRange);
     }
 }
 
@@ -243,10 +270,16 @@ class Loop : Statement
 
     nullable Statement loopstep;
 
-    this(this.label, this.setup, this.condition, this.body_, this.loopstep) { }
+    (LocRange | :none) locRange;
+
+    this(this.label, this.setup, this.condition, this.body_, this.loopstep, this.locRange) { }
 
     override void emit(Generator output)
     {
+        this.locRange.case {
+            LocRange locRange: output.fun.setLocation(locRange.toBackendLoc);
+            :none: {}
+        }
         if (this.setup) this.setup.emit(output);
 
         output.fun.branch(label ~ "_start");
@@ -280,13 +313,13 @@ class LabelLoopScope : LoopScope
 {
     string label;
     this(this.label, this.parent) { this.isContextScope = true; }
-    override (Statement | fail Error) breakFrom(Context context) {
-        auto branch = new Branch(this.label ~ "_break");
+    override (Statement | fail Error) breakFrom(Context context, LocRange locRange) {
+        auto branch = new Branch(this.label ~ "_break", locRange);
 
         return sequence2(context.compiler.unwindScope(context, this, new NoopStatement)?, branch);
     }
-    override (Statement | fail Error) continueFrom(Context context) {
-        auto branch = new Branch(this.label ~ "_continue");
+    override (Statement | fail Error) continueFrom(Context context, LocRange locRange) {
+        auto branch = new Branch(this.label ~ "_continue", locRange);
 
         return sequence2(context.compiler.unwindScope(context, this, new NoopStatement)?, branch);
     }

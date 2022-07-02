@@ -923,7 +923,7 @@ class ASTIndexAccess : ASTSymbol
                 auto temp = new PairedTemporary(deref.type, Lifetime.gifted);
                 auto init = new UninitializeTemporaryStatement(temp);
                 return context.compiler.wrapRef(
-                    sequence(init, new AssignStatement(temp, deref.copy(context)?)),
+                    sequence(init, new AssignStatement(temp, deref.copy(context)?, this.locRange)),
                     deref, null);
             }
             return deref;
@@ -1034,7 +1034,7 @@ with (parser.transaction)
             .notNull;
         auto tempRet = new PairedTemporary(ret.type, Lifetime.gifted); // temporary since we copy
         auto initTemp = new UninitializeTemporaryStatement(tempRet);
-        auto copyTemp = new AssignStatement(tempRet, ret.copy(context)?);
+        auto copyTemp = new AssignStatement(tempRet, ret.copy(context)?, locRange);
 
         nullable Statement endLifetime = baseType.endLifetime(context, baseExpr);
 
@@ -1152,7 +1152,7 @@ class ParenPropertyNamespace : Namespace
                 // Ephemeral 'that', usually a temporization of a gifted expr: leak our caller a reference.
                 auto copiedRes = new PairedTemporary(result.type, Lifetime.gifted);
                 auto initCopy = new UninitializeTemporaryStatement(copiedRes);
-                auto fillCopy = new AssignStatement(copiedRes, result.copy(context)?);
+                auto fillCopy = new AssignStatement(copiedRes, result.copy(context)?, locRange);
                 return new StatementExpression(sequence(initCopy, fillCopy), copiedRes, false);
             }
             return result;
@@ -2262,7 +2262,7 @@ class ASTReturnStatement : ASTStatement
         auto temp = new PairedTemporaryExpr(ret, Lifetime.lexical);
         auto init = new InitializeTemporaryExprStatement(temp, expr.take(context)?);
         mut Statement returnStmt = unwindScope(context, findParent!FunctionScope(context.namespace), init)?;
-        returnStmt = sequence(returnStmt, new ReturnStatement(temp));
+        returnStmt = sequence(returnStmt, new ReturnStatement(temp, this.locRange));
         // no need for stack cleanup after a return.
 
         return StatementCompileResult(returnStmt, context);
@@ -2503,7 +2503,7 @@ class ASTIfStatement : ASTStatement
         }
 
         auto test = truthy(context, test.notNull, this.locRange)?;
-        auto ifStmt = new IfStatement(test, sequence2(epilog, then), else_);
+        auto ifStmt = new IfStatement(test, sequence2(epilog, then), else_, this.locRange);
 
         return StatementCompileResult(sequence2(prelude, ifStmt), context);
     }
@@ -2907,7 +2907,7 @@ class ASTVarDeclStatement : ASTStatement
 
             // Still zero-init.
             return StatementCompileResult(
-                new AssignStatement(decl.accessDecl(context.compiler), new NullExpr(type)),
+                new AssignStatement(decl.accessDecl(context.compiler), new NullExpr(type), this.locRange),
                 context.withNamespace(decl));
         }
         else
@@ -2921,7 +2921,7 @@ class ASTVarDeclStatement : ASTStatement
                 context.namespace, this.name, type, mut=this.mutable, borrowed=false, hidden=false);
 
             return StatementCompileResult(
-                new AssignStatement(decl.accessDecl(context.compiler), new NullExpr(type)),
+                new AssignStatement(decl.accessDecl(context.compiler), new NullExpr(type), this.locRange),
                 context.withNamespace(decl));
         }
     }
@@ -3314,7 +3314,7 @@ class ASTWhile : ASTStatement
         auto bodyStmt = unwindScope(bodyPair.context, context.namespace, bodyPair.statement)?;
 
         return StatementCompileResult(
-            new Loop(label, null, condExpr, bodyStmt, null),
+            new Loop(label, null, condExpr, bodyStmt, null, this.locRange),
             context);
     }
 
@@ -3387,8 +3387,8 @@ class ASTStatementExpression : ASTSymbol
 
         (Statement | fail Error) assignEscapeValue() {
             if (resultValue.info.lifetime == Lifetime.gifted)
-                return new AssignStatement(temp, resultValue);
-            return new AssignStatement(temp, resultValue.copy(context)?);
+                return new AssignStatement(temp, resultValue, this.locRange);
+            return new AssignStatement(temp, resultValue.copy(context)?, this.locRange);
         }
         auto initAndCopy = sequence(init, assignEscapeValue?);
 
@@ -3460,7 +3460,7 @@ class ASTForLoop : ASTStatement
         auto bodyPair = this.body_.compile(breakContScope)?;
 
         return StatementCompileResult(
-            new Loop(label, declPair.statement, condition, bodyPair.statement, stepPair.statement),
+            new Loop(label, declPair.statement, condition, bodyPair.statement, stepPair.statement, this.locRange),
             context);
     }
 
@@ -3741,7 +3741,7 @@ class ASTDestroy : ASTSymbol
 
     override (Expression | fail Error) compile(Context context) {
         auto expr = this.target.compile(context)?.beExpressionImplCall(context, locRange)?;
-        auto stmt = destroy(context, expr);
+        auto stmt = destroy(context, expr, this.locRange);
         if (!stmt) return once new VoidExpression;
         return new StatementExpression(stmt, once new VoidExpression, false);
     }

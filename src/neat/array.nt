@@ -571,44 +571,54 @@ Expression releaseArray(Context context, Expression value) {
     ASTStatement body_() {
         if (appendElementType) {
             return compiler.$stmt {
-                auto left = *leftp;
-                if (left.base) {
-                    size_t prevCap = (cast(size_t*) left.base)[1];
-                    size_t* prevUsed = &(cast(size_t*) left.base)[2];
-                    auto prevFrontier = &(cast(typeof(left.ptr)) &(cast(size_t*) left.base)[3])[*prevUsed];
-                    if (&left.ptr[left.length] is prevFrontier && *prevUsed < prevCap) {
+                if (leftp.base) {
+                    size_t prevRefs = (cast(size_t*) leftp.base)[0];
+                    size_t prevCap = (cast(size_t*) leftp.base)[1];
+                    size_t* prevUsed = &(cast(size_t*) leftp.base)[2];
+                    auto prevFrontier = &(cast(typeof(leftp.ptr)) &(cast(size_t*) leftp.base)[3])[*prevUsed];
+                    if (&leftp.ptr[leftp.length] is prevFrontier && *prevUsed < prevCap) {
                         *prevUsed += 1;
-                        prevFrontier[0] = right;
-                        *leftp = left[0 .. $ + 1];
+                        prevFrontier[0] = __take(right);
+                        *leftp = (*leftp)[0 .. $ + 1];
+                        return;
+                    }
+                    if (prevRefs == 1) {
+                        auto result = new typeof(*leftp)(leftp.length * 2 + 1);
+                        for (i, src in *leftp) result[i] = __take(src);
+                        result[leftp.length] = __take(right);
+                        // used
+                        (cast(size_t*) result.base)[2] = leftp.length + 1;
+                        free(leftp.base);
+                        (cast(void**) leftp)[2] = null;
+                        *leftp = result[0 .. leftp.length + 1];
                         return;
                     }
                 }
-                auto result = new typeof(left)(left.length * 2 + 1);
-                for (i, src in left) result[i] = src;
-                result[left.length] = right;
+                auto result = new typeof(*leftp)(leftp.length * 2 + 1);
+                for (i, src in *leftp) result[i] = src;
+                result[leftp.length] = __take(right);
                 // used
-                (cast(size_t*) result.base)[2] = left.length + 1;
-                *leftp = result[0 .. left.length + 1];
+                (cast(size_t*) result.base)[2] = leftp.length + 1;
+                *leftp = result[0 .. leftp.length + 1];
             };
         } else if (appendArrays) {
             return compiler.$stmt {
                 // TODO don't try freeing result[i] on move-into
-                auto left = *leftp;
-                auto newLength = left.length + right.length;
-                if (left.base) {
-                    size_t prevCap = (cast(size_t*) left.base)[1];
-                    size_t* prevUsed = &(cast(size_t*) left.base)[2];
-                    auto prevFrontier = &(cast(typeof(left.ptr)) &(cast(size_t*) left.base)[3])[*prevUsed];
-                    if (&left.ptr[left.length] is prevFrontier && *prevUsed + right.length <= prevCap) {
+                auto newLength = leftp.length + right.length;
+                if (leftp.base) {
+                    size_t prevCap = (cast(size_t*) leftp.base)[1];
+                    size_t* prevUsed = &(cast(size_t*) leftp.base)[2];
+                    auto prevFrontier = &(cast(typeof(leftp.ptr)) &(cast(size_t*) leftp.base)[3])[*prevUsed];
+                    if (&leftp.ptr[leftp.length] is prevFrontier && *prevUsed + right.length <= prevCap) {
                         *prevUsed += right.length;
                         for (i, value in right) prevFrontier[i] = value;
-                        *leftp = left[0 .. newLength];
+                        *leftp = (*leftp)[0 .. newLength];
                         return;
                     }
                 }
-                auto result = new typeof(left)(left.length * 2 + right.length);
-                for (i, value in left) result[i] = value;
-                for (i, value in right) result[left.length + i] = value;
+                auto result = new typeof(*leftp)(leftp.length * 2 + right.length);
+                for (i, value in *leftp) result[i] = value;
+                for (i, value in right) result[leftp.length + i] = value;
                 (cast(size_t*) result.base)[2] = newLength;
                 *leftp = result[0 .. newLength];
             };
@@ -620,7 +630,13 @@ Expression releaseArray(Context context, Expression value) {
     auto fn = compiler.createRuntimeFunction(context, "arrayCatAssign", new Void, params, &body_);
     auto astFn = new ASTSymbolHelper(fn);
     auto astLeftPtr = new ASTSymbolHelper(compiler.reference(left));
-    auto astRight = new ASTSymbolHelper(right);
+    mut ASTSymbol astRight = new ASTSymbolHelper(right);
+    if (appendElementType) {
+        if (right.info.lifetime == Lifetime.gifted)
+            astRight = new ASTOverrideLifetime(astRight, Lifetime.lexical, __RANGE__);
+        if (right.info.lifetime == Lifetime.lexical || right.info.lifetime == Lifetime.ephemeral)
+            astRight = new ASTLeakExpr(astRight, __RANGE__);
+    }
 
     return compiler.call(
             context, astFn, [
@@ -837,4 +853,83 @@ class ArrayCastExpr : Expression
 
     override void hash(Hash hash) { hash.adds("ArrayCastExpr"); source.hash(hash); target.hash(hash); }
     override string repr() { return "cast($(target.repr)) $(source.repr)"; }
+}
+
+/**
+ * Even though the lifetime logic does not support this, sometimes it's
+ * useful to be able to borrow an expression anyways.
+ * (for instance, for (a in array) borrows a from array.
+ * TODO move to compiler/expr.
+ */
+class ASTOverrideLifetime : ASTSymbol
+{
+    ASTSymbol source;
+
+    Lifetime lifetime;
+
+    this(this.source, this.lifetime, this.locRange) { }
+
+    override (Symbol | fail Error) compile(Context context) {
+        auto source = this.source.compile(context)?.beExpression(this.locRange)?;
+        return new OverrideLifetimeExpr(source, ExprInfo(this.lifetime));
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        ASTSymbol quoteLifetime() {
+            if (lifetime == Lifetime.gifted)
+                return quoter.compiler.$expr Lifetime.gifted;
+            if (lifetime == Lifetime.ephemeral)
+                return quoter.compiler.$expr Lifetime.ephemeral;
+            if (lifetime == Lifetime.lexical)
+                return quoter.compiler.$expr Lifetime.lexical;
+            if (lifetime == Lifetime.permanent)
+                return quoter.compiler.$expr Lifetime.permament;
+            assert(false);
+        }
+        return quoter.compiler.astNewExpression(
+            quoter.compiler.astIdentifier("ASTOverrideLifetime", __RANGE__), [
+                this.source.quote(quoter),
+                quoteLifetime,
+                quoter.quoteLocRange(this.locRange)], __RANGE__);
+    }
+}
+
+class OverrideLifetimeExpr : Expression
+{
+    Expression value;
+    this(this.value, this.info) {
+        this.type = value.type;
+    }
+    override int emit(Generator output) { return value.emit(output); }
+    override void hash(Hash hash) {
+        hash.adds("OverrideLifetimeExpr");
+        if (info.lifetime == Lifetime.gifted) hash.adds("gifted");
+        else if (info.lifetime == Lifetime.ephemeral) hash.adds("ephemeral");
+        else if (info.lifetime == Lifetime.lexical) hash.adds("lexical");
+        else if (info.lifetime == Lifetime.permanent) hash.adds("permanent");
+        else assert(false);
+        value.hash(hash);
+    }
+}
+
+/**
+ * Leak a reference.
+ */
+class ASTLeakExpr : ASTSymbol
+{
+    ASTSymbol source;
+
+    this(this.source, this.locRange) { }
+
+    override (Symbol | fail Error) compile(Context context) {
+        auto source = this.source.compile(context)?.beExpression(this.locRange)?;
+        return new OverrideLifetimeExpr(source.type.copy(context, source)?, source.info);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        return quoter.compiler.astNewExpression(
+            quoter.compiler.astIdentifier("ASTLeakExpr", __RANGE__), [
+                this.source.quote(quoter),
+                quoter.quoteLocRange(this.locRange)], __RANGE__);
+    }
 }

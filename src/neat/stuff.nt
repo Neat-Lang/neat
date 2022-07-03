@@ -1618,7 +1618,7 @@ class ASTLambdaExpr : ASTSymbol
     if (auto trait = parser.parseTrait(lexicalContext)?) {
         return trait;
     }
-    if (auto override_ = parser.parseOverrideLifetime(lexicalContext)?) {
+    if (auto override_ = parser.parseLifetimeExpr(lexicalContext)?) {
         return override_;
     }
     if (auto lambda = parser.parseLambdaExpression(lexicalContext)?) {
@@ -1730,88 +1730,29 @@ class ASTLambdaExpr : ASTSymbol
     return new ASTFormatString(parts, parser.to(from));
 }
 
-(nullable ASTOverrideLifetime | fail Error) parseOverrideLifetime(Parser parser, LexicalContext lexicalContext)
+(nullable ASTSymbol | fail Error) parseLifetimeExpr(Parser parser, LexicalContext lexicalContext)
 with (parser.transaction)
 {
     auto from = parser.from?;
-    if (parser.accept("__borrow")?) {
-        parser.expect("(")?;
-        auto fromSource = parser.from?;
-        auto source = parser.parseExpression(lexicalContext)?;
-        parser.to(fromSource).assert(!!source, "expression expected")?;
-        parser.expect(")")?;
-        commit;
-        return new ASTOverrideLifetime(source.notNull, Lifetime.lexical, parser.to(from));
-    }
-    if (parser.accept("__take")?) {
-        parser.expect("(")?;
-        auto fromSource = parser.from?;
-        auto source = parser.parseExpression(lexicalContext)?;
-        parser.to(fromSource).assert(!!source, "expression expected")?;
-        parser.expect(")")?;
-        commit;
-        return new ASTOverrideLifetime(source.notNull, Lifetime.gifted, parser.to(from));
-    }
-    return null;
-}
-
-/**
- * Even though the lifetime logic does not support this, sometimes it's
- * useful to be able to borrow an expression anyways.
- * (for instance, for (a in array) borrows a from array.
- */
-class ASTOverrideLifetime : ASTSymbol
-{
-    ASTSymbol source;
-
-    Lifetime lifetime;
-
-    this(this.source, this.lifetime, this.locRange) { }
-
-    override (Symbol | fail Error) compile(Context context) {
-        auto source = this.source.compile(context)?.beExpression(this.locRange)?;
-        return new OverrideLifetimeExpr(source, ExprInfo(this.lifetime));
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        ASTSymbol quoteLifetime() {
-            if (lifetime == Lifetime.gifted)
-                return quoter.compiler.$expr Lifetime.gifted;
-            if (lifetime == Lifetime.ephemeral)
-                return quoter.compiler.$expr Lifetime.ephemeral;
-            if (lifetime == Lifetime.lexical)
-                return quoter.compiler.$expr Lifetime.lexical;
-            if (lifetime == Lifetime.permanent)
-                return quoter.compiler.$expr Lifetime.permament;
-            assert(false);
-        }
-        return quoter.compiler.astNewExpression(
-            quoter.compiler.astIdentifier("ASTOverrideLifetime", __RANGE__), [
-                this.source.quote(quoter),
-                quoteLifetime,
-                quoter.quoteLocRange(this.locRange)], __RANGE__);
-    }
-}
-
-// REMOVE ME
-class ASTBorrow : ASTSymbol
-{
-    ASTSymbol source;
-
-    this(this.source, this.locRange) { }
-
-    override (Symbol | fail Error) compile(Context context) {
-        auto source = this.source.compile(context)?.beExpression(this.locRange)?;
-        return new OverrideLifetimeExpr(source, ExprInfo(Lifetime.lexical));
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compiler.astNewExpression(
-            quoter.compiler.astIdentifier("ASTOverrideLifetime", __RANGE__), [
-                this.source.quote(quoter),
-                quoter.compiler.$expr Lifetime.lexical,
-                quoter.quoteLocRange(this.locRange)], __RANGE__);
-    }
+    mut string op;
+    if (parser.accept("__borrow")?) op = "borrow";
+    else if (parser.accept("__take")?) op = "take";
+    else if (parser.accept("__leak")?) op = "leak";
+    else return null;
+    parser.expect("(")?;
+    auto fromSource = parser.from?;
+    auto source = parser.parseExpression(lexicalContext)?;
+    parser.to(fromSource).assert(!!source, "expression expected")?;
+    auto source = source.notNull;
+    parser.expect(")")?;
+    commit;
+    if (op == "borrow")
+        return new ASTOverrideLifetime(source, Lifetime.lexical, parser.to(from));
+    if (op == "take")
+        return new ASTOverrideLifetime(source, Lifetime.gifted, parser.to(from));
+    if (op == "leak")
+        return new ASTLeakExpr(source, parser.to(from));
+    assert(false);
 }
 
 // i++, i--, ++i, --i
@@ -2761,7 +2702,7 @@ class ASTOpAssignStatement : ASTStatement
 
         Expression left = this.left.compile(context)?.beExpressionImplCall(context, left.locRange)?;
         Expression right = this.right.compile(context)?.beExpressionImplCall(context, right.locRange)?;
-        if (op == "~" && left.info.lifetime == Lifetime.lexical) {
+        if (op == "~") {
             if (auto rLeft = left.instanceOf(Reference)) {
                 if (auto leftArray = left.type.instanceOf(Array)) {
                     // special performance optimization for a ~= b

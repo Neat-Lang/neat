@@ -70,19 +70,22 @@ class ClassNamespace : Namespace
 
     this(this.parent, this.class_) { this.isContextScope = true; }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange)
+    override (nullable Symbol | fail Error) lookup(
+        string name, Context context, LookupReason reason, LocRange locRange)
     {
         if (auto thisPtr = context.framePointer) {
             auto thisPtr = new PointerCast(this.class_, thisPtr);
 
-            if (auto result = context.compiler.accessMemberWithLifetime(
-                    context, thisPtr, name, locRange, true)?)
-                return result;
+            if (reason != LookupReason.ufcs) {
+                if (auto result = context.compiler.accessMemberWithLifetime(
+                        context, thisPtr, name, locRange, true)?)
+                    return result;
+            }
         }
 
         // TODO "outer"?
         if (!this.parent) return null;
-        return this.parent.lookup(name, context.withFramePointer(null), locRange);
+        return this.parent.lookup(name, context.withFramePointer(null), reason, locRange);
     }
 }
 
@@ -1268,7 +1271,8 @@ class ASTClassDecl : ASTSymbol
         mut nullable Class superClass = null;
         mut Intf[] superIntfs = [];
         for (i, super_ in this.supers) {
-            nullable Symbol superObj = context.namespace.lookup(super_, context, locRange)?;
+            nullable Symbol superObj = context.namespace.lookup(
+                super_, context, LookupReason.identifier, locRange)?;
             if (!superObj) return this.locRange.fail("super class/intf not found: $super_");
             auto superClassTest = superObj.instanceOf(ClassType);
             if (i == 0 && superClassTest) {
@@ -1404,7 +1408,8 @@ class ASTIntfDecl : ASTSymbol
         if (this.superIntfs.length > 0)
         {
             for (superIntf in this.superIntfs) {
-                nullable Symbol superIntfSym = context.namespace.lookup(superIntf, context, locRange)?;
+                nullable Symbol superIntfSym = context.namespace.lookup(
+                    superIntf, context, LookupReason.identifier, locRange)?;
                 this.locRange.assert(!!superIntfSym, "super interface not found: " ~ superIntf)?;
                 auto superIntf = superIntfSym.instanceOf(IntfType);
                 this.locRange.assert(!!superIntf, "super interface is not an interface")?;
@@ -1957,7 +1962,7 @@ class Super : Symbol
         }
         auto methodOffset = [first i for i, a in superClass.vtable where matches(a) else -1];
         locRange.assert3(methodOffset != -1, "Method '", name, "' not found in super class!")?;
-        auto baseExpr = context.namespace.lookup("this", context, locRange)?
+        auto baseExpr = context.namespace.lookup("this", context, LookupReason.identifier, locRange)?
             .instanceOf(Expression)
             .notNull;
         return new ClassMethodSymbol(superClass, baseExpr, methodOffset, staticLookup=true);

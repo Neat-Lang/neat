@@ -42,7 +42,7 @@ rm build/neat.ini || true
 
 # turn off pass version flags on the next pass to avoid re-running into them
 # use this opportunity to remove them
-PASSFLAGS="-version='firstpass' -macro-version='firstpassmacro'"
+PASSFLAGS="-version=firstpass -macro-version=firstpassmacro"
 if grep -qR 'firstpass' build/src; then PASSFLAGS=""; fi
 
 I=1

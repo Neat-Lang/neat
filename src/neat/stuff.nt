@@ -810,9 +810,11 @@ class ASTCall : ASTSymbol
                     context, base, astMemberAccess.member, astMemberAccess.locRange, allowUndefined=true)?;
                 if (!member) {
                     // if `foo` has no `bar` but there is a `bar` symbol:
-                    if (auto callable = context.namespace.lookup(astMemberAccess.member, context, this.locRange)?) {
+                    if (auto callable = context.namespace.lookup(
+                        astMemberAccess.member, context, LookupReason.ufcs, this.locRange)?)
+                    {
                         // rewrite foo.bar(baz) to bar(foo, baz)
-                        auto target = new ASTIdentifier(astMemberAccess.member, false, astMemberAccess.locRange);
+                        auto target = new ASTSymbolHelper(callable, astMemberAccess.locRange);
                         auto args = [ASTArgument(astMemberAccess.base, "", astMemberAccess.locRange)] ~ this.args;
                         return (new ASTCall(target, args, this.locRange)).compile(context);
                     }
@@ -1089,10 +1091,11 @@ class ASTMember : ASTMemberBase
         if (auto base = this.base.compile(context)?.isExpressionImplCall(context, this.locRange)?) {
             auto member = accessMember(context, base, this.member, this.locRange, allowUndefined=true)?;
             if (!member) {
-                auto callable = context.namespace.lookup(this.member, context, this.locRange)?;
+                auto callable = context.namespace.lookup(
+                    this.member, context, LookupReason.ufcs, this.locRange)?;
                 // if `foo` has no `bar` but there is a `bar` symbol:
-                if (callable) {
-                    auto target = new ASTIdentifier(this.member, false, this.locRange);
+                if (auto callable = callable) {
+                    auto target = new ASTSymbolHelper(callable, this.locRange);
                     // bar(foo)
                     auto args = [ASTArgument(this.base, "", this.locRange)];
                     return (new ASTCall(target, args, this.locRange)).compile(context);
@@ -1139,7 +1142,8 @@ class ParenPropertyNamespace : Namespace
 
     this(this.parent, this.frame, this.value) { this.isContextScope = parent.isContextScope; }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange)
+    override (nullable Symbol | fail Error) lookup(
+        string name, Context context, LookupReason reason, LocRange locRange)
     {
         if (name == "that") {
             mut Symbol result = value;
@@ -1163,7 +1167,7 @@ class ParenPropertyNamespace : Namespace
             return ret;
         }
 
-        if (this.parent) return this.parent.lookup(name, context, locRange);
+        if (this.parent) return this.parent.lookup(name, context, reason, locRange);
         return null;
     }
 }
@@ -2431,7 +2435,7 @@ class ASTIfStatement : ASTStatement
                     prelude = pair.statement;
                     testSucceedsContext = pair.context;
                     auto var = testSucceedsContext.namespace.lookup(
-                            vardecl.name, context, this.locRange)?
+                            vardecl.name, context, LookupReason.identifier, this.locRange)?
                         .notNull
                         .beExpression(this.locRange)?;
                     // TODO lookup() that handles the stackframe thing
@@ -4341,7 +4345,8 @@ class Module : ModuleBase
         return null;
     }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange)
+    override (nullable Symbol | fail Error) lookup(
+        string name, Context context, LookupReason reason, LocRange locRange)
     {
         if (!!context.framePointer) {
             print("error: lookup with frame propagated to Module");
@@ -4364,7 +4369,7 @@ class Module : ModuleBase
         }
         assert(!this.parent);
         if (this.parentModule)
-            return this.parentModule.lookup(name, context, locRange);
+            return this.parentModule.lookup(name, context, reason, locRange);
         return null;
     }
 }
@@ -4542,7 +4547,9 @@ class ImportNamespace : Namespace
         this.isContextScope = this.parent.isContextScope;
     }
 
-    override (nullable Symbol | fail Error) lookup(string name, Context context, LocRange locRange) {
+    override (nullable Symbol | fail Error) lookup(
+        string name, Context context, LookupReason reason, LocRange locRange)
+    {
         if (!symbols.length || [any symbol == name for symbol in symbols]) {
             auto sym = module_.lookupPublic(
                 context.withFramePointer(null),
@@ -4550,7 +4557,7 @@ class ImportNamespace : Namespace
                 name)?;
             if (sym) return sym;
         }
-        return this.parent.lookup(name, context, locRange);
+        return this.parent.lookup(name, context, reason, locRange);
     }
 }
 

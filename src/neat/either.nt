@@ -61,24 +61,25 @@ class ASTEitherDecl : ASTSymbol
         return "($parts)";
     }
 
-    override ASTSymbol quote(Quoter quoter)
-    {
-        // TODO move into quoter?
-        ASTSymbol quoteBool(bool b) {
-            if (b) return quoter.compiler.astIdentifier("true", __RANGE__);
-            return quoter.compiler.astIdentifier("false", __RANGE__);
-        }
-        mut ASTSymbol[] quotedParts;
-        for (entry in this.partTypes) {
-            quotedParts ~= quoter.compiler.astCall(
-                quoter.compiler.astIdentifier("ASTEitherDeclEntry", __RANGE__), [
+    override ASTSymbol quote(Quoter quoter) {
+        with (quoter.compiler) {
+            mut ASTSymbol[] quotedParts;
+            for (entry in this.partTypes) {
+                quotedParts ~= astTupleLiteral([
+                    entry.symbol.quote(quoter),
+                    astBoolLiteral(entry.fail, __RANGE__),
                     quoter.quoteLocRange(entry.locRange),
-                    quoteBool(entry.fail),
-                    entry.symbol.quote(quoter)], __RANGE__);
+                ], __RANGE__);
+            }
+            auto typeHint = astTupleType([
+                ("symbol", astIdentifier("ASTSymbol", __RANGE__)),
+                ("fail", astBasicType("bool", __RANGE__)),
+                ("locRange", astIdentifier("LocRange", __RANGE__)),
+            ], __RANGE__);
+            return quoter.compilerCall("astEitherType", [
+                astArrayLiteralTypeHint(typeHint, quotedParts, this.locRange),
+            ], locRange);
         }
-        return quoter.compiler.astNewExpression(
-            quoter.compiler.astIdentifier("ASTEitherDecl", __RANGE__), [
-                quoter.compiler.astArrayLiteral(quotedParts, __RANGE__)], __RANGE__);
     }
 }
 
@@ -500,21 +501,6 @@ class SwitchExpr : Expression
 /**
  * a.case(T t: 5, U u: 6)
  */
-struct ASTEitherCaseExprCase
-{
-    LocRange locRange;
-
-    ASTSymbol type;
-
-    string identifier;
-
-    bool return_;
-
-    bool fail; // Helper: used for returning failure.
-
-    ASTSymbol expr;
-}
-
 class ASTEitherCaseExpr : ASTSymbol
 {
     ASTSymbol base;
@@ -658,26 +644,24 @@ class ASTEitherCaseExpr : ASTSymbol
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        mut ASTSymbol[] quotedCases;
-        ASTSymbol quoteBool(bool b) {
-            if (b) return quoter.compiler.astIdentifier("true", __RANGE__);
-            return quoter.compiler.astIdentifier("false", __RANGE__);
-        }
-        for (case_ in this.cases) {
-            quotedCases ~= quoter.compiler.astCall(
-                quoter.compiler.astIdentifier("ASTEitherCaseExprCase", __RANGE__), [
-                    quoter.quoteLocRange(case_.locRange),
-                    case_.type.quote(quoter),
-                    quoter.compiler.astStringLiteral(case_.identifier, __RANGE__),
-                    quoteBool(case_.return_),
-                    quoteBool(case_.fail),
-                    case_.expr.quote(quoter)], __RANGE__);
-        }
-        return quoter.compiler.astNewExpression(
-            quoter.compiler.astIdentifier("ASTEitherCaseExpr", __RANGE__), [
-                quoter.quoteLocRange(this.locRange),
+        with (quoter.compiler) {
+            mut ASTSymbol[] quotedCases;
+            for (case_ in this.cases) {
+                quotedCases ~= astCall(
+                    astIdentifier("ASTEitherCaseExprCase", __RANGE__), [
+                        quoter.quoteLocRange(case_.locRange),
+                        case_.type.quote(quoter),
+                        astStringLiteral(case_.identifier, __RANGE__),
+                        astBoolLiteral(case_.return_, __RANGE__),
+                        astBoolLiteral(case_.fail, __RANGE__),
+                        case_.expr.quote(quoter)], __RANGE__);
+            }
+            auto typeHint = astIdentifier("ASTEitherCaseExprCase", __RANGE__);
+            return quoter.compilerCall("astEitherCaseExpr", [
                 this.base.quote(quoter),
-                quoter.compiler.astArrayLiteral(quotedCases, __RANGE__)], __RANGE__);
+                astArrayLiteralTypeHint(typeHint, quotedCases, this.locRange),
+            ], locRange);
+        }
     }
 }
 
@@ -715,18 +699,6 @@ class ASTEitherCaseExpr : ASTSymbol
  *   U u: { bar; }
  * }
  */
-
-struct ASTEitherCaseStmtCase
-{
-    LocRange locRange;
-
-    ASTSymbol type;
-
-    string identifier;
-
-    ASTStatement stmt;
-}
-
 class ASTEitherCaseStmt : ASTStatement
 {
     ASTSymbol base;
@@ -797,25 +769,28 @@ class ASTEitherCaseStmt : ASTStatement
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        mut ASTSymbol[] quotedCases;
-        for (case_ in this.cases) {
-            quotedCases ~= quoter.compiler.astCall(
-                quoter.compiler.astIdentifier("ASTEitherCaseStmtCase", __RANGE__), [
-                    quoter.quoteLocRange(case_.locRange),
-                    case_.type.quote(quoter),
-                    quoter.compiler.astStringLiteral(case_.identifier, __RANGE__),
-                    case_.stmt.quote(quoter)], __RANGE__);
-        }
-        ASTSymbol quote(nullable ASTStatement either) {
-            if (auto either = either) return either.quote(quoter);
-            else return quoter.compiler.astIdentifier("null", __RANGE__);
-        }
-        return quoter.compiler.astNewExpression(
-            quoter.compiler.astIdentifier("ASTEitherCaseStmt", __RANGE__), [
-                quoter.quoteLocRange(this.locRange),
+        with (quoter.compiler) {
+            mut ASTSymbol[] quotedCases;
+            for (case_ in this.cases) {
+                quotedCases ~= astCall(
+                    astIdentifier("ASTEitherCaseStmtCase", __RANGE__), [
+                        quoter.quoteLocRange(case_.locRange),
+                        case_.type.quote(quoter),
+                        astStringLiteral(case_.identifier, __RANGE__),
+                        case_.stmt.quote(quoter)], __RANGE__);
+            }
+            ASTSymbol quote(nullable ASTStatement either) {
+                // FIXME support with() access from nested function
+                if (auto either = either) return either.quote(quoter);
+                else return quoter.compiler.astIdentifier("null", __RANGE__);
+            }
+            auto typeHint = astIdentifier("ASTEitherCaseStmtCase", __RANGE__);
+            return quoter.compilerCall("astEitherCaseStmt", [
                 this.base.quote(quoter),
-                quoter.compiler.astArrayLiteral(quotedCases, __RANGE__),
-                quote(this.default_)], __RANGE__);
+                astArrayLiteralTypeHint(typeHint, quotedCases, this.locRange),
+                quote(this.default_),
+            ], locRange);
+        }
     }
 }
 

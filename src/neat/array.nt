@@ -36,9 +36,15 @@ class Array : Type
 
     BackendType backendType;
 
-    this(this.pendingElementType) {
+    this(this.pendingElementType, Platform platform) {
         this.zeroInitializable = true;
         this.hasElaborateCopyConstructor = true;
+        BackendType[] types = new BackendType[](3);
+        types[0] = platform.nativeWordType;
+        // No Element type here; there would be an infinite recursion with self-referential types like JSONValue.
+        types[1] = platform.voidp;
+        types[2] = platform.voidp;
+        this.backendType = new BackendStructType(types);
     }
 
     Type elementType() {
@@ -64,15 +70,6 @@ class Array : Type
 
     override BackendType emit(Platform platform)
     {
-        if (!this.backendType)
-        {
-            BackendType[] types = new BackendType[](3);
-            types[0] = platform.nativeWordType;
-            // No Element type here; there would be an infinite recursion with self-referential types like JSONValue.
-            types[1] = platform.voidp;
-            types[2] = platform.voidp;
-            this.backendType = new BackendStructType(types);
-        }
         return this.backendType;
     }
 
@@ -104,7 +101,7 @@ class Array : Type
             mut auto context = context.withNamespace(context.compiler.exprAlias(context.namespace, "source", source));
             auto refCountIncFun = once new FunctionDeclaration(
                 "neat_runtime_refcount_inc", new Void, [
-                    Parameter.simple("label", new Array(new Character)),
+                    Parameter.simple("label", new Array(new Character, context.platform)),
                     Parameter.simple("ptr", new Pointer(new Void))]);
             context = context.withNamespace(context.compiler.exprAlias(
                         context.namespace, "neat_runtime_refcount_inc", refCountIncFun));
@@ -115,7 +112,7 @@ class Array : Type
             auto result = stmt.compile(context)?;
             return compiler.statementExpression(result.statement, source);
         }
-        return compiler.exprWithTemporaryExpr(source, &do_)?.notNull;
+        return compiler.exprWithTemporaryExpr(context.getLabel, source, &do_)?.notNull;
     }
 
     override nullable Statement endLifetime(Context context, Expression value)
@@ -147,7 +144,7 @@ class Array : Type
                 auto length = new ArrayLength(base, context.nativeWordType);
 
                 return new ArraySlice(
-                    base, context.compiler.wordLiteral(context.platform, 1), length, locRange);
+                    base, context.compiler.wordLiteral(context.platform, 1), length, locRange, context.platform);
             }
         }
         return null;
@@ -197,10 +194,10 @@ class ASTArray : ASTSymbol
         auto sym = this.elementType.compile(context)?;
         if (auto pending = sym.instanceOf(PendingSymbol))
         {
-            return new Array(pending);
+            return new Array(pending, context.platform);
         }
         auto symtype = sym.beType(this.locRange)?;
-        return new Array(symtype);
+        return new Array(symtype, context.platform);
     }
 
     override string repr() {
@@ -293,7 +290,7 @@ class ArrayBase : Expression
 
 int makeArray(Generator output, Type elementType, int lenReg, int ptrReg, int baseReg)
 {
-    BackendType structType = (new Array(elementType)).emit(output.platform);
+    BackendType structType = (new Array(elementType, output.platform)).emit(output.platform);
     auto voidp = output.platform.voidp;
 
     return output.fun.structLiteral(structType, [
@@ -310,8 +307,8 @@ class ArrayAllocation : Expression
 
     (Expression | size_t) length;
 
-    this(this.elementType, this.length) {
-        this.type = new Array(this.elementType);
+    this(this.elementType, this.length, Platform platform) {
+        this.type = new Array(this.elementType, platform);
         this.info = ExprInfo(Lifetime.gifted);
     }
 
@@ -373,12 +370,12 @@ class ArraySlice : Expression
 
     Array arrayType;
 
-    this(this.base, this.lower, this.upper, this.locRange) {
+    this(this.base, this.lower, this.upper, this.locRange, Platform platform) {
         auto baseType = this.base.type;
         if (auto arrayType = baseType.instanceOf(Array)) {
             this.arrayType = arrayType;
         } else if (auto pointerType = baseType.instanceOf(Pointer)) {
-            this.arrayType = new Array(pointerType.target);
+            this.arrayType = new Array(pointerType.target, platform);
         } else {
             print("$(locRange.repr): slice of non-array/non-pointer - catch this earlier!");
             exit(1);
@@ -776,7 +773,7 @@ class ASTArrayLiteral : ASTSymbol
                 values[i] = castValue;
             else assert(false);
         }
-        auto target = new ArrayAllocation(mergeType, values.length);
+        auto target = new ArrayAllocation(mergeType, values.length, context.platform);
         (nullable Expression | fail Error) do_(Expression target) {
             mut Statement[] moves;
             auto base = new ArrayPointer(mergeType, target);
@@ -788,7 +785,7 @@ class ASTArrayLiteral : ASTSymbol
             return context.compiler.statementExpression(
                 context.compiler.sequenceStatement(moves), target);
         }
-        return context.compiler.exprWithTemporaryExpr(target, &do_).case(
+        return context.compiler.exprWithTemporaryExpr(context.getLabel, target, &do_).case(
             nullable Expression e: e.notNull,
             Error err: err);
     }

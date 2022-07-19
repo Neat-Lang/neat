@@ -633,7 +633,7 @@ class WrapReference : Reference
             mut Expression arg = args[i];
             // we must free arg after the call, so make a copy
             if (arg.info.lifetime == Lifetime.gifted) {
-                auto temp = new PairedTemporaryExpr(arg.type, Lifetime.lexical);
+                auto temp = new PairedTemporaryExpr(arg.type, Lifetime.lexical, context.getLabel);
                 // no copy() because we're taking ownership.
                 auto set = new InitializeTemporaryExprStatement(temp, arg);
                 if (auto destructor = arg.type.endLifetime(context, temp)) {
@@ -676,7 +676,7 @@ class WrapReference : Reference
         }
         (Expression | fail Error) do2(Expression baseExpr)
         {
-            return context.compiler.exprWithTemporaryExpr(baseExpr, &do1)?.notNull;
+            return context.compiler.exprWithTemporaryExpr(context.getLabel, baseExpr, &do1)?.notNull;
         }
         auto fpCall = context.compiler.consume(context, lateSym.baseExpr, &do2)?;
 
@@ -687,7 +687,7 @@ class WrapReference : Reference
     if (method && method.thisValue.info.lifetime == Lifetime.gifted) { // foo().bar()
         // create temporary
         // create temporary for endLifetime call
-        auto tempThis = new PairedTemporaryExpr(method.thisValue.type, Lifetime.gifted);
+        auto tempThis = new PairedTemporaryExpr(method.thisValue.type, Lifetime.gifted, context.getLabel);
         if (Statement cleanupThis = method.thisValue.type.endLifetime(context, tempThis)) {
             auto setTemp = new InitializeTemporaryExprStatement(tempThis, method.thisValue);
             pre = sequence2(pre, setTemp);
@@ -732,14 +732,14 @@ class WrapReference : Reference
         }
 
         if (method.valueIsPtr) {
-            if (auto ret = context.compiler.exprWithTemporaryExpr(method.thisValue, &doPtr)?)
+            if (auto ret = context.compiler.exprWithTemporaryExpr(context.getLabel, method.thisValue, &doPtr)?)
                 return (wrap(ret), quality);
         } else if (auto ref_ = method.thisValue.instanceOf(Reference)) {
             auto ptr = context.compiler.reference(ref_);
-            if (auto ret = context.compiler.exprWithTemporaryExpr(ptr, &doPtr)?)
+            if (auto ret = context.compiler.exprWithTemporaryExpr(context.getLabel, ptr, &doPtr)?)
                 return (wrap(ret), quality);
         } else {
-            if (auto ret = context.compiler.exprWithTemporary(method.thisValue, &doRef)?)
+            if (auto ret = context.compiler.exprWithTemporary(context.getLabel, method.thisValue, &doRef)?)
                 return (wrap(ret), quality);
         }
         return (:mismatch, locRange.fail("something went wrong in call"));
@@ -922,7 +922,7 @@ class ASTIndexAccess : ASTSymbol
                 // Hint: When is 'base' released? What if we're the last thing referencing 'base'
                 // and we're assigning an index?
                 // TODO better approach
-                auto temp = new PairedTemporary(deref.type, Lifetime.gifted);
+                auto temp = new PairedTemporary(deref.type, Lifetime.gifted, context.getLabel);
                 auto init = new UninitializeTemporaryStatement(temp);
                 return context.compiler.wrapRef(
                     sequence(init, new AssignStatement(temp, deref.copy(context)?, this.locRange)),
@@ -970,7 +970,7 @@ class ASTArraySlice : ASTSymbol
                     context,
                     this.upper.compile(context)?.beExpressionImplCall(context, this.locRange)?,
                     sizeT, this.locRange)?,
-                this.locRange);
+                this.locRange, context.platform);
         }
         return context.compiler.consumeTemporary(
                 context, allowRefReturn=false, array, &do_)?.notNull;
@@ -1034,7 +1034,7 @@ with (parser.transaction)
                 context, baseExpr, member, locRange, allowUndefined)?
             .instanceOf(Expression)
             .notNull;
-        auto tempRet = new PairedTemporary(ret.type, Lifetime.gifted); // temporary since we copy
+        auto tempRet = new PairedTemporary(ret.type, Lifetime.gifted, context.getLabel); // temporary since we copy
         auto initTemp = new UninitializeTemporaryStatement(tempRet);
         auto copyTemp = new AssignStatement(tempRet, ret.copy(context)?, locRange);
 
@@ -1054,7 +1054,7 @@ with (parser.transaction)
         return accessMember(context, baseExpr, member, locRange, allowUndefined)?
             .instanceOf(Expression);
     }
-    return context.compiler.exprWithTemporaryExpr(baseExpr, &do_);
+    return context.compiler.exprWithTemporaryExpr(context.getLabel, baseExpr, &do_);
 }
 
 (nullable Symbol | fail Error) accessMember(
@@ -1154,7 +1154,7 @@ class ParenPropertyNamespace : Namespace
                 assert(result.info.lifetime != Lifetime.gifted);
                 if (result.info.lifetime != Lifetime.ephemeral) return result;
                 // Ephemeral 'that', usually a temporization of a gifted expr: leak our caller a reference.
-                auto copiedRes = new PairedTemporary(result.type, Lifetime.gifted);
+                auto copiedRes = new PairedTemporary(result.type, Lifetime.gifted, context.getLabel);
                 auto initCopy = new UninitializeTemporaryStatement(copiedRes);
                 auto fillCopy = new AssignStatement(copiedRes, result.copy(context)?, locRange);
                 return new StatementExpression(sequence(initCopy, fillCopy), copiedRes, false);
@@ -1366,7 +1366,7 @@ class ASTReference : ASTSymbol
             }
             (Expression | fail Error) do2(Expression baseExpr)
             {
-                return context.compiler.exprWithTemporaryExpr(baseExpr, &do1)?.notNull;
+                return context.compiler.exprWithTemporaryExpr(context.getLabel, baseExpr, &do1)?.notNull;
             }
             return context.compiler.consume(context, lateSym.baseExpr, &do2);
         }
@@ -1378,9 +1378,9 @@ class ASTReference : ASTSymbol
                 return doExpr(context.compiler.reference(thisValue));
             }
             if (nestfn.valueIsPtr) {
-                return context.compiler.exprWithTemporaryExpr(nestfn.thisValue, &doExpr)?.notNull;
+                return context.compiler.exprWithTemporaryExpr(context.getLabel, nestfn.thisValue, &doExpr)?.notNull;
             } else {
-                return context.compiler.exprWithTemporary(nestfn.thisValue, &doRef)?.notNull;
+                return context.compiler.exprWithTemporary(context.getLabel, nestfn.thisValue, &doRef)?.notNull;
             }
         }
         Expression baseExpression = base.beExpression(this.locRange)?;
@@ -1789,7 +1789,7 @@ class ASTPrePostIncDec : ASTSymbol
                 .compile(context)?.beExpression(__RANGE__)?;
         }
         auto refptr = context.compiler.reference(target.instanceOf(Reference).notNull);
-        return context.compiler.exprWithTemporaryExpr(refptr, &do_)?.notNull;
+        return context.compiler.exprWithTemporaryExpr(context.getLabel, refptr, &do_)?.notNull;
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTPreOp'!"); assert(false); }
@@ -2249,7 +2249,7 @@ class ASTReturnStatement : ASTStatement
          * - unwind stack
          * - ret the saved value
          */
-        auto temp = new PairedTemporaryExpr(ret, Lifetime.lexical);
+        auto temp = new PairedTemporaryExpr(ret, Lifetime.lexical, context.getLabel);
         auto init = new InitializeTemporaryExprStatement(temp, expr.take(context)?);
         mut Statement returnStmt = unwindScope(context, findParent!FunctionScope(context.namespace), init)?;
         returnStmt = sequence(returnStmt, new ReturnStatement(temp, this.locRange));
@@ -2415,7 +2415,7 @@ class ASTIfStatement : ASTStatement
                 if (initial.type.zeroInitializable && context.compiler.isClassType(initial.type)) {
                     Type notNullableType = initial.type.makeNotNullable;
 
-                    auto tempInitial = new PairedTemporaryExpr(initial.type, initial.info.lifetime);
+                    auto tempInitial = new PairedTemporaryExpr(initial.type, initial.info.lifetime, context.getLabel);
                     auto initTemp = new InitializeTemporaryExprStatement(tempInitial, initial);
 
                     prelude = initTemp;
@@ -2454,7 +2454,7 @@ class ASTIfStatement : ASTStatement
                 extractdecl.locRange.assert(!!sourceType, "source of <- decl must be sumtype, not $(source.type.repr)")?;
                 auto sourceType = sourceType.notNull;
                 // FIXME check lifetime here
-                auto tempSource = new PairedTemporaryExpr(source.type, source.info.lifetime);
+                auto tempSource = new PairedTemporaryExpr(source.type, source.info.lifetime, context.getLabel);
                 auto initTemp = new InitializeTemporaryExprStatement(tempSource, source);
                 // check expected type
                 auto remainingType = typeWithoutFail(sourceType);
@@ -2801,12 +2801,12 @@ class ASTAssignStatement : ASTStatement
 
                     return sequence(reassign, cleanup);
                 }
-                return compiler.stmtWithTemporaryExpr(tmpLhs, &do3);
+                return compiler.stmtWithTemporaryExpr(context.getLabel, tmpLhs, &do3);
             }
-            return compiler.stmtWithTemporaryExpr(compiler.reference(targetref), &do2);
+            return compiler.stmtWithTemporaryExpr(context.getLabel, compiler.reference(targetref), &do2);
         }
         return StatementCompileResult(
-            compiler.stmtWithTemporaryExpr(value, &do1)?.notNull,
+            compiler.stmtWithTemporaryExpr(context.getLabel, value, &do1)?.notNull,
             context);
     }
 
@@ -3372,7 +3372,7 @@ class ASTStatementExpression : ASTSymbol
         auto resultType = resultValue.type;
 
         // as ASTReturn
-        auto temp = new PairedTemporary(resultType, Lifetime.lexical);
+        auto temp = new PairedTemporary(resultType, Lifetime.lexical, context.getLabel);
         auto init = new UninitializeTemporaryStatement(temp);
 
         (Statement | fail Error) assignEscapeValue() {

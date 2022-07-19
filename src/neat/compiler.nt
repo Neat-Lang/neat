@@ -397,7 +397,7 @@ class CompilerImpl : CompilerBase
 
     override Expression voidLiteral() { return new VoidExpression; }
 
-    override Expression stringLiteral(string value) { return new StringLiteral(value); }
+    override Expression stringLiteral(Platform platform, string value) { return new StringLiteral(value, platform); }
 
     override Reference stackFrame(Type type) {
         return new StackFrame(type);
@@ -460,7 +460,7 @@ class CompilerImpl : CompilerBase
             return dg(expr);
         }
         auto type = expr.type;
-        auto temp = new PairedTemporaryExpr(type, Lifetime.ephemeral);
+        auto temp = new PairedTemporaryExpr(type, Lifetime.ephemeral, context.getLabel);
         auto assign = new InitializeTemporaryExprStatement(temp, expr);
         auto cleanup = type.endLifetime(context, temp);
         auto result = dg(temp)?;
@@ -474,7 +474,7 @@ class CompilerImpl : CompilerBase
             return dg(expr);
         }
         auto type = expr.type;
-        auto temp = new PairedTemporaryExpr(type, Lifetime.ephemeral);
+        auto temp = new PairedTemporaryExpr(type, Lifetime.ephemeral, context.getLabel);
         auto assign = new InitializeTemporaryExprStatement(temp, expr);
         auto cleanup = type.endLifetime(context, temp);
         auto result = dg(temp);
@@ -486,7 +486,7 @@ class CompilerImpl : CompilerBase
         (nullable Expression | fail Error) delegate(Expression) dg)
     {
         auto type = expr.type;
-        auto temp = new PairedTemporaryExpr(type, Lifetime.ephemeral);
+        auto temp = new PairedTemporaryExpr(type, Lifetime.ephemeral, context.getLabel);
         auto result = dg(temp)?;
         if (!result) return null;
         auto result = result.notNull;
@@ -513,7 +513,7 @@ class CompilerImpl : CompilerBase
         else
             tempLifetime = expr.info.lifetime; // ephemeral, permanent, lexical
 
-        auto temp = new PairedTemporary(type, tempLifetime);
+        auto temp = new PairedTemporary(type, tempLifetime, context.getLabel);
         auto result = dg(temp)?;
         if (!result) return null;
         auto result = result.notNull;
@@ -619,13 +619,13 @@ class CompilerImpl : CompilerBase
     }
 
     override (nullable Expression | fail Error) exprWithScratchspace(
-        Type type, bool temporary, (nullable Statement | fail Error) delegate(Reference) callback)
+        string label, Type type, bool temporary, (nullable Statement | fail Error) delegate(Reference) callback)
     {
         mut uninitialized Lifetime tempLifetime;
         if (temporary) tempLifetime = Lifetime.gifted;
         else tempLifetime = Lifetime.lexical;
 
-        auto temp = new PairedTemporary(type, tempLifetime);
+        auto temp = new PairedTemporary(type, tempLifetime, label);
         auto initialize = new UninitializeTemporaryStatement(temp);
         auto stmt = callback(temp)?;
         if (!stmt) return null;
@@ -634,13 +634,13 @@ class CompilerImpl : CompilerBase
     }
 
     override (nullable Statement | fail Error) stmtWithTemporary(
-        Expression value, (nullable Statement | fail Error) delegate(Reference) callback)
+        string label, Expression value, (nullable Statement | fail Error) delegate(Reference) callback)
     {
         mut uninitialized Lifetime tempLifetime;
         if (value.info.lifetime == Lifetime.gifted) tempLifetime = Lifetime.gifted;
         else tempLifetime = Lifetime.lexical;
 
-        auto temp = new PairedTemporary(value.type, tempLifetime);
+        auto temp = new PairedTemporary(value.type, tempLifetime, label);
         auto start = new InitializeTemporaryStatement(temp, value);
         auto stmt = callback(temp)?;
         if (!stmt) return null;
@@ -649,7 +649,7 @@ class CompilerImpl : CompilerBase
     }
 
     override (nullable Expression | fail Error) exprWithTemporary(
-        Expression value, (nullable Expression | fail Error) delegate(Reference) callback)
+        string label, Expression value, (nullable Expression | fail Error) delegate(Reference) callback)
     {
         // TODO: the way gifted works here is almost certainly wrong,
         // cause the Reference can be read multiple times - that's
@@ -658,7 +658,7 @@ class CompilerImpl : CompilerBase
         if (value.info.lifetime == Lifetime.gifted) tempLifetime = Lifetime.gifted;
         else tempLifetime = Lifetime.lexical;
 
-        auto temp = new PairedTemporary(value.type, tempLifetime);
+        auto temp = new PairedTemporary(value.type, tempLifetime, label);
         auto start = new InitializeTemporaryStatement(temp, value);
         auto expr = callback(temp)?;
         if (!expr) return null;
@@ -667,9 +667,9 @@ class CompilerImpl : CompilerBase
     }
 
     override (nullable Statement | fail Error) stmtWithTemporaryExpr(
-        Expression value, (nullable Statement | fail Error) delegate(Expression) callback)
+        string label, Expression value, (nullable Statement | fail Error) delegate(Expression) callback)
     {
-        auto temp = new PairedTemporaryExpr(value.type, value.info.lifetime);
+        auto temp = new PairedTemporaryExpr(value.type, value.info.lifetime, label);
         auto start = new InitializeTemporaryExprStatement(temp, value);
         auto stmt = callback(temp)?;
         if (!stmt) return null;
@@ -678,9 +678,9 @@ class CompilerImpl : CompilerBase
     }
 
     override (nullable Expression | fail Error) exprWithTemporaryExpr(
-        Expression value, (nullable Expression | fail Error) delegate(Expression) callback)
+        string label, Expression value, (nullable Expression | fail Error) delegate(Expression) callback)
     {
-        auto temp = new PairedTemporaryExpr(value.type, value.info.lifetime);
+        auto temp = new PairedTemporaryExpr(value.type, value.info.lifetime, label);
         auto start = new InitializeTemporaryExprStatement(temp, value);
         auto expr = callback(temp)?;
         if (!expr) return null;
@@ -739,16 +739,16 @@ class CompilerImpl : CompilerBase
         rtMod.register("free", Protection.public_, once new FunctionDeclaration(
             "free", new Void, [Parameter.fromType(new Pointer(new Void))]));
         rtMod.register("print", Protection.public_, once new FunctionDeclaration(
-            "print", new Void, [Parameter.fromType(new Array(new Character))]));
+            "print", new Void, [Parameter.fromType(new Array(new Character, context.platform))]));
         rtMod.register("neat_runtime_alloc", Protection.public_, once new FunctionDeclaration(
             "neat_runtime_alloc", new Pointer(new Void), [Parameter.fromType(context.nativeWordType)]));
         rtMod.register("neat_runtime_refcount_inc", Protection.public_, once new FunctionDeclaration(
             "neat_runtime_refcount_inc", new Void, [
-                Parameter.simple("label", new Array(new Character)),
+                Parameter.simple("label", new Array(new Character, context.platform)),
                 Parameter.simple("ptr", new Pointer(new Void))]));
         rtMod.register("neat_runtime_refcount_dec", Protection.public_, once new FunctionDeclaration(
             "neat_runtime_refcount_dec", new Integer, [
-                Parameter.simple("label", new Array(new Character)),
+                Parameter.simple("label", new Array(new Character, context.platform)),
                 Parameter.simple("ptr", new Pointer(new Void))]));
 
         fun.parent = rtMod;

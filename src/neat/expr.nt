@@ -511,7 +511,7 @@ class ASTStringLiteral : ASTSymbol
 
     override (Symbol | fail Error) compile(Context context)
     {
-        return new StringLiteral(this.text);
+        return new StringLiteral(this.text, context.platform);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -527,7 +527,10 @@ class ASTStringLiteral : ASTSymbol
 
 class StringLiteral : StringLiteralBase
 {
-    this(this.text) { this.type = once new Array(new Character); this.info = ExprInfo(Lifetime.permanent); }
+    this(this.text, Platform platform) {
+        this.type = once new Array(new Character, platform);
+        this.info = ExprInfo(Lifetime.permanent);
+    }
 
     override int emit(Generator output)
     {
@@ -813,22 +816,19 @@ class ReferenceExpression : Expression
  */
 class PairedTemporary : Reference
 {
-    int reg;
+    string regName;
 
     Lifetime lifetime;
 
-    this(this.type, this.lifetime)
+    this(this.type, this.lifetime, this.regName)
     {
-        this.reg = -1;
         this.info = ExprInfo(this.lifetime);
         this.mutable = false; // not overwritable by user code (?)
     }
 
     override int emitLocation(Generator output)
     {
-        assert(reg != -1);
-
-        return reg;
+        return output.fun.getNamedReg(this.regName);
     }
 
     override int emit(Generator output)
@@ -850,7 +850,7 @@ class PairedTemporary : Reference
         type.hash(hash);
     }
 
-    override string repr() { return "%$reg"; }
+    override string repr() { return "%$regName"; }
 }
 
 class UninitializeTemporaryStatement : Statement
@@ -861,14 +861,8 @@ class UninitializeTemporaryStatement : Statement
 
     override void emit(Generator output)
     {
-        // does double-emit ever happen?
-        // yes! - macros!
-        // TODO figure out a Generator based way (named regs?) to avoid double emit.
-        // assert(target.reg == -1);
-
         auto type = target.type.emit(output.platform);
-
-        target.reg = output.fun.staticAlloca(type);
+        output.fun.setNamedReg(target.regName, output.fun.staticAlloca(type));
     }
 
     // TODO id here?
@@ -876,7 +870,7 @@ class UninitializeTemporaryStatement : Statement
         hash.adds("UninitializeTemporaryStatement");
     }
 
-    override string repr() { return "%$(target.reg) = null"; }
+    override string repr() { return "%$(target.regName) = null"; }
 }
 
 // assignment that defines a register
@@ -890,16 +884,12 @@ class InitializeTemporaryStatement : Statement
 
     override void emit(Generator output)
     {
-        // does double-emit ever happen?
-        // yes! - macros!
-        // TODO figure out a Generator based way (named regs?) to avoid double emit.
-        // assert(target.reg == -1);
-
         auto type = target.type.emit(output.platform);
 
-        target.reg = output.fun.staticAlloca(type);
+        int reg = output.fun.staticAlloca(type);
+        output.fun.setNamedReg(target.regName, reg);
         int value = value.emit(output);
-        output.fun.store(type, target.reg, value);
+        output.fun.store(type, reg, value);
     }
 
     // TODO id here?
@@ -908,7 +898,7 @@ class InitializeTemporaryStatement : Statement
         value.hash(hash);
     }
 
-    override string repr() { return "%$(target.reg) = $(value.repr)"; }
+    override string repr() { return "%$(target.regName) = $(value.repr)"; }
 }
 
 /**
@@ -918,22 +908,19 @@ class InitializeTemporaryStatement : Statement
  */
 class PairedTemporaryExpr : Expression
 {
-    int reg;
+    string regName;
 
     Lifetime lifetime;
 
-    this(this.type, this.lifetime)
+    this(this.type, this.lifetime, this.regName)
     {
-        this.reg = -1;
         this.info = ExprInfo(this.lifetime);
     }
 
     override int emit(Generator output)
     {
         auto type = this.type.emit(output.platform);
-        assert(this.reg != -1);
-
-        return this.reg;
+        return output.fun.getNamedReg(this.regName);
     }
 
     // temp value change identified in InitializeTemporaryExprStatement
@@ -943,7 +930,7 @@ class PairedTemporaryExpr : Expression
         type.hash(hash);
     }
 
-    override string repr() { return "%$reg"; }
+    override string repr() { return "%$regName"; }
 }
 
 // assignment that defines a register
@@ -957,12 +944,11 @@ class InitializeTemporaryExprStatement : Statement
 
     override void emit(Generator output)
     {
-        // does double-emit ever happen?
-        // yes! - macros!
-        // TODO figure out a Generator based way (named regs?) to avoid double emit.
-        // assert(target.reg == -1);
+        output.fun.setNamedReg(target.regName, value.emit(output));
+    }
 
-        target.reg = value.emit(output);
+    override string repr() {
+        return "%$(target.regName) = $(value.repr); ";
     }
 
     // TODO id here?

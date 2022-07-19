@@ -192,7 +192,7 @@ class Struct : Type
             if (!destructors.length) return null;
             return compiler.sequenceStatement(destructors);
         }
-        context.compiler.stmtWithTemporaryExpr(expr, &do_).case {
+        context.compiler.stmtWithTemporaryExpr(context.getLabel, expr, &do_).case {
             nullable Statement stmt: return stmt;
             Error err: assert(false);
         }
@@ -202,7 +202,7 @@ class Struct : Type
         auto compiler = context.compiler;
 
         if (FunctionDeclaration copyCtor = getCopyCtor) {
-            auto temp = new PairedTemporary(source.type, Lifetime.gifted);
+            auto temp = new PairedTemporary(source.type, Lifetime.gifted, context.getLabel);
             auto initTemp = new InitializeTemporaryStatement(temp, source);
             Expression tempPtr = compiler.castTo(new Pointer(new Void), new ReferenceExpression(temp));
             auto call = new Call(copyCtor, [tempPtr, source], this.locRange);
@@ -222,14 +222,14 @@ class Struct : Type
             }
             return new StructLiteral(this, ExprInfo(Lifetime.gifted), exprs);
         }
-        return compiler.exprWithTemporaryExpr(source, &do_)?.notNull;
+        return compiler.exprWithTemporaryExpr(context.getLabel, source, &do_)?.notNull;
     }
 
     override nullable Statement endLifetime(Context context, Expression expr)
     {
         nullable Statement callAutoDtor_ = callAutoDtor(context, expr);
         if (auto destructor = getDtor) {
-            auto ref_ = new PairedTemporary(expr.type, expr.info.lifetime);
+            auto ref_ = new PairedTemporary(expr.type, expr.info.lifetime, context.getLabel);
             auto initRef = new InitializeTemporaryStatement(ref_, expr);
             auto refptr = new ReferenceExpression(ref_);
             Expression ptr = context.compiler.castTo(new Pointer(new Void), refptr);
@@ -254,7 +254,7 @@ class Struct : Type
             (:mismatch, Error err): return err,
             (:argCastError, Error err): return err);
 
-        auto temp = new PairedTemporary(this, Lifetime.gifted);
+        auto temp = new PairedTemporary(this, Lifetime.gifted, context.getLabel);
         mut Statement initialize = new UninitializeTemporaryStatement(temp);
         for (i, arg in result.args) {
             auto field = new StructMemberReference(temp, i);
@@ -277,9 +277,9 @@ class Struct : Type
                         (nullable Expression | fail Error) do4(Expression right) {
                             return structEqual(context, left, right, locRange);
                         }
-                        return context.compiler.exprWithTemporaryExpr(right, &do4);
+                        return context.compiler.exprWithTemporaryExpr(context.getLabel, right, &do4);
                     }
-                    return context.compiler.exprWithTemporaryExpr(left, &do3)?.notNull;
+                    return context.compiler.exprWithTemporaryExpr(context.getLabel, left, &do3)?.notNull;
                 }
                 return context.compiler.consume(context, right, &do2);
             }
@@ -649,11 +649,13 @@ class ASTStruct : ASTSymbol
         struct_.methods = new StructMethod[](methods.length);
         for (i, method in methods) {
             auto methodParams = new Parameter[](method.params.length);
+            auto paramContext = structContext.withLabelPrefix(
+                "$(context.namespace.mangle)_$(struct_.name)_$(method.name)");
 
             for (k, param in method.params) {
                 param.case {
                     ASTParameter param:
-                        methodParams[k] = .compile(param, structContext)?;
+                        methodParams[k] = .compile(param, paramContext)?;
                     ASTThisAssignment param:
                         assert(false); // TODO this.foo
                 }

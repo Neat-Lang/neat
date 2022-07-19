@@ -668,7 +668,7 @@ class ClassType : Type
 
             return context.compiler.statementExpression(astCall.compile(context)?.statement, source);
         }
-        return context.compiler.exprWithTemporaryExpr(source, &do_)?.notNull;
+        return context.compiler.exprWithTemporaryExpr(context.getLabel, source, &do_)?.notNull;
     }
 
     override nullable Statement endLifetime(Context context, Expression expr)
@@ -693,7 +693,7 @@ class ClassType : Type
             auto stmt = context.compiler.$stmt neat_runtime_class_refcount_dec(cast(void*) this);;
             return stmt.compile(context)?.statement;
         }
-        return context.compiler.stmtWithTemporaryExpr(expr, &do_).case(
+        return context.compiler.stmtWithTemporaryExpr(context.getLabel, expr, &do_).case(
             nullable Statement res: res.notNull,
             Error err: exitWithError!Statement(err));
     }
@@ -1012,7 +1012,7 @@ class IntfType : Type
             auto sizeT = context.nativeWordType;
             auto refCountIncFun = once new FunctionDeclaration(
                 "neat_runtime_refcount_inc", new Void, [
-                    Parameter.simple("label", new Array(new Character)),
+                    Parameter.simple("label", new Array(new Character, context.platform)),
                     Parameter.simple("ptr", new Pointer(new Void))]);
 
             // why do we need to ignore lifetime? what actually eats a lifetime here??
@@ -1024,7 +1024,7 @@ class IntfType : Type
             context = context.withNamespace(context.compiler.exprAlias(
                         context.namespace, "neat_runtime_refcount_inc", refCountIncFun));
             context = context.withNamespace(context.compiler.exprAlias(
-                        context.namespace, "inc_name", new StringLiteral("inc " ~ this.intf.name)));
+                        context.namespace, "inc_name", new StringLiteral("inc " ~ this.intf.name, context.platform)));
 
             auto incref = context.compiler.$stmt
             if (!!this) {
@@ -1036,7 +1036,7 @@ class IntfType : Type
                 incref.compile(context)?.statement,
                 source);
         }
-        return context.compiler.exprWithTemporaryExpr(source, &do_)?.notNull;
+        return context.compiler.exprWithTemporaryExpr(context.getLabel, source, &do_)?.notNull;
     }
 
     override nullable Statement endLifetime(Context context, Expression expr)
@@ -1046,7 +1046,7 @@ class IntfType : Type
         // (otherwise we get an infinite cycle when the compiler
         // tries to clean up 'this' after the __destroy() call by
         // ending its lifetime (ad infinitum).
-        auto tempThis = new PairedTemporaryExpr(expr.type, Lifetime.permanent);
+        auto tempThis = new PairedTemporaryExpr(expr.type, Lifetime.permanent, context.getLabel);
         auto initTemp = new InitializeTemporaryExprStatement(tempThis, expr);
 
         auto sizeT = context.nativeWordType;
@@ -1060,7 +1060,7 @@ class IntfType : Type
             "free", new Void, [Parameter.simple("ptr", new Pointer(new Void))]);
         auto refCountDecFun = once new FunctionDeclaration(
             "neat_runtime_refcount_dec", new Integer, [
-                Parameter.simple("label", new Array(new Character)),
+                Parameter.simple("label", new Array(new Character, context.platform)),
                 Parameter.simple("ptr", new Pointer(new Void))]);
 
         context = context.withNamespace(context.compiler.exprAlias(
@@ -1068,7 +1068,7 @@ class IntfType : Type
         context = context.withNamespace(context.compiler.exprAlias(
                     context.namespace, "neat_runtime_refcount_dec", refCountDecFun));
         context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "dec_name", new StringLiteral("dec " ~ this.intf.name)));
+                    context.namespace, "dec_name", new StringLiteral("dec " ~ this.intf.name, context.platform)));
         auto stmt = context.compiler.$stmt
             if (!!this) {
                 auto baseOffset = **cast(size_t**) this;
@@ -1333,6 +1333,9 @@ class ASTClassDecl : ASTSymbol
         for (i, entry in lateMemberMethods) {
             ASTClassDeclMethod method = entry.method;
             auto methodContext = entry.context;
+            // TODO types?
+            auto paramContext = methodContext.withLabelPrefix(
+                "$(context.namespace.mangle)_$(target.name)_$(method.name)");
 
             auto methodParams = new Parameter[](method.params.length);
             for (k, param in method.params) {
@@ -1351,10 +1354,10 @@ class ASTClassDecl : ASTSymbol
                         auto type = findType(target);
                         param.locRange.assert2(!!type, "no such member: ", param.name)?;
                         auto type = type.notNull;
-                        methodParams[k] = .compile(param, type, methodContext)?;
+                        methodParams[k] = .compile(param, type, paramContext)?;
                     }
                     ASTParameter param:
-                        methodParams[k] = .compile(param, methodContext)?;
+                        methodParams[k] = .compile(param, paramContext)?;
                 }
             }
 
@@ -1863,7 +1866,7 @@ class ASTInstanceOf : ASTSymbol
             return new OverrideLifetimeExpr(ret, baseinfo);
 
         }
-        return context.compiler.exprWithTemporaryExpr(base, &do_)
+        return context.compiler.exprWithTemporaryExpr(context.getLabel, base, &do_)
             .case(nullable Expression expr: expr.notNull, Error err: err);
     }
 
@@ -1917,7 +1920,7 @@ class ASTNewExpression : ASTSymbol
 
                 return context.compiler.statementExpression(ctorCall, classptr);
             }
-             return context.compiler.exprWithTemporaryExpr(classptr, &do_)?.notNull;
+             return context.compiler.exprWithTemporaryExpr(context.getLabel, classptr, &do_)?.notNull;
         }
         if (auto arrayType = type.instanceOf(Array)) {
             this.locRange.assert(this.astArgs.length == 1, "expected one argument to array constructor")?;
@@ -1928,7 +1931,7 @@ class ASTNewExpression : ASTSymbol
                 this.astArgs[0].sym.compile(context)?.beExpressionImplCall(context, this.locRange)?,
                 sizeT,
                 this.locRange)?;
-            return new ArrayAllocation(arrayType.elementType, length);
+            return new ArrayAllocation(arrayType.elementType, length, context.platform);
         }
         this.locRange.assert2(false, "don't know how to allocate ", type.repr)?;
     }

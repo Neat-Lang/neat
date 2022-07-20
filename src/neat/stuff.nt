@@ -2815,17 +2815,6 @@ class ASTAssignStatement : ASTStatement
     }
 }
 
-(nullable ASTStatement | fail Error) parseAssignStatement(
-    Parser parser, LexicalContext lexicalContext)
-{
-    if (auto ret = parseAssignment(parser, lexicalContext)?)
-    {
-        parser.expect(";")?;
-        return ret;
-    }
-    return null;
-}
-
 class ASTVarDeclStatement : ASTStatement
 {
     string name;
@@ -3329,23 +3318,6 @@ class ASTWhile : ASTStatement
     return new ASTWhile(cond.notNull, body_, parser.to(from));
 }
 
-(nullable ASTExprStatement | fail Error) parseExprStatement(
-    Parser parser, LexicalContext lexicalContext)
-{
-    parser.begin;
-    auto from = parser.from?;
-    nullable ASTSymbol value = parseExpression(parser, lexicalContext)?;
-    if (!value)
-    {
-        parser.revert;
-        return null;
-    }
-    auto value = value.notNull;
-    parser.expect(";")?;
-    parser.commit;
-    return new ASTExprStatement(value, parser.to(from));
-}
-
 class ASTStatementExpression : ASTSymbol
 {
     ASTStatement[] statements;
@@ -3480,7 +3452,7 @@ class ASTForLoop : ASTStatement
     parser.expect(";")?;
     nullable ASTSymbol condition = parseExpression(parser, lexicalContext)?;
     parser.expect(";")?;
-    nullable ASTStatement step = parseAssignment(parser, lexicalContext)?;
+    nullable ASTStatement step = parseForStep(parser, lexicalContext)?;
     parser.expect(")")?;
     ASTStatement body_ = parseStatement(parser, lexicalContext)?;
 
@@ -3867,6 +3839,21 @@ class ASTStaticIfStatement : ASTStatement
     return null;
 }
 
+/**
+ * Parse "the sort of thing that can be in the step of a for loop".
+ * This category only exists for the benefit of providing C developers with the familiar for loop step.
+ * In C, `i = i + 1` is an expression, but in Neat it's a statement. So this category is a weird chimera,
+ * because what it actually describes is 'syntax elements that are expressions in C'.
+ */
+(nullable ASTStatement | fail Error) parseForStep(Parser parser, LexicalContext lexicalContext)
+{
+    if (auto stmt = parseAssignment(parser, lexicalContext)?)
+        return stmt;
+    if (auto expr = parseExpression(parser, lexicalContext)?)
+        return new ASTExprStatement(expr, expr.locRange);
+    return null;
+}
+
 (ASTStatement | fail Error) parseStatement(Parser parser, LexicalContext lexicalContext)
 {
     if (ASTStatement stmt = parseReturn(parser, lexicalContext)?)
@@ -3884,7 +3871,7 @@ class ASTStaticIfStatement : ASTStatement
     if (ASTStatement stmt = parseScope(parser, lexicalContext)?)
         return stmt;
     // FIXME why did this work?!
-    // if (ASTStatement decl = parseDeclaration(parser, lexicalContext))
+    // if (ASTStatement decl = parseDeclaration(parser, lexicalContext)?)
     if (ASTDeclaration decl = parseDeclaration(parser, lexicalContext)?)
         return new ASTDeclarationStatement(decl);
     if (ASTStatement stmt = parseNestedFunctionDecl(parser, lexicalContext)?)
@@ -3892,8 +3879,6 @@ class ASTStaticIfStatement : ASTStatement
     if (ASTStatement stmt = parseStatementStatement(parser, lexicalContext)?)
         return stmt;
     if (ASTStatement stmt = parseMultiVarDecl(parser, lexicalContext)?)
-        return stmt;
-    if (ASTStatement stmt = parseAssignStatement(parser, lexicalContext)?)
         return stmt;
     if (ASTStatement stmt = parseWithStatement(parser, lexicalContext)?)
         return stmt;
@@ -3906,8 +3891,10 @@ class ASTStaticIfStatement : ASTStatement
         lexicalContext.macroState.applyMacro(args);
         if (ASTStatement ret = args.statement?) return ret;
     }
-    if (ASTStatement stmt = parseExprStatement(parser, lexicalContext)?)
+    if (ASTStatement stmt = parseForStep(parser, lexicalContext)?) {
+        parser.expect(";")?;
         return stmt;
+    }
     return parser.fail("statement expected");
 }
 

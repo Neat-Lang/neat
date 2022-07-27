@@ -20,7 +20,7 @@ class Struct : Type
 
     StructMemberDeclaration[] members;
 
-    StructMethod[] methods;
+    LiftedStructMethod[] methods;
 
     // While compiling the struct, we will already reference it, but
     // some methods will be null.
@@ -131,10 +131,8 @@ class Struct : Type
                 locRange.assert(!baseExpr, "static method cannot be called on value")?;
                 return method;
             } else {
-                // TODO dereference-into-symbol so we can '&' it again
-                auto funcPtr = context.compiler.referenceFunction(method);
                 locRange.assert(!!baseExpr, "non-static method cannot be called on type")?;
-                return new ClassMethodPtr(funcPtr, baseExpr.notNull, false, method.name);
+                return new StructMethod(method, baseExpr.notNull);
             }
         }
         size_t declOffset = [
@@ -540,7 +538,42 @@ class StructNamespace : Namespace
     }
 }
 
-class StructMethod : Function
+class StructMethod : LateSymbol
+{
+    LiftedStructMethod fun;
+
+    Expression baseExpr;
+
+    this(this.fun, this.baseExpr) { }
+
+    override LateSymbolResult resolve(Context context) {
+        auto funcPtr = new FunctionReference(this.fun);
+
+        if (auto reference = baseExpr.instanceOf(Reference)) {
+            auto firstArg = new PointerCast(new Pointer(new Void), context.compiler.reference(reference));
+            return LateSymbolResult(setup=null, funcPtr=funcPtr, firstArg=firstArg, teardown=null);
+        }
+
+        // FIXME: this looks wrong...
+        mut uninitialized Lifetime tempLifetime;
+        if (this.baseExpr.info.lifetime == Lifetime.gifted) tempLifetime = Lifetime.gifted;
+        else tempLifetime = Lifetime.lexical;
+
+        auto tmpBaseExpr = new PairedTemporary(baseExpr.type, tempLifetime, context.getLabel);
+        auto setup = new InitializeTemporaryStatement(tmpBaseExpr, baseExpr);
+        auto firstArg = new PointerCast(new Pointer(new Void), context.compiler.reference(tmpBaseExpr));
+
+        mut nullable Statement teardown = null;
+        if (baseExpr.info.lifetime == Lifetime.gifted) {
+            teardown = baseExpr.type.endLifetime(context, tmpBaseExpr);
+        }
+
+        return LateSymbolResult(setup=setup, funcPtr=funcPtr, firstArg=firstArg, teardown=teardown);
+    }
+}
+
+// Lifted struct method (function with an additional parameter)
+class LiftedStructMethod : Function
 {
     Protection protection;
 
@@ -646,7 +679,7 @@ class ASTStruct : ASTSymbol
             context.namespace, struct_);
         auto structContext = context.withNamespace(structNamespace);
 
-        struct_.methods = new StructMethod[](methods.length);
+        struct_.methods = new LiftedStructMethod[](methods.length);
         for (i, method in methods) {
             auto methodParams = new Parameter[](method.params.length);
             auto paramContext = structContext.withLabelPrefix(
@@ -667,7 +700,7 @@ class ASTStruct : ASTSymbol
                 structContext.namespace, methodParams);
             auto returnTypeContext = structContext.withNamespace(returnTypeNamespace);
 
-            struct_.methods[i] = new StructMethod(
+            struct_.methods[i] = new LiftedStructMethod(
                 struct_,
                 context.namespace,
                 method.static_,

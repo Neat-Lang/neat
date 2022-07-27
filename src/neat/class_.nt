@@ -1136,6 +1136,8 @@ class ClassMethodSymbol : LateSymbol
 {
     Class class_; // TODO does this cause a ref cycle? remove?
 
+    Expression baseExpr;
+
     size_t methodOffset;
 
     // We somehow selected a method of a specific class. Bypass vtable lookup.
@@ -1144,25 +1146,34 @@ class ClassMethodSymbol : LateSymbol
 
     this(this.class_, this.baseExpr, this.methodOffset, this.staticLookup) {}
 
-    override Expression resolve(Context context, Expression baseExpr)
-    {
+    override LateSymbolResult resolve(Context context) {
+        auto tmpBaseExpr = new PairedTemporaryExpr(baseExpr.type, Lifetime.ephemeral, context.getLabel);
+        auto setup = new InitializeTemporaryExprStatement(tmpBaseExpr, baseExpr);
+
+        mut nullable Statement teardown = null;
+        if (baseExpr.info.lifetime == Lifetime.gifted) {
+            teardown = baseExpr.type.endLifetime(context, tmpBaseExpr);
+        }
+
+        mut uninitialized Expression funcPtr;
         if (this.class_.final_ || this.staticLookup) {
             this.class_.vtable[methodOffset].case {
-                ClassMethod method: return new FunctionReference(method);
+                ClassMethod method: funcPtr = new FunctionReference(method);
                 (:baseOffset, size_t): assert(false);
             }
+        } else {
+            Reference classInfo = context.compiler.dereference(context.compiler.dereference(new PointerCast(
+                new Pointer(new Pointer(class_.classInfoStruct(context))),
+                tmpBaseExpr)));
+            Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
+            auto funcPtrType = funcPtrValue.type.instanceOf(FunctionPointer);
+
+            auto funcPtrWithVoidpThis = new FunctionPointer(funcPtrType.ret, [param for param in funcPtrType.params]);
+            funcPtrWithVoidpThis.params[0] = Parameter.fromType(once new Pointer(new Void));
+            funcPtr = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
         }
-        Reference classInfo = context.compiler.dereference(context.compiler.dereference(new PointerCast(
-            new Pointer(new Pointer(class_.classInfoStruct(context))),
-            baseExpr)));
-        mut Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
-        auto funcPtr = funcPtrValue.type.instanceOf(FunctionPointer);
 
-        auto funcPtrWithVoidpThis = new FunctionPointer(funcPtr.ret, [param for param in funcPtr.params]);
-        funcPtrWithVoidpThis.params[0] = Parameter.fromType(once new Pointer(new Void));
-        funcPtrValue = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
-
-        return funcPtrValue;
+        return LateSymbolResult(setup=setup, funcPtr=funcPtr, firstArg=tmpBaseExpr, teardown=teardown);
     }
 }
 
@@ -1170,37 +1181,44 @@ class IntfMethodSymbol : LateSymbol
 {
     IntfType intfType; // TODO does this cause a ref cycle? remove?
 
+    Expression baseExpr;
+
     // methodOffset includes base offsets.
     size_t methodOffset;
 
     this(this.intfType, this.baseExpr, this.methodOffset) {}
 
-    override Expression resolve(Context context, Expression baseExpr)
-    {
+    override LateSymbolResult resolve(Context context) {
+        auto tmpBaseExpr = new PairedTemporaryExpr(baseExpr.type, Lifetime.ephemeral, context.getLabel);
+        auto setup = new InitializeTemporaryExprStatement(tmpBaseExpr, baseExpr);
         Reference classInfo = context.compiler.dereference(context.compiler.dereference(new PointerCast(
             new Pointer(new Pointer(this.intfType.intf.intfVtableStruct(context))),
-            baseExpr)));
-        mut Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
+            tmpBaseExpr)));
+        Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
         auto funcPtr = funcPtrValue.type.instanceOf(FunctionPointer);
 
         auto funcPtrWithVoidpThis = new FunctionPointer(funcPtr.ret, [param for param in funcPtr.params]);
         funcPtrWithVoidpThis.params[0] = Parameter.fromType(once new Pointer(new Void));
-        funcPtrValue = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
+        auto funcPtrValue = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
 
-        return funcPtrValue;
-    }
-
-    override Expression patchContext(Context context, Expression baseExpr) {
-        auto astBaseExpr = new ASTSymbolHelper(baseExpr);
+        auto astBaseExpr = new ASTSymbolHelper(tmpBaseExpr);
         auto astObjectPtr = context.compiler.$expr ({
             auto baseOffset = **cast(size_t**) $astBaseExpr;
             &(cast(char*) $astBaseExpr)[-baseOffset];
         });
+
+        mut nullable Statement teardown = null;
+        if (baseExpr.info.lifetime == Lifetime.gifted) {
+            teardown = baseExpr.type.endLifetime(context, tmpBaseExpr);
+        }
+
+        // gather errors
         (Expression | Error) do_() {
             return astObjectPtr.compile(context)?.beExpression(__RANGE__)?;
         }
         do_.case {
-            Expression expr: return expr;
+            Expression expr:
+                return LateSymbolResult(setup=setup, funcPtr=funcPtrValue, firstArg=expr, teardown=teardown);
             Error err: assert(false);
         }
     }

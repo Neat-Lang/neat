@@ -652,48 +652,32 @@ class WrapReference : Reference
 
     if (auto lateSym = target.instanceOf(LateSymbol)) {
         mut CallQuality quality = CallQuality.match;
-        (nullable Expression | fail Error) do1(Expression baseExpr) {
-            auto funcPtr = lateSym.resolve(context, baseExpr);
-            mut Expression[] args;
+        auto result = lateSym.resolve(context);
+        auto funcPtr = result.funcPtr;
 
-            if (auto funcPtr = funcPtr.type.instanceOf(FunctionPointer)) {
-                // TODO support arg cast error here? (... for what overload?)
-                auto result = validateCall(
-                    context, funcPtr.params[1 .. $], astArgs, "function pointer", variadic=false, locRange
-                )?.case(
-                    (:argCastError, Error err): return err,
-                    (:mismatch, Error err): return err);
-                args = result.args.addLifetime;
-                quality = result.quality;
-            } else {
-                return locRange.fail("function reference or funcptr expected? but is '$(funcPtr.type.repr)'");
-            }
-            auto voidp = once new Pointer(new Void);
-            mut Expression[] combinedArgs;
-            combinedArgs ~= lateSym.patchContext(context, new PointerCast(voidp, baseExpr));
-            combinedArgs ~= args;
-            return new FuncPtrCall(funcPtr, combinedArgs, locRange);
+        if (auto setup = result.setup) pre = sequence2(pre, setup);
+        if (auto teardown = result.teardown) post = sequence(teardown, post);
+
+        mut Expression[] args;
+
+        if (auto funcPtr = funcPtr.type.instanceOf(FunctionPointer)) {
+            // TODO support arg cast error here? (... for what overload?)
+            auto result = validateCall(
+                context, funcPtr.params[1 .. $], astArgs, "function pointer", variadic=false, locRange
+            )?.case(
+                (:argCastError, Error err): return err,
+                (:mismatch, Error err): return err);
+            args = result.args.addLifetime;
+            quality = result.quality;
+        } else {
+            return locRange.fail("function reference or funcptr expected? but is '$(funcPtr.type.repr)'");
         }
-        (Expression | fail Error) do2(Expression baseExpr)
-        {
-            return context.compiler.exprWithTemporaryExpr(context.getLabel, baseExpr, &do1)?.notNull;
-        }
-        auto fpCall = context.compiler.consume(context, lateSym.baseExpr, &do2)?;
+        mut Expression[] combinedArgs;
+        combinedArgs ~= result.firstArg;
+        combinedArgs ~= args;
+        auto fpCall = new FuncPtrCall(funcPtr, combinedArgs, locRange);
 
         return (wrap(fpCall), quality);
-    }
-
-    nullable ClassMethodPtr method = target.instanceOf(ClassMethodPtr);
-    if (method && method.thisValue.info.lifetime == Lifetime.gifted) { // foo().bar()
-        // create temporary
-        // create temporary for endLifetime call
-        auto tempThis = new PairedTemporaryExpr(method.thisValue.type, Lifetime.gifted, context.getLabel);
-        if (Statement cleanupThis = method.thisValue.type.endLifetime(context, tempThis)) {
-            auto setTemp = new InitializeTemporaryExprStatement(tempThis, method.thisValue);
-            pre = sequence2(pre, setTemp);
-            post = sequence(cleanupThis, post);
-            target = new ClassMethodPtr(method.funcPtr, tempThis, method.valueIsPtr, method.name);
-        }
     }
 
     if (auto fundecl = target.instanceOf(FunctionDeclaration)) {
@@ -702,47 +686,6 @@ class WrapReference : Reference
                 (:argCastError, Error err): return (:argCastError, err),
                 (:mismatch, Error err): return (:mismatch, err));
         return (wrap(new Call(fundecl, result.args.addLifetime, locRange)), result.quality);
-    }
-    if (ClassMethodPtr method = target.instanceOf(ClassMethodPtr))
-    {
-        mut CallQuality quality = CallQuality.match;
-        mut Expression[] args;
-        if (auto funcptr = method.funcPtr.type.instanceOf(FunctionPointer)) {
-            // this ptr
-            if (astArgs.length != funcptr.params.length - 1)
-                return locRange.fail(
-                    "wrong number of arguments: expected $(funcptr.params.length - 1) but got $(astArgs.length)");
-            auto result = validateCall(context, funcptr.params[1 .. $], astArgs, "", variadic=false, locRange)?.case(
-                (:argCastError, Error err): return (:argCastError, err),
-                (:mismatch, Error err): return (:mismatch, err));
-            args = result.args.addLifetime;
-            quality = result.quality;
-        } else {
-            return locRange.fail("function reference or funcptr expected? but is '$(method.funcPtr.type.repr)'");
-        }
-        (nullable Expression | fail Error) doPtr(Expression thisPtr) {
-            auto voidp = once new Pointer(new Void);
-            mut Expression[] combinedArgs;
-            combinedArgs ~= new PointerCast(voidp, thisPtr);
-            combinedArgs ~= args;
-            return new FuncPtrCall(method.funcPtr, combinedArgs, locRange);
-        }
-        (nullable Expression | fail Error) doRef(Reference thisValue) {
-            return doPtr(context.compiler.reference(thisValue));
-        }
-
-        if (method.valueIsPtr) {
-            if (auto ret = context.compiler.exprWithTemporaryExpr(context.getLabel, method.thisValue, &doPtr)?)
-                return (wrap(ret), quality);
-        } else if (auto ref_ = method.thisValue.instanceOf(Reference)) {
-            auto ptr = context.compiler.reference(ref_);
-            if (auto ret = context.compiler.exprWithTemporaryExpr(context.getLabel, ptr, &doPtr)?)
-                return (wrap(ret), quality);
-        } else {
-            if (auto ret = context.compiler.exprWithTemporary(context.getLabel, method.thisValue, &doRef)?)
-                return (wrap(ret), quality);
-        }
-        return (:mismatch, locRange.fail("something went wrong in call"));
     }
     if (autoCall) return (:mismatch, locRange.fail("cannot call"));
     nullable Expression expr = target.instanceOf(Expression);
@@ -781,7 +724,6 @@ class WrapReference : Reference
  */
 bool previewCanCallImplicit(Symbol target) {
     return target.instanceOf(FunctionDeclaration)
-        || target.instanceOf(ClassMethodPtr)
         || target.instanceOf(LateSymbol)
         || target.instanceOf(Overload);
 }
@@ -1358,30 +1300,10 @@ class ASTReference : ASTSymbol
         if (Function fun = base.instanceOf(Function))
             return new FunctionReference(fun);
         if (LateSymbol lateSym = base.instanceOf(LateSymbol)) {
-            (nullable Expression | fail Error) do1(Expression baseExpr) {
-                auto funcPtr = lateSym.resolve(context, baseExpr);
-                auto voidp = once new Pointer(new Void);
-                auto contextPtr = lateSym.patchContext(context, new PointerCast(voidp, baseExpr));
-                return new DelegateExpr(funcPtr, contextPtr);
-            }
-            (Expression | fail Error) do2(Expression baseExpr)
-            {
-                return context.compiler.exprWithTemporaryExpr(context.getLabel, baseExpr, &do1)?.notNull;
-            }
-            return context.compiler.consume(context, lateSym.baseExpr, &do2);
-        }
-        if (auto nestfn = base.instanceOf(ClassMethodPtr)) {
-            (nullable Expression | fail Error) doExpr(Expression thisPtr) {
-                return new DelegateExpr(nestfn.funcPtr, thisPtr);
-            }
-            (nullable Expression | fail Error) doRef(Reference thisValue) {
-                return doExpr(context.compiler.reference(thisValue));
-            }
-            if (nestfn.valueIsPtr) {
-                return context.compiler.exprWithTemporaryExpr(context.getLabel, nestfn.thisValue, &doExpr)?.notNull;
-            } else {
-                return context.compiler.exprWithTemporary(context.getLabel, nestfn.thisValue, &doRef)?.notNull;
-            }
+            auto result = lateSym.resolve(context);
+            auto dg = new DelegateExpr(result.funcPtr, result.firstArg);
+            this.locRange.assert(result.teardown is null, "cannot take address: reference base requires cleanup")?;
+            return new WrapExpression(result.setup, dg, result.teardown);
         }
         Expression baseExpression = base.beExpression(this.locRange)?;
 
@@ -4283,7 +4205,7 @@ class Module : ModuleBase
                     }
                     if (Struct struct_ = symbol.instanceOf(Struct)) {
                         for (method in struct_.methods)
-                            finishedSymbols ~= method.instanceOf(StructMethod).compile(context)?;
+                            finishedSymbols ~= method.compile(context)?;
                     }
                 }
                 FinishedSymbol symbol:

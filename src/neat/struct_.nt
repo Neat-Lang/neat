@@ -171,9 +171,7 @@ class Struct : Type
     FunctionDeclaration getCopyCtor()
     {
         assert(this.validMethods == this.methods.length);
-        return [first method for method in this.methods
-            where method.name == "__ctor" && method.params.length == 1 && method.params[0].type.same(this)
-            else null];
+        return [first method for method in this.methods where method.isCopyCtorFor(this) else null];
     }
 
     nullable Statement callAutoDtor(Context context, Expression expr)
@@ -239,8 +237,22 @@ class Struct : Type
 
     override (nullable Expression | fail Error) call(Context context, LocRange locRange, ASTArgument[] args)
     {
-        locRange.assert(args.length == this.members.length, "invalid number of args for struct constructor")?;
+        auto structCtor = [
+            first a for a in this.methods
+            where a.name == "__ctor" && !a.isCopyCtorFor(this) else null];
+        if (auto structCtor = structCtor) {
+            auto temp = new PairedTemporary(this, Lifetime.gifted, context.getLabel);
+            auto initialize = new UninitializeTemporaryStatement(temp);
+            auto structCtorMethod = new StructMethod(structCtor, temp);
+            auto astStructCtor = new ASTSymbolHelper(structCtorMethod);
+            auto call = context.compiler.call(context, astStructCtor, args, locRange, false)?;
+            auto initAndCall = context.compiler.sequence(
+                initialize,
+                context.compiler.exprStatement(call.notNull));
+            return context.compiler.wrap(initAndCall, temp, null);
+        }
 
+        locRange.assert(args.length == this.members.length, "invalid number of args for struct constructor")?;
         auto params = [Parameter(
                 isThisAssignment=false,
                 name=member.name,
@@ -690,7 +702,10 @@ class ASTStruct : ASTSymbol
                     ASTParameter param:
                         methodParams[k] = .compile(param, paramContext)?;
                     ASTThisAssignment param:
-                        assert(false); // TODO this.foo
+                        auto type = [first m.type for m in members where m.name == param.name else null];
+                        param.locRange.assert2(!!type, "no such member: ", param.name)?;
+                        auto type = type.notNull;
+                        methodParams[k] = .compile(param, type, paramContext)?;
                 }
             }
 
@@ -937,4 +952,8 @@ class ASTStructDecl : ASTDeclaration
         }
     }
     return entries;
+}
+
+bool isCopyCtorFor(LiftedStructMethod method, Struct struct_) {
+    return method.name == "__ctor" && method.params.length == 1 && method.params[0].type.same(struct_);
 }

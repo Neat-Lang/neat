@@ -42,7 +42,7 @@ then
 #!/usr/bin/env bash
 set -exo pipefail
 CFLAGS="\${CFLAGS} -Ofast -fno-strict-aliasing -pthread"
-gcc -fpic -rdynamic intermediate/* src/runtime.c -o neat -ldl \$CFLAGS
+gcc -fpic -rdynamic intermediate/* src/runtime.c -o neat -ldl -lm \$CFLAGS
 EOT
     cat > $TARGET/neat.ini <<EOT
 -syspackage compiler:src
@@ -78,7 +78,7 @@ fi
 LLVM_CFLAGS="-I\$(\$LLVM_CONFIG --includedir) -L\$(\$LLVM_CONFIG --libdir)"
 LLVM_NTFLAGS="-I\$(\$LLVM_CONFIG --includedir) -L-L\$(\$LLVM_CONFIG --libdir)"
 CFLAGS="\${CFLAGS:+ } \${LLVM_CFLAGS} -O2 -fno-strict-aliasing -pthread"
-gcc -fpic -rdynamic intermediate/* src/runtime.c -o neat_bootstrap -ldl -lLLVM \$CFLAGS
+gcc -fpic -rdynamic intermediate/* src/runtime.c -o neat_bootstrap -ldl -lm -lLLVM \$CFLAGS
 ./neat_bootstrap -O -macro-backend=c src/main.nt \${LLVM_NTFLAGS} $NTFLAGS -o neat
 rm neat_bootstrap
 EOT

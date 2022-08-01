@@ -2187,7 +2187,7 @@ class ASTReturnStatement : ASTStatement
         returnStmt = sequence(returnStmt, new ReturnStatement(temp, this.locRange));
         // no need for stack cleanup after a return.
 
-        return StatementCompileResult(returnStmt, context);
+        return StatementCompileResult(returnStmt, context.namespace);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -2333,7 +2333,7 @@ class ASTIfStatement : ASTStatement
         mut nullable Statement prelude; // var decl statement
         mut nullable Expression test;
         mut nullable Statement epilog; // either decl value assignment
-        mut auto testSucceedsContext = context;
+        mut auto testSucceedsNamespace = context.namespace;
         this.test.case {
             ASTSymbol symbol: {
                 // TODO pick assignment
@@ -2361,12 +2361,12 @@ class ASTIfStatement : ASTStatement
                         vardecl.locRange);
                     auto pair = actualVarDecl.compile(context)?;
                     epilog = pair.statement;
-                    testSucceedsContext = pair.context;
+                    testSucceedsNamespace = pair.namespace;
                 } else {
                     auto pair = vardecl.compile(context)?;
                     prelude = pair.statement;
-                    testSucceedsContext = pair.context;
-                    auto var = testSucceedsContext.namespace.lookup(
+                    testSucceedsNamespace = pair.namespace;
+                    auto var = testSucceedsNamespace.lookup(
                             vardecl.name, context, LookupReason.identifier, this.locRange)?
                         .notNull
                         .beExpression(this.locRange)?;
@@ -2413,21 +2413,25 @@ class ASTIfStatement : ASTStatement
                     extractdecl.locRange);
                 auto pair = actualVarDecl.compile(context)?;
                 epilog = pair.statement;
-                testSucceedsContext = pair.context;
+                testSucceedsNamespace = pair.namespace;
             }
         }
+        auto testSucceedsContext = context.withNamespace(testSucceedsNamespace);
         auto thenPair = this.then.compile(testSucceedsContext)?;
-        Statement then = unwindScope(thenPair.context, context.namespace, thenPair.statement)?;
+        // TODO make unwindScope take two namespaces
+        auto thenPairContext = testSucceedsContext.withNamespace(thenPair.namespace);
+        Statement then = unwindScope(thenPairContext, context.namespace, thenPair.statement)?;
         mut nullable Statement else_;
         if (this.else_) {
             auto elsePair = this.else_.compile(context)?;
-            else_ = unwindScope(elsePair.context, context.namespace, elsePair.statement)?;
+            auto elsePairContext = context.withNamespace(elsePair.namespace);
+            else_ = unwindScope(elsePairContext, context.namespace, elsePair.statement)?;
         }
 
         auto test = truthy(context, test.notNull, this.locRange)?;
         auto ifStmt = new IfStatement(test, sequence2(epilog, then), else_, this.locRange);
 
-        return StatementCompileResult(sequence2(prelude, ifStmt), context);
+        return StatementCompileResult(sequence2(prelude, ifStmt), context.namespace);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -2518,12 +2522,12 @@ class ASTScopeStatement : ASTStatement
         for (i, statement in this.statements) {
             auto pair = statement.compile(subContext)?;
 
-            subContext = pair.context;
+            subContext = subContext.withNamespace(pair.namespace);
             statements[i] = pair.statement;
         }
         return StatementCompileResult(
             unwindScope(subContext, context.namespace, new SequenceStatement(statements))?,
-            context); // scope ends here
+            context.namespace); // scope ends here
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -2552,11 +2556,11 @@ class ASTSequenceStatement : ASTStatement
         for (i, statement in this.statements) {
             auto pair = statement.compile(subContext)?;
 
-            subContext = pair.context;
+            subContext = subContext.withNamespace(pair.namespace);
             statements[i] = pair.statement;
         }
         // not a scope!
-        return StatementCompileResult(new SequenceStatement(statements), subContext);
+        return StatementCompileResult(new SequenceStatement(statements), subContext.namespace);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -2645,11 +2649,11 @@ class ASTOpAssignStatement : ASTStatement
                     if (auto converted = implicitConvertTo(context, right, leftArray.elementType)) {
                         return StatementCompileResult(
                             arrayCatAssign(context, rLeft, converted, this.locRange)?,
-                            context);
+                            context.namespace);
                     }
                     return StatementCompileResult(
                         arrayCatAssign(context, rLeft, right, this.locRange)?,
-                        context);
+                        context.namespace);
                 }
             }
         }
@@ -2684,7 +2688,7 @@ class ASTAssignStatement : ASTStatement
             auto base = astIndex.base.compile(context)?.beExpressionImplCall(context, astIndex.locRange)?;
             auto index = astIndex.index.compile(context)?.beExpressionImplCall(context, astIndex.locRange)?;
             if (auto assignment = base.type.indexAssignment(context, base, index, value, this.locRange)?)
-                return StatementCompileResult(assignment, context);
+                return StatementCompileResult(assignment, context.namespace);
         }
 
         auto compiler = context.compiler;
@@ -2739,7 +2743,7 @@ class ASTAssignStatement : ASTStatement
         }
         return StatementCompileResult(
             compiler.stmtWithTemporaryExpr(context.getLabel, value, &do1)?.notNull,
-            context);
+            context.namespace);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -2798,7 +2802,7 @@ class ASTVarDeclStatement : ASTStatement
                     context.namespace, this.name, type, mut=false, borrowed=true, hidden=false);
                 auto assign = context.compiler.assignStatement(decl.accessDecl(context.compiler), initial);
 
-                return StatementCompileResult(assign, context.withNamespace(decl));
+                return StatementCompileResult(assign, decl);
             }
 
             // print("$(this.locRange.repr):$(initial.info.repr): moving $(initial.repr) for $(this.name)");
@@ -2808,7 +2812,7 @@ class ASTVarDeclStatement : ASTStatement
 
             return StatementCompileResult(
                 move(context, decl.accessDecl(context.compiler), initial)?,
-                context.withNamespace(decl));
+                decl);
         }
         else if (this.uninitialized)
         {
@@ -2819,7 +2823,7 @@ class ASTVarDeclStatement : ASTStatement
             // Still zero-init.
             return StatementCompileResult(
                 new AssignStatement(decl.accessDecl(context.compiler), new NullExpr(type), this.locRange),
-                context.withNamespace(decl));
+                decl);
         }
         else
         {
@@ -2833,7 +2837,7 @@ class ASTVarDeclStatement : ASTStatement
 
             return StatementCompileResult(
                 new AssignStatement(decl.accessDecl(context.compiler), new NullExpr(type), this.locRange),
-                context.withNamespace(decl));
+                decl);
         }
     }
 
@@ -3075,7 +3079,7 @@ class ASTVarExtractDeclStatement : ASTStatement
 
         return StatementCompileResult(
             move(context, decl.accessDecl(context.compiler), switchExpr)?,
-            context.withNamespace(decl));
+            decl);
     }
 
     (StatementCompileResult | fail Error) compileObjectDenullFallback(Context context, Expression source) {
@@ -3098,7 +3102,7 @@ class ASTVarExtractDeclStatement : ASTStatement
         context.pushErrorLoc(this.locRange);
         auto ret = StatementCompileResult(
             move(context, decl.accessDecl(context.compiler), initial.compile(context)?.beExpression(initial.locRange)?)?,
-            context.withNamespace(decl));
+            decl);
         context.popErrorLoc;
         return ret;
     }
@@ -3188,8 +3192,8 @@ class ASTNestedFunctionDeclStatement : ASTStatement
         assert(!!latent);
         return StatementCompileResult(
             new NoopStatement,
-            context.withNamespace(new SymbolAlias(
-                context.namespace, latent.fun.name, latent)));
+            new SymbolAlias(
+                context.namespace, latent.fun.name, latent));
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -3222,11 +3226,12 @@ class ASTWhile : ASTStatement
             .beExpressionImplCall(context, this.locRange)?
             .truthy2(context, this.locRange)?;
         auto bodyPair = this.body_.compile(loopContext)?;
-        auto bodyStmt = unwindScope(bodyPair.context, context.namespace, bodyPair.statement)?;
+        auto bodyPairContext = loopContext.withNamespace(bodyPair.namespace);
+        auto bodyStmt = unwindScope(bodyPairContext, context.namespace, bodyPair.statement)?;
 
         return StatementCompileResult(
             new Loop(label, null, condExpr, bodyStmt, null, this.locRange),
-            context);
+            context.namespace);
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTWhileStatement'"); assert(false); }
@@ -3270,7 +3275,7 @@ class ASTStatementExpression : ASTSymbol
             auto result = statement.compile(context)?;
 
             statements[i] = result.statement;
-            context = result.context;
+            context = context.withNamespace(result.namespace);
         }
         auto resultValue = this.expr.compile(context)?.beExpressionImplCall(context, locRange)?;
         auto resultType = resultValue.type;
@@ -3344,7 +3349,7 @@ class ASTForLoop : ASTStatement
     override (StatementCompileResult | fail Error) compile(Context context)
     {
         auto declPair = this.declareLoopVar.compile(context)?;
-        auto forScope = declPair.context;
+        auto forScope = context.withNamespace(declPair.namespace);
         Expression condition = this.condition.compile(forScope)?.beExpressionImplCall(context, this.locRange)?;
         auto stepPair = this.step.compile(forScope)?;
 
@@ -3355,7 +3360,7 @@ class ASTForLoop : ASTStatement
 
         return StatementCompileResult(
             new Loop(label, declPair.statement, condition, bodyPair.statement, stepPair.statement, this.locRange),
-            context);
+            context.namespace);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -4534,7 +4539,7 @@ class ASTImport : ASTDeclaration
 
     this(this.statement, this.moduleSource) { }
 
-    override (Context | fail Error) compile(Context context) {
+    override (Namespace | fail Error) compile(Context context) {
         auto astModule_ = this.module_?;
         auto id = "compile platform $(context.platform.ident) ast $(astModule_.mangledName)";
         auto task = new AstCompileTask(astModule_, context.data);
@@ -4547,7 +4552,7 @@ class ASTImport : ASTDeclaration
 
         contextModule.addModuleDependency(module_);
 
-        return context.withNamespace(namespace);
+        return namespace;
     }
 
     override ASTSymbol quote(Quoter quoter) {

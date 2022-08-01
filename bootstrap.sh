@@ -614,6 +614,10 @@ at_revision '6c60f500e9fffd5a0b412faebf6413d9d872c3bd' 'rebuild neat' 'build/nea
 at_revision 'f80ea73111eb767bbbe511cc0bc72e808d2ffed6' 'rebuild neat' 'build/neat'
 # __take
 at_revision '2dee59f7b4b0e9f0378941f98e9f22a7f5bd0382' 'rebuild neat' 'build/neat'
+# remove firstpassmacro
+at_revision 'fb53f0704ce45726c40d9dc7732c7c361dbfd5a5' 'rebuild neat' 'build/neat'
+# prefix, postfix, struct constructors
+at_revision '92b792039b38aca4f2ae36d3565fcbca3de15ced' 'rebuild neat' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

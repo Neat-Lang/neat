@@ -1,0 +1,135 @@
+module life;
+
+import std.stdio;
+macro import std.macro.cimport;
+
+import c_header("SDL2/SDL.h");
+pragma(lib, "SDL2");
+pragma(lib, "m");
+
+int paint(int x, int y) {
+    return x * y;
+}
+
+final class Game
+{
+    int width, height;
+    int[] data, backbuffer;
+    this(this.width, this.height) {
+        this.data = new int[](width * height);
+        this.backbuffer = new int[](width * height);
+    }
+    void randomize() {
+        for (i in 0 .. width * height) {
+            if (rand() % 16 == 0) data[i] = 100;
+            else data[i] = 0;
+        }
+    }
+    int get(int x, int y) {
+        if (x < 0 || y < 0 || x >= width || y >= height)
+            return get(x % width, y % height);
+        return this.backbuffer[y * width + x];
+    }
+    bool live(int x, int y) {
+        return get(x, y) == 100;
+    }
+    void set(int x, int y, int value) {
+        this.data[y * width + x] = value;
+    }
+    void swap() {
+        auto backup = this.data;
+        this.data = this.backbuffer;
+        this.backbuffer = backup;
+    }
+    void step() {
+        swap;
+        for (int y in 0 .. height) for (int x in 0 .. width) {
+            int value = get(x, y);
+            int neighbors = live(x - 1, y - 1) + live(x, y - 1) + live(x + 1, y - 1)
+                + live(x - 1, y) + live(x + 1, y)
+                + live(x - 1, y + 1) + live(x, y + 1) + live(x + 1, y + 1);
+            if (value == 100 && neighbors == 2 || neighbors == 3) set(x, y, 100);
+            else if (value == 100) set(x, y, 80);
+            else if (value > 0) set(x, y, value - 1);
+            else set(x, y, 0);
+        }
+    }
+    int paint(int x, int y) {
+        if (x < 0 || y < 0 || x >= width || y >= height) return 0x101010;
+        auto value = (get(x, y) * 255) / 100;
+        return value | (value << 8) | (value << 16);
+    }
+}
+
+int main() {
+    mut void* window;
+    int width = 1920;
+    int height = 1080;
+    int SDL_WINDOWPOS_UNDEFINED = 536805376;
+
+    // Initialize SDL systems
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+        print("SDL could not be initialized!");
+        return 1;
+    }
+    auto window = SDL_CreateWindow(
+        "Hello World".ptr,
+        SDL_WINDOWPOS_UNDEFINED,
+        SDL_WINDOWPOS_UNDEFINED,
+        width, height,
+        SDL_WINDOW_SHOWN);
+    if (!window) {
+        print("Window could not be created!");
+        return 1;
+    }
+
+    auto game = new Game(width / 2, height / 2);
+    // game.randomize;
+    void on(int x, int y) game.set(x + game.width / 2, y + game.height / 2, 100);
+    on(1, 6); on(3, 5); on(3, 6); on(5, 2); on(5, 3); on(5, 4);
+    on(7, 1); on(7, 2); on(7, 3); on(8, 2);
+
+    mut int targetZoom = -1;
+    mut float zoom = targetZoom;
+    // Poll for events and wait till user closes window
+    while (true) {
+        mut SDL_Event currentEvent;
+        while (SDL_PollEvent(&currentEvent) != 0) {
+            if (currentEvent.type == SDL_QUIT) {
+                return 0;
+            }
+            if (currentEvent.type == SDL_MOUSEWHEEL) {
+                auto wheel = cast(SDL_MouseWheelEvent*) &currentEvent.u1;
+                if (wheel.x > 0) {
+                    // FIXME ++, -- should honor mutable!
+                    targetZoom--;
+                } else if (wheel.x < 0) {
+                    targetZoom++;
+                }
+            }
+        }
+        for (_ in 0 .. 4)
+            game.step;
+
+        zoom = zoom * 0.9f + targetZoom * 0.1f;
+
+        auto screenSurface = SDL_GetWindowSurface(window);
+        SDL_LockSurface(screenSurface);
+        float mulfac = powf(2, zoom);
+        for (y in 0..height) for (x in 0..width) {
+            int rgb = game.paint(cast(int) (x * mulfac), cast(int) (y * mulfac));
+            (cast(int*) screenSurface.pixels)[y * width + x] = rgb;
+        }
+        SDL_UnlockSurface(screenSurface);
+        SDL_UpdateWindowSurface(window);
+    }
+}
+
+struct SDL_Event
+{
+    int type;
+    // plenty of space
+    int u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16;
+}
+
+extern(C) int SDL_PollEvent(SDL_Event* event);

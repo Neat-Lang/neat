@@ -114,6 +114,7 @@ function rebuild_patch_ptr_offset {
     echo "void* ptr_offset(void* p, int i) { return p + i; }" >> src/runtime.c
     rebuild "$@"
 }
+FLAGS=""
 # progressively add a flag to the compiler invocation
 function transition {
     TRANSITION="$1"
@@ -127,9 +128,9 @@ function transition {
     fi
     cp ../../build/$COMPILER build/$COMPILER
     cp -R ../../build/src build
-    build/$COMPILER -Pcompiler:build/src -Pnext:src src/main.$EXT -o build/stage1 -transition=$TRANSITION $@
+    build/$COMPILER -Pcompiler:build/src -Pnext:src src/main.$EXT -o build/stage1 -transition=$TRANSITION $FLAGS $@
     rm -rf .obj
-    build/stage1 -Pcompiler:src src/main.$EXT -o build/stage2 -transition=$TRANSITION -macro-transition=$TRANSITION $@
+    build/stage1 -Pcompiler:src src/main.$EXT -o build/stage2 -transition=$TRANSITION -macro-transition=$TRANSITION $FLAGS $@
     mv build/stage2 build/$COMPILER
     rm -rf build/src
     cp -R src build/
@@ -153,9 +154,9 @@ function detransition {
     fi
     cp ../../build/$COMPILER build/$COMPILER
     build/$COMPILER -Pcompiler:build/src -Pnext:src src/main.$EXT -o build/stage1 \
-        -transition=$TRANSITION -macro-transition=$TRANSITION $@
+        -transition=$TRANSITION -macro-transition=$TRANSITION $FLAGS $@
     rm -rf .obj
-    build/stage1 -Pcompiler:src src/main.$EXT -o build/stage2 $@
+    build/stage1 -Pcompiler:src src/main.$EXT -o build/stage2 $FLAGS $@
     mv build/stage2 build/$COMPILER
     rm -rf build/src
     cp -R src build/
@@ -618,6 +619,12 @@ at_revision '2dee59f7b4b0e9f0378941f98e9f22a7f5bd0382' 'rebuild neat' 'build/nea
 at_revision 'fb53f0704ce45726c40d9dc7732c7c361dbfd5a5' 'rebuild neat' 'build/neat'
 # prefix, postfix, struct constructors
 at_revision '92b792039b38aca4f2ae36d3565fcbca3de15ced' 'rebuild neat' 'build/neat'
+# llvm amd64 argument rewriting
+LLVM_CONFIG="/usr/lib/llvm/12/bin/llvm-config"
+FLAGS="-I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir) \
+    -version=LLVMBackend -macro-version=LLVMBackend"
+at_revision '195eff861e71824aba3fe96904f1c517276e3c24' 'rebuild neat' 'build/neat'
+at_revision '195eff861e71824aba3fe96904f1c517276e3c24' 'transition amd64' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

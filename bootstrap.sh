@@ -625,6 +625,7 @@ FLAGS="-I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir) \
     -version=LLVMBackend -macro-version=LLVMBackend"
 at_revision '195eff861e71824aba3fe96904f1c517276e3c24' 'rebuild neat' 'build/neat'
 at_revision '195eff861e71824aba3fe96904f1c517276e3c24' 'transition amd64' 'build/neat'
+at_revision '8072b51a1aebc055ea37b8d7b4565e88eebae4ea' 'detransition amd64' 'build/neat'
 
 # unpack the last tagfile
 unpack_tagfile

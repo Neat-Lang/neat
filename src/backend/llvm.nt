@@ -61,6 +61,48 @@ LLVMTypeRef translate(BackendType type, LLVMContextRef context, Platform platfor
     assert(false);
 }
 
+nullable BackendType toAmd64ParamType(BackendType type, Platform platform) {
+    if (type.size(platform) > 16) return null;
+    mut auto sseFields = new int[](2), intFields = new int[](2), unkFields = new int[](2);
+    mut auto fill = new int[](2);
+    void walk(int offset, BackendType type) {
+        assert(offset < 16);
+        fill[offset / 8] = offset + type.size(platform);
+        if (type.instanceOf(BackendFloatType) || type.instanceOf(BackendDoubleType))
+            sseFields[offset / 8] += 1;
+        else if (type.instanceOf(BackendLongType) || type.instanceOf(BackendIntType)
+            || type.instanceOf(BackendShortType) || type.instanceOf(BackendCharType))
+            intFields[offset / 8] += 1;
+        else if (auto struct_ = type.instanceOf(BackendStructType)) {
+            for (int i, field in struct_.members) {
+                walk(offset + struct_.memberOffset(i, platform), field);
+            }
+        }
+        else
+            unkFields[offset / 8] += 1;
+    }
+    walk(0, type);
+    mut BackendType[] blobs;
+    for (i in 0 .. 2) {
+        bool isSSE = sseFields[i] > 0, isInt = intFields[i] > 0, isUnk = unkFields[i] > 0;
+        BackendType intFillType() {
+            if (fill[i] > 4) return new BackendLongType;
+            if (fill[i] > 2) return new BackendIntType;
+            if (fill[i] > 1) return new BackendShortType;
+            return new BackendCharType;
+        }
+        BackendType doubleFillType() {
+            if (fill[i] > 4) return new BackendDoubleType;
+            return new BackendFloatType;
+        }
+        if (isInt && !isUnk) blobs ~= intFillType;
+        else if (isSSE && !isUnk) blobs ~= doubleFillType;
+        else if (isUnk) return null;
+    }
+    if (blobs.length == 1) return blobs[0];
+    return new BackendStructType(blobs);
+}
+
 LLVMTypeRef translateFunc(BackendFunctionPointerType backendFpType, LLVMContextRef context, Platform platform) {
     bool sret = passByMemory(backendFpType.ret, platform);
     mut LLVMTypeRef returnType;
@@ -68,17 +110,29 @@ LLVMTypeRef translateFunc(BackendFunctionPointerType backendFpType, LLVMContextR
 
     if (sret) returnType = LLVMVoidTypeInContext(context);
     else returnType = translate(backendFpType.ret, context, platform, true);
+    if (!sret && platform.platformFlags.amd64ParamRewrite) {
+        if (auto translatedType = toAmd64ParamType(backendFpType.ret, platform)) {
+            returnType = translate(translatedType, context, platform, true);
+        }
+    }
 
     if (sret) {
         paramTypes ~= LLVMPointerType(
             translate(backendFpType.ret, context, platform, true), 0);
     }
     for (param in backendFpType.params) {
-        if (passByMemory(param, platform))
+        if (platform.platformFlags.amd64ParamRewrite) {
+            if (auto translatedType = toAmd64ParamType(param, platform)) {
+                paramTypes ~= translate(translatedType, context, platform, false);
+                continue;
+            }
+        }
+        if (passByMemory(param, platform)) {
             paramTypes ~= LLVMPointerType(
                 translate(param, context, platform, false), 0);
-        else
-            paramTypes ~= translate(param, context, platform, false);
+            continue;
+        }
+        paramTypes ~= translate(param, context, platform, false);
     }
     return LLVMFunctionType(returnType, paramTypes.ptr, cast(int) paramTypes.length, backendFpType.variadic);
 }
@@ -459,13 +513,26 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
 
         llArgs = new LLVMValueRef[](this.params.length);
         bool sret = passByMemory(this.ret_, this.mod.platform);
+        mut int llvmParamId = sret;
         for (int i, param in params) {
-            if (passByMemory(param, this.mod.platform)) {
-                auto paramPtr = LLVMGetParam(this.function_, sret + i);
+            auto amd64Type = toAmd64ParamType(param, this.mod.platform);
+            if (this.mod.platform.platformFlags.amd64ParamRewrite && amd64Type) {
+                auto amd64Type = amd64Type.notNull;
+                auto llParam = this.mod.translate(param, false);
+                auto llAllocaReg = LLVMBuildAlloca(this.entryBuilder, llParam, "tmparg$i".toStringz);
+                auto llAmd64Type = this.mod.translate(amd64Type, false);
+                auto llAmd64Ptr = this.mod.translate(new BackendPointerType(amd64Type), false);
+                auto llAllocaAmd64Ptr = LLVMBuildBitCast(
+                    this.builder, llAllocaReg, llAmd64Ptr, "argload_alloca$i".toStringz);
+                auto paramPtr = LLVMGetParam(this.function_, llvmParamId++);
+                LLVMBuildStore(this.builder, paramPtr, llAllocaAmd64Ptr);
+                llArgs[i] = LLVMBuildLoad(this.builder, llAllocaReg, "argload$i".toStringz);
+            } else if (passByMemory(param, this.mod.platform)) {
+                auto paramPtr = LLVMGetParam(this.function_, llvmParamId++);
                 llArgs[i] = LLVMBuildLoad(
                     this.builder, paramPtr, "arg$i.load".toStringz);
             } else {
-                llArgs[i] = LLVMGetParam(this.function_, sret + i);
+                llArgs[i] = LLVMGetParam(this.function_, llvmParamId++);
             }
         }
     }
@@ -762,6 +829,7 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
         this.defReg2(target, to, llTarget);
         return target;
     }
+
     (BackendType[] params, int[] args) patchVariadicParams(BackendFunctionPointerType type, int[] args) {
         if (!type.variadic || type.params.length >= args.length)
             return (type.params, args);
@@ -793,32 +861,34 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
         return (realParams, realArgs);
     }
 
-    override int call(BackendType ret, string name, int[] args) {
-        if (!mod.declared(name)) { .print(name ~ " not declared"); assert(false); }
-        int reg = this.nextReg;
-        BackendFunctionPointerType globalType() {
-            if (auto type = this.mod.globalType(name).instanceOf(BackendFunctionPointerType))
-                return type;
-            assert(false);
-        }
-        auto type = globalType;
-        auto patch = patchVariadicParams(type, args);
+    int callImpl(BackendType retType, BackendFunctionPointerType fpType, (int | string) target, int[] args) {
+        auto patch = patchVariadicParams(fpType, args);
         BackendType[] params = patch.params;
         int[] args = patch.args;
+        int reg = this.nextReg;
 
         mut LLVMValueRef llRetReg;
         mut LLVMValueRef[] llArgs;
-        bool sret = passByMemory(ret, this.mod.platform);
+        bool sret = passByMemory(retType, this.mod.platform);
         if (sret) {
-            auto llRetType = this.mod.translate(ret, true);
+            auto llRetType = this.mod.translate(retType, true);
             llRetReg = LLVMBuildAlloca(this.entryBuilder, llRetType, "reg$reg.ret".toStringz);
             llArgs ~= llRetReg;
         }
         for (int i, arg in args) {
-            if (passByMemory(params[i], this.mod.platform)) {
-                string coerceReg = "reg$reg.coerce$i";
+            auto amd64Type = toAmd64ParamType(params[i], this.mod.platform);
+            if (this.mod.platform.platformFlags.amd64ParamRewrite && amd64Type) {
+                auto amd64Type = amd64Type.notNull;
                 auto llParam = this.mod.translate(params[i], false);
-                auto llAlloca = LLVMBuildAlloca(this.entryBuilder, llParam, coerceReg.toStringz);
+                auto llAlloca = LLVMBuildAlloca(this.entryBuilder, llParam, "reg$reg.coerce$i".toStringz);
+                LLVMBuildStore(this.builder, llReg(arg), llAlloca);
+                auto llAmd64PtrType = this.mod.translate(new BackendPointerType(amd64Type), false);
+                auto llAllocaAsAmd64Ptr = LLVMBuildBitCast(
+                    this.builder, llAlloca, llAmd64PtrType, "reg$reg.coerce$i.cast".toStringz);
+                llArgs ~= LLVMBuildLoad(this.builder, llAllocaAsAmd64Ptr, "reg$reg.load".toStringz);
+            } else if (passByMemory(params[i], this.mod.platform)) {
+                auto llParam = this.mod.translate(params[i], false);
+                auto llAlloca = LLVMBuildAlloca(this.entryBuilder, llParam, "reg$reg.coerce$i".toStringz);
                 LLVMBuildStore(this.builder, llReg(arg), llAlloca);
                 llArgs ~= llAlloca;
             } else {
@@ -826,14 +896,21 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
             }
         }
 
-        auto callType = translateFunc(type, this.mod.context, this.mod.platform);
-        auto llFun = LLVMGetNamedFunction(this.mod.module_, name.toStringz);
-        if (!llFun) {
-            print("couldn't find target named function $name");
-            assert(false);
+        mut LLVMValueRef llFun;
+
+        target.case {
+            string name:
+                llFun = LLVMGetNamedFunction(this.mod.module_, name.toStringz);
+                if (!llFun) {
+                    print("couldn't find target named function $name");
+                    assert(false);
+                }
+            int reg:
+                llFun = llReg(reg);
         }
+
         mut string name = "reg$reg";
-        if (sret || ret.instanceOf(BackendVoidType)) {
+        if (sret || retType.instanceOf(BackendVoidType)) {
             name = "";
         }
 
@@ -849,7 +926,7 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
             auto sretAttrKind = LLVMGetEnumAttributeKindForName("sret", 4);
             assert(sretAttrKind != 0);
             auto sretTypeAttr = LLVMCreateTypeAttribute(
-                this.mod.context, sretAttrKind, this.mod.translate(type.ret, true));
+                this.mod.context, sretAttrKind, this.mod.translate(retType, true));
             // base-1, first parameter
             LLVMAddCallSiteAttribute(llCall, 1, sretTypeAttr);
         }
@@ -868,89 +945,50 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
 
         if (sret) {
             auto llLoad = LLVMBuildLoad(this.builder, llRetReg, "reg$reg.ret".toStringz);
-            this.defReg2(reg, ret, llLoad);
-        } else if (!ret.instanceOf(BackendVoidType)) {
-            this.defReg2(reg, ret, llCall);
+            this.defReg2(reg, retType, llLoad);
+        } else if (!retType.instanceOf(BackendVoidType)) {
+            auto amd64Type = toAmd64ParamType(retType, this.mod.platform);
+            if (this.mod.platform.platformFlags.amd64ParamRewrite && amd64Type) {
+                auto amd64Type = amd64Type.notNull;
+                auto llAmd64Type = this.mod.translate(amd64Type, false);
+                auto llAlloca = LLVMBuildAlloca(this.entryBuilder, llAmd64Type, "reg$reg.ret.coerce".toStringz);
+                LLVMBuildStore(this.builder, llCall, llAlloca);
+                auto llRetPtrType = this.mod.translate(new BackendPointerType(retType), false);
+                auto llAllocaAsRetPtr = LLVMBuildBitCast(
+                    this.builder, llAlloca, llRetPtrType, "reg$reg.ret.cast".toStringz);
+                auto llLoad = LLVMBuildLoad(this.builder, llAllocaAsRetPtr, "reg$reg.ret.load".toStringz);
+                this.defReg2(reg, retType, llLoad);
+            } else
+                this.defReg2(reg, retType, llCall);
         }
 
         return reg;
     }
+
+    override int call(BackendType ret, string name, int[] args) {
+        if (!mod.declared(name)) { .print(name ~ " not declared"); assert(false); }
+        BackendFunctionPointerType globalType() {
+            if (auto type = this.mod.globalType(name).instanceOf(BackendFunctionPointerType))
+                return type;
+            assert(false);
+        }
+        auto type = globalType;
+        return callImpl(type.ret, type, name, args);
+    }
+
     override int getFuncPtr(string name) {
         auto type = this.mod.globalType(name);
 
         return this.defReg(type,
             LLVMGetNamedFunction(this.mod.module_, name.toStringz));
     }
-    // TODO merge with call()
+
     override int callFuncPtr(BackendType type, int callReg, int[] args) {
-        auto backendFpType = type.instanceOf(BackendFunctionPointerType);
-        assert(!!backendFpType);
-        auto ret = backendFpType.ret;
-        int reg = this.nextReg;
+        auto backendFpType = type.instanceOf(BackendFunctionPointerType).notNull;
 
-        mut LLVMValueRef llRetReg;
-        mut LLVMValueRef[] llArgs;
-
-        bool sret = passByMemory(ret, this.mod.platform);
-        if (sret) {
-            auto llRetType = this.mod.translate(ret, true);
-            llRetReg = LLVMBuildAlloca(this.entryBuilder, llRetType, "reg$reg.ret".toStringz);
-            llArgs ~= llRetReg;
-        }
-
-        for (int i, arg in args) {
-            if (passByMemory(backendFpType.params[i], this.mod.platform)) {
-                string coerceReg = "reg$reg.coerce$i";
-                auto llParam = this.mod.translate(backendFpType.params[i], false);
-                auto llAlloca = LLVMBuildAlloca(this.entryBuilder, llParam, coerceReg.toStringz);
-                LLVMBuildStore(this.builder, llReg(arg), llAlloca);
-                llArgs ~= llAlloca;
-            } else {
-                llArgs ~= llReg(arg);
-            }
-        }
-        mut string name = "reg$reg";
-        if (sret || ret.instanceOf(BackendVoidType)) {
-            name = "";
-        }
-
-        // TODO lines
-        auto llLoc = LLVMDIBuilderCreateDebugLocation(
-            LLVMGetModuleContext(this.mod.module_), 0, 0, this.difun, null);
-        LLVMSetCurrentDebugLocation2(this.builder, llLoc);
-
-        auto llCall = LLVMBuildCall(
-            this.builder, llReg(callReg), llArgs.ptr, cast(int) llArgs.length, name.toStringz);
-
-        if (sret) {
-            auto sretAttrKind = LLVMGetEnumAttributeKindForName("sret", 4);
-            assert(sretAttrKind != 0);
-            auto sretTypeAttr = LLVMCreateTypeAttribute(
-                this.mod.context, sretAttrKind, this.mod.translate(backendFpType.ret, true));
-            // base-1, first parameter
-            LLVMAddCallSiteAttribute(llCall, 1, sretTypeAttr);
-        }
-
-        for (int i, param in backendFpType.params) {
-            if (passByMemory(param, this.mod.platform)) {
-                auto byvalAttrKind = LLVMGetEnumAttributeKindForName("byval", 5);
-                assert(byvalAttrKind != 0);
-                auto byvalTypeAttr = LLVMCreateTypeAttribute(
-                    this.mod.context, byvalAttrKind, this.mod.translate(param, false));
-                // base-1 (0 is return type), + 1 for sret parameter
-                int base = 1 + sret;
-                LLVMAddCallSiteAttribute(llCall, base + cast(int) i, byvalTypeAttr);
-            }
-        }
-
-        if (sret) {
-            auto llLoad = LLVMBuildLoad(this.builder, llRetReg, "reg$reg".toStringz);
-            this.defReg2(reg, ret, llLoad);
-        } else if (!ret.instanceOf(BackendVoidType)) {
-            this.defReg2(reg, ret, llCall);
-        }
-        return reg;
+        return callImpl(retType=backendFpType.ret, fpType=backendFpType, callReg, args);
     }
+
     override int load(BackendType backendType, int source) {
         int reg = this.nextReg;
         if (backendType.instanceOf(BackendVoidType)) {
@@ -1026,7 +1064,19 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
             LLVMBuildStore(this.builder, llReg(reg), LLVMGetParam(this.function_, 0));
             LLVMBuildRetVoid(this.builder);
         } else {
-            LLVMBuildRet(this.builder, llReg(reg));
+            auto amd64Type = toAmd64ParamType(this.ret_, this.mod.platform);
+            if (this.mod.platform.platformFlags.amd64ParamRewrite && amd64Type) {
+                auto amd64Type = amd64Type.notNull;
+                auto llAmd64Type = this.mod.translate(amd64Type, false);
+                auto llAlloca = LLVMBuildAlloca(this.entryBuilder, llAmd64Type, "reg$reg.ret.coerce".toStringz);
+                auto llRetPtrType = this.mod.translate(new BackendPointerType(this.ret_), false);
+                auto llAllocaAsRetPtr = LLVMBuildBitCast(
+                    this.builder, llAlloca, llRetPtrType, "reg$reg.ret.cast".toStringz);
+                LLVMBuildStore(this.builder, llReg(reg), llAllocaAsRetPtr);
+                auto llRetVal = LLVMBuildLoad(this.builder, llAlloca, "reg$reg.ret.load".toStringz);
+                LLVMBuildRet(this.builder, llRetVal);
+            } else
+                LLVMBuildRet(this.builder, llReg(reg));
         }
         this.blockId += 1;
     }
@@ -1070,4 +1120,11 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
 
 bool isPointer(BackendType type) {
     return type.instanceOf(BackendPointerType) || type.instanceOf(BackendFunctionPointerType);
+}
+
+private template notNull(T) {
+    nonnullable T notNull(nullable T arg) {
+        if (auto a = arg) return a;
+        assert(false);
+    }
 }

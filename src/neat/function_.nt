@@ -93,9 +93,16 @@ class Function : FunctionDeclaration
     (CompiledFunction | fail Error) compile(Context context)
     {
         auto compiler = context.compiler;
+
         auto stackframe = new FunctionScope(
             compiler, this.ret, this.contextType, this.parent.notNull, this.mangle, this.repr, this.locRange);
-        mut Namespace scope_ = stackframe;
+        auto framePtr = compiler.reference(compiler.stackFrame(new Void));
+        auto icontext = makeIContext(
+            compiler, context.platform, this.macroState,
+            context.compilingModule, context.modulePreProcessor, context.modulePostProcessor);
+        auto context = makeContext(icontext, stackframe).withFramePointer(framePtr);
+
+       mut Namespace scope_ = stackframe;
         mut int extra = 0;
         if (this.contextType)
             extra = 1;
@@ -103,8 +110,7 @@ class Function : FunctionDeclaration
         auto argAssignments = new Statement[](this.params.length + extra);
 
         mut nullable VariableDeclaration thisDecl;
-        if (auto contextType = this.contextType)
-        {
+        if (auto contextType = this.contextType) {
             // unnamed variable because of "first field in stackframe is 'this'" logic
             mut string framePtrName;
             if (this.hasThisArg) framePtrName = "this";
@@ -117,16 +123,11 @@ class Function : FunctionDeclaration
             scope_ = thisDecl;
 
             argAssignments[0] = compiler.assignStatement(
-                thisDecl.accessDecl(compiler),
+                thisDecl.accessDecl(context),
                 new PointerCast(contextType, new ArgExpr(0, voidp)));
         }
 
-        auto framePtr = compiler.reference(compiler.stackFrame(new Void));
-        auto icontext = makeIContext(
-            compiler, context.platform, this.macroState,
-            context.compilingModule, context.modulePreProcessor, context.modulePostProcessor);
-        mut auto context = makeContext(icontext, scope_)
-            .withFramePointer(framePtr);
+        mut auto context = context.withNamespace(scope_);
 
         for (int i, param in this.params) {
             auto argExpr = new ArgExpr(extra + i, param.type);
@@ -135,7 +136,7 @@ class Function : FunctionDeclaration
                 this.locRange.assert(!!thisDecl, "no this. args outside class")?;
 
                 auto target = compiler.accessMemberWithLifetime(
-                        context, thisDecl.accessDecl(context.compiler), param.name, this.locRange, false)?
+                        context, thisDecl.accessDecl(context), param.name, this.locRange, false)?
                     .instanceOf(Reference);
                 this.locRange.assert2(!!target, "not a reference: ", param.name)?;
                 auto target = target.notNull;
@@ -147,7 +148,7 @@ class Function : FunctionDeclaration
                     // So despite being lexical, we copy them.
                     auto argDecl = new VariableDeclaration(
                         scope_, param.name, param.type, mut=true, borrowed=false, false);
-                    auto target = argDecl.accessDecl(context.compiler);
+                    auto target = argDecl.accessDecl(context);
 
                     argAssignments[extra + i] = compiler.assignStatement(target, argExpr.copy(context)?);
                     scope_ = argDecl;
@@ -155,7 +156,7 @@ class Function : FunctionDeclaration
                     auto argDecl = new VariableDeclaration(
                         scope_, param.name, param.type, mut=false, borrowed=true, false);
 
-                    argAssignments[extra + i] = compiler.assignStatement(argDecl.accessDecl(context.compiler), argExpr);
+                    argAssignments[extra + i] = compiler.assignStatement(argDecl.accessDecl(context), argExpr);
                     scope_ = argDecl;
                 }
             }
@@ -345,14 +346,15 @@ class LatentVariableImpl : LatentVariable
         else this.info = ExprInfo(Lifetime.lexical);
     }
 
-    override Expression localStackFrame(CompilerBase compiler) {
-        return compiler.reference(new StackFrame(stackFrameType));
+    override Expression localStackFrame(Context context) {
+        return context.compiler.reference(new StackFrame(stackFrameType));
     }
 
-    override Reference access(CompilerBase compiler, Expression frame)
+    override Reference access(Context context)
     {
-        auto frame = new PointerCast(new Pointer(stackFrameType), frame);
-        auto reference = compiler.structMemberReference(compiler.dereference(frame), offset);
+        auto frame = new PointerCast(new Pointer(stackFrameType), context.framePointer.notNull);
+        auto reference = context.compiler.structMemberReference(
+            context.compiler.dereference(frame), offset);
         return new InfoReference(reference, mut, info);
     }
 }
@@ -379,14 +381,14 @@ class VariableDeclaration : DeclarationHolder
         return !borrowed;
     }
 
-    override Reference accessDecl(CompilerBase compiler)
+    override Reference accessDecl(Context context)
     {
-        return access(compiler, this.variable.localStackFrame(compiler));
+        return access(context.withFramePointer(this.variable.localStackFrame(context)));
     }
 
-    Reference access(CompilerBase compiler, Expression frame)
+    Reference access(Context context)
     {
-        return this.variable.access(compiler, frame);
+        return this.variable.access(context);
     }
 
     override (nullable Symbol | fail Error) lookup(
@@ -395,11 +397,11 @@ class VariableDeclaration : DeclarationHolder
         // Frame may be null for struct nested in function.
         if (auto frame = context.framePointer) {
             if (this.name == name) {
-                return access(context.compiler, frame);
+                return access(context);
             }
             // soft destructuring
             if (!hidden && this.name == "") {
-                auto unnamedVar = access(context.compiler, frame);
+                auto unnamedVar = access(context);
                 auto target = context.compiler.accessMemberWithLifetime(
                         context, unnamedVar, name, locRange, true)?;
                 if (target) return target;

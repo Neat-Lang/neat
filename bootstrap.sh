@@ -620,9 +620,11 @@ at_revision 'fb53f0704ce45726c40d9dc7732c7c361dbfd5a5' 'rebuild neat' 'build/nea
 # prefix, postfix, struct constructors
 at_revision '92b792039b38aca4f2ae36d3565fcbca3de15ced' 'rebuild neat' 'build/neat'
 # llvm amd64 argument rewriting
-LLVM_CONFIG="/usr/lib/llvm/12/bin/llvm-config"
-FLAGS="-I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir) \
-    -version=LLVMBackend -macro-version=LLVMBackend"
+if [ -f /usr/lib/llvm/12/bin/llvm-config ]; then
+    LLVM_CONFIG="/usr/lib/llvm/12/bin/llvm-config"
+    FLAGS="-I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir) \
+        -version=LLVMBackend -macro-version=LLVMBackend"
+fi
 at_revision '195eff861e71824aba3fe96904f1c517276e3c24' 'rebuild neat' 'build/neat'
 at_revision '195eff861e71824aba3fe96904f1c517276e3c24' 'transition amd64' 'build/neat'
 at_revision '8072b51a1aebc055ea37b8d7b4565e88eebae4ea' 'detransition amd64' 'build/neat'

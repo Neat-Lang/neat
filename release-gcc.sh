@@ -51,12 +51,12 @@ EOT
 -running-compiler-version=$VERSION
 EOT
 else
-    if [ -f "/usr/lib/llvm/12/bin/llvm-config" ]
+    if [ -f "/usr/lib/llvm/14/bin/llvm-config" ]
     then
-        LLVM_CONFIG="/usr/lib/llvm/12/bin/llvm-config"
-    elif [ -f "/usr/lib/llvm-12/bin/llvm-config" ]
+        LLVM_CONFIG="/usr/lib/llvm/14/bin/llvm-config"
+    elif [ -f "/usr/lib/llvm-14/bin/llvm-config" ]
     then
-        LLVM_CONFIG="/usr/lib/llvm-12/bin/llvm-config"
+        LLVM_CONFIG="/usr/lib/llvm-14/bin/llvm-config"
     else
         echo "Cannot find llvm-config!" 1>&2
         exit 1
@@ -65,12 +65,12 @@ else
     cat > $TARGET/build.sh <<EOT
 #!/usr/bin/env bash
 set -exo pipefail
-if [ -f "/usr/lib/llvm/12/bin/llvm-config" ]
+if [ -f "/usr/lib/llvm/14/bin/llvm-config" ]
 then
-    LLVM_CONFIG="/usr/lib/llvm/12/bin/llvm-config"
-elif [ -f "/usr/lib/llvm-12/bin/llvm-config" ]
+    LLVM_CONFIG="/usr/lib/llvm/14/bin/llvm-config"
+elif [ -f "/usr/lib/llvm-14/bin/llvm-config" ]
 then
-    LLVM_CONFIG="/usr/lib/llvm-12/bin/llvm-config"
+    LLVM_CONFIG="/usr/lib/llvm-14/bin/llvm-config"
 else
     echo "Cannot find llvm-config!" 1>&2
     exit 1

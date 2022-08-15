@@ -16,7 +16,7 @@ then
     FLAGS="-j8"
 fi
 
-LLVM_CONFIG="/usr/lib/llvm/12/bin/llvm-config"
+LLVM_CONFIG="/usr/lib/llvm/14/bin/llvm-config"
 FLAGS="${FLAGS} -I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir) \
     -version=LLVMBackend -macro-version=LLVMBackend"
 

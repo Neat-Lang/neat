@@ -30,12 +30,5 @@ In the context of macros called inside the compiler, the existence of `CompilerB
 leads to a snag.
 
 Since the macro will be pulling in the original compiler's version of `CompilerBase`,
-we cannot use new `Compiler` features immediately. Instead, we need to create a
-commit with the extended `CompilerBase`, then add that commit to the bootstrap script
-and use it in a following commit.
-
-In order to change behavior, a more complicated dance is required. Each line is one commit:
-
-- Introduce a new function `<name>2` with the new behavior
-- Use the new function in all code, switch the old function to the new semantics
-- Use the old function again.
+we cannot use new `Compiler` features immediately. Instead, use the version statement
+to make the macro work on both bootstrap and current versions of the compiler.

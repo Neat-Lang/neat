@@ -28,7 +28,7 @@ TARGET="$RELEASE"/neat
 mkdir -p $TARGET
 
 rm -rf .obj
-./bootstrap.sh
+./build.sh
 
 build/neat -backend=c -Pcompiler:src -dump-intermediates build/intermediates.txt src/main.nt -c $NTFLAGS
 

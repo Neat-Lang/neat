@@ -42,7 +42,20 @@ then
 #!/usr/bin/env bash
 set -exo pipefail
 CFLAGS="\${CFLAGS} -Ofast -fno-strict-aliasing -pthread"
-gcc -fpic -rdynamic intermediate/* src/runtime.c -o neat -ldl -lm \$CFLAGS
+I=0
+JOBS=16
+OBJECTS=()
+# poor man's make -j
+for file in intermediate/*.c src/runtime.c; do
+    obj=\${file%.c}.o
+    gcc -c -fpic -rdynamic \$file -o \$obj &
+    OBJECTS+=(\$obj)
+    if [ \$I -ge \$JOBS ]; then wait -n; fi
+    I=\$((I+1))
+done
+for i in \$(seq \$JOBS); do wait -n; done
+gcc -fpic -rdynamic \${OBJECTS[@]} -o neat -ldl -lm \$CFLAGS
+rm \${OBJECTS[@]}
 EOT
     cat > $TARGET/neat.ini <<EOT
 -syspackage compiler:src
@@ -78,7 +91,20 @@ fi
 LLVM_CFLAGS="-I\$(\$LLVM_CONFIG --includedir) -L\$(\$LLVM_CONFIG --libdir)"
 LLVM_NTFLAGS="-I\$(\$LLVM_CONFIG --includedir) -L-L\$(\$LLVM_CONFIG --libdir)"
 CFLAGS="\${CFLAGS:+ } \${LLVM_CFLAGS} -O2 -fno-strict-aliasing -pthread"
-gcc -fpic -rdynamic intermediate/* src/runtime.c -o neat_bootstrap -ldl -lm -lLLVM \$CFLAGS
+I=0
+JOBS=16
+OBJECTS=()
+# poor man's make -j
+for file in intermediate/*.c src/runtime.c; do
+    obj=\${file%.c}.o
+    gcc -c -fpic -rdynamic \$file -o \$obj &
+    OBJECTS+=(\$obj)
+    if [ \$I -ge \$JOBS ]; then wait -n; fi
+    I=\$((I+1))
+done
+for i in \$(seq \$JOBS); do wait -n; done
+gcc -fpic -rdynamic \${OBJECTS[@]} -o neat_bootstrap -ldl -lm -lLLVM \$CFLAGS
+rm \${OBJECTS[@]}
 ./neat_bootstrap -O -macro-backend=c src/main.nt \${LLVM_NTFLAGS} $NTFLAGS -o neat
 rm neat_bootstrap
 EOT

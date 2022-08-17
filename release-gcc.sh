@@ -24,7 +24,7 @@ then
     exit 1
 fi
 
-TARGET="$RELEASE"/neat
+TARGET="$RELEASE"/"$RELEASE"
 mkdir -p $TARGET
 
 rm -rf .obj
@@ -123,4 +123,6 @@ chmod +x $TARGET/build.sh
 NEAT=$TARGET/neat ./runtests.sh
 rm $TARGET/neat
 rm -rf $TARGET/.obj
-(cd "$RELEASE"; zip -r ../"$RELEASE".zip neat)
+(cd "$RELEASE"
+    zip -r ../"$RELEASE".zip "$RELEASE"
+    tar cf ../"$RELEASE".tar.xz "$RELEASE")

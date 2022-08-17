@@ -125,4 +125,4 @@ rm $TARGET/neat
 rm -rf $TARGET/.obj
 (cd "$RELEASE"
     zip -r ../"$RELEASE".zip "$RELEASE"
-    tar cf ../"$RELEASE".tar.xz "$RELEASE")
+    tar caf ../"$RELEASE".tar.xz "$RELEASE")

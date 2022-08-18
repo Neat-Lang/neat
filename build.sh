@@ -21,21 +21,20 @@ fi
 LLVM_CONFIG="/usr/lib/llvm/14/bin/llvm-config"
 FLAGS="$JFLAG -I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir)"
 
-TAG=v0.1.6
-NEAT=.cache/bootstrap/"$TAG"/neat/neat
+TAG=v0.1.7
+NEAT=.cache/bootstrap/"$TAG"/neat-"$TAG"-gcc/neat
 
 if [ ! -f "$NEAT" ]
 then
-    pushd
     echo "Downloading bootstrap compiler $TAG..."
     TARGET=.cache/bootstrap/"$TAG"
     rm -rf "$TARGET"
     mkdir -p "$TARGET"
-    cd "$TARGET"
+    pushd "$TARGET"
     FILE=neat-"$TAG"-gcc.zip
     curl -L https://github.com/Neat-Lang/neat/releases/download/"$TAG"/"$FILE" --output "$FILE"
     unzip "$FILE"
-    cd neat
+    cd neat-"$TAG"-gcc
     echo "Building bootstrap compiler $TAG..."
     ./build.sh
     popd

@@ -21,7 +21,7 @@ fi
 LLVM_CONFIG="/usr/lib/llvm/14/bin/llvm-config"
 FLAGS="$JFLAG -I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir)"
 
-TAG=v0.1.7
+TAG=v0.1.8
 NEAT=.cache/bootstrap/"$TAG"/neat-"$TAG"-gcc/neat
 
 if [ ! -f "$NEAT" ]
@@ -44,7 +44,14 @@ mkdir -p build
 
 echo "Building stage 1..."
 FLAGS="$FLAGS -version=LLVMBackend"
-$NEAT $FLAGS -backend=c -macro-backend=c -Pcompiler:src src/main.nt -o build/neat_stage1
+# see generation.md
+NEXT=compiler$(($($NEAT -print-generation) + 1))
+$NEAT $FLAGS -backend=c -macro-backend=c -next-generation -P$NEXT:src -version=firstpass \
+    src/main.nt -o build/neat_stage1
+cat <<EOF > build/neat.ini
+-syspackage compiler:src
+-running-compiler-version=$TAG
+EOF
 NEAT=build/neat_stage1
 
 echo "Building stage 2..."
@@ -53,11 +60,6 @@ NEAT=build/neat_stage2
 
 cp $NEAT build/neat
 rm build/neat_stage*
-
-cat <<EOF > build/neat.ini
--syspackage compiler:src
--running-compiler-version=$TAG
-EOF
 
 # store compiler source next to compiler
 rm -rf build/src

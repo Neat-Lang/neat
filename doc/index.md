@@ -10,4 +10,5 @@ and give insight into their motivations.
 ## Index
 
 - [The CompilerBase Class](./compilerbase.md)
+- [\_\_GENERATION\_\_ and bootstrapping](./generations.md)
 - TODO Multi-Stage Feature Transitions

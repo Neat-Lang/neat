@@ -2,30 +2,21 @@ module neat.with_;
 
 import helpers;
 import neat.base;
+import neat.function_ : VariableDeclaration;
 import neat.util;
 
-class WithNamespace : DeclarationHolder, Unwindable
+class WithNamespace : Namespace, Unwindable
 {
-    // This can't work!
-    // When you do with() { void nested() { accessWithMember; } }, then the
-    // lookup will try to access a nonlocal register.
-    // We need to localize the reference in the stackframe,
-    // by declaring it as an anonymous variable.
-    // edit 12-28-021: don't we have a thing for looking up delayed-resolved values now?
-    // LatentSymbol/LateSymbol or sth?
-    // But I think it still doesn't work cause the temporary won't show up in the stackframe,
-    // so we still need to go over a temporary variable.
-    Reference temporary;
+    LatentVariable latent;
 
-    bool freeOnExit_;
+    bool isPtr;
 
     LocRange locRange;
 
-    this(this.parent, this.freeOnExit_, this.temporary, this.locRange) { this.isContextScope = parent.isContextScope; }
-
-    override bool freeOnExit() { return this.freeOnExit_; }
+    this(this.parent, this.latent, this.isPtr, this.locRange) { this.isContextScope = parent.isContextScope; }
 
     override (nullable Statement | fail Error) unwind(Context context) {
+        auto temporary = accessDecl(context);
         if (auto exit = temporary.type.accessMember(
                 context, temporary, "onExit", Protection.private_, this.locRange)?) {
             return context.compiler.exprStatement(exit.beExpressionImplCall(context, this.locRange)?);
@@ -33,16 +24,20 @@ class WithNamespace : DeclarationHolder, Unwindable
         return null;
     }
 
-    override Reference accessDecl(Context context)
+    Reference accessDecl(Context context)
     {
-        return temporary;
+        if (isPtr) return context.compiler.dereference(latent.access(context));
+        else return latent.access(context);
     }
 
     override (nullable Symbol | fail Error) lookup(
         string name, Context context, LookupReason reason, LocRange locRange)
     {
-        auto member = context.compiler.accessMemberWithLifetime(context, temporary, name, locRange, true)?;
-        if (member) return member;
+        if (context.framePointer) {
+            auto temporary = accessDecl(context);
+            auto member = context.compiler.accessMemberWithLifetime(context, temporary, name, locRange, true)?;
+            if (member) return member;
+        }
         if (this.parent) return this.parent.lookup(name, context, reason, locRange);
         return null;
     }
@@ -59,30 +54,50 @@ class ASTWithStatement : ASTStatement
     override (StatementCompileResult | fail Error) compile(Context context)
     {
         Expression expr = this.expr.compile(context)?.beExpressionImplCall(context, this.expr.locRange)?;
+        bool isPtr = !!expr.instanceOf(Reference);
 
-        bool freeOnExit = expr.info.lifetime == Lifetime.gifted;
-
-        (nullable Statement | fail Error) do_(Reference temp)
-        {
-            mut nullable Statement prefix, suffix;
-            if (auto enter = temp.type.accessMember(
-                context, temp, "onEnter", Protection.private_, this.locRange)?) {
-                prefix = context.compiler.exprStatement(enter.beExpressionImplCall(context, this.locRange)?);
-            }
-            if (auto exit = temp.type.accessMember(
-                context, temp, "onExit", Protection.private_, this.locRange)?) {
-                suffix = context.compiler.exprStatement(exit.beExpressionImplCall(context, this.locRange)?);
-            }
-
-            auto subContext = context.withNamespace(new WithNamespace(context.namespace, freeOnExit, temp, this.locRange));
-            auto subStmtPair = this.stmt.compile(subContext)?;
-            auto stmt = subStmtPair.statement;
-
-            return context.compiler.(that.sequence(that.sequence2(prefix, stmt), suffix));
+        Type varType() {
+            if (isPtr) return new Pointer(expr.type);
+            return expr.type;
         }
-        auto stmt = context.compiler.consumeTemporaryStmt(context, expr, &do_)?.notNull;
 
-        return StatementCompileResult(stmt, context.namespace);
+        // TODO with (mut expr) so we can borrow vars here.
+        (Expression | fail Error) takeExpr() {
+            if (isPtr) return context.compiler.reference(expr.instanceOf(Reference).notNull);
+            if (expr.info.lifetime == Lifetime.ephemeral || expr.info.lifetime == Lifetime.lexical)
+                return expr.copy(context)?;
+            return expr;
+        }
+
+        auto outerNamespace = context.namespace;
+        auto withVarDecl = context.compiler.variableDeclaration(
+                context.namespace, "__with", varType, mut=true, borrowed=false, hidden=true);
+        auto var = withVarDecl.instanceOf(VariableDeclaration).variable;
+        auto context = context.withNamespace(withVarDecl);
+
+        mut Reference target = var.access(context);
+        assert(target.info.lifetime == Lifetime.ephemeral);
+        auto set = context.compiler.assignStatement(target, takeExpr?);
+
+        if (isPtr) target = context.compiler.dereference(target);
+
+        mut nullable Statement prefix, suffix;
+        if (auto enter = target.type.accessMember(
+            context, target, "onEnter", Protection.private_, this.locRange)?) {
+            prefix = context.compiler.exprStatement(enter.beExpressionImplCall(context, this.locRange)?);
+        }
+        // onExit is called by the unwind.
+        // if (auto exit = ... )
+
+        auto subContext = context.withNamespace(new WithNamespace(context.namespace, var, isPtr, this.locRange));
+        auto subStmtPair = this.stmt.compile(subContext)?;
+
+        with (context.compiler) {
+            auto stmt = subStmtPair.statement;
+            auto stmt = sequence(sequence(sequence(set, prefix), stmt), suffix);
+            auto stmt = unwindScope(subContext, outerNamespace, stmt)?;
+            return StatementCompileResult(stmt, outerNamespace);
+        }
     }
 
     override ASTSymbol quote(Quoter quoter) {

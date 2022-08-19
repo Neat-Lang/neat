@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 NEAT=${NEAT:-build/neat}
-NEATFLAGS="-Pcompiler:build/src -Pimports:test/imports"
+NEATFLAGS="-Pimports:test/imports"
 NEATFLAGS="${NEATFLAGS} -Prunnable:test/runnable:compiler,imports"
 NEATFLAGS="${NEATFLAGS} -Pfail_compilation:test/fail_compilation:compiler,imports"
 

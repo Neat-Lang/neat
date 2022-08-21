@@ -150,6 +150,17 @@ This is because C's order is stupid^W a legacy holdover from before it had boole
 
 Operator precedence can be clarified using parentheses: `2 * (3 + 4)` instead of `2 * 3 + 4`.
 
+Ternary If
+^^^^^^^^^^
+
+`a if t else b` has the value of `a` if `t` is true, else it has the value of `b`.
+
+Only the selected expression is evaluated. So if `t` is true, `b` is never evaluated.
+
+This operator has a lower rank than any of the binary operators.
+
+The ternary operator syntax diverges from C because `?` is already used for error propagation.
+
 Functions
 ---------
 

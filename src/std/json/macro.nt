@@ -27,34 +27,83 @@ class JsonSyntax : Macro
             parser.revert;
             return null;
         }
-        auto json = jsonParseImpl(parser.instanceOf(ParserImpl).notNull)?;
+        auto value = parseJSONValueMacro(parser, lexicalContext)?;
         parser.expect(")")?;
         parser.commit;
-        return quoteJson(lexicalContext.compiler, json);
+        return value;
     }
 }
 
-ASTSymbol quoteJson(CompilerBase compiler, JSONValue v) {
-    ASTSymbol jv(ASTSymbol sym) {
-        return compiler.astCall(
-            compiler.astIdentifier("JSONValue", __RANGE__),
-            [sym],
-            __RANGE__);
+// TODO correct ranges
+private (ASTSymbol | fail Error) parseJSONValueMacro(Parser parser, LexicalContext lexicalContext) {
+    if (parser.accept("\"")?) {
+        auto str = parseStringLiteral(parser)?;
+        return lexicalContext.compiler.astStringLiteral(str, __RANGE__)
+            .astJSONValue(lexicalContext.compiler);
     }
-    v.value.case {
-        (:false): return compiler.astIdentifier("false", __RANGE__).jv;
-        (:true): return compiler.astIdentifier("true", __RANGE__).jv;
-        int i: return compiler.astIntLiteral(i, __RANGE__).jv;
-        string s: return compiler.astStringLiteral(s, __RANGE__).jv;
-        JSONValue[] arr: return compiler.astArrayLiteral(
-            [quoteJson(compiler, a) for a in arr],
-            __RANGE__).jv;
-        (string key, JSONValue value)[] obj:
-            return compiler.astArrayLiteral(
-                [compiler.astTupleLiteral([
-                    compiler.astStringLiteral(a.key, __RANGE__),
-                    quoteJson(compiler, a.value)], __RANGE__)
-                for a in obj], __RANGE__).jv;
+    parser.parseJsonNumber?.case {
+        (:failure): {}
+        int value: return lexicalContext.compiler.astIntLiteral(value, __RANGE__)
+            .astJSONValue(lexicalContext.compiler);
+    }
+    if (parser.accept("true")?) {
+        return lexicalContext.compiler.astIdentifier("true", __RANGE__)
+            .astJSONValue(lexicalContext.compiler);
+    }
+    if (parser.accept("false")?) {
+        return lexicalContext.compiler.astIdentifier("false", __RANGE__)
+            .astJSONValue(lexicalContext.compiler);
+    }
+    if (parser.accept("[")?) {
+        mut ASTSymbol[] entries;
+        if (!parser.accept("]")?) while (true) {
+            entries ~= parseJSONValueMacro(parser, lexicalContext)?;
+            if (parser.accept("]")?) break;
+            parser.expect(",")?;
+        }
+        with (lexicalContext.compiler) {
+            auto literal = astArrayLiteralTypeHint(
+                astIdentifier("JSONValue", __RANGE__), entries, __RANGE__);
+            return literal.astJSONValue(lexicalContext.compiler);
+        }
+    }
+    if (parser.accept("{")?) {
+        mut ASTSymbol[] entries;
+        if (!parser.accept("}")?) while (true) {
+            parser.expect("\"")?;
+            auto key = parseStringLiteral(parser)?;
+            parser.expect(":")?;
+            auto value = parseJSONValueMacro(parser, lexicalContext)?;
+
+            with (lexicalContext.compiler) {
+                entries ~= astTupleLiteral([
+                    astStringLiteral(key, __RANGE__),
+                    value,
+                ], __RANGE__);
+            }
+
+            if (parser.accept("}")?) break;
+            parser.expect(",")?;
+        }
+        with (lexicalContext.compiler) {
+            auto type = astTupleType([
+                ("key", astIdentifier("string", __RANGE__)),
+                ("value", astIdentifier("JSONValue", __RANGE__)),
+            ], __RANGE__);
+            auto literal = astArrayLiteralTypeHint(type, entries, __RANGE__);
+            return literal.astJSONValue(lexicalContext.compiler);
+        }
+    }
+    // Maybe it's a Neat expression?`(Let's do some macro magic.)
+    if (auto expr = lexicalContext.compiler.parseExpression(parser, lexicalContext)?) {
+        return expr.astJSONValue(lexicalContext.compiler);
+    }
+    return parser.fail("unexpected input: " ~ parser.text);
+}
+
+private ASTSymbol astJSONValue(ASTSymbol symbol, CompilerBase compiler) {
+    with (compiler) {
+        return astCall(astIdentifier("__jv", __RANGE__), [symbol], __RANGE__);
     }
 }
 
@@ -67,6 +116,7 @@ macro(jsonMacro);
 
 unittest
 {
-    auto value = JSONValue({"Hello": "World", "five": 5, "array": [6]});
+    int five = 5;
+    auto value = JSONValue({"Hello": "World", "five": five, "array": [6]});
     assert(value.str == "{\"Hello\": \"World\", \"five\": 5, \"array\": [6]}");
 }

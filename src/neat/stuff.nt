@@ -1488,24 +1488,29 @@ class ASTLambdaExpr : ASTSymbol
 (nullable ASTSymbol | fail Error) parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
 {
     auto from = parser.from?;
-    if (parser.accept("*")?)
-    {
+    // The parser.begin/commit/revert in this function does nothing.
+    // Leave it in anyway - otherwise, you can cause stack overflow by
+    // just repeatedly spamming * or &.
+    parser.begin;
+    if (parser.accept("*")?) {
         nullable ASTSymbol next = parseExpressionLeaf(parser, lexicalContext)?;
+        parser.to(from).assert(!!next, "expression expected")?;
+        parser.commit;
 
         return new ASTDereference(next.notNull, parser.to(from));
     }
-    if (parser.accept("&")?)
-    {
+    if (parser.accept("&")?) {
         nullable ASTSymbol next = parseExpressionLeaf(parser, lexicalContext)?;
+        parser.to(from).assert(!!next, "expression expected")?;
+        parser.commit;
 
         return new ASTReference(next.notNull, parser.to(from));
     }
-    if (parser.acceptIdentifier("new")?)
-    {
+    if (parser.acceptIdentifier("new")?) {
         auto type = parser.parseType(lexicalContext)?;
-        if (!type) {
-            return parser.fail("type expected");
-        }
+        parser.to(from).assert(!!type, "type expected")?;
+        parser.commit;
+
         mut ASTArgument[] args;
         if (parser.accept("(")?)
         {
@@ -1514,8 +1519,8 @@ class ASTLambdaExpr : ASTSymbol
 
         return new ASTNewExpression(type.notNull, args, parser.to(from));
     }
-    if (parser.acceptIdentifier("sizeof")?)
-    {
+    if (parser.acceptIdentifier("sizeof")?) {
+        parser.commit;
         parser.expect("(")?;
         parser.begin;
         mut nullable ASTSymbol sym = lexicalContext.compiler.parseType(parser, lexicalContext)?;
@@ -1523,25 +1528,25 @@ class ASTLambdaExpr : ASTSymbol
             parser.revert;
             parser.begin;
             sym = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
-            if (!sym) return parser.fail("expression expected");
+            parser.to(from).assert(!!sym, "expression expected")?;
             parser.expect(")")?;
         }
         parser.commit;
 
         return new ASTSizeOf(sym.notNull);
     }
-    if (parser.acceptIdentifier("cast")?)
-    {
+    if (parser.acceptIdentifier("cast")?) {
         parser.expect("(")?;
         nullable ASTSymbol target = parser.parseType(lexicalContext)?;
-        if (!target) {
-            return parser.fail("type expected");
-        }
+        parser.to(from).assert(!!target, "expression expected")?;
         parser.expect(")")?;
         nullable ASTSymbol value = parseExpressionLeaf(parser, lexicalContext)?;
+        parser.to(from).assert(!!value, "expression expected")?;
+        parser.commit;
 
         return new ASTCastExpr(target.notNull, value.notNull, parser.to(from));
     }
+    parser.revert;
     if (auto trait = parser.parseTrait(lexicalContext)?) {
         return trait;
     }
@@ -1551,23 +1556,25 @@ class ASTLambdaExpr : ASTSymbol
     if (auto lambda = parser.parseLambdaExpression(lexicalContext)?) {
         return lambda;
     }
-    if (auto tuple = parser.parseTupleExpression(lexicalContext)?)
-    {
+    if (auto tuple = parser.parseTupleExpression(lexicalContext)?) {
         return tuple;
     }
-    if (parser.accept("!")?)
-    {
+    parser.begin;
+    if (parser.accept("!")?) {
         nullable ASTSymbol next = parser.parseExpressionLeaf(lexicalContext)?;
+        parser.to(from).assert(!!next, "expression expected")?;
+        parser.commit;
 
         return new ASTNegation(next.notNull, parser.to(from));
     }
-    if (parser.acceptButNot("-", "--")?)
-    {
+    if (parser.acceptButNot("-", "--")?) {
         nullable ASTSymbol next = parser.parseExpressionLeaf(lexicalContext)?;
+        parser.to(from).assert(!!next, "expression expected")?;
+        parser.commit;
 
-        parser.to(from).assert(!!next, "expression expected for negation")?;
         return new ASTBinaryOp("-", new ASTIntLiteral(0, parser.to(from)), next.notNull, parser.to(from));
     }
+    parser.revert;
     if (ASTSymbol expr = parser.parseExpressionIncDec(lexicalContext)?)
         return parseProperties(parser, lexicalContext, expr);
     return null;
@@ -2610,9 +2617,11 @@ class ASTSequenceStatement : ASTStatement
 
 (nullable ASTScopeStatement | fail Error) parseScope(Parser parser, LexicalContext lexicalContext)
 {
+    // This is not necessary, but ensures we get an error instead of segfault if we just spam brackets.
+    parser.begin;
     auto from = parser.from?;
-    if (!parser.accept("{")?)
-    {
+    if (!parser.accept("{")?) {
+        parser.revert;
         return null;
     }
     mut ASTStatement[] statements;
@@ -2623,6 +2632,7 @@ class ASTSequenceStatement : ASTStatement
         }
         parser.verifyTransactions("statement parse rule imbalance", &appendStmt)?;
     }
+    parser.commit;
     return new ASTScopeStatement(statements, parser.to(from));
 }
 
@@ -4338,7 +4348,8 @@ class Module : ModuleBase
 
 abstract class ParserHelper
 {
-    abstract (void | fail Error) proxyCall(ASTModule astModule, string function_, MacroState macroState)
+    abstract (void | fail Error) proxyCall(ASTModule astModule, string function_, MacroState macroState,
+        LocRange locRange)
     {
         assert(false);
     }
@@ -4728,6 +4739,7 @@ class ModuleParserConfig
     ModuleParserConfig config)
 {
     parser.begin;
+    auto from = parser.from?;
     if (!parser.acceptIdentifier("macro")? || !parser.accept("(")?)
     {
         parser.revert;
@@ -4740,7 +4752,7 @@ class ModuleParserConfig
 
     auto newMacroState = astModule.macroState.dup;
 
-    helper.proxyCall(astModule, identifier, newMacroState)?;
+    helper.proxyCall(astModule, identifier, newMacroState, parser.to(from))?;
 
     auto subModule = new ASTModule(astModule.name, astModule.pak, newMacroState, astModule.locRange, astModule);
 

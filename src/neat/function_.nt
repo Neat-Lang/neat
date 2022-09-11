@@ -14,6 +14,13 @@ class Function : FunctionDeclaration
 {
     ASTStatement statement;
 
+    /**
+     * If the function has a declared return type, we defer compilation until later.
+     * If it has an auto return type, it is compiled on resolution. In this case,
+     * the resulting function is stored here.
+     */
+    nullable CompiledFunction compiled;
+
     MacroState macroState;
 
     nullable Namespace parent;
@@ -28,7 +35,7 @@ class Function : FunctionDeclaration
 
     string mangleFragment;
 
-    this(this.name, this.ret, this.params, this.statement, this.macroState, this.hasThisArg, this.locRange)
+    this(this.name, this.retWIP, this.params, this.statement, this.macroState, this.hasThisArg, this.locRange)
     {
         this.contextType = null;
         this.parent = null;
@@ -46,9 +53,15 @@ class Function : FunctionDeclaration
 
     string mangleImpl()
     {
+        // This is all sorts of dirty, but I don't want to give up mangle precaching,
+        // and return type mangling isn't all THAT important anyways.
+        string retMangle() {
+            if (auto ret = this.retWIP) return ret.mangle;
+            return "auto";
+        }
         auto paramMangle = "$(this.params.length)_"
             ~ [join with "_" param.type.mangle for param in this.params];
-        return "_$(name)_$(ret.mangle)_$(paramMangle)";
+        return "_$(name)_$(retMangle)_$(paramMangle)";
     }
 
     override string repr()
@@ -90,12 +103,19 @@ class Function : FunctionDeclaration
         return new CompiledFunction(fun, compiledStatement, stackframe, argAssignments);
     }
 
+    (void | fail Error) inferReturnType(Context context) {
+        auto compiledFun = compile(context)?;
+        this.retWIP = compiledFun.stackframe.finalRet;
+    }
+
     (CompiledFunction | fail Error) compile(Context context)
     {
+        if (auto compiledFun = this.compiled) return compiledFun;
+
         auto compiler = context.compiler;
 
         auto stackframe = new FunctionScope(
-            compiler, this.ret, this.contextType, this.parent.notNull, this.mangle, this.repr, this.locRange);
+            compiler, this.retWIP, this.contextType, this.parent.notNull, this.mangle, this.repr, this.locRange);
         auto framePtr = compiler.reference(compiler.stackFrame(new Void));
         auto icontext = makeIContext(
             compiler, context.platform, this.macroState,
@@ -171,22 +191,24 @@ class Function : FunctionDeclaration
          * So we need to implicitly convert `void` to the return type.
          */
         ASTStatement funWithVoidReturn() {
-            auto voidRet = new NullExpr(new Void);
-            if (auto convert = context.compiler.implicitConvertTo(context, voidRet, this.ret)) {
-                auto astConv = new ASTSymbolHelper(convert);
-                return context.compiler.astSequence([
-                    this.statement,
-                    context.compiler.astReturn(astConv, false, __RANGE__)], __RANGE__);
-            }
-            // TODO missing return error here
             return this.statement;
         }
 
-        auto pair = funWithVoidReturn.compile(context)?;
+        auto pair = this.statement.compile(context)?;
         auto pairContext = context.withNamespace(pair.namespace);
-        auto compiledStatement = compiler.unwindScope(pairContext, stackframe, pair.statement)?;
+        mut auto compiledStatement = compiler.unwindScope(pairContext, stackframe, pair.statement)?;
 
-        return mkCompiledFunction(this, compiledStatement, stackframe, argAssignments);
+        if (auto convert = context.compiler.implicitConvertTo(context, new VoidExpression, stackframe.finalRet)) {
+            import neat.statements : ReturnStatement;
+            compiledStatement = context.compiler.sequence(
+                compiledStatement,
+                new ReturnStatement(convert, this.locRange));
+        } else {
+            // TODO missing return error here
+        }
+
+        this.compiled = mkCompiledFunction(this, compiledStatement, stackframe, argAssignments);
+        return this.compiled.notNull;
     }
 }
 
@@ -251,7 +273,7 @@ class FunctionScope : Namespace, Returnable, Declarable
 {
     CompilerBase compiler;
 
-    Type ret;
+    nullable Type ret;
 
     nullable Type extra;
 
@@ -271,6 +293,11 @@ class FunctionScope : Namespace, Returnable, Declarable
         this.isContextScope = true;
     }
 
+    Type finalRet() {
+        if (!ret) ret = new Void;
+        return ret.notNull;
+    }
+
     override LatentVariable declare(string name, Type type, bool mut, bool borrowed)
     {
         // borrowed == "no cleanup on scope exit".
@@ -286,8 +313,12 @@ class FunctionScope : Namespace, Returnable, Declarable
 
     override string mangle() { return this.mangle_; }
 
-    override Type mergeReturnType(Type proposed, bool failProp) {
-        return this.ret;
+    override (Type | fail Error) mergeReturn(Context context, Expression retExpr, bool failProp, LocRange locRange) {
+        if (!this.ret) this.ret = retExpr.type;
+        auto retType = this.ret.notNull;
+        if (context.compiler.implicitConvertTo(context, retExpr, retType))
+            return retType;
+        return locRange.fail("cannot return $(retExpr.type.repr): clashes with existing type $(this.ret.repr)");
     }
 
     override (nullable Symbol | fail Error) lookup(
@@ -550,7 +581,7 @@ class ASTFunction : ASTSymbol
 {
     string name;
 
-    ASTSymbol ret;
+    (ASTSymbol | :auto_) ret;
 
     ASTParameter[] params;
 
@@ -580,17 +611,39 @@ class ASTFunction : ASTSymbol
 
         if (this.isDeclaration)
         {
+            (ASTSymbol | fail Error) ret() {
+                this.ret.case {
+                    ASTSymbol sym: return sym;
+                    :auto_: return this.locRange.fail("Cannot use 'auto' return type for function declaration");
+                }
+            }
+            auto ret = ret?;
             return new FunctionDeclaration(
-                this.name, this.ret.compile(returnTypeContext)?.beType(this.ret.locRange)?, params);
+                this.name, ret.compile(returnTypeContext)?.beType(ret.locRange)?, params);
         }
 
+        // FIXME: nullptr_t
+        // this.ret.case(Type type: type, :auto_: null);
+        (nullable Type | fail Error) ret() {
+            this.ret.case {
+                ASTSymbol ret: return ret.compile(returnTypeContext)?.beType(ret.locRange)?;
+                :auto_: return null;
+            }
+        }
         auto fun = new Function(
             this.name,
-            this.ret.compile(returnTypeContext)?.beType(this.ret.locRange)?,
+            ret?,
             params,
             this.statement, this.macroState, false, this.locRange);
 
         fun.comment = this.comment;
+
+        (void | fail Error) inferReturnType() {
+            this.ret.case {
+                ASTSymbol ret: {}
+                :auto_: fun.inferReturnType(context)?;
+            }
+        }
 
         if (auto functionScope = findParent!FunctionScope(context.namespace)) {
             auto structType = functionScope.structType;
@@ -604,6 +657,7 @@ class ASTFunction : ASTSymbol
             auto namespace = new SymbolAlias(context.namespace, fun.name, latent);
 
             fun.parent = namespace;
+            inferReturnType?;
 
             context.compilingModule.track(fun);
 
@@ -611,6 +665,7 @@ class ASTFunction : ASTSymbol
         }
 
         fun.parent = context.namespace;
+        inferReturnType?;
         return fun;
     }
 
@@ -622,9 +677,12 @@ class ASTFunction : ASTSymbol
     parser.begin;
     auto comment = parser.parseLastComment?;
     auto from = parser.from?;
-    nullable ASTSymbol ret = lexicalContext.compiler.parseType(parser, lexicalContext)?;
-    if (!ret)
-    {
+    mut uninitialized (ASTSymbol | :auto_) ret;
+    if (parser.acceptIdentifier("auto")?) {
+        ret = :auto_;
+    } else if (auto retType = lexicalContext.compiler.parseType(parser, lexicalContext)?) {
+        ret = retType;
+    } else {
         parser.revert;
         return null;
     }
@@ -648,8 +706,7 @@ class ASTFunction : ASTSymbol
     }
     auto params = [pick(entry) for entry in params.params];
     ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
-    return new ASTFunction(
-        name, ret.notNull, params, false, locRange, stmt, lexicalContext.macroState, comment);
+    return new ASTFunction(name, ret, params, false, locRange, stmt, lexicalContext.macroState, comment);
 }
 
 ((ASTParameter | ASTThisAssignment)[] params, bool variadic | fail Error) parseParameterList(

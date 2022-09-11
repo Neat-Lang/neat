@@ -1559,6 +1559,9 @@ class ASTLambdaExpr : ASTSymbol
     if (auto tuple = parser.parseTupleExpression(lexicalContext)?) {
         return tuple;
     }
+    if (auto nestfun = parser.parseNestedFunctionExpr(lexicalContext)?) {
+        return nestfun;
+    }
     parser.begin;
     if (parser.accept("!")?) {
         nullable ASTSymbol next = parser.parseExpressionLeaf(lexicalContext)?;
@@ -3226,9 +3229,8 @@ class ASTNestedFunctionDeclStatement : ASTStatement
     override (StatementCompileResult | fail Error) compile(Context context)
     {
         auto fun = this.fun.compile(context)?;
-        auto latent = fun.instanceOf(LatentNestedFunction);
+        auto latent = fun.instanceOf(LatentNestedFunction).notNull;
 
-        assert(!!latent);
         return StatementCompileResult(
             new NoopStatement,
             new SymbolAlias(
@@ -3247,6 +3249,62 @@ class ASTNestedFunctionDeclStatement : ASTStatement
     if (auto fun_ = parseFunction(parser, lexicalContext)?)
         return new ASTNestedFunctionDeclStatement(fun_);
     return null;
+}
+
+class ASTNestedFunctionDeclExpr : ASTSymbol
+{
+    ASTParameter[] params;
+
+    ASTStatement stmt;
+
+    MacroState macroState;
+
+    this(this.params, this.stmt, this.macroState, this.locRange) {}
+
+    override (Symbol | fail Error) compile(Context context) {
+        string name = "__nested_literal_$(this.locRange.from.row)_$(context.getLabel)";
+        auto fun = new ASTFunction(
+            name, :auto_, this.params, isDeclaration=false, this.locRange, this.stmt, this.macroState, comment=null);
+
+        auto resolvedFun = fun.compile(context)?.instanceOf(LatentNestedFunction).notNull.resolve(context);
+        auto astSym = new ASTSymbolHelper(resolvedFun);
+        auto astRef = new ASTReference(astSym, this.locRange);
+        return astRef.compile(context);
+    }
+
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTNestedFunctionDeclExpr'!"); assert(false); }
+
+    override string repr() { return "TODO repr(ASTNestedFunctionDeclExpr)"; }
+}
+
+(nullable ASTNestedFunctionDeclExpr | fail Error) parseNestedFunctionExpr(
+    Parser parser, LexicalContext lexicalContext)
+{
+    with (parser.transaction) {
+        if (!parser.accept("(")?) {
+            return null;
+        }
+        auto from = parser.from?;
+        auto params = parseParameterList(parser, lexicalContext, variadic=false, thisAssignment=false)
+            .case(Error err: return null);
+        // Extremely dirty hack.
+        if (parser.accept(",")? || parser.accept(")")? || parser.accept(";")?) {
+            return null;
+        }
+        commit;
+
+        assert(!params.variadic);
+        ASTParameter pick((ASTParameter | ASTThisAssignment) value) {
+            value.case {
+                ASTParameter p: return p;
+                ASTThisAssignment a: parser.fail("cannot have this-assignment in nested function literal");
+            }
+        }
+        auto params = [pick(entry) for entry in params.params];
+        ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
+        auto locRange = parser.to(from);
+        return new ASTNestedFunctionDeclExpr(params, stmt, lexicalContext.macroState, locRange);
+    }
 }
 
 class ASTWhile : ASTStatement

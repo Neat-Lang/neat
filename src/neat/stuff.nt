@@ -735,28 +735,29 @@ class ASTCall : ASTSymbol
 
     override (Expression | fail Error) compile(Context context)
     {
-        // FIXME this goes better in call()
-        if (auto astMemberAccess = this.target.instanceOf(ASTMember))
-        {
-            /**
-             * UFCS:
-             * Syntax is foo.bar(baz).
-             * Check if "foo" has a property "bar".
-             * If not, call bar(foo, baz) instead.
-             */
-            if (auto base = astMemberAccess.base.compile(context)?.isExpressionImplCall(context, this.locRange)?) {
-                auto member = accessMember(
-                    context, base, astMemberAccess.member, astMemberAccess.locRange, allowUndefined=true)?;
-                if (!member) {
-                    // if `foo` has no `bar` but there is a `bar` symbol:
-                    if (auto callable = context.namespace.lookup(
-                        astMemberAccess.member, context, LookupReason.ufcs, this.locRange)?)
-                    {
-                        // rewrite foo.bar(baz) to bar(foo, baz)
-                        auto target = new ASTSymbolHelper(callable, astMemberAccess.locRange);
-                        auto args = [ASTArgument(astMemberAccess.base, "", astMemberAccess.locRange)] ~ this.args;
-                        return (new ASTCall(target, args, this.locRange)).compile(context);
-                    }
+        /**
+         * UFCS rewriting:
+         * foo.bar(baz)
+         * => bar(foo, baz)
+         */
+        if (auto astMember = this.target.instanceOf(ASTMember)) {
+            if (auto target = astMember.checkUfcs(context)?) {
+                // rewrite foo.bar(baz) to bar(foo, baz)
+                auto args = [ASTArgument(astMember.base, "", astMember.locRange)] ~ this.args;
+                return (new ASTCall(target, args, this.locRange)).compile(context);
+            }
+        }
+        /**
+         * UFCS rewriting:
+         * foo.bar!baz(whee)
+         * => bar!baz(foo, whee)
+         */
+        if (auto astInstance = this.target.instanceOf(ASTTemplateInstance)) {
+            if (auto astMember = astInstance.templateDecl.instanceOf(ASTMember)) {
+                if (auto target = astMember.checkUfcs(context)?) {
+                    auto reinstance = new ASTTemplateInstance(target, astInstance.types, astInstance.locRange);
+                    auto args = [ASTArgument(astMember.base, "", astMember.locRange)] ~ this.args;
+                    return (new ASTCall(reinstance, args, this.locRange)).compile(context);
                 }
             }
         }
@@ -1024,22 +1025,15 @@ class ASTMember : ASTMemberBase
 {
     override (Symbol | fail Error) compile(Context context)
     {
-        // UFCS part two
-        // support `foo.bar` as implicit `bar(foo)` if `foo` has no member `bar`
-        // TODO merge with ASTCall UFCS code (they should be the same)
-        if (auto base = this.base.compile(context)?.isExpressionImplCall(context, this.locRange)?) {
-            auto member = accessMember(context, base, this.member, this.locRange, allowUndefined=true)?;
-            if (!member) {
-                auto callable = context.namespace.lookup(
-                    this.member, context, LookupReason.ufcs, this.locRange)?;
-                // if `foo` has no `bar` but there is a `bar` symbol:
-                if (auto callable = callable) {
-                    auto target = new ASTSymbolHelper(callable, this.locRange);
-                    // bar(foo)
-                    auto args = [ASTArgument(this.base, "", this.locRange)];
-                    return (new ASTCall(target, args, this.locRange)).compile(context);
-                }
-            }
+        /**
+         * UFCS rewriting
+         * foo.bar
+         * => bar(foo)
+         */
+        if (auto target = checkUfcs(context)?) {
+            // bar(foo)
+            auto args = [ASTArgument(this.base, "", this.locRange)];
+            return (new ASTCall(target, args, this.locRange)).compile(context);
         }
 
         if (auto ret = accessMemberWithLifetime(

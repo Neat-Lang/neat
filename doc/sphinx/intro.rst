@@ -121,5 +121,5 @@ Please report bugs on Github as you find them. Patches are welcome. And most imp
 
 .. _D: https://www.dlang.org/
 .. _Walter Bright: https://en.wikipedia.org/wiki/Walter_Bright
-.. [#references] Buy me a drink and ask me why referenceability is the great killer of language and library design
-    that nobody ever talks about.
+.. [#references] Meaning `&var` doesn't compile. If you're bored, buy me a drink and ask me why referenceability is the
+    great killer of language and library design that nobody ever talks about.

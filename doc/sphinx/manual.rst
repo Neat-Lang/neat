@@ -179,6 +179,9 @@ When a function is called with `name(arg, arg)`, the arguments are passed to the
 control passes to the function. The statements of the function are then executed, until control
 returns to the caller when the function exits, by explicit `return` or reaching its end.
 
+If the return type is `auto`, it is inferred from the type returned by the `return` statements
+in the function body. This is called return type inference.
+
 Call
 ^^^^
 
@@ -200,7 +203,7 @@ This also allows struct or class methods that look like properties.
 Uniform Function Call Syntax
 ############################
 
-As in D, "uniform function call syntax" may be used. That is, if a call of the form `a.method(b)`
+As in D, "uniform function call syntax" (UFCS) may be used. That is, if a call of the form `a.method(b)`
 did not find a method `a.method` to call, it will instead be interpreted as `method(a, b)`.
 This allows easily defining global functions that can be called as if they are member functions of `a`.
 

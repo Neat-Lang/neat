@@ -4,7 +4,7 @@ The Neat Language
 =================
 
 Neat is a C-like statically-typed native compiled language with automated reference counting, OOP and macros.
-This is its documentation.
+Its syntax is heavily "inspired by" D.
 
 Have some example code! Here's a program that prints the longest line in a file::
 
@@ -29,9 +29,20 @@ Have some example code! Here's a program that prints the longest line in a file:
     $ ./longestline longestline.nt
     macro import std.macro.listcomprehension;
 
+**Important notice**: Before you jump in, please read the section :ref:`getstarted:Good and Bad Neat`!
+
+Community
+=========
+
+- `#neat on libera.chat <https://web.libera.chat/#neat>`_ (formerly Freenode).
+    If you're trying out the language, drop by and say hi!
+- TODO: I should probably make a forum or something.
+
+Contents
+========
+
 .. toctree::
    :maxdepth: 2
-   :caption: Contents:
 
    getstarted
    intro

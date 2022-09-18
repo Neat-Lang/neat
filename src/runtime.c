@@ -5,6 +5,7 @@
 #endif
 #include <pthread.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,34 +61,6 @@ char* toStringz(struct String str) {
     buffer[str.length] = 0;
     return buffer;
 }
-int neat_runtime_atoi(struct String str) {
-    char *temp = toStringz(str);
-    int res = atoi(temp);
-    free(temp);
-    // printf("atoi(%.*s) = %i\n", str.length, str.ptr, res);
-    return res;
-}
-float neat_runtime_atof(struct String str) {
-    char *temp = toStringz(str);
-    float res = atof(temp);
-    free(temp);
-    // printf("atof(%.*s) = %f\n", str.length, str.ptr, res);
-    return res;
-}
-struct String neat_runtime_ftoa_hex(float f) {
-    double d = f;
-    int len = snprintf(NULL, 0, "%llx", *(long long int*) &d);
-    struct String res = string_alloc(len + 1);
-    res.length = snprintf(res.ptr, res.length, "%llx", *(long long int*) &d);
-    return res;
-}
-struct String neat_runtime_ptr_id(void* ptr) {
-    int len = snprintf(NULL, 0, "%p", ptr);
-    struct String res = string_alloc(len + 1);
-    res.length = snprintf(res.ptr, res.length, "%p", ptr);
-    return res;
-}
-int neat_runtime_toInt(float f) { return (int) f; }
 
 FILE* neat_runtime_stdout() {
     return stdout;
@@ -320,26 +293,26 @@ void print_backtrace()
 #endif
 }
 
-void neat_runtime_refcount_violation(struct String s, long long int *ptr)
+void neat_runtime_refcount_violation(struct String s, ptrdiff_t *ptr)
 {
-    printf("<%.*s: refcount logic violated: %lld at %p\n", (int) s.length, s.ptr, *ptr, ptr);
+    printf("<%.*s: refcount logic violated: %zd at %p\n", (int) s.length, s.ptr, *ptr, ptr);
     print_backtrace();
 }
 
-void neat_runtime_refcount_inc(struct String s, long long int *ptr)
+void neat_runtime_refcount_inc(struct String s, ptrdiff_t *ptr)
 {
-    // long long int result = *ptr += 1;
-    long long int result = __atomic_add_fetch(ptr, 1, __ATOMIC_ACQ_REL);
+    // ptrdiff_t result = *ptr += 1;
+    ptrdiff_t result = __atomic_add_fetch(ptr, 1, __ATOMIC_ACQ_REL);
     if (result <= 1)
     {
         neat_runtime_refcount_violation(s, ptr);
     }
 }
 
-int neat_runtime_refcount_dec(struct String s, long long int *ptr)
+int neat_runtime_refcount_dec(struct String s, ptrdiff_t *ptr)
 {
-    // long long int result = *ptr -= 1;
-    long long int result = __atomic_sub_fetch(ptr, 1, __ATOMIC_ACQ_REL);
+    // ptrdiff_t result = *ptr -= 1;
+    ptrdiff_t result = __atomic_sub_fetch(ptr, 1, __ATOMIC_ACQ_REL);
     if (result <= -1)
     {
         neat_runtime_refcount_violation(s, ptr);
@@ -348,14 +321,14 @@ int neat_runtime_refcount_dec(struct String s, long long int *ptr)
     return result == 0;
 }
 
-void neat_runtime_class_refcount_inc(long long int *ptr) {
+void neat_runtime_class_refcount_inc(void **ptr) {
     if (!ptr) return;
-    neat_runtime_refcount_inc((struct String){5, "class", NULL}, &ptr[1]);
+    neat_runtime_refcount_inc((struct String){5, "class", NULL}, (ptrdiff_t*) &ptr[1]);
 }
 
-void neat_runtime_class_refcount_dec(long long int *ptr) {
+void neat_runtime_class_refcount_dec(void **ptr) {
     if (!ptr) return;
-    if (neat_runtime_refcount_dec((struct String){5, "class", NULL}, &ptr[1]))
+    if (neat_runtime_refcount_dec((struct String){5, "class", NULL}, (ptrdiff_t*) &ptr[1]))
     {
         void (**vtable)(void*) = *(void(***)(void*)) ptr;
         void (*destroy)(void*) = vtable[1];
@@ -364,7 +337,7 @@ void neat_runtime_class_refcount_dec(long long int *ptr) {
     }
 }
 
-void neat_runtime_refcount_set(long long int *ptr, long long int value)
+void neat_runtime_refcount_set(size_t *ptr, size_t value)
 {
     // *ptr = value;
     __atomic_store(ptr, &value, __ATOMIC_RELEASE);

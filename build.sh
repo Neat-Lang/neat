@@ -54,13 +54,13 @@ cat <<EOF > build/neat.ini
 EOF
 NEAT=build/neat_stage1
 
+# store compiler source next to compiler
+rm -rf build/src
+cp -R src build/
+
 echo "Building stage 2..."
 $NEAT $FLAGS $OPTFLAG -backend=llvm -macro-backend=c -Pcompiler:src src/main.nt -o build/neat_stage2
 NEAT=build/neat_stage2
 
 cp $NEAT build/neat
 rm build/neat_stage*
-
-# store compiler source next to compiler
-rm -rf build/src
-cp -R src build/

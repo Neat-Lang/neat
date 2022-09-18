@@ -18,7 +18,7 @@
 # -- Project information -----------------------------------------------------
 
 project = 'Neat'
-copyright = '2021, @FeepingCreature'
+copyright = '@FeepingCreature'
 author = '@FeepingCreature'
 
 

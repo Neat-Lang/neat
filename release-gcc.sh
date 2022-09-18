@@ -8,14 +8,29 @@ fi
 VERSION="$1"
 
 LLVM=0
-NTFLAGS=""
-RELEASE="neat-$VERSION-gcc"
+NTFLAGS="-O"
+RELEASE=""
+ARCH=64
+ARCHFLAGS=""
 
-if [ $(basename $0) != "release-gcc.sh" ]
+if [ $(basename $0) == "release-llvm.sh" ]
 then
     LLVM=1
     NTFLAGS="${NTFLAGS} -version=LLVMBackend"
     RELEASE="neat-$VERSION-llvm"
+elif [ $(basename $0) == "release-gcc.sh" ]
+then
+    RELEASE="neat-$VERSION-gcc"
+elif [ $(basename $0) == "release-gcc-32.sh" ]
+then
+    # TODO figure out why -O is broken
+    NTFLAGS=""
+    RELEASE="neat-$VERSION-gcc-32"
+    ARCH=32
+    ARCHFLAGS="-m32"
+else
+    echo "Unknown release name $(basename $0)"
+    exit 1
 fi
 
 if [ -e "$RELEASE" ]
@@ -30,7 +45,8 @@ mkdir -p $TARGET
 rm -rf .obj
 ./build.sh
 
-build/neat -backend=c -Pcompiler:src -dump-intermediates build/intermediates.txt src/main.nt -c $NTFLAGS
+build/neat -backend=c -Pcompiler:src -dump-intermediates build/intermediates.txt src/main.nt -c \
+    $ARCHFLAGS $NTFLAGS
 
 mkdir $TARGET/intermediate
 cp -R src/ $TARGET
@@ -48,14 +64,16 @@ OBJECTS=()
 # poor man's make -j
 for file in intermediate/*.c src/runtime.c; do
     obj=\${file%.c}.o
-    gcc -c -fpic -rdynamic \$file -o \$obj &
+    gcc $ARCHFLAGS -c -fpic -rdynamic \$file -o \$obj &
     OBJECTS+=(\$obj)
     if [ \$I -ge \$JOBS ]; then wait -n; fi
     I=\$((I+1))
 done
 for i in \$(seq \$JOBS); do wait -n; done
-gcc -fpic -rdynamic \${OBJECTS[@]} -o neat -ldl -lm \$CFLAGS
+gcc -fpic -rdynamic \${OBJECTS[@]} -o neat_bootstrap -ldl -lm $ARCHFLAGS \$CFLAGS
 rm \${OBJECTS[@]}
+./neat_bootstrap src/main.nt $NTFLAGS -o neat
+rm neat_bootstrap
 EOT
     cat > $TARGET/neat.ini <<EOT
 -syspackage compiler:src
@@ -63,6 +81,13 @@ EOT
 -macro-backend=c
 -running-compiler-version=$VERSION
 EOT
+    if [ $ARCH == "32" ]
+    then
+        cat >> $TARGET/neat.ini <<EOT
+-m32
+-macro-m32
+EOT
+    fi
 else
     if [ -f "/usr/lib/llvm/14/bin/llvm-config" ]
     then
@@ -105,7 +130,7 @@ done
 for i in \$(seq \$JOBS); do wait -n; done
 gcc -fpic -rdynamic \${OBJECTS[@]} -o neat_bootstrap -ldl -lm -lLLVM \$CFLAGS
 rm \${OBJECTS[@]}
-./neat_bootstrap -O -macro-backend=c src/main.nt \${LLVM_NTFLAGS} $NTFLAGS -o neat
+./neat_bootstrap -macro-backend=c src/main.nt \${LLVM_NTFLAGS} $NTFLAGS -o neat
 rm neat_bootstrap
 EOT
     cat > $TARGET/neat.ini <<EOT

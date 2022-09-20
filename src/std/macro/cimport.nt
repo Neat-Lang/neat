@@ -12,6 +12,9 @@ import package(compiler).neat.struct_;
 import package(compiler).neat.types;
 import package(compiler).neat.util;
 import package(compiler).helpers;
+version (firstpassmacro) { } else {
+    import package(compiler).neat.union_;
+}
 
 extern(C) void neat_runtime_system(string command);
 
@@ -158,6 +161,14 @@ class CImportMacro : Macro
                 add(type.instanceOf(ASTStructDeclSym).decl.struct_.name, type);
                 continue;
             }
+            version (firstpassmacro) { } else {
+                if (cparser.accept("union")?) {
+                    auto type = cparserHelper.parseStructType(union_=true)?;
+                    if (!type) { cparser.eatline; continue; }
+                    add(type.instanceOf(ASTUnion).name, type);
+                    continue;
+                }
+            }
             if (cparser.accept("enum")?) {
                 auto type = cparserHelper.parseEnumType?;
                 if (!type) { cparser.eatline; continue; }
@@ -293,6 +304,9 @@ class CParserHelper {
         if (ident == "struct") {
             return parseStructType?;
         }
+        if (ident == "union") {
+            return parseStructType(union_=true)?;
+        }
         if (ident == "enum") {
             return parseEnumType?;
         }
@@ -307,8 +321,6 @@ class CParserHelper {
     (nullable ASTSymbol type, string name | fail Error) parseTypedDecl(ASTSymbol baseType) {
         mut auto current = baseType;
         assert(!!current);
-        // TODO polysemous null type
-        nullable ASTSymbol nullSymbol;
         auto start = parser.loc;
         while (true) {
             if (parser.accept("*")? || parser.accept("[]")?) {
@@ -326,7 +338,7 @@ class CParserHelper {
                 // I fucking hate C type syntax. No arrays of function pointers for you.
                 if (!parser.accept(")")?) {
                     parser.revert;
-                    return (nullSymbol, "");
+                    return (null, "");
                 }
                 parser.expect("(")?;
                 mut ASTSymbol[] params;
@@ -335,12 +347,12 @@ class CParserHelper {
                     auto argtype = parseType?;
                     if (!argtype) {
                         parser.revert;
-                        return (nullSymbol, "");
+                        return (null, "");
                     }
                     auto arg = parseTypedDecl(notNull!ASTSymbol(argtype))?;
                     if (!arg.type) {
                         parser.revert;
-                        return (nullSymbol, "");
+                        return (null, "");
                     }
                     params ~= notNull!ASTSymbol(arg.type);
                 }
@@ -358,21 +370,34 @@ class CParserHelper {
             break;
         }
         // name can be empty!
-        auto name = parser.parseIdentifier?;
-        auto start = parser.loc;
-        while (parser.accept("[")?) {
-            if (parser.accept("]")?) {
-                current = new ASTPointer(current, parser.loc);
-                continue;
+        with (parser.transaction) {
+            auto name = parser.parseIdentifier?;
+            auto start = parser.loc;
+            while (parser.accept("[")?) {
+                if (parser.accept("]")?) {
+                    current = new ASTPointer(current, parser.loc);
+                    continue;
+                }
+                mut int num;
+                auto cn = parseCNumber?;
+                // TODO if ((:success, int i) <- parseCNumber?)
+                if (cn.case(:failure: false, (:success, int): true)) {
+                    num = cn.case(:failure: 0, (:success, int i): i);
+                } else if (
+                    parser.accept("sizeof(void *) <= 8 ? 56 : sizeof(void *) == 16 ? 64 : 3 * sizeof(void *)")?) {
+                    // Jesus Christ, SDL, what the fuck.
+                    // TODO full C expression parser, apparently
+                    num = 64;
+                } else {
+                    return (null, "");
+                }
+                // parser.expect("]")?;
+                if (!parser.accept("]")?) return (null, "");
+                current = new CStaticArray(current, num, start);
             }
-            auto n = parseCNumber?; auto num = n.case(
-                (:failure): return (nullSymbol, ""),
-                (:success, int i): i);
-            // parser.expect("]")?;
-            if (!parser.accept("]")?) return (nullSymbol, "");
-            current = new CStaticArray(current, num, start);
+            commit;
+            return (current, name);
         }
-        return (current, name);
     }
 
     (nullable ASTSymbol | fail Error) parseBasicCType() {
@@ -413,10 +438,10 @@ class CParserHelper {
         }
     }
 
-    (ASTSymbol | fail Error) parseStructType() {
+    (ASTSymbol | fail Error) parseStructType(bool union_=false) {
         auto start = parser.loc;
         auto name = parser.parseIdentifier?;
-        mut ASTStructEntry[] entries;
+        mut ASTStructMember[] members;
         auto emptyStruct = new ASTStructDeclSym(new ASTStructDecl(name, [], start)); // opaque
         if (!parser.accept("{")?) {
             if (auto definedSym = this.mod.getSymbolAlias(name)) return definedSym;
@@ -442,12 +467,14 @@ class CParserHelper {
             parser.begin;
             // #defines inside structs happen occasionally
             if (parser.accept("#define ")?) { parser.eatline; parser.commit; continue; }
+            // line number annotation
+            if (parser.accept("# ")?) { parser.eatline; parser.commit; continue; }
             auto baseType = parseType?;
             if (!baseType) { parser.revert; scanToClosingBracket; return emptyStruct; }
             auto baseType = notNull!ASTSymbol(baseType);
             mut auto memberDecl = parseTypedDecl(baseType)?;
             void flush() {
-                entries ~= (memberDecl.name, Protection.public_, notNull!ASTSymbol(memberDecl.type));
+                members ~= (memberDecl.name, Protection.public_, notNull!ASTSymbol(memberDecl.type));
             }
             while (parser.accept(",")?) {
                 if (!memberDecl.type) { parser.revert; scanToClosingBracket; return emptyStruct; }
@@ -460,6 +487,15 @@ class CParserHelper {
             if (!parser.accept(";")?) { parser.revert; scanToClosingBracket; return emptyStruct; }
             parser.commit;
         }
+        version (firstpassmacro) { } else {
+            if (union_) {
+                mut ASTUnionMember[] unionMembers;
+                for (a in members) unionMembers ~= (a.name, a.type);
+                return new ASTUnion(name, unionMembers, null, start);
+            }
+        }
+        mut ASTStructEntry[] entries;
+        for (a in members) entries ~= a;
         return new ASTStructDeclSym(new ASTStructDecl(name, entries, start));
     }
 

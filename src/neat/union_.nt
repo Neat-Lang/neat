@@ -1,0 +1,191 @@
+module neat.union_;
+
+macro import std.macro.listcomprehension;
+
+import backend.base;
+import helpers;
+import neat.base;
+import neat.decl;
+import neat.expr;
+import neat.function_;
+import neat.hash;
+import neat.statements;
+import neat.types;
+import neat.util;
+import std.thread;
+
+alias UnionMember = (string name, Type type);
+
+class Union : Type
+{
+    string name;
+
+    UnionMember[] members;
+
+    LocRange locRange;
+
+    string mangledName;
+
+    Hash preHash;
+
+    this(this.name, this.members, this.locRange, string manglePrefix) {
+        this.mangledName = manglePrefix ~ "_union_" ~ this.name;
+        // unions don't participate in lifetime stuff
+        this.zeroInitializable = true;
+        this.hasElaborateCopyConstructor = false;
+        this.preHash = new Hash;
+        this.preHash.adds("union");
+        this.preHash.adds(mangledName);
+        this.preHash.addl(members.length);
+        [member.type.hash(this.preHash) for member in this.members];
+    }
+
+    override bool same(Type other) {
+        if (auto other = other.instanceOf(Union)) {
+            return this.mangledName == other.mangledName;
+        }
+        return false;
+    }
+
+    override BackendType emit(Platform platform) {
+        mut int size = 0;
+        mut int alignment = 1;
+        for (member in this.members) {
+            auto backendType = member.type.emit(platform);
+            int memberSize = backendType.size(platform);
+            int memberAlignment = backendType.alignment(platform);
+
+            if (memberSize > size) size = memberSize;
+            if (memberAlignment > alignment) alignment = memberAlignment;
+        }
+        return new BackendSpacerType(size, alignment);
+    }
+
+    override string repr() { return this.name; }
+
+    override string mangle() { return this.mangledName; }
+
+    override (nullable Statement | fail Error) assignMember(
+        Context context, Expression baseExpr, string field, Expression arg, Protection protection, LocRange locRange)
+    {
+        size_t memberOffset = [first i for i, a in this.members where a.name == field else -1];
+        if (memberOffset == -1) return null;
+        auto member = this.members[memberOffset];
+        auto baseRef = baseExpr.instanceOf(Reference);
+        locRange.assert(!!baseRef, "target of assignment must be a reference")?;
+        locRange.assert(baseRef.mutable, "target of assignment must be mutable: $(baseRef.repr)")?;
+        auto converted = new Dereference(new PointerCast(
+            new Pointer(member.type),
+            new ReferenceExpression(baseRef.notNull)));
+
+        // deliberately leak the source
+        return context.compiler.assignStatement(
+            converted,
+            new OverrideLifetimeExpr(arg, ExprInfo(Lifetime.permanent)));
+    }
+
+    override (nullable Symbol | fail Error) accessMember(
+        Context context, nullable Expression baseExpr, string member, Protection protection, LocRange locRange)
+    {
+        if (auto baseExpr = baseExpr) {
+            size_t memberOffset = [first i for i, a in this.members where a.name == member else -1];
+            if (memberOffset == -1) return null;
+            auto member = this.members[memberOffset];
+            // We *must* create a temporary variable: LLVM does not have freeform reinterpret casting!
+            auto temporary = new PairedTemporary(this, Lifetime.ephemeral, context.getLabel);
+            auto assign = new InitializeTemporaryStatement(temporary, baseExpr);
+            auto converted = new Dereference(new PointerCast(
+                new Pointer(member.type),
+                new ReferenceExpression(temporary)));
+            // unleak the field
+            auto ephemeral = new OverrideLifetimeExpr(converted, ExprInfo(Lifetime.ephemeral));
+
+            return new StatementExpression(assign, ephemeral, gifted=false);
+        }
+        return null;
+    }
+
+    override void hash(Hash hash) {
+        hash.applyHash(this.preHash);
+    }
+}
+
+alias ASTUnionMember = (string name, ASTSymbol type);
+
+class ASTUnion : ASTSymbol
+{
+    string name;
+
+    string comment;
+
+    ASTUnionMember[] members;
+
+    this(this.name, this.members, this.comment, this.locRange) { }
+
+    override (Union | fail Error) compile(Context context) {
+        mut UnionMember[] members;
+        for (member in this.members) {
+            members ~= (member.name, member.type.compile(context)?.beType(member.type.locRange)?);
+        }
+
+        return new Union(this.name, members, this.locRange, context.namespace.mangle);
+    }
+
+    override string repr() { return "ASTUnion($name)"; }
+}
+
+class ASTUnionDecl : ASTDeclaration
+{
+    ASTUnion union_;
+
+    this(string name, ASTUnionMember[] members, string comment, LocRange locRange) {
+        this.union_ = new ASTUnion(name, members, comment, locRange);
+    }
+
+    override (Namespace | fail Error) compile(Context context)
+    {
+        auto union_ = this.union_.compile(context)?;
+
+        return new SymbolAlias(context.namespace, this.union_.name, union_);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        print("TODO ASTUnionDecl.quote");
+        assert(false);
+    }
+
+    override string repr() { return union_.name; }
+}
+
+(nullable ASTUnionDecl | fail Error) parseUnionDecl(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin;
+    auto comment = parser.parseLastComment?;
+    auto from = parser.from?;
+    if (parser.parseIdentifier? != "union") {
+        parser.revert;
+        return null;
+    }
+    string name = parser.parseIdentifier?;
+    assert(!!name.length);
+    auto locRange = parser.to(from);
+    mut ASTUnionMember[] members;
+    parser.expect("{")?;
+    while (!parser.accept("}")?) {
+        members ~= parseUnionMember(parser, lexicalContext)?;
+    }
+    parser.commit;
+    return new ASTUnionDecl(name, members, comment, locRange);
+}
+
+(ASTUnionMember | fail Error) parseUnionMember(Parser parser, LexicalContext lexicalContext)
+{
+    auto from = parser.from?;
+    auto memberType = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+    if (!memberType) return parser.fail("expected member type");
+    auto memberName = parser.parseIdentifier?;
+    if (!memberName.length) return parser.fail("expected member name");
+    parser.expect(";")?;
+    auto locRange = parser.to(from);
+    return (memberName, memberType.notNull);
+}

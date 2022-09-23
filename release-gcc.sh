@@ -49,7 +49,7 @@ build/neat -backend=c -Pcompiler:src -dump-intermediates build/intermediates.txt
     $ARCHFLAGS $NTFLAGS
 
 mkdir $TARGET/intermediate
-cp -R src/ $TARGET
+cp --parents $(find src -xtype f -name '*.nt' -o -name runtime.c) $TARGET
 cp $(cat build/intermediates.txt) $TARGET/intermediate/
 
 if [ $LLVM -eq 0 ]

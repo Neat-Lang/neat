@@ -18,7 +18,7 @@ then
     JFLAG="-j8"
 fi
 
-LLVM_CONFIG="/usr/lib/llvm/14/bin/llvm-config"
+LLVM_CONFIG=${LLVM_CONFIG:-"/usr/lib/llvm/14/bin/llvm-config"}
 FLAGS="$JFLAG -I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir)"
 
 TAG=v0.1.9

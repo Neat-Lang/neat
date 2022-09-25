@@ -90,13 +90,13 @@ OBJECTS=()
 # poor man's make -j
 for file in intermediate_\${ARCH}/*.c src/runtime.c; do
     obj=\${file%.c}.o
-    gcc \$ARCHFLAG -c -fpic -rdynamic \$file -o \$obj &
+    gcc \$ARCHFLAG -c -fpic -rdynamic -fno-strict-aliasing \$file -o \$obj &
     OBJECTS+=(\$obj)
     if [ \$I -ge \$JOBS ]; then wait -n; fi
     I=\$((I+1))
 done
 for i in \$(seq \$JOBS); do wait -n; done
-gcc -fpic -rdynamic \${OBJECTS[@]} -o neat_bootstrap -ldl -lm \$ARCHFLAG \$CFLAGS
+gcc -fpic -rdynamic -fno-strict-aliasing \${OBJECTS[@]} -o neat_bootstrap -ldl -lm \$ARCHFLAG \$CFLAGS
 rm \${OBJECTS[@]}
 cat > neat.ini <<EOI
 -syspackage compiler:src
@@ -149,13 +149,13 @@ OBJECTS=()
 # poor man's make -j
 for file in intermediate/*.c src/runtime.c; do
     obj=\${file%.c}.o
-    gcc -c -fpic -rdynamic \$file -o \$obj &
+    gcc -c -fpic -rdynamic -fno-strict-aliasing \$file -o \$obj &
     OBJECTS+=(\$obj)
     if [ \$I -ge \$JOBS ]; then wait -n; fi
     I=\$((I+1))
 done
 for i in \$(seq \$JOBS); do wait -n; done
-gcc -fpic -rdynamic \${OBJECTS[@]} -o neat_bootstrap -ldl -lm -lLLVM \$CFLAGS
+gcc -fpic -rdynamic -fno-strict-aliasing \${OBJECTS[@]} -o neat_bootstrap -ldl -lm -lLLVM \$CFLAGS
 rm \${OBJECTS[@]}
 ./neat_bootstrap -macro-backend=c src/main.nt \${LLVM_NTFLAGS} $NTFLAGS -o neat
 rm neat_bootstrap

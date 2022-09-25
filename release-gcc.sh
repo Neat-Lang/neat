@@ -10,8 +10,7 @@ VERSION="$1"
 LLVM=0
 NTFLAGS="-O"
 RELEASE=""
-ARCH=64
-ARCHFLAGS=""
+ARCHS=64
 
 if [ $(basename $0) == "release-llvm.sh" ]
 then
@@ -20,14 +19,8 @@ then
     RELEASE="neat-$VERSION-llvm"
 elif [ $(basename $0) == "release-gcc.sh" ]
 then
+    ARCHS="32 64"
     RELEASE="neat-$VERSION-gcc"
-elif [ $(basename $0) == "release-gcc-32.sh" ]
-then
-    # TODO figure out why -O is broken
-    NTFLAGS=""
-    RELEASE="neat-$VERSION-gcc-32"
-    ARCH=32
-    ARCHFLAGS="-m32"
 else
     echo "Unknown release name $(basename $0)"
     exit 1
@@ -45,49 +38,82 @@ mkdir -p $TARGET
 rm -rf .obj
 ./build.sh
 
-build/neat -backend=c -Pcompiler:src -dump-intermediates build/intermediates.txt src/main.nt -c \
-    $ARCHFLAGS $NTFLAGS
-
-mkdir $TARGET/intermediate
 cp --parents $(find src -xtype f -name '*.nt' -o -name runtime.c) $TARGET
-cp $(cat build/intermediates.txt) $TARGET/intermediate/
+
+for ARCH in $ARCHS
+do
+    ARCHFLAGS=""
+    if [ ARCH == "32" ]
+    then
+        ARCHFLAGS = "-m32"
+    fi
+    build/neat -backend=c -Pcompiler:src -dump-intermediates build/intermediates.txt src/main.nt -c \
+        $ARCHFLAGS $NTFLAGS
+
+    mkdir $TARGET/intermediate_$ARCH
+    cp $(cat build/intermediates.txt) $TARGET/intermediate_$ARCH/
+done
 
 if [ $LLVM -eq 0 ]
 then
     cat > $TARGET/build.sh <<EOT
 #!/usr/bin/env bash
 set -exo pipefail
+if [ "\${ARCH}" == "" ]
+then
+    ARCH=\$(getconf LONG_BIT)
+    echo "ARCH not set, guessing \$ARCH"
+fi
+DEFAULT_ARCH=""
+echo "int main(void) {}" |gcc -x c - -o _platform_test
+if (file _platform_test |grep -q 32-bit)
+then
+    DEFAULT_ARCH="32"
+elif (file _platform_test |grep -q 64-bit)
+then
+    DEFAULT_ARCH="64"
+else
+    echo "Cannot determine architecture!"
+    exit 1
+fi
+rm _platform_test
+ARCHFLAG=""
+if [ "\${ARCH}" != "\${DEFAULT_ARCH}" ]
+then
+    # force targetting the ARCH architecture
+    ARCHFLAG="-m\${ARCH}"
+fi
 CFLAGS="\${CFLAGS} -Ofast -fno-strict-aliasing -pthread"
 I=0
 JOBS=16
 OBJECTS=()
 # poor man's make -j
-for file in intermediate/*.c src/runtime.c; do
+for file in intermediate_\${ARCH}/*.c src/runtime.c; do
     obj=\${file%.c}.o
-    gcc $ARCHFLAGS -c -fpic -rdynamic \$file -o \$obj &
+    gcc \$ARCHFLAG -c -fpic -rdynamic \$file -o \$obj &
     OBJECTS+=(\$obj)
     if [ \$I -ge \$JOBS ]; then wait -n; fi
     I=\$((I+1))
 done
 for i in \$(seq \$JOBS); do wait -n; done
-gcc -fpic -rdynamic \${OBJECTS[@]} -o neat_bootstrap -ldl -lm $ARCHFLAGS \$CFLAGS
+gcc -fpic -rdynamic \${OBJECTS[@]} -o neat_bootstrap -ldl -lm \$ARCHFLAG \$CFLAGS
 rm \${OBJECTS[@]}
-./neat_bootstrap src/main.nt $NTFLAGS -o neat
-rm neat_bootstrap
-EOT
-    cat > $TARGET/neat.ini <<EOT
+cat > neat.ini <<EOI
 -syspackage compiler:src
 -backend=c
 -macro-backend=c
 -running-compiler-version=$VERSION
-EOT
-    if [ $ARCH == "32" ]
-    then
-        cat >> $TARGET/neat.ini <<EOT
+EOI
+if [ \${ARCH} == "32" ]
+then
+    cat >> neat.ini <<EOI
 -m32
 -macro-m32
+EOI
+fi
+./neat_bootstrap src/main.nt $NTFLAGS -o neat
+rm neat_bootstrap
 EOT
-    fi
 else
     if [ -f "/usr/lib/llvm/14/bin/llvm-config" ]
     then
@@ -144,10 +170,15 @@ EOT
 fi
 chmod +x $TARGET/build.sh
 
-(cd $TARGET; ./build.sh)
-NEAT=$TARGET/neat ./runtests.sh
-rm $TARGET/neat
-rm -rf $TARGET/.obj
+for ARCH in $ARCHS
+do
+    echo "Test $ARCH"
+    TEST_TARGET="test_${RELEASE}_${ARCH}"
+    cp -R "${TARGET}" "${TEST_TARGET}"
+    (cd "${TEST_TARGET}" && ./build.sh)
+    NEAT="${TEST_TARGET}"/neat ./runtests.sh
+    rm -rf "${TEST_TARGET}"
+done
 (cd "$RELEASE"
     zip -r ../"$RELEASE".zip "$RELEASE"
     tar caf ../"$RELEASE".tar.xz "$RELEASE")

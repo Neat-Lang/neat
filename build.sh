@@ -21,7 +21,7 @@ fi
 LLVM_CONFIG=${LLVM_CONFIG:-"/usr/lib/llvm/14/bin/llvm-config"}
 FLAGS="$JFLAG -I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir)"
 
-TAG=v0.1.9
+TAG=v0.1.10
 NEAT=.cache/bootstrap/"$TAG"/neat-"$TAG"-gcc/neat
 
 if [ ! -f "$NEAT" ]

@@ -103,6 +103,7 @@ cat > neat.ini <<EOI
 -backend=c
 -macro-backend=c
 -running-compiler-version=$VERSION
+-extra-cflags=\$ARCHFLAG
 EOI
 if [ \${ARCH} == "32" ]
 then

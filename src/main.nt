@@ -125,7 +125,7 @@ BackgroundCompilation emitModule(
         exec = getEnv("CC", "gcc");
         if (settings.optimize) args = baseArgs ~ "-O3";
         else args = baseArgs;
-        if (settings.x86_32) args ~= "-m32";
+        if (settings.extraCFlags.length > 0) args ~= settings.extraCFlags.split(" ");
 
         string cmd = exec ~ " " ~ args.join(" ");
         int pid = neat_runtime_execbg(exec, args);
@@ -246,6 +246,8 @@ class BuildSettings
 
     WorkPool pool;
 
+    string extraCFlags;
+
     Platform platform() {
         BackendType macroWordType() {
             if (x86_32) return new BackendIntType;
@@ -255,7 +257,7 @@ class BuildSettings
     }
 
     this(this.compiler, this.backend, this.x86_32, this.caching, this.versions,
-         this.platformFlags, this.optimize, this.forMacro, this.pool) { }
+         this.platformFlags, this.optimize, this.forMacro, this.extraCFlags, this.pool) { }
 }
 
 class CompilationTask : ITask
@@ -452,7 +454,7 @@ class ParserHelperImpl : ParserHelper
             assert(false);
         }
         mut string baseCmd = baseCmd;
-        if (settings.x86_32) baseCmd ~= " -m32";
+        if (settings.extraCFlags) baseCmd ~= " $(settings.extraCFlags)";
 
         auto preProcessor = new SimpleModulePreProcessor;
         auto postProcessor = new SimpleModulePostProcessor;
@@ -477,7 +479,7 @@ class ParserHelperImpl : ParserHelper
             }
             if (settings.backend.instanceOf(CBackend)) {
                 mut string flags = " -shared -g";
-                if (settings.x86_32) flags ~= " -m32";
+                if (settings.extraCFlags) flags ~= " $(settings.extraCFlags)";
                 return (
                     soname,
                     "$baseCmd$flags$objFiles -o $soname");
@@ -710,6 +712,7 @@ class Options
     string docGenFolder;
     string runningCompilerVersion;
     string requestedCompilerVersion;
+    string extraCFlags, macroExtraCFlags;
     int threads;
     Mutex llvmMutex;
 
@@ -826,6 +829,10 @@ class Options
             } else if (string num = arg.startsWith("-j")) {
                 if (num.length == 0) this.threads = 4;
                 else this.threads = num.atoi;
+            } else if (string rest = arg.startsWith("-extra-cflags=")) {
+                this.extraCFlags = rest;
+            } else if (string rest = arg.startsWith("-macro-extra-cflags=")) {
+                this.macroExtraCFlags = rest;
             } else {
                 remArgs ~= arg;
             }
@@ -919,11 +926,11 @@ void buildBinary(Options options, string mainFile, string execPath, Package[] pa
     auto settings = new BuildSettings(compiler, options.backend.notNull,
         x86_32=options.x86_32, caching=options.caching, versions=options.allVersions,
         platformFlags=options.platformFlags, optimize=options.optimize, forMacro=false,
-        pool=workPool);
+        extraCFlags=options.extraCFlags, pool=workPool);
     auto macroSettings = new BuildSettings(compiler, options.macroBackend.notNull,
         x86_32=options.macro_x86_32, caching=options.caching, versions=options.allMacroVersions,
         platformFlags=options.macroPlatformFlags, optimize=false, forMacro=true,
-        pool=workPool);
+        extraCFlags = options.macroExtraCFlags, pool=workPool);
     auto helper = new ParserHelperImpl(macroSettings);
     // FIXME break reference loop
     compiler.helper = helper;
@@ -1004,7 +1011,7 @@ long long int compiler_hash_mult() { return $(mult)LL; }
 
     mut string baseFlags = " -fno-strict-aliasing";
     if (options.optimize) baseFlags ~= " -Ofast";
-    if (options.x86_32) baseFlags ~= " -m32";
+    if (options.extraCFlags) baseFlags ~= " $(settings.extraCFlags)";
 
     version (LLVMBackend) {
         if (options.backend.instanceOf(LLVMBackend) && options.optimize)

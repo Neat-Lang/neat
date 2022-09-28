@@ -507,6 +507,9 @@ class ASTEitherCaseExpr : ASTSymbol
 
     ASTEitherCaseExprCase[] cases;
 
+    // For internal use: promise to use every member at most once. Lets us maintain gifted semantics.
+    bool singleUse;
+
     this(this.locRange, this.base, this.cases) { }
 
     override (Expression | fail Error) compile(Context context) {
@@ -572,7 +575,11 @@ class ASTEitherCaseExpr : ASTSymbol
             mergeType = new Either(members);
         }
         // as ASTReturn
-        auto resultVal = new PairedTemporary(mergeType, Lifetime.gifted, context.getLabel);
+        mut uninitialized PairedTemporary resultVal;
+        if (!singleUse)
+            resultVal = new PairedTemporary(mergeType, Lifetime.gifted, context.getLabel);
+        else
+            resultVal = new PairedTemporary(mergeType, baseExpr.info.lifetime, context.getLabel);
         Statement initResultVal = new UninitializeTemporaryStatement(resultVal);
         mut nullable Statement ifTree;
 
@@ -585,12 +592,20 @@ class ASTEitherCaseExpr : ASTSymbol
 
             bool cleanup = baseExpr.info.lifetime == Lifetime.gifted;
 
-            auto namespace = context.compiler.variableDeclaration(
-                context.namespace, case_.identifier, type, mut=false, borrowed=!cleanup, false);
-            auto context = context.withNamespace(namespace);
-            Reference variable = namespace.accessDecl(context);
-            // Borrow the case base.
-            thenSteps ~= context.compiler.assignStatement(variable, new EitherMember(baseExprTemp, matchIndex));
+            mut Context context = context;
+            mut uninitialized Reference variable;
+            if (!singleUse) {
+                auto namespace = context.compiler.variableDeclaration(
+                    context.namespace, case_.identifier, type, mut=false, borrowed=!cleanup, false);
+                context = context.withNamespace(namespace);
+                variable = namespace.accessDecl(context);
+                // Borrow the case base.
+                thenSteps ~= context.compiler.assignStatement(variable, new EitherMember(baseExprTemp, matchIndex));
+            } else {
+                auto namespace = context.compiler.symbolAlias(
+                    context.namespace, case_.identifier, new EitherMember(baseExprTemp, matchIndex));
+                context = context.withNamespace(namespace);
+            }
             Expression userExpr = case_.expr.compile(context)?
                 .beExpressionImplCall(context, caseLoc)?;
             (Statement | fail Error) userStmt() {
@@ -604,7 +619,7 @@ class ASTEitherCaseExpr : ASTSymbol
                 }
             }
             thenSteps ~= userStmt?;
-            if (cleanup) {
+            if (cleanup && !singleUse) {
                 if (auto destroy = variable.type.endLifetime(context, variable)) {
                     thenSteps ~= destroy;
                 }

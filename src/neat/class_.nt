@@ -1274,7 +1274,7 @@ alias ASTClassEntry = (ASTClassDeclMember | ASTClassDeclMethod | ASTDeclaration 
 
 class ASTClassDecl : ASTSymbolDeclaration
 {
-    string[] supers;
+    ASTSymbol[] supers;
 
     bool final_;
 
@@ -1294,9 +1294,7 @@ class ASTClassDecl : ASTSymbolDeclaration
         mut nullable Class superClass = null;
         mut Intf[] superIntfs = [];
         for (i, super_ in this.supers) {
-            nullable Symbol superObj = context.namespace.lookup(
-                super_, context, LookupReason.identifier, locRange)?;
-            if (!superObj) return this.locRange.fail("super class/intf not found: $super_");
+            auto superObj = super_.compile(context)?;
             auto superClassTest = superObj.instanceOf(ClassType);
             if (i == 0 && superClassTest) {
                 // first super may be a class
@@ -1304,7 +1302,7 @@ class ASTClassDecl : ASTSymbolDeclaration
             } else {
                 // all others must be intfs
                 auto superIntf = superObj.instanceOf(IntfType);
-                if (!superIntf) return this.locRange.fail("super interface is not an interface: $super_");
+                super_.locRange.assert(!!superIntf, "super type is not an interface")?;
                 superIntfs ~= superIntf.intf;
             }
         }
@@ -1412,7 +1410,7 @@ struct ASTIntfDeclMethod
 
 class ASTIntfDecl : ASTSymbolDeclaration
 {
-    string[] superIntfs;
+    ASTSymbol[] superIntfs;
 
     (ASTIntfDeclMethod | ASTDeclaration)[] members;
 
@@ -1423,15 +1421,13 @@ class ASTIntfDecl : ASTSymbolDeclaration
     override (IntfType | fail Error) compileSymbol(Context context)
     {
         mut Intf[] superIntfs = [];
-        if (this.superIntfs.length > 0)
-        {
+        if (this.superIntfs.length > 0) {
             for (superIntf in this.superIntfs) {
-                nullable Symbol superIntfSym = context.namespace.lookup(
-                    superIntf, context, LookupReason.identifier, locRange)?;
-                this.locRange.assert(!!superIntfSym, "super interface not found: " ~ superIntf)?;
-                auto superIntf = superIntfSym.instanceOf(IntfType);
-                this.locRange.assert(!!superIntf, "super interface is not an interface")?;
-                superIntfs ~= superIntf.intf;
+                auto superIntfSym = superIntf.compile(context)?;
+                superIntf.locRange.assert(!!superIntfSym, "super interface not found")?;
+                auto superIntfType = superIntfSym.instanceOf(IntfType);
+                superIntf.locRange.assert(!!superIntfType, "super interface is not an interface")?;
+                superIntfs ~= superIntfType.intf;
             }
         }
         return new IntfType(
@@ -1505,12 +1501,12 @@ class ASTIntfDecl : ASTSymbolDeclaration
 
     string name = parser.parseIdentifier?;
     auto locRange = parser.to(from);
-    mut string[] supers;
+    mut ASTSymbol[] supers;
     if (parser.accept(":")?) {
         while (true) {
-            auto super_ = parser.parseIdentifier?;
-            parser.assert_(super_.length > 0, "expected super class identifier")?;
-            supers ~= super_;
+            auto super_ = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+            parser.assert_(!!super_, "expected super class identifier")?;
+            supers ~= super_.notNull;
             if (parser.accept(",")?) continue;
             break;
         }
@@ -1669,12 +1665,12 @@ class ASTIntfDecl : ASTSymbolDeclaration
 
     string name = parser.parseIdentifier?;
     auto declLocRange = parser.to(from);
-    mut string[] superIntfs;
+    mut ASTSymbol[] superIntfs;
     if (parser.accept(":")?) {
         while (true) {
-            string superIntf = parser.parseIdentifier?;
-            parser.assert_(superIntf.length > 0, "expected super identifier identifier")?;
-            superIntfs ~= superIntf;
+            auto superIntf = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+            parser.assert_(!!superIntf, "expected super interface")?;
+            superIntfs ~= superIntf.notNull;
             if (parser.accept(",")?) continue;
             break;
         }

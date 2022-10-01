@@ -2391,12 +2391,18 @@ class ASTIfStatement : ASTStatement
             }
             ASTVarDeclStatement vardecl: {
                 auto initial = vardecl.initial.compile(context)?.beExpressionImplCall(context, vardecl.locRange)?;
+                // TODO
+                // auto declType = vardecl.type.compile(context)?.beType(vardecl.type.locRange)? if vardecl.type else null;
+                mut nullable Type declType;
+                if (vardecl.type)
+                    declType = vardecl.type.compile(context)?.beType(vardecl.type.locRange)?;
 
                 // `if (Foo var = some nullable Foo)`:
                 //   - cache `some`, test for nullness, then declare Foo var.
-                if (initial.type.zeroInitializable && context.compiler.isClassType(initial.type)) {
+                if (initial.type.zeroInitializable && context.compiler.isClassType(initial.type)
+                    && (!declType || !declType.zeroInitializable && context.compiler.isClassType(declType.notNull)))
+                {
                     Type notNullableType = initial.type.makeNotNullable;
-
                     auto tempInitial = new PairedTemporaryExpr(initial.type, initial.info.lifetime, context.getLabel);
                     auto initTemp = new InitializeTemporaryExprStatement(tempInitial, initial);
 
@@ -2406,7 +2412,7 @@ class ASTIfStatement : ASTStatement
 
                     auto actualVarDecl = new ASTVarDeclStatement(
                         vardecl.name, mutable=vardecl.mutable, infer=false, uninitialized=false,
-                        type=new ASTSymbolHelper(notNullableType),
+                        type=new ASTSymbolHelper(declType if declType else notNullableType),
                         initial=new ASTSymbolHelper(new PointerCast(notNullableType, tempInitial)),
                         vardecl.locRange);
                     auto pair = actualVarDecl.compile(context)?;
@@ -3925,8 +3931,6 @@ class ASTStaticIfStatement : ASTStatement
         return stmt;
     if (ASTStatement stmt = parseScope(parser, lexicalContext)?)
         return stmt;
-    // FIXME why did this work?!
-    // if (ASTStatement decl = parseDeclaration(parser, lexicalContext)?)
     if (ASTDeclaration decl = parseDeclaration(parser, lexicalContext)?)
         return new ASTDeclarationStatement(decl);
     if (ASTStatement stmt = parseNestedFunctionDecl(parser, lexicalContext)?)

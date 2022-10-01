@@ -3252,7 +3252,7 @@ class ASTNestedFunctionDeclStatement : ASTStatement
 
     override (StatementCompileResult | fail Error) compile(Context context)
     {
-        auto fun = this.fun.compile(context)?;
+        auto fun = this.fun.compileSymbol(context)?;
         auto latent = fun.instanceOf(LatentNestedFunction).notNull;
 
         return StatementCompileResult(
@@ -3290,7 +3290,7 @@ class ASTNestedFunctionDeclExpr : ASTSymbol
         auto fun = new ASTFunction(
             name, :auto_, this.params, isDeclaration=false, this.locRange, this.stmt, this.macroState, comment=null);
 
-        auto resolvedFun = fun.compile(context)?.instanceOf(LatentNestedFunction).notNull.resolve(context);
+        auto resolvedFun = fun.compileSymbol(context)?.instanceOf(LatentNestedFunction).notNull.resolve(context);
         auto astSym = new ASTSymbolHelper(resolvedFun);
         auto astRef = new ASTReference(astSym, this.locRange);
         return astRef.compile(context);
@@ -3979,7 +3979,7 @@ struct ASTModuleEntry
 {
     Protection protection;
 
-    (ASTImport | ASTSymbol | ASTExternFunction | ASTExternVariable
+    (ASTImport | ASTExternFunction | ASTExternVariable
         | ASTDeclaration | ASTUnitTest
         | ASTPragma | ASTVersion
     ) symbol;
@@ -4028,7 +4028,7 @@ class ASTModule : ASTModuleBase
         return null;
     }
 
-    override void addEntry(Protection protection, (ASTExternFunctionBase | ASTSymbol) target) {
+    override void addEntry(Protection protection, (ASTExternFunctionBase | ASTDeclaration) target) {
         this.entries ~= ASTModuleEntry(
             protection,
             target.case(ASTExternFunctionBase b: b.instanceOf(ASTExternFunction).notNull),
@@ -4104,7 +4104,7 @@ struct ResolvingModuleEntry
 
     (nullable Symbol | fail Error) resolution;
 
-    (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStruct | ASTAliasDecl | ASTUnitTest | Nothing) symbol;
+    (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest | Nothing) symbol;
 
     bool shouldEmit() {
         symbol.case {
@@ -4138,7 +4138,7 @@ class Resolver
     void add(
         string name,
         Protection protection,
-        (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStruct | ASTAliasDecl | ASTUnitTest) astSymbol)
+        (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) astSymbol)
     {
         index[name] = index.get(name, []) ~ this.entries.length;
         this.entries ~= ResolvingModuleEntry(name, protection, false, null, astSymbol);
@@ -4196,15 +4196,16 @@ class Resolver
                 return locRange.fail("Dependency cycle while resolving $(this.entries[i].name).");
             }
             this.entries[i].resolving = true;
+            // TODO ASTSymbolDeclaration now combines many of those
             this.entries[i].resolution = this.entries[i].symbol.case(
                 // TODO compile function statement immediately too
-                ASTFunction fun: fun.compile(context).case(
+                ASTFunction fun: fun.compileSymbol(context).case(
                     Symbol sym: sym.instanceOf(FunctionDeclaration).notNull,
                     Error err: err),
                 ASTUnitTest ut: ut.compile(context),
-                ASTClassDecl decl: decl.compile(context),
-                ASTIntfDecl decl: decl.compile(context),
-                ASTStruct struct_: struct_.compile(context),
+                ASTClassDecl decl: decl.compileSymbol(context),
+                ASTIntfDecl decl: decl.compileSymbol(context),
+                ASTStructDecl struct_: struct_.compileSymbol(context),
                 ASTAliasDecl decl: decl.target.compile(context),
                 Nothing _: ({ assert(false); cast(Symbol) null; }));
             this.entries[i].resolving = false;
@@ -4249,7 +4250,7 @@ class Module : ModuleBase
 
     void add(
         string name, Protection protection,
-        (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStruct | ASTAliasDecl | ASTUnitTest) symbol)
+        (ASTFunction | ASTClassDecl | ASTIntfDecl | ASTStructDecl | ASTAliasDecl | ASTUnitTest) symbol)
     {
         this.resolver.add(name, protection, symbol);
     }
@@ -4337,10 +4338,6 @@ class Module : ModuleBase
                     if (ClassType classType = symbol.instanceOf(ClassType)) {
                         finishedSymbols ~= new DefineClassIntf(classType.class_);
                         for (method in classType.class_.methods)
-                            finishedSymbols ~= method.compile(context)?;
-                    }
-                    if (Struct struct_ = symbol.instanceOf(Struct)) {
-                        for (method in struct_.methods)
                             finishedSymbols ~= method.compile(context)?;
                     }
                 }
@@ -5122,35 +5119,23 @@ class LexicalContextImpl : LexicalContext
             }
             ASTDeclaration astDecl: {
                 if (auto structDecl = astDecl.instanceOf(ASTStructDecl)) {
-                    module_.add(structDecl.struct_.name, entry.protection, structDecl.struct_);
+                    module_.add(structDecl.name, entry.protection, structDecl);
                 } else if (auto aliasDecl = astDecl.instanceOf(ASTAliasDecl)) {
                     module_.add(aliasDecl.name, entry.protection, aliasDecl);
                 } else if (auto templateDecl = astDecl.instanceOf(ASTTemplateDecl)) {
                     module_.register(templateDecl.name, entry.protection, templateDecl.compileSymbol(context));
+                } else if (auto classDecl = astDecl.instanceOf(ASTClassDecl)) {
+                    module_.add(classDecl.name, entry.protection, classDecl);
+                } else if (auto intfDecl = astDecl.instanceOf(ASTIntfDecl)) {
+                    module_.add(intfDecl.name, entry.protection, intfDecl);
+                } else if (auto enumDecl = astDecl.instanceOf(ASTEnumDecl)) {
+                    module_.register(enumDecl.name, entry.protection, enumDecl.compileSymbol(context)?);
+                } else if (auto struct_ = astDecl.instanceOf(ASTStructDecl)) {
+                    module_.add(struct_.name, entry.protection, struct_);
+                } else if (auto funDef = astDecl.instanceOf(ASTFunction)) {
+                    module_.add(funDef.name, entry.protection, funDef);
                 } else {
                     print("declaration $(astDecl.repr)");
-                    assert(false);
-                }
-            }
-            ASTSymbol symbol: {
-                // TODO just handle all as ASTDeclaration
-                if (auto classDecl = symbol.instanceOf(ASTClassDecl)) {
-                    module_.add(classDecl.name, entry.protection, classDecl);
-                }
-                else if (auto intfDecl = symbol.instanceOf(ASTIntfDecl)) {
-                    module_.add(intfDecl.name, entry.protection, intfDecl);
-                }
-                else if (auto enumDecl = symbol.instanceOf(ASTEnumDecl)) {
-                    module_.register(enumDecl.name, entry.protection, enumDecl.compile(context)?);
-                }
-                else if (auto struct_ = symbol.instanceOf(ASTStruct)) {
-                    module_.add(struct_.name, entry.protection, struct_);
-                }
-                else if (auto funDef = symbol.instanceOf(ASTFunction)) {
-                    module_.add(funDef.name, entry.protection, funDef);
-                }
-                else {
-                    print("symbol $(symbol.repr)");
                     assert(false);
                 }
             }

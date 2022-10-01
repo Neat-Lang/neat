@@ -635,17 +635,15 @@ class ASTStructStaticIf
 alias ASTStructEntry = (ASTStructMember | ASTStructMethod | ASTAliasDecl
     | ASTStructVersionBlock | ASTStructStaticIf);
 
-class ASTStruct : ASTSymbol
+class ASTStructDecl : ASTSymbolDeclaration
 {
-    string name;
-
     string comment;
 
     ASTStructEntry[] entries;
 
     this(this.name, this.entries, this.locRange) { }
 
-    override (Struct | fail Error) compile(Context context) {
+    override (Struct | fail Error) compileSymbol(Context context) {
         mut StructMemberDeclaration[] members;
         mut ASTStructMethod[] methods;
         mut StructAliasDecl[] decls;
@@ -730,10 +728,26 @@ class ASTStruct : ASTSymbol
         }
         struct_.decls = decls;
 
+        for (method in struct_.methods) {
+            context.compilingModule.track(method);
+        }
+
         return struct_;
     }
 
-    override string repr() { return "repr(ASTStruct)"; }
+    override string repr() { return this.name; }
+
+    override ASTSymbol quote(Quoter quoter) {
+        ASTSymbol[] entries = [a.quoteStructEntry(quoter) for a in this.entries];
+        with (quoter.compiler) {
+            ASTSymbol structEntry = astIdentifier("ASTStructEntry", __RANGE__);
+            return astNewExpression(
+                astIdentifier("ASTStructDecl", __RANGE__), [
+                    astStringLiteral(this.name, __RANGE__),
+                    astArrayLiteralTypeHint(structEntry, entries, __RANGE__),
+                    quoter.quoteLocRange(this.locRange)], __RANGE__);
+        }
+    }
 }
 
 class StructLiteral : Expression
@@ -762,46 +776,7 @@ class StructLiteral : Expression
     }
 }
 
-class ASTStructDecl : ASTDeclaration
-{
-    ASTStruct struct_;
-
-    this(string name, ASTStructEntry[] entries, LocRange locRange) {
-        this.struct_ = new ASTStruct(name, entries, locRange);
-    }
-
-    override (Namespace | fail Error) compile(Context context)
-    {
-        auto struct_ = this.struct_.compile(context)?;
-
-        for (method in struct_.methods) {
-            context.compilingModule.track(method);
-        }
-
-        return new SymbolAlias(context.namespace, this.struct_.name, struct_);
-    }
-
-    (Struct | fail Error) compileToStruct(Context context)
-    {
-        return this.struct_.compile(context);
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        ASTSymbol[] entries = [a.quoteStructEntry(quoter) for a in this.struct_.entries];
-        with (quoter.compiler) {
-            ASTSymbol structEntry = astIdentifier("ASTStructEntry", __RANGE__);
-            return astNewExpression(
-                astIdentifier("ASTStructDecl", __RANGE__), [
-                    astStringLiteral(this.struct_.name, __RANGE__),
-                    astArrayLiteralTypeHint(structEntry, entries, __RANGE__),
-                    quoter.quoteLocRange(this.struct_.locRange)], __RANGE__);
-        }
-    }
-
-    override string repr() { return struct_.name; }
-}
-
-(nullable ASTStructDecl | fail Error) parseStructDecl(Parser parser, LexicalContext lexicalContext)
+(nullable ASTDeclaration | fail Error) parseStructDecl(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto comment = parser.parseLastComment?;
@@ -822,7 +797,7 @@ class ASTStructDecl : ASTDeclaration
     parser.commit;
     // FIXME transition to constructor that takes comment (constructor overloading?)
     auto decl = new ASTStructDecl(name, entries, locRange);
-    decl.struct_.comment = comment;
+    decl.comment = comment;
     return decl;
 }
 

@@ -199,7 +199,9 @@ class TemplateDecl : LatentSymbol
             .withNamespace(new TemplateInstantiationNamespace(
                 this.parent, this.decl.typeParameterNames, parameters))
             .withCompilingModule(module_);
-        Symbol value = this.decl.content.compile(instanceContext)?;
+        auto astSymbolDecl = this.decl.content.instanceOf(ASTSymbolDeclaration);
+        this.decl.content.locRange.assert(!!astSymbolDecl, "invalid declaration for template")?;
+        Symbol value = astSymbolDecl.notNull.compileSymbol(instanceContext)?;
 
         with (this.mutex.locked) {
             this.instantiations ~= (module_, parameters, value);
@@ -230,7 +232,7 @@ class ASTTemplateDecl : ASTDeclaration
 
     string[] typeParameterNames;
 
-    ASTSymbol content;
+    ASTDeclaration content;
 
     string comment;
 
@@ -278,7 +280,7 @@ class ASTTemplateDecl : ASTDeclaration
     mut uninitialized ASTSymbol member;
     parser.strip?;
     auto contentFrom = parser.from?;
-    nullable ASTSymbol member = parseTemplateContents(parser, lexicalContext)?;
+    nullable ASTDeclaration member = parseTemplateContents(parser, lexicalContext)?;
     if (!member) {
         return parser.to(contentFrom).fail("template member expected");
     }
@@ -289,29 +291,16 @@ class ASTTemplateDecl : ASTDeclaration
 
 // parse "the sort of thing that can appear in a `template`"
 // TODO better name for this category. Maybe it really is parseDeclaration?
-(nullable ASTSymbol | fail Error) parseTemplateContents(Parser parser, LexicalContext lexicalContext) {
-    // FIXME
-    auto classDecl = parseClassDecl(parser, lexicalContext)?;
-    if (ASTClassDecl classDecl = classDecl) {
+(nullable ASTDeclaration | fail Error) parseTemplateContents(Parser parser, LexicalContext lexicalContext) {
+    if (ASTDeclaration classDecl = parseClassDecl(parser, lexicalContext)?) {
         return classDecl;
     }
-    auto intfDecl = parseIntfDecl(parser, lexicalContext)?;
-    if (ASTIntfDecl intfDecl = intfDecl) {
+    if (ASTDeclaration intfDecl = parseIntfDecl(parser, lexicalContext)?) {
         return intfDecl;
     }
-    parser.begin;
-    if (ASTDeclaration decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)?) {
-        // FIXME figure out how to converge ASTDeclaration and ASTSymbol
-        // imports and structs are only "sort of" the same thing - maybe make
-        // an ASTTypeDeclaration that can wrap an ASTSymbol?
-        if (auto structDecl = decl.instanceOf(ASTStructDecl)) {
-            parser.commit;
-            return structDecl.struct_;
-        }
-        parser.revert;
-        return null;
+    if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)?) {
+        return decl;
     }
-    parser.revert;
     if (auto fun = parseFunction(parser, lexicalContext)?) {
         return fun;
     }

@@ -226,10 +226,8 @@ class TemplateDecl : LatentSymbol
     }
 }
 
-class ASTTemplateDecl : ASTDeclaration
+class ASTTemplateDecl : ASTSymbolDeclaration
 {
-    string name;
-
     string[] typeParameterNames;
 
     ASTDeclaration content;
@@ -238,12 +236,8 @@ class ASTTemplateDecl : ASTDeclaration
 
     this(this.name, this.typeParameterNames, this.content, this.comment) { }
 
-    Symbol compileSymbol(Context context) {
+    override (Symbol | fail Error) compileSymbol(Context context) {
         return new TemplateDecl(context.namespace, this);
-    }
-
-    override (Namespace | fail Error) compile(Context context) {
-        return new SymbolAlias(context.namespace, this.name, compileSymbol(context));
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTTemplateDecl'!"); assert(false); }
@@ -261,20 +255,9 @@ class ASTTemplateDecl : ASTDeclaration
     }
     parser.commit;
     auto name = parser.parseIdentifier?;
-    mut string[] typeParameters;
-    // ( [identifier [, identifier]*]? )
     parser.expect("(")?;
-    auto typeParameter = parser.parseIdentifier?;
-    if (typeParameter.length == 0) {
-        parser.expect(")")?;
-    } else {
-        typeParameters ~= typeParameter;
-        while (!parser.accept(")")?) {
-            parser.expect(",")?;
-            auto typeParameter = parser.parseIdentifier?;
-            typeParameters ~= typeParameter;
-        }
-    }
+    string[] typeParameters = parser.parseTemplateParameters(lexicalContext, swallowErrors=false)?
+        .case(:nothing: ({ assert(false); null; }));
     parser.expect("{")?;
     // TODO generalize (parseSymbol)?
     mut uninitialized ASTSymbol member;
@@ -287,6 +270,59 @@ class ASTTemplateDecl : ASTDeclaration
 
     parser.expect("}")?;
     return new ASTTemplateDecl(name, typeParameters, member.notNull, comment);
+}
+
+(nullable ASTDeclaration | fail Error) parseTemplateStub(
+    Parser parser, LexicalContext lexicalContext, string name, string comment,
+    (nullable ASTDeclaration | fail Error) delegate() parseInner)
+{
+    parser.begin;
+    if (!parser.accept("(")?) {
+        parser.revert;
+        return null;
+    }
+    parser.parseTemplateParameters(lexicalContext, swallowErrors=true)?.case {
+        :nothing:
+            parser.revert;
+            return null;
+        string[] typeParameters:
+            auto inner = parseInner()?;
+            if (!inner) {
+                parser.revert;
+                return null;
+            }
+            parser.commit;
+            return new ASTTemplateDecl(name, typeParameters, inner.notNull, comment);
+    }
+}
+
+(string[] | fail Error | :nothing) parseTemplateParameters(
+    Parser parser, LexicalContext lexicalContext, bool swallowErrors)
+{
+    mut string[] typeParameters;
+    // ( [identifier [, identifier]*]? )
+    auto typeParameter = parser.parseIdentifier?;
+    if (typeParameter.length == 0) {
+        if (!parser.accept(")")?) {
+            if (swallowErrors) return :nothing;
+            parser.expect(")")?;
+        }
+    } else {
+        typeParameters ~= typeParameter;
+        while (!parser.accept(")")?) {
+            if (!parser.accept(",")?) {
+                if (swallowErrors) return :nothing;
+                parser.expect(",")?;
+            }
+            auto typeParameter = parser.parseIdentifier?;
+            if (typeParameter.length == 0) {
+                if (swallowErrors) return :nothing;
+                return parser.fail("type parameter expected");
+            }
+            typeParameters ~= typeParameter;
+        }
+    }
+    return typeParameters;
 }
 
 // parse "the sort of thing that can appear in a `template`"

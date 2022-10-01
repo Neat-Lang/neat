@@ -4,18 +4,14 @@ import neat.base;
 import neat.statements;
 import neat.util;
 
-class ASTAliasDecl : ASTDeclaration
+class ASTAliasDecl : ASTSymbolDeclaration
 {
-    string name;
-
     ASTSymbol target;
 
-    this(this.name, this.target) { }
+    this(this.name, this.target, this.locRange=__RANGE__) { }
 
-    // FIXME should return a Namespace?
-    override (Namespace | fail Error) compile(Context context) {
-        auto target = this.target.compile(context)?;
-        return new SymbolAlias(context.namespace, this.name, target);
+    override (Symbol | fail Error) compileSymbol(Context context) {
+        return this.target.compile(context)?;
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -28,14 +24,26 @@ class ASTAliasDecl : ASTDeclaration
     }
 }
 
-(nullable ASTAliasDecl | fail Error) parseAliasDecl(Parser parser, LexicalContext lexicalContext) {
-    if (!parser.accept("alias")?) return null;
+(nullable ASTDeclaration | fail Error) parseAliasDecl(Parser parser, LexicalContext lexicalContext) {
+    parser.begin;
+    auto comment = parser.parseLastComment?;
+    if (!parser.accept("alias")?) {
+        parser.revert;
+        return null;
+    }
     auto from = parser.from?;
     string name = parser.parseIdentifier?;
     from.assert(name.length > 0, "alias name expected")?;
-    parser.expect("=")?;
-    mut nullable ASTSymbol target = lexicalContext.compiler.parseType(parser, lexicalContext)?;
-    if (!target) target = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
-    parser.expect(";")?;
-    return new ASTAliasDecl(name, target.notNull);
+    parser.commit;
+    auto locRange = parser.to(from);
+    (nullable ASTDeclaration | fail Error) parseRest() {
+        parser.expect("=")?;
+        mut nullable ASTSymbol target = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+        if (!target) target = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
+        parser.expect(";")?;
+        return new ASTAliasDecl(name, target.notNull, locRange);
+    }
+    if (auto ret = lexicalContext.compiler.parseTemplateStub(parser, lexicalContext, name, comment, &parseRest)?)
+        return ret;
+    return parseRest?;
 }

@@ -786,19 +786,26 @@ class StructLiteral : Expression
         return null;
     }
     string name = parser.parseIdentifier?;
-    assert(!!name.length);
-    auto locRange = parser.to(from);
-    mut ASTStructEntry[] entries;
-    parser.expect("{")?;
-    while (!parser.accept("}")?) {
-        auto entry = parseStructEntry(parser, lexicalContext)?;
-        entries ~= entry;
+    (nullable ASTDeclaration | fail Error) parseRest() {
+        assert(!!name.length);
+        auto locRange = parser.to(from);
+        mut ASTStructEntry[] entries;
+        parser.expect("{")?;
+        while (!parser.accept("}")?) {
+            auto entry = parseStructEntry(parser, lexicalContext)?;
+            entries ~= entry;
+        }
+        // FIXME transition to constructor that takes comment (constructor overloading?)
+        auto decl = new ASTStructDecl(name, entries, locRange);
+        decl.comment = comment;
+        return decl;
+    }
+    if (auto ret = lexicalContext.compiler.parseTemplateStub(parser, lexicalContext, name, comment, &parseRest)?) {
+        parser.commit;
+        return ret;
     }
     parser.commit;
-    // FIXME transition to constructor that takes comment (constructor overloading?)
-    auto decl = new ASTStructDecl(name, entries, locRange);
-    decl.comment = comment;
-    return decl;
+    return parseRest?;
 }
 
 (ASTStructEntry[] | fail Error) parseStructBlock(Parser parser, LexicalContext lexicalContext) {
@@ -876,7 +883,9 @@ class StructLiteral : Expression
     }
     if (auto aliasDecl = parseAliasDecl(parser, lexicalContext)?) {
         parser.assert_(!static_, "TODO static alias")?;
-        entries ~= aliasDecl;
+        auto aliasDecl = aliasDecl.instanceOf(ASTAliasDecl);
+        parser.assert_(!!aliasDecl, "TODO template alias")?;
+        entries ~= aliasDecl.notNull;
         return entries;
     }
     if (parser.accept("this")?)

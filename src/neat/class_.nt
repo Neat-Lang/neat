@@ -1501,28 +1501,34 @@ class ASTIntfDecl : ASTSymbolDeclaration
 
     string name = parser.parseIdentifier?;
     auto locRange = parser.to(from);
-    mut ASTSymbol[] supers;
-    if (parser.accept(":")?) {
-        while (true) {
-            auto super_ = lexicalContext.compiler.parseType(parser, lexicalContext)?;
-            parser.assert_(!!super_, "expected super class identifier")?;
-            supers ~= super_.notNull;
-            if (parser.accept(",")?) continue;
-            break;
-        }
-    }
 
-    mut ASTClassEntry[] members;
-    parser.expect("{")?;
-    while (!parser.accept("}")?) {
-        (void | fail Error) do_() {
-            members ~= parseClassEntry(parser, lexicalContext, name)?;
+    (nullable ASTDeclaration | fail Error) parseRest() {
+        mut ASTSymbol[] supers;
+        if (parser.accept(":")?) {
+            while (true) {
+                auto super_ = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+                parser.assert_(!!super_, "expected super class identifier")?;
+                supers ~= super_.notNull;
+                if (parser.accept(",")?) continue;
+                break;
+            }
         }
-        parser.verifyTransactions("parse rule imbalance", &do_)?;
+
+        mut ASTClassEntry[] members;
+        parser.expect("{")?;
+        while (!parser.accept("}")?) {
+            (void | fail Error) do_() {
+                members ~= parseClassEntry(parser, lexicalContext, name)?;
+            }
+            parser.verifyTransactions("parse rule imbalance", &do_)?;
+        }
+        return new ASTClassDecl(
+            name, supers, classFinal, classAbstract,
+            members, lexicalContext.macroState, locRange, comment);
     }
-    return new ASTClassDecl(
-        name, supers, classFinal, classAbstract,
-        members, lexicalContext.macroState, locRange, comment);
+    if (auto ret = lexicalContext.compiler.parseTemplateStub(parser, lexicalContext, name, comment, &parseRest)?)
+        return ret;
+    return parseRest?;
 }
 
 (ASTClassEntry[] | fail Error) parseClassEntry(Parser parser, LexicalContext lexicalContext, string className)
@@ -1651,10 +1657,10 @@ class ASTIntfDecl : ASTSymbolDeclaration
     }
 }
 
-(nullable ASTIntfDecl | fail Error) parseIntfDecl(Parser parser, LexicalContext lexicalContext)
+(nullable ASTDeclaration | fail Error) parseIntfDecl(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
-    parser.strip?;
+    auto comment = parser.parseLastComment?;
     auto from = parser.from?;
     if (!parser.acceptIdentifier("interface")?)
     {
@@ -1665,47 +1671,53 @@ class ASTIntfDecl : ASTSymbolDeclaration
 
     string name = parser.parseIdentifier?;
     auto declLocRange = parser.to(from);
-    mut ASTSymbol[] superIntfs;
-    if (parser.accept(":")?) {
-        while (true) {
-            auto superIntf = lexicalContext.compiler.parseType(parser, lexicalContext)?;
-            parser.assert_(!!superIntf, "expected super interface")?;
-            superIntfs ~= superIntf.notNull;
-            if (parser.accept(",")?) continue;
-            break;
-        }
-    }
-    mut (ASTIntfDeclMethod | ASTDeclaration)[] members;
-    parser.expect("{")?;
-    while (!parser.accept("}")?)
-    {
-        auto from = parser.from?;
 
-        if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)?) {
-            members ~= decl;
-            continue;
+    (nullable ASTDeclaration | fail Error) parseRest() {
+        mut ASTSymbol[] superIntfs;
+        if (parser.accept(":")?) {
+            while (true) {
+                auto superIntf = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+                parser.assert_(!!superIntf, "expected super interface")?;
+                superIntfs ~= superIntf.notNull;
+                if (parser.accept(",")?) continue;
+                break;
+            }
         }
+        mut (ASTIntfDeclMethod | ASTDeclaration)[] members;
+        parser.expect("{")?;
+        while (!parser.accept("}")?)
+        {
+            auto from = parser.from?;
 
-        nullable ASTSymbol retType = lexicalContext.compiler.parseType(parser, lexicalContext)?;
-        parser.to(from).assert(!!retType, "expected member type")?;
-        string memberName = parser.parseIdentifier?;
-        parser.to(from).assert(memberName.length > 0, "expected member name")?;
-        auto locRange = parser.to(from);
-        parser.expect("(")?;
-        auto params = parseParameterList(parser, lexicalContext, variadic=false, thisAssignment=true)?;
-        assert(!params.variadic);
-        auto params = params.params;
-        parser.expect(";")?;
-        // TODO error on specific parameter
-        locRange.assert(
-            [all a.case(ASTParameter: true, ASTThisAssignment: false) for a in params],
-            "no 'this.' in interface method")?;
-        // FIXME bottom
-        ASTParameter fail() { assert(false); }
-        auto astParameters = [a.case(ASTParameter p: p, ASTThisAssignment: fail) for a in params];
-        members ~= ASTIntfDeclMethod(memberName, retType.notNull, astParameters, locRange);
+            if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)?) {
+                members ~= decl;
+                continue;
+            }
+
+            nullable ASTSymbol retType = lexicalContext.compiler.parseType(parser, lexicalContext)?;
+            parser.to(from).assert(!!retType, "expected member type")?;
+            string memberName = parser.parseIdentifier?;
+            parser.to(from).assert(memberName.length > 0, "expected member name")?;
+            auto locRange = parser.to(from);
+            parser.expect("(")?;
+            auto params = parseParameterList(parser, lexicalContext, variadic=false, thisAssignment=true)?;
+            assert(!params.variadic);
+            auto params = params.params;
+            parser.expect(";")?;
+            // TODO error on specific parameter
+            locRange.assert(
+                [all a.case(ASTParameter: true, ASTThisAssignment: false) for a in params],
+                "no 'this.' in interface method")?;
+            // FIXME bottom
+            ASTParameter fail() { assert(false); }
+            auto astParameters = [a.case(ASTParameter p: p, ASTThisAssignment: fail) for a in params];
+            members ~= ASTIntfDeclMethod(memberName, retType.notNull, astParameters, locRange);
+        }
+        return new ASTIntfDecl(name, superIntfs, members, lexicalContext.macroState, declLocRange);
     }
-    return new ASTIntfDecl(name, superIntfs, members, lexicalContext.macroState, declLocRange);
+    if (auto ret = lexicalContext.compiler.parseTemplateStub(parser, lexicalContext, name, comment, &parseRest)?)
+        return ret;
+    return parseRest?;
 }
 
 class ClassInfo : Expression

@@ -672,7 +672,7 @@ class ASTFunction : ASTSymbolDeclaration
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTFunction'!"); assert(false); }
 }
 
-(nullable ASTFunction | fail Error) parseFunction(Parser parser, LexicalContext lexicalContext)
+(nullable ASTDeclaration | fail Error) parseFunction(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto comment = parser.parseLastComment?;
@@ -690,23 +690,36 @@ class ASTFunction : ASTSymbolDeclaration
     // avoid 'mut typeof(expr)' from matching as a function
     // TODO reserved identifier list
     auto locRange = parser.to(from);
-    if (!name.length || name == "typeof" || !parser.accept("(")?)
+    if (!name.length || name == "typeof")
     {
         parser.revert;
         return null;
     }
-    parser.commit;
-    auto params = parseParameterList(parser, lexicalContext, variadic=false, thisAssignment=false)?;
-    assert(!params.variadic);
-    ASTParameter pick((ASTParameter | ASTThisAssignment) value) {
-        value.case {
-            ASTParameter p: return p;
-            ASTThisAssignment a: assert(false);
+    (nullable ASTDeclaration | fail Error) parseRest() {
+        if (!parser.accept("(")?)
+            return null;
+        auto params = parseParameterList(parser, lexicalContext, variadic=false, thisAssignment=false)?;
+        assert(!params.variadic);
+        ASTParameter pick((ASTParameter | ASTThisAssignment) value) {
+            value.case {
+                ASTParameter p: return p;
+                ASTThisAssignment a: assert(false);
+            }
         }
+        auto params = [pick(entry) for entry in params.params];
+        ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
+        return new ASTFunction(name, ret, params, false, locRange, stmt, lexicalContext.macroState, comment);
     }
-    auto params = [pick(entry) for entry in params.params];
-    ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
-    return new ASTFunction(name, ret, params, false, locRange, stmt, lexicalContext.macroState, comment);
+    if (auto ret = lexicalContext.compiler.parseTemplateStub(parser, lexicalContext, name, comment, &parseRest)?) {
+        parser.commit;
+        return ret;
+    }
+    if (auto ret = parseRest?) {
+        parser.commit;
+        return ret;
+    }
+    parser.revert;
+    return null;
 }
 
 ((ASTParameter | ASTThisAssignment)[] params, bool variadic | fail Error) parseParameterList(

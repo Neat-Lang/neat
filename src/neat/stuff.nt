@@ -544,12 +544,12 @@ class WrapReference : Reference
         if (auto memberAccess = astTarget.instanceOf(ASTMemberBase)) {
             auto base = memberAccess.base.compile(context)?;
             if (auto type = base.instanceOf(Type)) {
-                auto protection = type.protectionAt(context.namespace.notNull);
+                auto protection = type.protectionAt(context.namespace);
                 if (auto ret = type.callMember(
                         context, null, memberAccess.member, astArgs, protection, memberAccess.locRange)?)
                     return ret;
             } else if (auto baseExpr = base.isExpressionImplCall(context, locRange)?) {
-                auto protection = baseExpr.type.protectionAt(context.namespace.notNull);
+                auto protection = baseExpr.type.protectionAt(context.namespace);
                 if (auto ret = baseExpr.type.callMember(
                         context, baseExpr, memberAccess.member, astArgs, protection, memberAccess.locRange)?)
                     return ret;
@@ -557,22 +557,39 @@ class WrapReference : Reference
         }
     }
 
-    mut auto target = astTarget.compile(context)?;
+    // This IFTI specialcasing is very skeevy
+    mut uninitialized Symbol target;
+    mut (:none | ASTSymbol[]) templateArgs = :none;
+    bool iftiMode() return templateArgs != :none;
 
-    if (!autoCall) {
-        if (auto type_ = target.instanceOf(Type)) {
-            if (auto ret = type_.call(context, locRange, astArgs)?)
-                return ret;
+    if (auto astInstance = astTarget.instanceOf(ASTTemplateInstance)) {
+        auto decl = astInstance.templateDecl.compile(context)?;
+        if (auto scopeDecl = decl.instanceOf(ScopeBoundTemplateDecl)) {
+            if (scopeDecl.latent.decl.eponymousFun) {
+                target = decl;
+                templateArgs = astInstance.types;
+            }
         }
-        if (auto expr = target.instanceOf(Expression)) {
-            if (auto ret = expr.type.callExpr(context, locRange, expr, astArgs)?)
-                return ret;
+    }
+
+    if (!iftiMode) {
+        target = astTarget.compile(context)?;
+        // TODO figure out how to fall through to this if ifti fails.
+        if (!autoCall) {
+            if (auto type_ = target.instanceOf(Type)) {
+                if (auto ret = type_.call(context, locRange, astArgs)?)
+                    return ret;
+            }
+            if (auto expr = target.instanceOf(Expression)) {
+                if (auto ret = expr.type.callExpr(context, locRange, expr, astArgs)?)
+                    return ret;
+            }
         }
     }
 
     if (auto overload = target.instanceOf(Overload)) {
         // TODO transpose macro!
-        auto possibleCalls = [callResolved(context, target, astArgs, locRange, autoCall)?
+        auto possibleCalls = [callResolved(context, target, astArgs, templateArgs, locRange, autoCall)?
             for target in overload.parts];
 
         auto matches = possibleCalls.pickMatches;
@@ -586,7 +603,7 @@ class WrapReference : Reference
         locRange.assert(false, "no overload matched call: $(overload.repr)")?;
     }
 
-    callResolved(context, target, astArgs, locRange, autoCall)?.case {
+    callResolved(context, target, astArgs, templateArgs, locRange, autoCall)?.case {
         (Expression expr, CallQuality quality): return expr;
         (:argCastError, Error err): return err;
         (:mismatch, Error err): return err;
@@ -607,23 +624,38 @@ class WrapReference : Reference
 }
 
 (Expression expr, CallQuality quality | (:mismatch, Error) | (:argCastError, Error) | fail Error) callResolved(
-    Context context, mut Symbol target, ASTArgument[] astArgs, LocRange locRange, bool autoCall)
+    Context context, mut Symbol target, ASTArgument[] astArgs, (ASTSymbol[] | :none) astTemplateArgs,
+    LocRange locRange, bool autoCall)
 {
     if (auto templ = target.instanceOf(ScopeBoundTemplateDecl)) {
-        // Simplest conceivable IFTI
+        ASTSymbol[] astStubArgs = astTemplateArgs.case(ASTSymbol[] sym: sym, :none: null);
+        Type[] stubArgs = [a.compile(context)?.beType(a.locRange)? for a in astStubArgs];
         auto args = [
             arg.sym.compile(context)?.beExpressionImplCall(context, locRange)?
             for arg in astArgs];
-        auto types = [arg.type for arg in args];
-        // Some types, like Lambda, generate different types every time they're compiled.
-        auto repackagedArgs = [
-            ASTArgument(new ASTSymbolHelper(arg), astArgs[i].name, astArgs[i].locRange)
-            for i, arg in args];
-        auto instance = templ.instantiate(context, locRange, types)?;
-        auto callExpr = call(context, new ASTSymbolHelper(instance), repackagedArgs, locRange, autoCall)?;
+        Type[] argTypes = [arg.type for arg in args];
+        auto templateDecl = templ.latent.decl;
+        if (auto astFun = templateDecl.eponymousFun) {
+            context.pushErrorLoc(locRange);
+            auto inferTemplateArgs = .inferTemplateArgs(
+                templateDecl, stubArgs, astFun.params, argTypes, context.data.errorStack);
+            context.popErrorLoc;
+            Type[] inferredTypes = inferTemplateArgs.case((:resolveError, Error err): return (:mismatch, err));
+            // Some types, like Lambda, generate different types every time they're compiled.
+            // So repackage the args we just compiled.
+            auto repackagedArgs = [
+                ASTArgument(new ASTSymbolHelper(arg), astArgs[i].name, astArgs[i].locRange)
+                for i, arg in args];
+            auto instance = templ.instantiate(context, locRange, inferredTypes)?;
+            auto callExpr = call(context, new ASTSymbolHelper(instance), repackagedArgs, locRange, autoCall)?;
 
-        // FIXME instantiation failures (type mismatches?) will go here
-        return (callExpr, CallQuality.match);
+            return (callExpr, CallQuality.match);
+        }
+    }
+
+    astTemplateArgs.case {
+        ASTSymbol[]: return locRange.fail("cannot instantiate non-template");
+        :none: {}
     }
 
     mut nullable Statement pre, post;
@@ -726,6 +758,74 @@ bool previewCanCallImplicit(Symbol target) {
     return target.instanceOf(FunctionDeclaration)
         || target.instanceOf(LateSymbol)
         || target.instanceOf(Overload);
+}
+
+/**
+ * Implements IFTI.
+ */
+(Type[] | :resolveError, Error err) inferTemplateArgs(
+    ASTTemplateDecl templateDecl, Type[] stubArgs, ASTParameter[] astParams, Type[] args, LocRange[] errorStack)
+{
+    mut (Type | :unknown)[string] assignments;
+
+    for (i, param in templateDecl.typeParameterNames) {
+        if (i < stubArgs.length) assignments[param] = stubArgs[i];
+        else assignments[param] = :unknown;
+    }
+
+    if (args.length > astParams.length) return (:resolveError, new Error(errorStack, "too many arguments"));
+    (void | fail Error) tryInfer(ASTSymbol sym, Type type) {
+        // print("tryInfer($(sym.repr), $(type.repr))");
+        if (auto ident = sym.instanceOf(ASTIdentifier)) if (!ident.moduleLevel) {
+            if (!assignments.has(ident.name)) return;
+            assignments[ident.name] = assignments[ident.name].case(
+                :unknown: type,
+                Type existing: existing.mergeTypes(type).case(:failure: return new Error(
+                    errorStack ~ sym.locRange, "incompatible types '$(existing.repr)' and '$(type.repr)'")));
+            return;
+        }
+        if (auto astNullable = sym.instanceOf(ASTNullable)) if (astNullable.nullify) {
+            if (auto classType = type.instanceOf(ClassType)) if (classType.zeroInitializable) {
+                return tryInfer(astNullable.next, classType.makeNotNullable);
+            }
+            if (auto intfType = type.instanceOf(IntfType)) if (intfType.zeroInitializable) {
+                return tryInfer(astNullable.next, intfType.makeNotNullable);
+            }
+            return;
+        }
+        if (auto astArray = sym.instanceOf(ASTArray)) {
+            if (auto arrayType = type.instanceOf(Array)) {
+                return tryInfer(astArray.elementType, arrayType.elementType);
+            }
+            return;
+        }
+        return;
+    }
+    for (i, arg in args) {
+        auto astParamType = astParams[i].type;
+        tryInfer(astParamType, arg).case(Error err: return (:resolveError, err));
+    }
+
+    Type[] inferredTemplateArgs;
+    for (param in templateDecl.typeParameterNames) {
+        assignments[param].case {
+            // FIXME "return not found" without the {}
+            :unknown: {
+                return (:resolveError, new Error(
+                    errorStack, "failed to infer template parameter '$param'"));
+            }
+            Type t: inferredTemplateArgs ~= t;
+        }
+    }
+
+    return inferredTemplateArgs;
+}
+
+// FIXME generalize all the type merge functions
+(Type | fail :failure) mergeTypes(Type first, Type second) {
+    if (first.same(second)) return first;
+    // TODO conversion
+    return :failure;
 }
 
 class ASTCall : ASTSymbol
@@ -1015,7 +1115,7 @@ with (parser.transaction)
 {
     if (!context.namespace) return null;
     if (auto type = base.instanceOf(Type)) {
-        auto protection = type.protectionAt(context.namespace.notNull);
+        auto protection = type.protectionAt(context.namespace);
         return type.accessMember(context, null, member, protection, locRange);
     }
 
@@ -1026,7 +1126,7 @@ with (parser.transaction)
         baseExpr = new Dereference(baseExpr);
     }
 
-    auto protection = baseExpr.type.protectionAt(context.namespace.notNull);
+    auto protection = baseExpr.type.protectionAt(context.namespace);
     if (auto field = baseExpr.type.accessMember(context, baseExpr, member, protection, locRange)?)
         return field;
 
@@ -2751,7 +2851,7 @@ class ASTAssignStatement : ASTStatement
         // `a.b = c` special handling.
         if (auto astMemberAccess = target.instanceOf(ASTMemberBase)) {
             auto base = astMemberAccess.base.compile(context)?.beExpressionImplCall(context, astMemberAccess.locRange)?;
-            auto protection = base.type.protectionAt(context.namespace.notNull);
+            auto protection = base.type.protectionAt(context.namespace);
             if (auto ret = base.type.assignMember(
                     context, base, astMemberAccess.member, value, protection, astMemberAccess.locRange)?)
                 return StatementCompileResult(ret, context.namespace);

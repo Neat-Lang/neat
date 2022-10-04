@@ -161,19 +161,16 @@ class CImportMacro : Macro
             }
             // match struct foo { }; as "foo"
             if (cparser.accept("struct")?) {
-                auto type = cparserHelper.parseStructType?;
-                if (!type) { cparser.eatline; continue; }
-                version (firstpassmacro)
-                    add(type.instanceOf(ASTStructDeclSym).decl.struct_.name, type);
-                else
-                    add(type.instanceOf(ASTStructDeclSym).decl.name, type);
+                auto pair = cparserHelper.parseStructType?;
+                if (!pair.type) { cparser.eatline; continue; }
+                add(pair.name, pair.type);
                 continue;
             }
             version (firstpassmacro) { } else {
                 if (cparser.accept("union")?) {
-                    auto type = cparserHelper.parseStructType(union_=true)?;
-                    if (!type) { cparser.eatline; continue; }
-                    add(type.instanceOf(ASTUnion).name, type);
+                    auto pair = cparserHelper.parseStructType(union_=true)?;
+                    if (!pair.type) { cparser.eatline; continue; }
+                    add(pair.name, pair.type);
                     continue;
                 }
             }
@@ -314,10 +311,12 @@ class CParserHelper {
         }
         auto ident = parser.parseIdentifier?;
         if (ident == "struct") {
-            return parseStructType?;
+            auto ret = parseStructType?;
+            return ret.type;
         }
         if (ident == "union") {
-            return parseStructType(union_=true)?;
+            auto ret = parseStructType(union_=true)?;
+            return ret.type;
         }
         if (ident == "enum") {
             return parseEnumType?;
@@ -453,15 +452,13 @@ class CParserHelper {
         }
     }
 
-    (ASTSymbol | fail Error) parseStructType(bool union_=false) {
+    (ASTSymbol type, string name | fail Error) parseStructType(bool union_=false) {
         auto start = parser.loc;
         auto name = parser.parseIdentifier?;
         mut ASTStructMember[] members;
         auto emptyStruct = new ASTStructDeclSym(new ASTStructDecl(name, [], start)); // opaque
         if (!parser.accept("{")?) {
-            if (auto definedSym = this.mod.getSymbolAlias(name)) return definedSym;
-            if (auto definedSym = this.sysmod.getSymbolAlias(name)) return definedSym;
-            return emptyStruct;
+            return (new ASTFallbackIdentifier(name, emptyStruct), name);
         }
         void scanToClosingBracket() {
             mut int bracketDepth = 1;
@@ -485,33 +482,37 @@ class CParserHelper {
             // line number annotation
             if (parser.accept("# ")?) { parser.eatline; parser.commit; continue; }
             auto baseType = parseType?;
-            if (!baseType) { parser.revert; scanToClosingBracket; return emptyStruct; }
+            if (!baseType) { parser.revert; scanToClosingBracket; return (emptyStruct, name); }
             auto baseType = notNull!ASTSymbol(baseType);
             mut auto memberDecl = parseTypedDecl(baseType)?;
             void flush() {
                 members ~= (memberDecl.name, Protection.public_, notNull!ASTSymbol(memberDecl.type));
             }
             while (parser.accept(",")?) {
-                if (!memberDecl.type) { parser.revert; scanToClosingBracket; return emptyStruct; }
+                if (!memberDecl.type) { parser.revert; scanToClosingBracket; return (emptyStruct, name); }
                 flush;
                 memberDecl = parseTypedDecl(baseType)?;
             }
-            if (!memberDecl.type) { parser.revert; scanToClosingBracket; return emptyStruct; }
+            if (!memberDecl.type) { parser.revert; scanToClosingBracket; return (emptyStruct, name); }
             flush;
+            if (parser.accept(":")?) {
+                // It's hopeless. Just try, I guess.
+                parser.parseNumber?;
+            }
             // parser.expect(";")?;
-            if (!parser.accept(";")?) { parser.revert; scanToClosingBracket; return emptyStruct; }
+            if (!parser.accept(";")?) { parser.revert; scanToClosingBracket; return (emptyStruct, name); }
             parser.commit;
         }
         version (firstpassmacro) { } else {
             if (union_) {
                 mut ASTUnionMember[] unionMembers;
                 for (a in members) unionMembers ~= (a.name, a.type);
-                return new ASTUnion(name, unionMembers, null, start);
+                return (new ASTUnion(name, unionMembers, null, start), name);
             }
         }
         mut ASTStructEntry[] entries;
         for (a in members) entries ~= a;
-        return new ASTStructDeclSym(new ASTStructDecl(name, entries, start));
+        return (new ASTStructDeclSym(new ASTStructDecl(name, entries, start)), name);
     }
 
     (nullable ASTSymbol | fail Error) parseEnumType() {
@@ -572,6 +573,21 @@ private ASTSymbol type(string ident) {
         return new ASTBasicType(ident, __RANGE__);
     } else {
         return new ASTIdentifier(ident, false, __RANGE__);
+    }
+}
+
+// the reason for this is we see `typedef struct Foo_ Foo` before we see `struct Foo_` -
+// but sometimes we don't see `struct Foo_` at all; in that case we treat it as `struct {}`.
+class ASTFallbackIdentifier : ASTSymbol
+{
+    string name;
+    ASTStructDeclSym emptyStruct;
+    this(this.name, this.emptyStruct) {}
+    override (Symbol | fail Error) compile(Context context) {
+        if (auto res = context.namespace.lookup(this.name, context, LookupReason.identifier, __RANGE__)?) {
+            if (res.instanceOf(Type)) return res;
+        }
+        return this.emptyStruct.compile(context);
     }
 }
 

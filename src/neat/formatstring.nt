@@ -10,6 +10,7 @@ import neat.decl;
 import neat.expr;
 import neat.struct_;
 import neat.types;
+import neat.tuples;
 import neat.util;
 
 class ASTFormatString : ASTSymbol
@@ -26,6 +27,13 @@ class ASTFormatString : ASTSymbol
             if (auto array = type.instanceOf(Array))
                 return !!array.elementType.instanceOf(Character);
             return false;
+        }
+        ASTSymbol str(string text) {
+            return compiler.astStringLiteral(text, __RANGE__);
+        }
+        ASTSymbol append(ASTSymbol prev, string text) {
+            auto strSym = str(text);
+            return compiler.$expr $prev ~ $strSym;
         }
         for (auto part in parts) {
             auto sym = part.compile(context)?.beExpressionImplCall(context, part.locRange)?;
@@ -47,8 +55,20 @@ class ASTFormatString : ASTSymbol
             } else if (sym.type.instanceOf(NullPointer) || sym.type.instanceOf(Pointer)) {
                 result = compiler.$expr $result ~ ptoa($astSym);
             } else if (auto identType = sym.type.instanceOf(SymbolIdentifierType)) {
-                auto str = compiler.astStringLiteral(identType.repr, __RANGE__);
-                result = compiler.$expr $result ~ $str;
+                result = result.append(identType.repr);
+            } else if (auto tupleType = sym.type.instanceOf(TupleType)) {
+                mut ASTSymbol[] parts = [str("(")];
+                for (int i, member in tupleType.members) {
+                    if (i) parts ~= str(", ");
+                    auto memberExpr = compiler.astIndex(
+                        compiler.astIdentifier("that", __RANGE__),
+                        compiler.astIntLiteral(i, __RANGE__), __RANGE__);
+                    parts ~= memberExpr;
+                }
+                parts ~= str(")");
+                auto subExpr = new ASTFormatString(parts, __RANGE__);
+                auto astPropertyExpr = compiler.astParenPropertyExpression(astSym, subExpr, __RANGE__);
+                result = compiler.$expr $result ~ $astPropertyExpr;
             } else {
                 return this.locRange.fail("Don't know how to format $(sym.type.repr)");
             }

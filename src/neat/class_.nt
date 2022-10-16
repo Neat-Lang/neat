@@ -29,12 +29,12 @@ class ClassMethod : Function
     {
         this.hasThisArg = true;
         this.contextType = classType;
+        this.mangleFragment = mangleImpl;
     }
 
     override string mangle()
     {
-        // TODO mangle types
-        return this.parent.mangle ~ "_" ~ this.contextType.instanceOf(ClassType).class_.name ~ "_" ~ this.name;
+        return "$(parent.mangle)_$(this.contextType.instanceOf(ClassType).class_.name)_$(mangleFragment)";
     }
 
     Type funcPtrType()
@@ -303,23 +303,21 @@ class Class
             */
             mut bool overridden = false;
             for (i, a in vtable) {
-                if (!a.sameName) continue;
+                // ctor is always called static
+                if (!a.sameName || isCtor) continue;
                 overridden = true;
                 method.locRange.assert(method.override_ || isCtor,
                     "Expected 'override' attribute for overriding method.")?;
-                if (!isCtor) { // ctor is always called static
-                    // override
-                    vtable[i].case {
-                        ClassMethod classMethod: validateOverride(classMethod, method)?;
-                        IntfMethod intfMethod: validateOverride(intfMethod, method)?;
-                        (:baseOffset, size_t offs): {}
-                    }
+                // override
+                vtable[i].case {
+                    ClassMethod classMethod: validateOverride(classMethod, method)?;
+                    IntfMethod intfMethod: validateOverride(intfMethod, method)?;
+                    (:baseOffset, size_t offs): {}
                 }
                 // print("a: $(this.name): vtable[$i] = $(method.name)");
                 vtable[i] = method;
             }
-            if (!overridden)
-            {
+            if (!overridden) {
                 method.locRange.assert(!method.override_,
                     "'override' specified but method does not override a parent method.")?;
                 // print("b: $(this.name): vtable[$(vtable.length)] = $(method.name)");
@@ -578,15 +576,35 @@ class ClassType : Type
             }
             return rank(symbol) <= rank(protection);
         }
-        bool test(typeof(this.class_.vtable[0]) entry) {
+        bool test(typeof(this.class_.vtable[0]) entry, bool mustInThisClass) {
+            if (mustInThisClass) {
+                return entry.case(
+                    ClassMethod m: m.name == member && m.contextType.same(this) && allowed(m.protection),
+                    (:baseOffset, size_t offs): false);
+            }
             return entry.case(
                 ClassMethod m: m.name == member && allowed(m.protection),
                 (:baseOffset, size_t offs): false);
         }
-        size_t methodOffset = [first i for i, a in this.class_.vtable where test(a) else -1];
-        if (methodOffset != -1)
-        {
-            return new ClassMethodSymbol(this.class_, baseExpr.notNull, methodOffset, staticLookup=false);
+        // if we have methods of the requested name in this class, use them preferentially.
+        size_t[] methods() {
+            auto methodsInThisClass = [i for i, a in this.class_.vtable where test(a, mustInThisClass=true)];
+            if (!methodsInThisClass.empty) return methodsInThisClass;
+            return [i for i, a in this.class_.vtable where test(a, mustInThisClass=false)];
+        }
+        auto methods = methods;
+        if (!methods.empty) {
+            // FIXME implicit typed array literal
+            // Symbol[] symbols = [
+            //     new ClassMethodSymbol(this.class_, baseExpr.notNull, methodIndex, staticLookup=false)
+            //     for methodIndex in methods];
+            Symbol[] symbols = [
+                (new ClassMethodSymbol(this.class_, baseExpr.notNull, methodIndex, staticLookup=false))
+                    .instanceOf(Symbol)
+                    .notNull
+                for methodIndex in methods];
+            if (symbols.length == 1) return symbols[0];
+            return new Overload(symbols);
         }
 
         if (!baseExpr) return null;
@@ -1181,6 +1199,13 @@ class ClassMethodSymbol : LateSymbol
         }
 
         return LateSymbolResult(setup=setup, funcPtr=funcPtr, firstArg=tmpBaseExpr, teardown=teardown);
+    }
+
+    override string repr() {
+            this.class_.vtable[this.methodOffset].case {
+                ClassMethod method: return "$(method.name)()";
+                (:baseOffset, size_t): assert(false);
+            }
     }
 }
 

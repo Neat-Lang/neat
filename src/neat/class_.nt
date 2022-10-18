@@ -283,16 +283,11 @@ class Class
             }
         }
 
+        auto supervtable = vtable.dup;
         mut typeof(vtable) addedMethods;
         for (ClassMethod method in this.methods) {
             // TODO match types
             bool isCtor = method.name == "__ctor"; // workaround: no final yet, no proper masking yet
-            bool sameName(typeof(vtable[0]) entry) {
-                return entry.case(
-                    ClassMethod classMethod: classMethod.name == method.name,
-                    IntfMethod intfMethod: intfMethod.name == method.name,
-                    (:baseOffset, size_t offs): false);
-            }
             /*
             string repr(typeof(vtable[0]) entry) {
                 return entry.case(
@@ -302,28 +297,34 @@ class Class
             }
             print("$(this.name): debug: vtable = " ~ [join ", " e.repr for e in vtable]);
             */
-            mut bool overridden = false;
-            for (i, a in vtable) {
-                // ctor is always called static
-                if (!a.sameName || isCtor) continue;
-                overridden = true;
-                method.locRange.assert(method.override_ || isCtor,
-                    "Expected 'override' attribute for overriding method.")?;
-                // override
-                vtable[i].case {
-                    ClassMethod classMethod: validateOverride(classMethod, method)?;
-                    IntfMethod intfMethod: validateOverride(intfMethod, method)?;
-                    (:baseOffset, size_t offs): {}
-                }
-                // print("a: $(this.name): vtable[$i] = $(method.name)");
-                vtable[i] = method;
-            }
-            if (!overridden) {
-                method.locRange.assert(!method.override_,
-                    "'override' specified but method does not override a parent method.")?;
-                // print("b: $(this.name): vtable[$(vtable.length)] = $(method.name)");
+            // ctor is always called static
+            if (isCtor) {
                 addedMethods ~= method;
+                continue;
             }
+
+            auto similarEntries = findSimilarEntries(supervtable, method);
+            if (!similarEntries.empty) {
+                auto bestEntry = [argmin(a.flaws) a for a in similarEntries];
+                if (bestEntry.flaws == 0) {
+                    method.locRange.assert(method.override_,
+                        "Expected 'override' attribute for overriding method.")?;
+                } else {
+                    vtable[bestEntry.offset].case {
+                        ClassMethod classMethod: validateOverride(classMethod, method)?;
+                        IntfMethod intfMethod: validateOverride(intfMethod, method)?;
+                        (:baseOffset, size_t offs): assert(false);
+                    }
+                    assert(false); // whence flaws if validateOverride passes?
+                }
+                vtable[bestEntry.offset] = method;
+                continue;
+            }
+
+            method.locRange.assert(!method.override_,
+                "'override' specified but method does not override a parent method.")?;
+            // print("b: $(this.name): vtable[$(vtable.length)] = $(method.name)");
+            addedMethods ~= method;
         }
         vtable ~= addedMethods;
 
@@ -371,6 +372,45 @@ class Class
                 "child argument type must be strict supertype of parent argument type: ",
                 childParam.type.repr, " and ", parentParam.type.repr)?;
         }
+    }
+
+    /**
+     * Find class methods that are almost, but not necessarily quite like `child`.
+     * This method effectively guesses which parent method you may have meant to override.
+     */
+    (size_t offset, int flaws)[] findSimilarEntries(
+        (ClassMethod | IntfMethod | (:baseOffset, size_t offs))[] vtable, ClassMethod child)
+    {
+        bool sameName(typeof(vtable[0]) entry) {
+            return entry.case(
+                ClassMethod classMethod: classMethod.name == child.name,
+                IntfMethod intfMethod: intfMethod.name == child.name,
+                (:baseOffset, size_t offs): false);
+        }
+        mut (size_t offset, int flaws)[] matches;
+        for (i, a in vtable) {
+            /**
+             * TODO:
+             * auto parent = a.case(ClassMethod..., IntfMethod..., (:baseOffset, size_t offs): continue);
+             * ie. make return, continue and break expressions of type bottom.
+             */
+            mut uninitialized FunctionDeclaration parent;
+            a.case {
+                ClassMethod classMethod: parent = classMethod;
+                IntfMethod intfMethod: parent = intfMethod;
+                (:baseOffset, size_t offs): continue;
+            }
+            if (parent.name != child.name) continue;
+            if (parent.params.length != child.params.length) continue;
+            mut int flaws = 0;
+            if (!child.ret.isStrictSubtypeOf(parent.ret)) flaws++;
+            for (i, parentParam in parent.params) {
+                if (parentParam.mutable != child.params[i].mutable) flaws++;
+                if (!parentParam.type.isStrictSubtypeOf(child.params[i].type)) flaws++;
+            }
+            matches ~= (i, flaws);
+        }
+        return matches;
     }
 
     void declare(Generator generator)

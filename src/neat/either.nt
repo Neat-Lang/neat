@@ -410,7 +410,7 @@ class Either : Type
                             new ASTSymbolHelper(rhsMember), __RANGE__);
 
                         eqCases ~= ASTEitherCaseExprCase(
-                            __RANGE__, new ASTSymbolHelper(entry.type), "a", return_=false, fail=false, memberEq);
+                            __RANGE__, new ASTSymbolHelper(entry.type), "a", fail=false, memberEq);
                     }
                     auto eqTest = new ASTEitherCaseExpr(__RANGE__, new ASTSymbolHelper(lhs), eqCases);
                     auto combinedExpr = context.compiler.astBinaryOp("&&", typeEq, eqTest, __RANGE__);
@@ -529,6 +529,9 @@ class ASTEitherCaseExpr : ASTSymbol
         // TODO implicitConvertTo should only require Type - ie. return a Expression function(Expression).
         mut Type[] resultTypes;
         void mergeType(LocRange locRange, Type exprType) {
+            // TODO centralize!
+            import neat.bottom : Bottom;
+            if (exprType.instanceOf(Bottom)) return;
             for (resultType in resultTypes)
                 if (resultType.same(exprType)) return;
             resultTypes ~= exprType;
@@ -547,8 +550,6 @@ class ASTEitherCaseExpr : ASTSymbol
             caseLoc.assert(matchIndex != -1, "Type is not listed in Either!")?;
             handled[matchIndex] = true;
             matchIndexes[i] = matchIndex;
-
-            if (case_.return_) continue;
 
             auto namespace = context.compiler.variableDeclaration(
                 context.namespace, case_.identifier, caseType, mut=false, borrowed=false, false);
@@ -610,14 +611,8 @@ class ASTEitherCaseExpr : ASTSymbol
             Expression userExpr = case_.expr.compile(context)?
                 .beExpressionImplCall(context, caseLoc)?;
             (Statement | fail Error) userStmt() {
-                if (case_.return_) {
-                    return context.compiler.astReturn(
-                        new ASTSymbolHelper(userExpr), failProp=case_.fail, this.locRange
-                    ).compile(context)?.statement;
-                } else {
-                    Expression expr = context.compiler.expectImplicitConvertTo(context, userExpr, mergeType, caseLoc)?;
-                    return context.compiler.move(context, resultVal, expr);
-                }
+                Expression expr = context.compiler.expectImplicitConvertTo(context, userExpr, mergeType, caseLoc)?;
+                return context.compiler.move(context, resultVal, expr);
             }
             thenSteps ~= userStmt?;
             if (cleanup && !singleUse) {
@@ -646,7 +641,6 @@ class ASTEitherCaseExpr : ASTSymbol
                     __RANGE__,
                     new ASTSymbolHelper(either.types[i].type),
                     "a",
-                    return_=false,
                     fail=false,
                     new ASTIdentifier("a", moduleLevel=false, __RANGE__));
                 handleCase(passthroughCase, i)?;
@@ -667,7 +661,6 @@ class ASTEitherCaseExpr : ASTSymbol
                         quoter.quoteLocRange(case_.locRange),
                         case_.type.quote(quoter),
                         astStringLiteral(case_.identifier, __RANGE__),
-                        astBoolLiteral(case_.return_, __RANGE__),
                         astBoolLiteral(case_.fail, __RANGE__),
                         case_.expr.quote(quoter)], __RANGE__);
             }
@@ -701,10 +694,9 @@ class ASTEitherCaseExpr : ASTSymbol
         parser.to(caseFrom).assert(!!type, "case type expected")?;
         string identifier = parser.parseIdentifier?;
         parser.expect(":")?;
-        bool return_ = parser.acceptIdentifier("return")?;
         ASTSymbol expr = lexicalContext.compiler.parseExpression(parser, lexicalContext)?
             .notNull;
-        cases ~= ASTEitherCaseExprCase(parser.to(from), type.notNull, identifier, return_, false, expr);
+        cases ~= ASTEitherCaseExprCase(parser.to(from), type.notNull, identifier, false, expr);
     }
     return new ASTEitherCaseExpr(parser.to(from), current, cases);
 }
@@ -825,7 +817,7 @@ class ASTEitherCaseStmt : ASTStatement
         return null;
     }
     auto locRange = parser.to(from);
-    parser.commit();
+    parser.commit;
 
     mut ASTEitherCaseStmtCase[] cases;
     mut nullable ASTStatement default_ = null;

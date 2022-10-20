@@ -12,6 +12,7 @@ import backend.base;
 import helpers;
 import neat.array;
 import neat.base;
+import neat.bottom;
 import neat.class_;
 import neat.decl;
 import neat.either;
@@ -306,8 +307,7 @@ with (parser.transaction)
     with (parser.transaction) {
         string identifier = parser.parseIdentifier?;
 
-        if (identifier == "" || parser.isKeyword(identifier))
-        {
+        if (identifier == "" || parser.isKeyword(identifier)) {
             return null;
         }
         commit;
@@ -333,6 +333,8 @@ with (parser.transaction)
             return once new ASTIdentifier("double", false, loc);
         if (identifier == "nullptr_t")
             return once new ASTIdentifier("nullptr_t", false, loc);
+        if (identifier == "bottom")
+            return once new ASTIdentifier("bottom", false, loc);
 
         return lexicalContext.compiler.astIdentifier(identifier, parser.to(from));
     }
@@ -1304,13 +1306,17 @@ class ASTPropagateFailureExpr : ASTSymbol
         context.assert2(!!either, this.locRange, "base of '?' must be sumtype")?;
         mut ASTEitherCaseExprCase[] cases;
         for (k, v in either.types) {
+            ASTSymbol expr() {
+                auto a = new ASTIdentifier("a", false, __RANGE__);
+                if (v.fail) return new ASTReturn(a, failProp=false, __RANGE__);
+                return a;
+            }
             cases ~= ASTEitherCaseExprCase(
                 __RANGE__,
                 new ASTSymbolHelper(v.type),
                 "a",
-                return_=v.fail,
                 fail=v.fail,
-                expr=new ASTIdentifier("a", false, __RANGE__)
+                expr=expr,
             );
         }
         auto caseExpr = new ASTEitherCaseExpr(__RANGE__, new ASTSymbolHelper(base), cases);
@@ -1553,7 +1559,7 @@ class ASTLambdaExpr : ASTSymbol
                 type=new ASTIdentifier("T$i", false, __RANGE__), initial=null, __RANGE__);
         auto typeofProbe = new ASTStatementExpression(declareUninitializedParams, value, __RANGE__);
         auto typeofLambda = new ASTTypeof(typeofProbe, captureImplicitReturn=true, __RANGE__);
-        auto returnLambdaExpr = new ASTReturnStatement(value, failProp=false, __RANGE__);
+        auto returnLambdaExpr = new ASTExprStatement(new ASTReturn(value, failProp=false, __RANGE__), __RANGE__);
         // Hax: Every compilation is unique!
         string lambdaName = "__lambda_$(this.locRange.from.row)_$(context.getLabel)";
         auto astParameters = [
@@ -1693,6 +1699,11 @@ class ASTLambdaExpr : ASTSymbol
     }
     if (auto nestfun = parser.parseNestedFunctionExpr(lexicalContext)?) {
         return nestfun;
+    }
+    if (auto sym = parseBreakCont(parser, lexicalContext)?)
+        return sym;
+    if (auto ret = parseReturn(parser, lexicalContext)?) {
+        return ret;
     }
     parser.begin;
     if (parser.accept("!")?) {
@@ -2342,7 +2353,7 @@ class ASTTernaryIf : ASTSymbol
     return null;
 }
 
-class ASTReturnStatement : ASTStatement
+class ASTReturn : ASTSymbol
 {
     ASTSymbol value;
 
@@ -2350,7 +2361,7 @@ class ASTReturnStatement : ASTStatement
 
     this(this.value, this.failProp, this.locRange) { }
 
-    override (StatementCompileResult | fail Error) compile(Context context)
+    override (Symbol | fail Error) compile(Context context)
     {
         mut Expression expr = this.value.compile(context)?.beExpressionImplCall(context, this.locRange)?;
         Type ret = findParent!Returnable(context.namespace)
@@ -2370,15 +2381,17 @@ class ASTReturnStatement : ASTStatement
         returnStmt = sequence(returnStmt, new ReturnStatement(temp, this.locRange));
         // no need for stack cleanup after a return.
 
-        return StatementCompileResult(returnStmt, context.namespace);
+        return new StatementExpression(returnStmt, new UnreachableExpr, gifted=false);
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astReturn", [
+        return quoter.compilerCall("astReturnNew", [
             value.quote(quoter),
             quoter.compiler.astBoolLiteral(this.failProp, __RANGE__),
         ], locRange);
     }
+
+    override string repr() { return "return $(value.repr)"; }
 }
 
 // the return expression of "return;"
@@ -2394,7 +2407,7 @@ class ASTVoidExpression : ASTSymbol
     }
 }
 
-(nullable ASTReturnStatement | fail Error) parseReturn(Parser parser, LexicalContext lexicalContext)
+(nullable ASTReturn | fail Error) parseReturn(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto from = parser.from?;
@@ -2405,17 +2418,18 @@ class ASTVoidExpression : ASTSymbol
         return null;
     }
     mut uninitialized ASTSymbol expr;
-    if (parser.accept(";")?) // return;
-    {
+    // peek
+    parser.begin;
+    // TODO acceptExprTerminator
+    if (parser.accept(";")? || parser.accept(",")? || parser.accept(")")?) { // return;
+        parser.revert;
         expr = new ASTVoidExpression(parser.to(from));
-    }
-    else
-    {
+    } else {
+        parser.revert;
         expr = parseExpression(parser, lexicalContext)?.notNull;
-        parser.expect(";")?;
     }
     parser.commit;
-    return new ASTReturnStatement(expr, failProp=false, parser.to(from));
+    return new ASTReturn(expr, failProp=false, parser.to(from));
 }
 
 (Statement | fail Error) unwindScope(Context context, nullable Namespace target, Statement body_)
@@ -2447,13 +2461,17 @@ class ASTVoidExpression : ASTSymbol
     for (k, v in either.types) {
         // return out all types that aren't the extract type
         bool return_ = !v.type.same(extractType);
+        ASTSymbol expr() {
+            auto a = new ASTIdentifier("a", false, __RANGE__);
+            if (return_) return new ASTReturn(a, failProp=false, __RANGE__);
+            return a;
+        }
         cases ~= ASTEitherCaseExprCase(
             __RANGE__,
             new ASTSymbolHelper(v.type),
             "a",
-            return_=return_,
             fail=v.fail,
-            expr=new ASTIdentifier("a", false, __RANGE__));
+            expr=expr);
     }
 
     auto case_ = new ASTEitherCaseExpr(__RANGE__, new ASTSymbolHelper(source), cases);
@@ -2667,22 +2685,20 @@ class ASTIfStatement : ASTStatement
     return new ASTIfStatement(test, thenStmt, elseStatement, locRange);
 }
 
-(nullable ASTStatement | fail Error) parseBreakCont(Parser parser, LexicalContext lexicalContext)
+(nullable ASTSymbol | fail Error) parseBreakCont(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto from = parser.from?;
     string identifier = parser.parseIdentifier?;
     if (identifier == "break")
     {
-        parser.expect(";")?;
         parser.commit;
-        return new ASTBreakStatement(parser.to(from));
+        return new ASTBreak(parser.to(from));
     }
     if (identifier == "continue")
     {
-        parser.expect(";")?;
         parser.commit;
-        return new ASTContinueStatement(parser.to(from));
+        return new ASTContinue(parser.to(from));
     }
     parser.revert;
     return null;
@@ -2938,6 +2954,7 @@ class ASTAssignStatement : ASTStatement
     override ASTSymbol quote(Quoter quoter) {
         return quoter.compilerCall("astAssign", [target.quote(quoter), value.quote(quoter)], locRange);
     }
+    override string repr() { return "$(target.repr) = $(value.repr); "; }
 }
 
 class ASTVarDeclStatement : ASTStatement
@@ -3060,6 +3077,15 @@ class ASTVarDeclStatement : ASTStatement
             quoter.compiler.astBoolLiteral(this.uninitialized, this.locRange),
             this.type.quote(quoter),
             quoter.compiler.astIdentifier("null", this.locRange)], this.locRange);
+    }
+
+    override string repr() {
+        if (type)
+            if (initial) return "$(type.repr) $name = $(initial.repr); ";
+            else return "$(type.repr) $name; ";
+        else
+            if (initial) return "auto $name = $(initial.repr); ";
+            else return "auto $name; ";
     }
 }
 
@@ -3250,15 +3276,14 @@ class ASTVarExtractDeclStatement : ASTStatement
         for (i, entry in sourceType.types) {
             auto sourceMemberType = entry.type;
             bool return_ = !sourceMemberType.inTargetType;
-
-            mut uninitialized ASTSymbol expr;
-            if (return_) expr = context.compiler.$expr a;
-            else expr = context.compiler.$expr ({ $astType x = a; x; });
+            // auto expr = (context.compiler.$expr return a) if return_
+            //     else context.compiler.$expr ({ $astType x = a; x; });
+            auto expr = new ASTReturn(new ASTIdentifier("a", false, __RANGE__), false, __RANGE__) if return_
+                else context.compiler.$expr ({ $astType x = a; x; });
             cases ~= ASTEitherCaseExprCase(
                 locRange=this.locRange,
                 type=new ASTSymbolHelper(sourceMemberType),
                 identifier="a",
-                return_=return_,
                 fail=entry.fail,
                 expr=expr);
         }
@@ -3421,7 +3446,7 @@ class ASTNestedFunctionDeclExpr : ASTSymbol
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTNestedFunctionDeclExpr'!"); assert(false); }
 
-    override string repr() { return "TODO repr(ASTNestedFunctionDeclExpr)"; }
+    override string repr() { return "ASTNestedFunctionDeclExpr((...) $(stmt.repr)).repr"; }
 }
 
 (nullable ASTNestedFunctionDeclExpr | fail Error) parseNestedFunctionExpr(
@@ -3434,6 +3459,7 @@ class ASTNestedFunctionDeclExpr : ASTSymbol
         auto from = parser.from?;
         auto params = parseParameterList(parser, lexicalContext, variadic=false, thisAssignment=false)
             .case(Error err: return null);
+
         // Extremely dirty hack.
         if (parser.accept(",")? || parser.accept(")")? || parser.accept(";")?) {
             return null;
@@ -4040,11 +4066,7 @@ class ASTStaticIfStatement : ASTStatement
 
 (ASTStatement | fail Error) parseStatement(Parser parser, LexicalContext lexicalContext)
 {
-    if (ASTStatement stmt = parseReturn(parser, lexicalContext)?)
-        return stmt;
     if (ASTStatement stmt = parseIf(parser, lexicalContext)?)
-        return stmt;
-    if (ASTStatement stmt = parseBreakCont(parser, lexicalContext)?)
         return stmt;
     if (ASTStatement stmt = parseWhile(parser, lexicalContext)?)
         return stmt;

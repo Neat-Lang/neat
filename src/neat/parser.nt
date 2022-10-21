@@ -7,7 +7,7 @@ import neat.base;
 /**
  * Advance row/column by byte distance `distance`.
  */
-StackEntry advance(mut StackEntry entry, string fulltext, size_t distance) {
+StackEntry advance(mut StackEntry entry, string fulltext, int distance) {
     mut auto skiptext = fulltext[entry.offset .. entry.offset + distance];
     entry.offset += distance;
 
@@ -15,6 +15,7 @@ StackEntry advance(mut StackEntry entry, string fulltext, size_t distance) {
     if (nl == -1) {
         // TODO unicode count
         entry.column += cast(int) distance;
+        entry.stripped = false;
         return entry;
     }
     while (nl != -1) {
@@ -25,19 +26,20 @@ StackEntry advance(mut StackEntry entry, string fulltext, size_t distance) {
     // no more newlines found, remainder are columns
     // TODO unicode count
     entry.column = cast(int) skiptext.length;
+    entry.stripped = false;
     return entry;
 }
 
 struct StackEntry
 {
-    size_t offset;
+    int offset;
     int row, column;
     bool stripped;
 
     /**
      * Advance row/column by byte distance `distance`, known to represent one character that is not a \n.
      */
-    void advanceOneCharNonNewline(size_t distance) {
+    void advanceOneCharNonNewline(int distance) {
         offset += distance;
         column += 1;
         stripped = false;
@@ -56,11 +58,14 @@ final class ParserImpl : Parser
 
     string fulltext;
 
+    (int from, int to) lastIdentifier;
+
     this(this.filename, this.fulltext)
     {
         this.stack = new StackEntry[](0);
         this.level = 0;
         this.current = StackEntry(offset=0, row=0, column=0, stripped=false);
+        lastIdentifier = (-1, -1);
         verify;
     }
 
@@ -94,6 +99,13 @@ final class ParserImpl : Parser
     with (transaction)
     {
         strip?;
+        if (current.offset == lastIdentifier.from) {
+            auto res = fulltext[lastIdentifier.from .. lastIdentifier.to];
+            drop(lastIdentifier.to - lastIdentifier.from);
+            commit;
+            return res;
+        }
+        auto from = current.offset;
         mut string identifier = "";
         string startText = text;
         {
@@ -108,7 +120,7 @@ final class ParserImpl : Parser
                 return "";
             }
             identifier = startText[0 .. unichar.length];
-            dropOneCharNonNewline(unichar.length);
+            dropOneCharNonNewline(cast(int) unichar.length);
         }
 
         while (!hard_eof) {
@@ -117,9 +129,10 @@ final class ParserImpl : Parser
             if (!isAlnum(codepoint)
                 && codepoint != cast(int) "_"[0])
                 break;
-            dropOneCharNonNewline(unichar.length);
+            dropOneCharNonNewline(cast(int) unichar.length);
             identifier = startText[0 .. identifier.length + unichar.length];
         }
+        lastIdentifier = (from, current.offset);
         commit;
         return identifier;
     }
@@ -167,13 +180,12 @@ final class ParserImpl : Parser
         this.current = this.stack[this.level];
     }
 
-    override void drop(size_t length)
+    override void drop(int length)
     {
         this.current = this.current.advance(this.fulltext, length);
-        this.current.stripped = false;
     }
 
-    override void dropOneCharNonNewline(size_t length)
+    override void dropOneCharNonNewline(int length)
     {
         this.current.advanceOneCharNonNewline(length);
     }
@@ -197,7 +209,7 @@ final class ParserImpl : Parser
         }
         if (text[0 .. match.length] == match)
         {
-            this.drop(match.length);
+            this.drop(cast(int) match.length);
             this.commit;
             return true;
         }
@@ -243,7 +255,7 @@ final class ParserImpl : Parser
             mut string text = this.text;
             while (text.length > 0 && isWhitespace(text[0]))
                 text = text[1 .. $];
-            drop(this.text.length - text.length);
+            drop(cast(int) (this.text.length - text.length));
             auto comment = parseComment?;
             if (!comment.ptr) {
                 return lastComment;
@@ -274,7 +286,7 @@ final class ParserImpl : Parser
                 int less = find(text, "*/");
 
                 if (more == -1 && less == -1) {
-                    drop(this.text.length - text.length);
+                    drop(cast(int) (this.text.length - text.length));
                     return this.fail("comment spans end of file");
                 }
                 if (less != -1 && (more == -1 || less < more))
@@ -290,7 +302,7 @@ final class ParserImpl : Parser
             }
             auto offset = this.text.length - text.length;
             auto ret = this.text[0 .. offset];
-            drop(offset);
+            drop(cast(int) offset);
             return ret;
         } else {
             return null;

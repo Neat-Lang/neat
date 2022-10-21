@@ -1344,12 +1344,25 @@ class ASTPropagateFailureExpr : ASTSymbol
     return new ASTPropagateFailureExpr(left, parser.to(from));
 }
 
-(ASTSymbol | fail Error) parseProperties(Parser parser, LexicalContext lexicalContext, mut ASTSymbol current)
+(nullable ASTSymbol | fail Error) parseProperties(Parser parser, LexicalContext lexicalContext)
 {
-    while (true)
-    {
-        if (ASTSymbol instanceOf = parser.parseInstanceOf(lexicalContext, current)?)
-        {
+    mut (:inc | :dec | :none) preincdec = :none, postincdec = :none;
+    auto fromPre = parser.from?;
+    if (parser.accept("--")?) preincdec = :dec;
+    else if (parser.accept("++")?) preincdec = :inc;
+    auto toPre = parser.to(fromPre);
+
+    /**
+     * TODO
+     * mut ASTSymbol current = parseExpressionBase(parser, lexicalContext)?.case(null: return null);
+     */
+    mut uninitialized ASTSymbol current;
+    if (auto base = parseExpressionBase(parser, lexicalContext)?)
+        current = base;
+    else return null;
+
+    while (true) {
+        if (ASTSymbol instanceOf = parser.parseInstanceOf(lexicalContext, current)?) {
             current = instanceOf;
             continue;
         }
@@ -1360,49 +1373,56 @@ class ASTPropagateFailureExpr : ASTSymbol
         }
         parser.verifyTransactions("macro parse rule imbalance", &doMacro)?;
 
-        if (ASTSymbol result = macroArgs.result?)
-        {
+        if (ASTSymbol result = macroArgs.result?) {
             current = result;
             continue;
         }
 
-        if (ASTSymbol caseExpr = parser.parseEitherCaseExpr(lexicalContext, current)?)
-        {
+        if (ASTSymbol caseExpr = parser.parseEitherCaseExpr(lexicalContext, current)?) {
             current = caseExpr;
             continue;
         }
-        if (ASTSymbol call = parser.parseCall(lexicalContext, current)?)
-        {
+        if (ASTSymbol call = parser.parseCall(lexicalContext, current)?) {
             current = call;
             continue;
         }
-        if (ASTSymbol propagateExpr = parser.parsePropagate(lexicalContext, current)?)
-        {
+        if (ASTSymbol propagateExpr = parser.parsePropagate(lexicalContext, current)?) {
             current = propagateExpr;
             continue;
         }
-        if (ASTSymbol prop = parser.parseParenPropertyExpression(lexicalContext, current)?)
-        {
+        if (ASTSymbol prop = parser.parseParenPropertyExpression(lexicalContext, current)?) {
             current = prop;
             continue;
         }
-        if (ASTSymbol memberAccess = parser.parseMember(current)?)
-        {
+        if (ASTSymbol memberAccess = parser.parseMember(current)?) {
             current = memberAccess;
             continue;
         }
-        if (ASTSymbol indexAccess = parser.parseIndex(lexicalContext, current)?)
-        {
+        if (ASTSymbol indexAccess = parser.parseIndex(lexicalContext, current)?) {
             current = indexAccess;
             continue;
         }
-        if (ASTSymbol templateInstance = parser.parseTemplateInstantiation(lexicalContext, current)?)
-        {
+        if (ASTSymbol templateInstance = parser.parseTemplateInstantiation(lexicalContext, current)?) {
             current = templateInstance;
             continue;
         }
-        return current;
+        break;
     }
+    auto fromPost = parser.from?;
+    if (parser.accept("--")?) postincdec = :dec;
+    else if (parser.accept("++")?) postincdec = :inc;
+    auto toPost = parser.to(fromPost);
+    if (preincdec != :none && postincdec != :none)
+        return toPost.fail("cannot have both pre- and post-increment operator");
+    current = preincdec.case(
+        :inc: new ASTPrePostIncDec((:pre, :inc), current, toPre),
+        :dec: new ASTPrePostIncDec((:pre, :dec), current, toPre),
+        :none: current);
+    current = postincdec.case(
+        :inc: new ASTPrePostIncDec((:post, :inc), current, toPost),
+        :dec: new ASTPrePostIncDec((:post, :dec), current, toPost),
+        :none: current);
+    return current;
 }
 
 class ASTDereference : ASTSymbol
@@ -1721,8 +1741,8 @@ class ASTLambdaExpr : ASTSymbol
         return new ASTBinaryOp("-", new ASTIntLiteral(0, parser.to(from)), next.notNull, parser.to(from));
     }
     parser.revert;
-    if (ASTSymbol expr = parser.parseExpressionIncDec(lexicalContext)?)
-        return parseProperties(parser, lexicalContext, expr);
+    if (auto expr = parseProperties(parser, lexicalContext)?)
+        return expr;
     return null;
 }
 
@@ -1879,33 +1899,6 @@ class ASTPrePostIncDec : ASTSymbol
         auto opText = op.what.case((:inc): "++", (:dec): "--");
         return op.when.case((:pre): opText ~ target.repr, (:post): target.repr ~ opText);
     }
-}
-
-(nullable ASTSymbol | fail Error) parseExpressionIncDec(Parser parser, LexicalContext lexicalContext)
-with (parser.transaction)
-{
-    mut (:inc | :dec | :none) pre = :none, post = :none;
-    auto from1 = parser.from?;
-    if (parser.accept("++")?) pre = :inc;
-    else if (parser.accept("--")?) pre = :dec;
-    nullable ASTSymbol ret = parseExpressionBase(parser, lexicalContext)?;
-    if (!ret) return null;
-    mut auto ret = ret.notNull;
-    commit;
-    auto from2 = parser.from?;
-    if (parser.accept("++")?) post = :inc;
-    else if (parser.accept("--")?) post = :dec;
-    pre.case {
-        (:inc): ret = new ASTPrePostIncDec((:pre, :inc), ret, parser.to(from1));
-        (:dec): ret = new ASTPrePostIncDec((:pre, :dec), ret, parser.to(from1));
-        (:none): {}
-    }
-    post.case {
-        (:inc): ret = new ASTPrePostIncDec((:post, :inc), ret, parser.to(from2));
-        (:dec): ret = new ASTPrePostIncDec((:post, :dec), ret, parser.to(from2));
-        (:none): {}
-    }
-    return ret;
 }
 
 // the AST of a LocRange literal recreating the passed loc.

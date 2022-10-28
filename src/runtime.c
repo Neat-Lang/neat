@@ -343,59 +343,7 @@ void neat_runtime_refcount_set(size_t *ptr, size_t value)
     __atomic_store(ptr, &value, __ATOMIC_RELEASE);
 }
 
-struct CacheEntry
-{
-    void* ptr;
-    void(*free)(void*);
-};
-
-struct Cache
-{
-    size_t length;
-    struct CacheEntry *entries;
-};
-
-__thread struct Cache neat_runtime_cache = {0};
-
-int neat_runtime_cache_isset(int key)
-{
-    if (key >= neat_runtime_cache.length)
-        return false;
-    return neat_runtime_cache.entries[key].ptr != NULL;
-}
-
-void *neat_runtime_cache_get(int key)
-{
-    return neat_runtime_cache.entries[key].ptr;
-}
-
-void neat_runtime_cache_clear()
-{
-    for (int i = 0; i < neat_runtime_cache.length; i++) {
-        struct CacheEntry entry = neat_runtime_cache.entries[i];
-        if (entry.ptr != NULL) {
-            entry.free(entry.ptr);
-        }
-    }
-    free(neat_runtime_cache.entries);
-    neat_runtime_cache.entries = NULL;
-    neat_runtime_cache.length = 0;
-}
-
 int neat_runtime_errno() { return errno; }
-
-void neat_runtime_cache_set(int key, void *ptr, void(*free)(void*))
-{
-    assert(ptr != NULL);
-    if (key >= neat_runtime_cache.length) {
-        size_t oldlen = neat_runtime_cache.length;
-        size_t newlen = key + 1;
-        neat_runtime_cache.entries = realloc(neat_runtime_cache.entries, sizeof(struct CacheEntry) * newlen);
-        memset(neat_runtime_cache.entries + oldlen, 0, sizeof(struct CacheEntry) * (newlen - oldlen));
-        neat_runtime_cache.length = newlen;
-    }
-    neat_runtime_cache.entries[key] = (struct CacheEntry) { .ptr = ptr, .free = free };
-}
 
 pthread_mutex_t stdout_lock;
 

@@ -82,10 +82,19 @@ class CBackendModule : BackendModule {
         this.globals.add(Global(name, typeFmt(this, new BackendFunctionPointerType(ret, args, variadic))));
     }
 
-    void declareVar(string name, BackendType type)
+    void defineVar(string name, BackendType type, bool threadlocal)
     {
         if (this.declared(name)) return;
-        this.output.print("extern " ~ typeFmt(this, type) ~ " $name;");
+        string modifier = "__thread " if threadlocal else "";
+        this.output.print(modifier ~ typeFmt(this, type) ~ " $name;");
+        this.globals.add(Global(name, typeFmt(this, type)));
+    }
+
+    void declareVar(string name, BackendType type, bool threadlocal)
+    {
+        if (this.declared(name)) return;
+        string modifier = "__thread " if threadlocal else "";
+        this.output.print("extern $modifier" ~ typeFmt(this, type) ~ " $name;");
         this.globals.add(Global(name, typeFmt(this, type)));
     }
 
@@ -250,7 +259,7 @@ alias Instr = (
     | :unreachable
     | :structLiteral, BackendStructType struct_, int[] regs
     | :symbolList, string name
-    | :globalVar, string name, BackendType type
+    | :globalVar, string name, BackendType type, bool define, bool threadlocal
     | :binOp, string op, BackendType type, int left, int right
     | :bitCast, int from, BackendType to
     | :zeroExtend, int value, BackendType to
@@ -429,8 +438,8 @@ class CBackendFunction : BackendFunction {
     override int symbolList(string name) {
         return addInstr((:symbolList, name));
     }
-    override int globalVar(string name, BackendType type) {
-        return addInstr((:globalVar, name, type));
+    override int globalVar(string name, BackendType type, bool define, bool threadlocal) {
+        return addInstr((:globalVar, name, type, define, threadlocal));
     }
     override int binop(string op, BackendType type, int left, int right) {
         useReg(left); useReg(right);
@@ -624,9 +633,10 @@ class CBackendFunction : BackendFunction {
                 (:symbolList, string name): {
                     ret = Value("void*", name, exactType=true);
                 }
-                (:globalVar, string name, BackendType type): {
-                    mod.declareVar(name, type);
-                    ret = Value(typeFmt(mod, type), name, exactType = true);
+                (:globalVar, string name, BackendType type, bool define, bool threadlocal): {
+                    if (define) mod.defineVar(name, type, threadlocal);
+                    else mod.declareVar(name, type, threadlocal);
+                    ret = Value(typeFmt(mod, new BackendPointerType(type)), "&$name", exactType=true);
                 }
                 (:binOp, string op, BackendType type, int left, int right): {
                     mut string typestr = typeFmt(mod, type);
@@ -1041,7 +1051,8 @@ string repr(Instr instr) {
         (:unreachable): "unreachable",
         (:structLiteral, BackendStructType struct_, int[] regs): "structLiteral",
         (:symbolList, string name): "symbolList($name)",
-        (:globalVar, string name, BackendType type): "globalVar($name)",
+        (:globalVar, string name, BackendType type, bool define, bool threadlocal):
+            "globalVar($name, $(cast(int) define), $(cast(int) threadlocal))",
         (:binOp, string op, BackendType type, int left, int right): "binOp($op, $left, $right)",
         (:bitCast, int from, BackendType to): "bitCast($from, $(to.repr))",
         (:zeroExtend, int value, BackendType to): "zeroExtend($value, $(to.repr))",

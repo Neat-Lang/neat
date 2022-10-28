@@ -4,78 +4,92 @@ macro import std.macro.quasiquoting;
 
 import neat.runtime : assert;
 import package(compiler).neat.base;
+import package(compiler).neat.hash;
 import package(compiler).neat.util;
 import package(compiler).neat.types;
 
 class ASTOnceExpression : ASTSymbol
 {
-    OnceMacro macro_;
-
     ASTSymbol target;
 
-    this(this.macro_, this.target, this.locRange) { }
+    this(this.target, this.locRange) { }
 
     override (Symbol | fail Error) compile(Context context)
     {
-        mut Context context = context;
-        auto key = context.compiler.astIntLiteral(this.macro_.keyCounter, this.locRange);
-        this.macro_.keyCounter += 1;
-
-        auto cacheIsSet = new FunctionDeclaration(
-            "neat_runtime_cache_isset", new Integer, [
-                Parameter.simple("key", new Integer)]);
-        auto cacheSet = new FunctionDeclaration(
-            "neat_runtime_cache_set", new Void, [
-                Parameter.simple("key", new Integer),
-                Parameter.simple("ptr", new Pointer(new Void)),
-                Parameter.simple("free", new FunctionPointer(new Void, [Parameter.fromType(new Pointer(new Void))]))]);
-        auto cacheGet = new FunctionDeclaration(
-            "neat_runtime_cache_get", new Pointer(new Void), [
-                Parameter.simple("key", new Integer)]);
-        auto rtFree = genRtFree(context, target.compile(context)?.instanceOf(Expression).type);
-
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "neat_runtime_cache_isset", cacheIsSet));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "neat_runtime_cache_set", cacheSet));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "neat_runtime_cache_get", cacheGet));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "rt_free", rtFree));
-
-        return (context.compiler.$expr ({
-            if (!neat_runtime_cache_isset($key))
-            {
-                neat_runtime_cache_set($key, cast(void*) $target, &rt_free);
-            }
-            cast(typeof($target)) neat_runtime_cache_get($key);
-        })).compile(context);
+        auto varName = "once__" ~ this.locRange.repr.cleanup;
+        auto target = this.target.compile(context)?.beExpressionImplCall(context, target.locRange)?;
+        version (firstpassmacro) {
+            return target;
+        } else {
+            auto initStmt = new InitGlobalVarOnce(varName, target);
+            auto globVar = new ExternCVariable(target.type, varName, threadlocal=true);
+            return context.compiler.statementExpression(initStmt, globVar);
+        }
     }
 }
 
-class FixedSymbolAlias : ASTSymbol
+class InitGlobalVarOnce : Statement
 {
-    Symbol symbol;
-    this(this.symbol) { }
-    override (Symbol | fail Error) compile(Context context) { return this.symbol; }
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'FixedSymbolAlias'"); assert(false); }
-}
+    string name;
 
-FunctionDeclarationBase genRtFree(Context context, Type type) {
-    ASTStatement body_() {
-        auto type = new FixedSymbolAlias(type);
-        return context.compiler.$stmt __destroy(cast($type) ptr);;
+    Expression value;
+
+    this(this.name, this.value) {}
+
+    override void emit(Generator output) {
+        version (firstpassmacro) {
+            assert(false);
+        } else {
+            auto backendType = this.value.type.emit(output.platform);
+            auto globalPtr = output.fun.globalVar(this.name, backendType, define=true, threadlocal=true);
+            auto global = output.fun.load(backendType, globalPtr);
+            auto zero = output.fun.zeroLiteral(backendType);
+            auto eq = output.fun.binop("==", backendType, global, zero);
+
+            string label = output.fun.getLabel;
+            output.fun.testBranch(eq, label ~ "_then", label ~ "_fin");
+
+            output.fun.setLabel(label ~ "_then");
+            auto value = this.value.emit(output);
+            output.fun.store(backendType, globalPtr, value);
+
+            output.fun.branch(label ~ "_fin");
+            output.fun.setLabel(label ~ "_fin");
+        }
     }
 
-    Parameter[] params = [Parameter.simple("ptr", new Pointer(new Void))];
-    return context.compiler.createRuntimeFunction(
-        context, "cache_free_" ~ type.mangle, new Void, params, &body_);
+    override void hash(Hash hash) {
+        hash.adds("init global");
+        hash.adds(name);
+        value.hash(hash);
+    }
+
+    override string repr() { return "InitGlobalVar($name)"; }
+}
+
+bool isAlnum(int ch) {
+    return isAlpha(ch) || isDigit(ch);
+}
+
+bool isAlpha(int ch) {
+    return ch >= cast(int) "a"[0] && ch <= cast(int) "z"[0]
+        || ch >= "A"[0] && ch <= cast(int) "Z"[0];
+}
+
+bool isDigit(int ch) {
+    return ch >= cast(int) "0"[0] && ch <= cast(int) "9"[0];
+}
+
+string cleanup(string s) {
+    mut string ret;
+    for (ch in s)
+        if (ch.isAlnum) ret ~= ch;
+        else ret ~= "_";
+    return ret;
 }
 
 class OnceMacro : Macro
 {
-    int keyCounter;
-
     this() { }
 
     override void apply(MacroArgs args) {
@@ -95,7 +109,7 @@ class OnceMacro : Macro
         parser.commit;
         auto locRange = parser.to(from);
         if (auto expression = lexicalContext.compiler.parseExpression(parser, lexicalContext)?) {
-            return new ASTOnceExpression(this, expression, locRange);
+            return new ASTOnceExpression(expression, locRange);
         } else {
             return parser.fail("expression expected");
         }

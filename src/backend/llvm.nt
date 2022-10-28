@@ -327,12 +327,22 @@ class LLVMBackendModule : BackendModule {
         }
     }
 
-    void declareVar(string name, BackendType type)
-    {
-        if (this.declared(name))
+    void declareVar(string name, BackendType type, bool define, bool threadlocal) {
+        if (this.declared(name)) {
+            if (define) {
+                .print("double-define $name");
+                assert(false);
+            }
             return;
+        }
         auto llType = translate(type, false);
-        LLVMAddGlobal(this.module_, llType, name.toStringz);
+        auto global = LLVMAddGlobal(this.module_, llType, name.toStringz);
+        if (define) {
+            LLVMSetInitializer(global, LLVMConstNull(llType));
+        }
+        if (threadlocal) {
+            LLVMSetThreadLocal(global, true);
+        }
         this.globals[name] = type;
     }
 
@@ -673,14 +683,12 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
         auto llCast = LLVMConstBitCast(llGlobal, this.mod.translate(bytePtr, false));
         return this.defReg(bytePtr, llCast);
     }
-    override int globalVar(string name, BackendType type) {
-        this.mod.declareVar(name, type);
+    override int globalVar(string name, BackendType type, bool define, bool threadlocal) {
+        this.mod.declareVar(name, type, define, threadlocal);
         int reg = this.nextReg;
         auto llGlobal = LLVMGetNamedGlobal(this.mod.module_, name.toStringz);
         assert(!!llGlobal);
-        auto llLoad = LLVMBuildLoad(
-            this.builder, llGlobal, "reg$reg".toStringz);
-        return this.defReg(type, llLoad);
+        return this.defReg(type, llGlobal);
     }
     override int binop(string op, BackendType type, int left, int right) {
         mut uninitialized (:op, LLVMOpcode | :fcmp, LLVMRealPredicate | :icmp, LLVMIntPredicate) llOp;

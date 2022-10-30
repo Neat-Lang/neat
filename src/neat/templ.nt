@@ -102,7 +102,13 @@ class TemplateInstantiationNamespace : Namespace
 
     Type[] parameterTypes;
 
-    this(this.parent, this.parameterNames, this.parameterTypes) { this.isContextScope = false; }
+    string memberName;
+
+    Symbol memberValue;
+
+    this(this.parent, this.parameterNames, this.parameterTypes) {
+        this.isContextScope = false;
+    }
 
     override (nullable Symbol | fail Error) lookup(
         string name, Context context, LookupReason reason, LocRange locRange)
@@ -110,6 +116,7 @@ class TemplateInstantiationNamespace : Namespace
         for (i, parameterName in parameterNames) {
             if (name == parameterName) return parameterTypes[i];
         }
+        if (!memberName.empty && name == memberName) return memberValue;
         return parent.lookup(name, context, reason, locRange);
     }
 
@@ -147,7 +154,7 @@ class TemplateDecl : LatentSymbol
 
     ASTTemplateDecl decl;
 
-    (ModuleBase mod, Type[] types, Symbol value)[] instantiations;
+    (Type[] types, (Symbol symbol, ModuleBase mod | :instantiating) value)[] instantiations;
 
     Mutex mutex;
 
@@ -186,11 +193,16 @@ class TemplateDecl : LatentSymbol
         with (this.mutex.locked) {
             for (entry in this.instantiations) {
                 if (entry.types.areSame(parameters)) {
-                    context.compilingModule.addModuleDependency(entry.mod);
-                    if (auto latent = entry.value.instanceOf(LatentSymbol)) {
-                        return latent.resolve(context);
+                    entry.value.case {
+                        :instantiating:
+                            return locRange.fail("Template instantiation loop");
+                        (Symbol symbol, ModuleBase mod):
+                            context.compilingModule.addModuleDependency(mod);
+                            if (auto latent = symbol.instanceOf(LatentSymbol)) {
+                                return latent.resolve(context);
+                            }
+                            return symbol;
                     }
-                    return entry.value;
                 }
             }
         }
@@ -203,17 +215,23 @@ class TemplateDecl : LatentSymbol
         string moduleMangle = this.mangle ~ "_instance_" ~ parameters.mangle;
         ModuleBase module_ = context.compiler.createModule(this.decl.name, moduleMangle, locRange, null);
 
+        mut size_t offset;
+        with (this.mutex.locked) {
+            this.instantiations ~= (parameters, :instantiating);
+            offset = this.instantiations.length - 1;
+        }
+
+        auto instanceNamespace = new TemplateInstantiationNamespace(
+                this.parent, this.decl.typeParameterNames, parameters);
         auto instanceContext = context
-            .withNamespace(new TemplateInstantiationNamespace(
-                this.parent, this.decl.typeParameterNames, parameters))
+            .withNamespace(instanceNamespace)
             .withCompilingModule(module_);
         auto astSymbolDecl = this.decl.content.instanceOf(ASTSymbolDeclaration);
         this.decl.content.locRange.assert(!!astSymbolDecl, "invalid declaration for template")?;
         Symbol value = astSymbolDecl.notNull.compileSymbol(instanceContext)?;
 
-        with (this.mutex.locked) {
-            this.instantiations ~= (module_, parameters, value);
-        }
+        instanceNamespace.memberName = this.decl.content.name;
+        instanceNamespace.memberValue = value;
 
         Symbol resolvedValue() {
             if (auto latent = value.instanceOf(LatentSymbol)) {
@@ -225,11 +243,14 @@ class TemplateDecl : LatentSymbol
 
         module_.track(resolvedValue);
 
-        // after append, to break recursion loops
         module_.compile(instanceContext)?;
 
-        // print("template hooking: add $(module_.mangledName) to $(context.compilingModule.mangledName)");
         context.compilingModule.addModuleDependency(module_);
+
+        with (this.mutex.locked) {
+            this.instantiations[offset].value = (resolvedValue, module_);
+        }
+
         return resolvedValue;
     }
 }

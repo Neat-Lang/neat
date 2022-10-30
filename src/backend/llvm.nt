@@ -155,8 +155,7 @@ bool passByMemory(BackendType type, Platform platform) {
 }
 
 class LLVMBackend : Backend {
-    Mutex mutex;
-    this(this.mutex) {
+    this() {
         LLVMInitializeX86TargetInfo;
         LLVMInitializeX86Target;
         LLVMInitializeX86TargetMC;
@@ -164,7 +163,7 @@ class LLVMBackend : Backend {
         LLVMInitializeX86AsmPrinter;
     }
     override LLVMBackendModule createModule(Platform platform, BackendLocation loc, bool forMacro) {
-        return new LLVMBackendModule(platform, loc, forMacro, this.mutex);
+        return new LLVMBackendModule(platform, loc, forMacro);
     }
     override void hash(Hash hash) {
         hash.adds("LLVM");
@@ -208,9 +207,7 @@ class LLVMBackendModule : BackendModule {
     LLVMDIBuilderRef dibuilder;
     LLVMMetadataRef dicu;
 
-    Mutex mutex;
-
-    this(this.platform, BackendLocation loc, this.forMacro, this.mutex) {
+    this(this.platform, BackendLocation loc, this.forMacro) {
         this.context = LLVMContextCreate;
 
         auto comps = split(loc.file, "/");
@@ -233,23 +230,21 @@ class LLVMBackendModule : BackendModule {
         LLVMSetTarget(this.module_, "x86_64-pc-linux-gnu");
         LLVMSetDataLayout(this.module_, datalayoutStr);
 
-        with (this.mutex.locked) {
-            auto verStr = "Debug Info Version";
-            LLVMAddModuleFlag(
-                this.module_, LLVMModuleFlagBehaviorWarning,
-                verStr.ptr, verStr.length,
-                LLVMValueAsMetadata(LLVMConstInt(LLVMInt32TypeInContext(this.context), 3, SignExtend=false)));
-            auto dwarfStr = "Dwarf Version";
-            LLVMAddModuleFlag(
-                this.module_, LLVMModuleFlagBehaviorWarning,
-                dwarfStr.ptr, dwarfStr.length,
-                LLVMValueAsMetadata(LLVMConstInt(LLVMInt32TypeInContext(this.context), 2, SignExtend=false)));
-            auto picLevel = "PIC Level";
-            LLVMAddModuleFlag(
-                this.module_, LLVMModuleFlagBehaviorWarning,
-                picLevel.ptr, picLevel.length,
-                LLVMValueAsMetadata(LLVMConstInt(LLVMInt32TypeInContext(this.context), 1, SignExtend=false)));
-        }
+        auto verStr = "Debug Info Version";
+        LLVMAddModuleFlag(
+            this.module_, LLVMModuleFlagBehaviorWarning,
+            verStr.ptr, verStr.length,
+            LLVMValueAsMetadata(LLVMConstInt(LLVMInt32TypeInContext(this.context), 3, SignExtend=false)));
+        auto dwarfStr = "Dwarf Version";
+        LLVMAddModuleFlag(
+            this.module_, LLVMModuleFlagBehaviorWarning,
+            dwarfStr.ptr, dwarfStr.length,
+            LLVMValueAsMetadata(LLVMConstInt(LLVMInt32TypeInContext(this.context), 2, SignExtend=false)));
+        auto picLevel = "PIC Level";
+        LLVMAddModuleFlag(
+            this.module_, LLVMModuleFlagBehaviorWarning,
+            picLevel.ptr, picLevel.length,
+            LLVMValueAsMetadata(LLVMConstInt(LLVMInt32TypeInContext(this.context), 1, SignExtend=false)));
 
         auto file = LLVMDIBuilderCreateFile(
             dibuilder,
@@ -277,15 +272,12 @@ class LLVMBackendModule : BackendModule {
             return;
         }
         char* error;
-        // :-(
-        with (this.mutex.locked) {
-            bool succ = LLVMTargetMachineEmitToFile(this.machine, this.module_, file.toStringz, LLVMObjectFile, &error) == 0;
-            if (!succ) {
-                print("compilation failed: $(cToString(error))");
-                assert(false);
-            }
-            LLVMContextDispose(this.context);
+        bool succ = LLVMTargetMachineEmitToFile(this.machine, this.module_, file.toStringz, LLVMObjectFile, &error) == 0;
+        if (!succ) {
+            print("compilation failed: $(cToString(error))");
+            assert(false);
         }
+        LLVMContextDispose(this.context);
     }
 
     LLVMTypeRef translate(BackendType type, bool returnType) {
@@ -475,8 +467,6 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
     LLVMBuilderRef entryBuilder;
     LLVMBasicBlockRef[string] labels;
 
-    Mutex mutex;
-
     LLVMBasicBlockRef llLabel(string name) {
         if (!this.labels.has(name)) {
             this.labels[name] = LLVMAppendBasicBlockInContext(
@@ -632,23 +622,19 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
         return this.defReg(platform.nativeWordType, LLVMConstInt(llType, value, false));
     }
     override int stringLiteral(string text) {
-        // TODO move to LLVMBackendModule
-        // FIXME work around llvm-12 threadsafety issue(?)
-        with (this.mod.mutex.locked) {
-            auto ptrType = new BackendPointerType(new BackendCharType);
-            string literalId = this.mod.nextLiteral;
-            auto llType = this.mod.translate(
-                new BackendStaticArrayType(new BackendCharType, cast(int) text.length), false);
-            auto stringVar = LLVMAddGlobal(this.mod.module_, llType, literalId.toStringz);
-            LLVMSetLinkage(stringVar, LLVMPrivateLinkage);
-            LLVMSetUnnamedAddress(stringVar, LLVMGlobalUnnamedAddr);
-            LLVMSetGlobalConstant(stringVar, true);
-            LLVMSetInitializer(stringVar, LLVMConstStringInContext(
-                this.mod.context, text.ptr, cast(int) text.length, DontNullTerminate=true));
-            auto stringVal = LLVMConstPointerCast(stringVar, this.mod.translate(ptrType, false));
+        auto ptrType = new BackendPointerType(new BackendCharType);
+        string literalId = this.mod.nextLiteral;
+        auto llType = this.mod.translate(
+            new BackendStaticArrayType(new BackendCharType, cast(int) text.length), false);
+        auto stringVar = LLVMAddGlobal(this.mod.module_, llType, literalId.toStringz);
+        LLVMSetLinkage(stringVar, LLVMPrivateLinkage);
+        LLVMSetUnnamedAddress(stringVar, LLVMGlobalUnnamedAddr);
+        LLVMSetGlobalConstant(stringVar, true);
+        LLVMSetInitializer(stringVar, LLVMConstStringInContext(
+            this.mod.context, text.ptr, cast(int) text.length, DontNullTerminate=true));
+        auto stringVal = LLVMConstPointerCast(stringVar, this.mod.translate(ptrType, false));
 
-            return this.defReg(ptrType, stringVal);
-        }
+        return this.defReg(ptrType, stringVal);
     }
     override int voidLiteral() {
         return zeroLiteral(new BackendVoidType);

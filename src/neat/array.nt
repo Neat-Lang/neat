@@ -177,6 +177,16 @@ class Array : Type
         return null;
     }
 
+    override nullable Expression implicitConvertTo(Context context, Expression source, Type target)
+    {
+        if (auto targetArray = target.instanceOf(Array)) {
+            if (elementType.triviallyConvertsTo(targetArray.elementType)) {
+                return context.compiler.trivialCastTo(target, source);
+            }
+        }
+        return null;
+    }
+
     override (nullable Expression | fail Error) truthy(Context context, Expression expr, LocRange locRange)
     {
         (Expression | fail Error) do_(Expression expr) {
@@ -497,21 +507,44 @@ Expression releaseArray(Context context, Expression value) {
     return context.compiler.mkCall(fn, [value], __RANGE__);
 }
 
-(Expression | fail Error) arrayCat(Context context, Expression left, Expression right, LocRange locRange) {
+(Expression | fail Error) arrayCat(Context context, mut Expression left, mut Expression right, LocRange locRange) {
     auto compiler = context.compiler;
 
     Array leftArray = left.type.instanceOf(Array).notNull;
-    Parameter[] params = [
-        Parameter.simple("left", leftArray),
-        Parameter.simple("right", right.type)];
 
+    mut (nullable Expression | :unknown) ltr_ = :unknown;
+    nullable Expression ltr() {
+        if (ltr_ == :unknown)
+            ltr_ = context.compiler.implicitConvertTo(context, left, right.type);
+        // TODO bottom assert
+        return ltr_.case(:unknown: return null);
+    }
+
+    mut (nullable Expression | :unknown) rtl_ = :unknown;
+    nullable Expression rtl() {
+        if (rtl_ == :unknown)
+            rtl_ = context.compiler.implicitConvertTo(context, right, left.type);
+        // TODO bottom assert
+        return rtl_.case(:unknown: return null);
+    }
+
+    bool sameType = left.type.same(right.type);
     bool appendElementType = leftArray.elementType.same(right.type)
         || leftArray.elementType.implicitConvertFrom(context, right);
-    bool appendArrays = leftArray.same(right.type);
+    bool appendArrays = sameType || ltr || rtl;
 
+    // TODO should element append really live in this function?
+    // if we factor it out the logic gets a bit easier probably.
     if (!appendElementType && !appendArrays) {
-        return locRange.fail("incompatible types for concat: " ~ leftArray.repr ~ " and " ~ right.type.repr);
+        return locRange.fail("incompatible types for concat: " ~ left.type.repr ~ " and " ~ right.type.repr);
     }
+
+    (Expression left, Expression right) merge() {
+        if (sameType || appendElementType) return (left, right);
+        if (auto rtl = rtl) return (left, rtl);
+        return (ltr.notNull, right);
+    }
+    auto = merge;
 
     ASTStatement body_() {
         if (appendElementType) {
@@ -555,7 +588,10 @@ Expression releaseArray(Context context, Expression value) {
             };
         } else assert(false);
     }
-    auto fn = compiler.createRuntimeFunction(context, "arrayCat", leftArray, params, &body_);
+    Parameter[] params = [
+        Parameter.simple("left", left.type),
+        Parameter.simple("right", right.type)];
+    auto fn = compiler.createRuntimeFunction(context, "arrayCat", left.type, params, &body_);
     auto astFn = new ASTSymbolHelper(fn);
     auto astLeft = new ASTSymbolHelper(left);
     auto astRight = new ASTSymbolHelper(right);

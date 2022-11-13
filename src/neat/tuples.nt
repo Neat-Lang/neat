@@ -19,21 +19,30 @@ import neat.util;
 
 class ASTTupleExpr : ASTSymbol
 {
-    ASTSymbol[] members;
+    (string name, ASTSymbol symbol)[] members;
 
     this(this.members, this.locRange) { }
 
     override (Expression | fail Error) compile(Context context) {
-        Expression[] fields = [
-            member.compile(context)?.beExpressionImplCall(context, member.locRange)? for member in members];
-        auto type = new TupleType([("", member.type) for member in fields]);
+        (string name, Expression expr)[] fields = [
+            (
+                member.name,
+                member.symbol.compile(context)?.beExpressionImplCall(context, member.symbol.locRange)?
+            )
+            for member in members];
+        auto type = new TupleType([(member.name, member.expr.type) for member in fields]);
 
-        return makeTuple(context, this.locRange, type, fields);
+        return makeTuple(context, this.locRange, type, [field.expr for field in fields]);
     }
 
     override ASTSymbol quote(Quoter quoter) {
-        auto members = [a.quote(quoter) for a in this.members];
-        return quoter.compilerCall("astTupleLiteral", [
+        ASTSymbol quote((string name, ASTSymbol sym) pair) {
+            return quoter.compiler.astTupleLiteral([
+                quoter.compiler.astStringLiteral(pair.name, __RANGE__),
+                pair.sym.quote(quoter)], __RANGE__);
+        }
+        auto members = [quote(a) for a in this.members];
+        return quoter.compilerCall("astTupleLiteral2", [
             quoter.compiler.astArrayLiteral(members, this.locRange),
         ], this.locRange);
     }
@@ -47,7 +56,7 @@ class ASTTupleExpr : ASTSymbol
         parser.revert;
         return null;
     }
-    mut ASTSymbol[] members;
+    mut (string name, ASTSymbol symbol)[] members;
     while (!parser.accept(")")?)
     {
         auto memberFrom = parser.from?;
@@ -59,8 +68,18 @@ class ASTTupleExpr : ASTSymbol
             }
             return parser.to(memberFrom).fail("tuple: ',' expected");
         }
-        if (auto member = lexicalContext.compiler.parseExpression(parser, lexicalContext)?) {
-            members ~= member;
+        if (mut auto member = lexicalContext.compiler.parseExpression(parser, lexicalContext)?) {
+            mut string name = "";
+            if (auto memberIdent = member.instanceOf(ASTIdentifier)) {
+                if (!memberIdent.moduleLevel && parser.accept("=")?) {
+                    name = memberIdent.name;
+                    auto member_ = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
+                    if (!member_)
+                        return parser.to(memberFrom).fail("tuple: member expected");
+                    member = member_.notNull;
+                }
+            }
+            members ~= (name, member);
         } else {
             // (bla bla) still
             if (members.length <= 1) {
@@ -168,18 +187,24 @@ class TupleType : Type
 
     override bool same(Type type) {
         if (auto other = type.instanceOf(TupleType)) {
-            return other.members.length == members.length &&
-                [all member.type.same(other.members[i].type) for i, member in members];
+            return other.members.length == members.length && [
+                all member.type.same(other.members[i].type) && member.name == other.members[i].name
+                for i, member in members
+            ];
         }
         return false;
     }
 
     override string repr() {
-        return "(" ~ [join with ", " member.type.repr for member in members] ~ ")";
+        string memberStr((string name, Type type) member) {
+            if (member.name == "") return member.type.repr;
+            return "$(member.type.repr) $(member.name)";
+        }
+        return "(" ~ [join with ", " member.memberStr for member in members] ~ ")";
     }
 
     override string mangle() {
-        return "tuple_" ~ [join with "_" member.type.mangle for member in members];
+        return "tuple_" ~ [join with "_" "$(member.name)_$(member.type.mangle)" for member in members];
     }
 
     override (nullable Symbol | fail Error) accessMember(
@@ -264,6 +289,21 @@ class TupleType : Type
             nullable Expression ex: return ex;
             Error err: assert(false);
         }
+    }
+
+    // Tuple trivially converts to tuple if all the fields are the same type
+    // and either have the same name or the first tuple field has no name.
+    override bool triviallyConvertsTo(Type target)
+    {
+        auto tupleTargetType = target.instanceOf(TupleType);
+        if (!tupleTargetType || tupleTargetType.members.length != members.length)
+            return false;
+        bool trivial((string name, Type type) first, (string name, Type type) second)
+        {
+            if (!first.type.triviallyConvertsTo(second.type)) return false;
+            return first.name == second.name || first.name.empty;
+        }
+        return [all trivial(members[i], tupleTargetType.members[i]) for i in 0 .. members.length];
     }
 
     override (nullable Expression | fail Error) index(
@@ -410,9 +450,9 @@ class ASTTupleType : ASTSymbol
 
     override ASTSymbol quote(Quoter quoter) {
         ASTSymbol quoteMember(typeof(members[0]) member) {
-            with (quoter.compiler) return astTupleLiteral([
-                astStringLiteral(member.name, __RANGE__),
-                member.type.quote(quoter)], __RANGE__);
+            with (quoter.compiler) return astTupleLiteral2([
+                ("name", astStringLiteral(member.name, __RANGE__)),
+                ("type", member.type.quote(quoter))], __RANGE__);
         }
         auto members = [a.quoteMember for a in this.members];
         return quoter.compilerCall("astTupleType", [

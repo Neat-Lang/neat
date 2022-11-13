@@ -298,6 +298,18 @@ class Either : Type
         }
     }
 
+    // Either trivially converts to target if all types trivially convert.
+    override bool triviallyConvertsTo(Type target)
+    {
+        auto otherEither = target.instanceOf(Either);
+        if (!otherEither || otherEither.types.length != types.length)
+            return false;
+        for (i in 0 .. types.length)
+            if (!types[i].type.triviallyConvertsTo(otherEither.types[i].type))
+                return false;
+        return true;
+    }
+
     override bool same(Type type) {
         auto other = type.instanceOf(Either);
         if (!other || types.length != other.types.length)
@@ -547,6 +559,15 @@ class ASTEitherCaseExpr : ASTSymbol
                     matchIndex = k;
                 }
             }
+            if (matchIndex == -1) {
+                // look for weaker match
+                for (int k, eitherType in either.types) {
+                    if (eitherType.type.triviallyConvertsTo(caseType)) {
+                        caseLoc.assert(matchIndex == -1, "either type $(eitherType.type.repr) matched twice")?;
+                        matchIndex = k;
+                    }
+                }
+            }
             caseLoc.assert(matchIndex != -1, "Type is not listed in Either!")?;
             handled[matchIndex] = true;
             matchIndexes[i] = matchIndex;
@@ -593,6 +614,7 @@ class ASTEitherCaseExpr : ASTSymbol
             mut Statement[] thenSteps;
 
             bool cleanup = baseExpr.info.lifetime == Lifetime.gifted;
+            auto castMember = context.compiler.trivialCastTo(type, new EitherMember(baseExprTemp, matchIndex));
 
             mut Context context = context;
             mut uninitialized Reference variable;
@@ -602,10 +624,10 @@ class ASTEitherCaseExpr : ASTSymbol
                 context = context.withNamespace(namespace);
                 variable = namespace.accessDecl(context);
                 // Borrow the case base.
-                thenSteps ~= context.compiler.assignStatement(variable, new EitherMember(baseExprTemp, matchIndex));
+                thenSteps ~= context.compiler.assignStatement(variable, castMember);
             } else {
                 auto namespace = context.compiler.symbolAlias(
-                    context.namespace, case_.identifier, new EitherMember(baseExprTemp, matchIndex));
+                    context.namespace, case_.identifier, castMember);
                 context = context.withNamespace(namespace);
             }
             Expression userExpr = case_.expr.compile(context)?
@@ -696,7 +718,7 @@ class ASTEitherCaseExpr : ASTSymbol
         parser.expect(":")?;
         ASTSymbol expr = lexicalContext.compiler.parseExpression(parser, lexicalContext)?
             .notNull;
-        cases ~= ASTEitherCaseExprCase(parser.to(from), type.notNull, identifier, false, expr);
+        cases ~= ASTEitherCaseExprCase(parser.to(caseFrom), type.notNull, identifier, false, expr);
     }
     return new ASTEitherCaseExpr(parser.to(from), current, cases);
 }
@@ -740,15 +762,24 @@ class ASTEitherCaseStmt : ASTStatement
                         matched = k;
                     }
                 }
+                if (matched == -1) {
+                    // look for weaker match
+                    for (int k, entry in either.types) {
+                        if (entry.type.triviallyConvertsTo(type)) {
+                            case_.locRange.assert(matched == -1, "either type " ~ type.repr() ~ " matched twice")?;
+                            matched = k;
+                        }
+                    }
+                }
                 case_.locRange.assert(matched != -1, "Type is not listed in Either!")?;
                 handled[matched] = true;
 
                 with (context.compiler) {
                     auto namespace = variableDeclaration(
                         context.namespace, case_.identifier, type, mut=false, borrowed=true, false);
-                    // FIXME rename to accessDecl
                     Reference variable = namespace.accessDecl(context);
-                    Statement assignment = assignStatement(variable, new EitherMember(baseExpr, matched));
+                    auto member = trivialCastTo(type, new EitherMember(baseExpr, matched));
+                    Statement assignment = assignStatement(variable, member);
                     auto userStmtPair = case_.stmt.compile(context.withNamespace(namespace))?;
                     Statement then = sequenceStatement([assignment, userStmtPair.statement]);
                     Expression test = binaryOp(

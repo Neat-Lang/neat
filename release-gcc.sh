@@ -96,7 +96,7 @@ for file in intermediate_\${ARCH}/*.c src/runtime.c; do
     I=\$((I+1))
 done
 for i in \$(seq \$JOBS); do wait -n; done
-gcc -fpic -rdynamic -fno-strict-aliasing \${OBJECTS[@]} -o neat_bootstrap -ldl -lm \$ARCHFLAG \$CFLAGS
+gcc \$ARCHFLAG -fpic -rdynamic -fno-strict-aliasing \${OBJECTS[@]} -o neat_bootstrap -ldl -lm \$CFLAGS
 rm \${OBJECTS[@]}
 cat > neat.ini <<EOI
 -syspackage compiler:src
@@ -142,20 +142,44 @@ else
 fi
 LLVM_CFLAGS="-I\$(\$LLVM_CONFIG --includedir) -L\$(\$LLVM_CONFIG --libdir)"
 LLVM_NTFLAGS="-I\$(\$LLVM_CONFIG --includedir) -L-L\$(\$LLVM_CONFIG --libdir)"
+if [ "\${ARCH}" == "" ]
+then
+    ARCH=\$(getconf LONG_BIT)
+    echo "ARCH not set, guessing \$ARCH"
+fi
+DEFAULT_ARCH=""
+echo "int main(void) {}" |gcc -x c - -o _platform_test
+if (file _platform_test |grep -q 32-bit)
+then
+    DEFAULT_ARCH="32"
+elif (file _platform_test |grep -q 64-bit)
+then
+    DEFAULT_ARCH="64"
+else
+    echo "Cannot determine architecture!"
+    exit 1
+fi
+rm _platform_test
+ARCHFLAG=""
+if [ "\${ARCH}" != "\${DEFAULT_ARCH}" ]
+then
+    # force targetting the ARCH architecture
+    ARCHFLAG="-m\${ARCH}"
+fi
 CFLAGS="\${CFLAGS:+ } \${LLVM_CFLAGS} -O2 -fno-strict-aliasing -pthread"
 I=0
 JOBS=16
 OBJECTS=()
 # poor man's make -j
-for file in intermediate/*.c src/runtime.c; do
+for file in intermediate_\${ARCH}/*.c src/runtime.c; do
     obj=\${file%.c}.o
-    gcc -c -fpic -rdynamic -fno-strict-aliasing \$file -o \$obj &
+    gcc \$ARCHFLAG -c -fpic -rdynamic -fno-strict-aliasing \$file -o \$obj &
     OBJECTS+=(\$obj)
     if [ \$I -ge \$JOBS ]; then wait -n; fi
     I=\$((I+1))
 done
 for i in \$(seq \$JOBS); do wait -n; done
-gcc -fpic -rdynamic -fno-strict-aliasing \${OBJECTS[@]} -o neat_bootstrap -ldl -lm -lLLVM \$CFLAGS
+gcc \$ARCHFLAG -fpic -rdynamic -fno-strict-aliasing \${OBJECTS[@]} -o neat_bootstrap -ldl -lm -lLLVM \$CFLAGS
 rm \${OBJECTS[@]}
 ./neat_bootstrap -macro-backend=c src/main.nt \${LLVM_NTFLAGS} $NTFLAGS -o neat
 rm neat_bootstrap
@@ -167,6 +191,7 @@ EOT
 -version=LLVMBackend
 -macro-version=LLVMBackend
 -running-compiler-version=$VERSION
+-extra-cflags=\$ARCHFLAG
 EOT
 fi
 chmod +x $TARGET/build.sh

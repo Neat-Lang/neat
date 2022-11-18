@@ -112,7 +112,7 @@ then
 -macro-m32
 EOI
 fi
-./neat_bootstrap src/main.nt $NTFLAGS -o neat
+./neat_bootstrap -j src/main.nt $NTFLAGS -o neat
 rm neat_bootstrap
 EOT
 else
@@ -181,7 +181,7 @@ done
 for i in \$(seq \$JOBS); do wait -n; done
 gcc \$ARCHFLAG -fpic -rdynamic -fno-strict-aliasing \${OBJECTS[@]} -o neat_bootstrap -ldl -lm -lLLVM \$CFLAGS
 rm \${OBJECTS[@]}
-./neat_bootstrap -macro-backend=c src/main.nt \${LLVM_NTFLAGS} $NTFLAGS -o neat
+./neat_bootstrap -j -macro-backend=c src/main.nt \${LLVM_NTFLAGS} $NTFLAGS -o neat
 rm neat_bootstrap
 EOT
     cat > $TARGET/neat.ini <<EOT

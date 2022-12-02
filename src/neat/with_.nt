@@ -43,6 +43,25 @@ class WithNamespace : Namespace, Unwindable
     }
 }
 
+class WithTypeNamespace : Namespace
+{
+    Type type;
+
+    LocRange locRange;
+
+    this(this.parent, this.type, this.locRange) { this.isContextScope = parent.isContextScope; }
+
+    override (nullable Symbol | fail Error) lookup(
+        string name, Context context, LookupReason reason, LocRange locRange)
+    {
+        auto protection = type.protectionAt(context.namespace);
+        auto member = type.accessMember(context, null, name, protection, locRange)?;
+        if (member) return member;
+        if (this.parent) return this.parent.lookup(name, context, reason, locRange);
+        return null;
+    }
+}
+
 class ASTWithStatement : ASTStatement
 {
     ASTSymbol expr;
@@ -53,7 +72,19 @@ class ASTWithStatement : ASTStatement
 
     override (StatementCompileResult | fail Error) compile(Context context)
     {
-        Expression expr = this.expr.compile(context)?.beExpressionImplCall(context, this.expr.locRange)?;
+        auto outerNamespace = context.namespace;
+
+        auto sym = this.expr.compile(context)?;
+        if (auto type = sym.instanceOf(Type)) {
+            // with (type) accesses static members
+            auto subContext = context.withNamespace(new WithTypeNamespace(context.namespace, type, this.locRange));
+            auto subStmtPair = this.stmt.compile(subContext)?;
+            auto stmt = subStmtPair.statement;
+            auto stmt = context.compiler.unwindScope(subContext, outerNamespace, stmt)?;
+            return StatementCompileResult(stmt, outerNamespace);
+        }
+
+        Expression expr = sym.beExpressionImplCall(context, this.expr.locRange)?;
         bool isPtr = !!expr.instanceOf(Reference);
 
         Type varType() {

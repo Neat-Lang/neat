@@ -1753,6 +1753,64 @@ class ASTLambdaExpr : ASTSymbol
     return null;
 }
 
+(char | :dollar | fail Error) parseChar(Parser parser) {
+    string ch = parser.text[0 .. 1];
+    parser.drop(1);
+    if (ch != "\\") {
+        if (ch == "\$") return :dollar;
+        return ch[0];
+    }
+    if (parser.text.empty)
+        return parser.fail("expected control character, got end of file");
+    string ctl = parser.text[0 .. 1];
+    parser.drop(1);
+    // TODO use char literals
+    if (ctl == "r") {
+        return "\r"[0];
+    } else if (ctl == "\$") {
+        return "\$"[0];
+    } else if (ctl == "n") {
+        return "\n"[0];
+    } else if (ctl == "t") {
+        return "\t"[0];
+    } else if (ctl == "\"") {
+        return "\""[0];
+    } else if (ctl == "\\") {
+        return "\\"[0];
+    } else if (ctl == "0") {
+        return "\x00"[0]; // TODO \0
+    } else if (ctl == "x") {
+        if (parser.text.length < 2) return parser.fail("expected hex code, got end of file");
+        char ch1 = parser.text[0], ch2 = parser.text[1];
+        int decodeHex(char ch) {
+            if (ch >= "0"[0] && ch <= "9"[0])
+                return ch - "0"[0];
+            if (ch >= "a"[0] && ch <= "f"[0])
+                return ch + 10 - "a"[0];
+            if (ch >= "A"[0] && ch <= "F"[0])
+                return ch + 10 - "A"[0];
+            print("Unknown hex digit '" ~ ch ~ "'");
+            assert(false);
+        }
+        char ord = cast(char) (decodeHex(ch1) * 16 + decodeHex(ch2));
+        parser.drop(2);
+        return ord;
+    } else {
+        return parser.fail("unknown control sequence \\$ctl");
+    }
+}
+
+(ASTSymbol | fail Error) parseCharLiteral(
+    Parser parser, LexicalContext lexicalContext, LocRange from)
+{
+    if (parser.text.empty)
+        return parser.fail("expected character, got end of file");
+    auto ch = parser.parseChar?.case(:dollar: "\$"[0]);
+    auto locRange = parser.to(from);
+    parser.expect("'")?;
+    return new ASTCharLiteral(ch, locRange);
+}
+
 (ASTSymbol | fail Error) parseStringLiteral(
     Parser parser, LexicalContext lexicalContext, string endMarker, LocRange from)
 {
@@ -1767,45 +1825,8 @@ class ASTLambdaExpr : ASTSymbol
         if (parser.text.length == 0) {
             return parser.fail("expected end of string, got end of file");
         }
-        string ch = parser.text[0 .. 1];
-        parser.drop(1);
-        if (ch == "\\") {
-            string ctl = parser.text[0 .. 1];
-            parser.dropOneCharNonNewline(1);
-            if (ctl == "r") {
-                current ~= "\r";
-            } else if (ctl == "\$") {
-                current ~= "\$";
-            } else if (ctl == "n") {
-                current ~= "\n";
-            } else if (ctl == "t") {
-                current ~= "\t";
-            } else if (ctl == "\"") {
-                current ~= "\"";
-            } else if (ctl == "\\") {
-                current ~= "\\";
-            } else if (ctl == "0") {
-                current ~= "\x00"; // TODO \0
-            } else if (ctl == "x") {
-                char ch1 = parser.text[0], ch2 = parser.text[1];
-                int decodeHex(char ch) {
-                    if (ch >= "0"[0] && ch <= "9"[0])
-                        return cast(int) (ch - "0"[0]);
-                    if (ch >= "a"[0] && ch <= "F"[0])
-                        return cast(int) ch + 10 - cast(int) "a"[0];
-                    if (ch >= "A"[0] && ch <= "F"[0])
-                        return cast(int) ch + 10 - cast(int) "A"[0];
-                    print("Unknown hex digit '" ~ ch ~ "'");
-                    assert(false);
-                }
-                char ord = cast(char) (decodeHex(ch1) * 16 + decodeHex(ch2));
-                current ~= ord;
-                parser.drop(2);
-            } else {
-                print("Unknown control sequence \\$ctl");
-                assert(false);
-            }
-        } else if (ch == "\$") {
+        auto ch = parser.parseChar?;
+        if (ch == :dollar) {
             flush;
             if (parser.accept("(")?) {
                 auto litFrom = parser.from?;
@@ -1820,7 +1841,8 @@ class ASTLambdaExpr : ASTSymbol
                 parts ~= new ASTIdentifier(var, moduleLevel=false, parser.to(varFrom));
             }
         } else {
-            current ~= ch;
+            bottom die() { assert(false); }
+            current ~= ch.case(:dollar: die);
         }
     }
     if (!parser.accept(endMarker)?)
@@ -1978,14 +2000,15 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
         (:success, int i):
             return new ASTIntLiteral(i, parser.to(from));
     }
-    if (parser.accept("\"")?)
-    {
+    if (parser.accept("'")?) {
+        return parseCharLiteral(parser, lexicalContext, from);
+    }
+    if (parser.accept("\"")?) {
         return parseStringLiteral(parser, lexicalContext, "\"", from);
     }
     if (auto statementExpr = parseStatementExpr(parser, lexicalContext)?)
         return statementExpr;
-    if (parser.accept("(")?)
-    {
+    if (parser.accept("(")?) {
         nullable ASTSymbol result = parseExpression(parser, lexicalContext)?;
 
         parser.expect(")")?;

@@ -98,6 +98,9 @@ class HashMap : Type
             if (field == "values") {
                 return valuesHashmap(context, this, base);
             }
+            if (field == "clear") {
+                return clearHashmap(context, this, base);
+            }
         }
         return null;
     }
@@ -133,9 +136,17 @@ class HashMap : Type
                 return hasKeyHashmap(context, this, base, key);
             }
             if (field == "resize") {
-                locRange.assert(args.length == 1, "hashmap.resize() expects one parameter, new size")?;
                 auto newsize = args[0].sym.compile(context)?.beExpressionImplCall(context, args[0].locRange)?;
                 return resizeHashmap(context, this, base, newsize);
+            }
+            if (field == "remove") {
+                locRange.assert(args.length == 1, "hashmap.remove() expects one parameter, key")?;
+                auto key = args[0].sym.compile(context)?.beExpressionImplCall(context, args[0].locRange)?;
+                return removeKeyHashmap(context, this, base, key);
+            }
+            if (field == "clear") {
+                locRange.assert(args.length == 0, "hashmap.clear() expects no parameters")?;
+                return clearHashmap(context, this, base);
             }
         } else {
             if (field == "allocate") {
@@ -443,6 +454,75 @@ private Expression getHashmap(Context context, HashMap hashmap, Expression base,
     return context.compiler.mkCall(fn, [base, key], __RANGE__);
 }
 
+private Expression removeKeyHashmap(Context context, HashMap hashmap, Expression base, Expression key) {
+    Parameter[] params = [
+        Parameter.simple("base", hashmap),
+        Parameter.simple("key", hashmap.key)];
+
+    ASTStatement body_() {
+        auto expr = context.compiler.$expr ({
+            // FIXME
+            alias T = Value[Key];
+            auto hash = T.hash(key);
+            mut auto data = cast(HashMapBase*) base;
+            if (!data) return false;
+            auto rows = cast(HashMapRow*) &data[1];
+            for (i in 0 .. data.capacity) {
+                // FIXME wraparound test instead of %
+                size_t index = (i + hash) % data.capacity;
+                rows[index].case {
+                    (:empty): return false;
+                    (:gravestone): {}
+                    (Key key, Value value) entry: {
+                        if (key == entry.key) {
+                            data.length -= 1;
+                            rows[index] = :gravestone;
+                            return true;
+                        }
+                    }
+                }
+            }
+            int* ip = null; *ip = *ip;
+            // TODO
+            // assert(false); // hashmap was completely full, this should never happen
+            0; // expr result value. TODO bottom literal
+        });
+        return new ASTExprStatement(wrap(context, hashmap, expr), __RANGE__);
+    }
+
+    auto fn = context.compiler.createRuntimeFunction(
+        context, "hashmap_remove", new Boolean, params, &body_);
+
+    return context.compiler.mkCall(fn, [base, key], __RANGE__);
+}
+
+private Expression clearHashmap(Context context, HashMap hashmap, Expression base) {
+    Parameter[] params = [
+        Parameter.simple("base", hashmap)];
+
+    ASTStatement body_() {
+        auto expr = context.compiler.$expr ({
+            // FIXME
+            alias T = Value[Key];
+            mut auto data = cast(HashMapBase*) base;
+            if (!data) return;
+            auto rows = cast(HashMapRow*) &data[1];
+            for (i in 0 .. data.capacity) {
+                rows[i] = :empty;
+            }
+            data.length = 0;
+            // TODO bottom expression
+            0;
+        });
+        return new ASTExprStatement(wrap(context, hashmap, expr), __RANGE__);
+    }
+
+    auto fn = context.compiler.createRuntimeFunction(
+        context, "hashmap_clear", new Void, params, &body_);
+
+    return context.compiler.mkCall(fn, [base], __RANGE__);
+}
+
 private Expression hasKeyHashmap(Context context, HashMap hashmap, Expression base, Expression key) {
     Parameter[] params = [
         Parameter.simple("base", hashmap),
@@ -597,8 +677,8 @@ private Expression valuesHashmap(Context context, HashMap hashmap, Expression ba
             mut int k = 0;
             for (i in 0 .. base.capacity) {
                 rows[i].case {
-                    (:empty): continue;
-                    (:gravestone): continue;
+                    :empty: continue;
+                    :gravestone: continue;
                     (Key key, Value value): {
                         ret[k] = value;
                         k += 1;
@@ -607,7 +687,11 @@ private Expression valuesHashmap(Context context, HashMap hashmap, Expression ba
                 0;
             }
             // assert(k == base.length);
-            if (k != base.length) { int* ip; *ip = *ip; }
+            if (k != base.length) {
+                print("logic error: $k results, but base length was tracked at $(base.length)");
+                int* ip;
+                *ip = *ip;
+            }
             ret;
         });
         return context.compiler.astReturn(wrap(context, hashmap, expr), false, __RANGE__);

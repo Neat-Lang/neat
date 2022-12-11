@@ -417,7 +417,11 @@ Tuple
 `tuple[0]` is the first member of the tuple. The index value must be an int literal.
 
 Tuple members can be named: `(int i, float f)`. This allows accessing the member with `value.i`.
-From a type system view, this is purely decorative.
+
+When implicitly converting tuples, tuple fields without names implicitly convert to any name, but tuple
+fields with names only convert to other fields with the same name.
+
+For example, `(2, 3)` implicitly converts to `(int from, int to)`, but `(min=2, max=3)` does not.
 
 Sum type
 ^^^^^^^^

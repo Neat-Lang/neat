@@ -126,20 +126,20 @@ Binary operations can be performed on types. These are:
 ========= ============== ====
 Operation Description    Rank
 ========= ============== ====
-`a || b`  Boolean "or"   0
-`a && b`  Boolean "and"  1
-`a <= b`  Comparison     2
-`a .. b`  Range          3
-`a << b`  Left shift     4
-`a >> b`  Right shift    4
+`a || b`  Boolean "or"   1
+`a && b`  Boolean "and"  2
+`a <= b`  Comparison     3
+`a .. b`  Range          4
 `a + b`   Addition       5
 `a - b`   Subtraction    5
 `a ~ b`   Concatenation  5
 `a * b`   Multiplication 6
 `a / b`   Division       6
 `a | b`   Bitwise "or"   7
-`a ^ b`   Bitwise "xor"  8
-`a & b`   Bitwise "and"  9
+`a << b`  Left shift     8
+`a >> b`  Right shift    8
+`a ^ b`   Bitwise "xor"  9
+`a & b`   Bitwise "and"  10
 ========= ============== ====
 
 Boolean "or" and "and" are short-circuiting. Comparison operators are `>`, `==`, `<`, `>=`, `<=`, and `!=`.

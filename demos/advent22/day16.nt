@@ -1,0 +1,169 @@
+module day16;
+
+macro import std.macro.assert;
+macro import std.macro.listcomprehension;
+
+import std.algorithm;
+import std.math;
+import std.stdio;
+import std.string;
+
+alias Graph = (int rate, (string name, int cost)[] to)[string];
+
+/**
+ * You may initially think, as I did, that the name of the game in Day 16 is memoization.
+ * It is not. The name of the game is ruthlessly minimizing strategy fanout.
+ * The first optimization is that all moves have the form "go to a valve and open it." Any
+ * move that doesn't can be replaced with one that does.
+ * This suggests to translate the cave graph into a fully connected graph where each
+ * edge has a traversal cost; ie. we never go anywhere if the intent is not to open a valve.
+ * At this point, many moves can already be excluded on the basis of "not enough time remaining
+ * to get there."
+ * Knowing where we're going when we set out also allows us to immediately discard moves where
+ * the valve will be closed by the time we get there, for instance because the elephant is already
+ * on its way there.
+ * The second optimization is that if we track how much pressure we've already released, we can
+ * use an early-abort heuristic to estimate how much pressure we can possibly still release. If
+ * this sum is less than the already-found best path, this again lets us prune branches early.
+ * With the second optimization, we can see that we benefit from reaching high best-pressure paths
+ * early. To facilitate this, we can pre-sort the outgoing edges to maximize the benefit of opening
+ * the valve. With this third optimization, we quickly reach good paths and then spend our time
+ * excluding less likely paths via the early-abort heuristic.
+ */
+void main()
+{
+    auto decodeValve = line => (
+        name=line.between("Valve ", " has"),
+        rate=line.between("flow rate=", ";").atoi,
+        to=line.after("valve ", "valves ").split(", ").map(a => (name=a, cost=1)).array);
+    auto valveArray = stdin.byLine
+        .filter(a => !a.empty)
+        .map(decodeValve)
+        .array;
+    print("valves: $valveArray");
+    mut Graph valves;
+    for (valve in valveArray) {
+        valves[valve.name] = (rate=valve.rate, to=valve.to);
+    }
+    valves = valves.optimize;
+    print("optimized:");
+    for (key in valves.keys) print("  $key: $(valves[key])");
+    alias Step = (int targetTime, string name);
+    mut int peakRelease = 0;
+    mut Step[] peakPath, peakElephantPath;
+    int lastMinute = 26;
+    void check(Step[] path, Step[] elephantPath, int minute, string[] remainingValves, int released) {
+        // print("check($path, $remTime, $openedValves, $released)");
+        if (released > peakRelease) {
+            peakRelease = released;
+            peakPath = path;
+            peakElephantPath = elephantPath;
+            print("peak improved to $peakRelease, $remainingValves");
+            print("  path: $path");
+            print("  elephant: $elephantPath");
+        }
+        if (minute == lastMinute) return;
+        int bestCaseRemAvailable = (lastMinute - minute + 1) * [sum valves[a].rate for a in remainingValves];
+        if (released + bestCaseRemAvailable <= peakRelease) {
+            return;
+        }
+        // elephant's path
+        void checkElephantMove(Step[] newPath, string[] remainingValves, int released) {
+            if (!elephantPath.empty && elephantPath[$ - 1].targetTime != minute) {
+                check(newPath, elephantPath, minute + 1, remainingValves, released);
+                return;
+            }
+            string name = "AA" if elephantPath.empty else elephantPath[$ - 1].name;
+            mut bool anyMatched = false;
+            for (target in valves[name].to) {
+                if (minute + target.cost < lastMinute && [any a == target.name for a in remainingValves]) {
+                    auto remainingValves = [a for a in remainingValves where a != target.name];
+                    anyMatched = true;
+                    auto arrival = minute + target.cost + 1;
+                    int releasedAtTarget = (lastMinute - arrival + 1) * valves[target.name].rate;
+                    check(
+                        newPath, elephantPath ~ (arrival, target.name),
+                        minute + 1, remainingValves, released + releasedAtTarget);
+                }
+            }
+            // wait out the clock
+            if (!anyMatched) check(newPath, elephantPath, minute + 1, remainingValves, released);
+        }
+        // my path
+        if (!path.empty && path[$ - 1].targetTime != minute) {
+            checkElephantMove(path, remainingValves, released);
+            return;
+        }
+        string name = "AA" if path.empty else path[$ - 1].name;
+        mut bool anyMatched = false;
+        for (target in valves[name].to) {
+            if (minute + target.cost < lastMinute && [any a == target.name for a in remainingValves]) {
+                auto remainingValves = [a for a in remainingValves where a != target.name];
+                anyMatched = true;
+                auto arrival = minute + target.cost + 1;
+                int releasedAtTarget = (lastMinute - arrival + 1) * valves[target.name].rate;
+                checkElephantMove(
+                    path ~ (arrival, target.name),
+                    remainingValves, released + releasedAtTarget);
+            }
+        }
+        if (!anyMatched) checkElephantMove(path, remainingValves, released);
+    }
+    check(path=[], elephantPath=[], minute=1, valves.keys, 0);
+    print("winning path: $peakRelease");
+    print("path: $peakPath");
+    print("elephant path: $peakElephantPath");
+}
+
+Graph optimize(Graph g) {
+    mut Graph res;
+    for (key in g.keys) {
+        auto value = g[key];
+        (string name, int cost)[] transitiveTo() {
+            mut (string name, int cost)[] edges;
+            mut string[] exploring; // break loops
+            void explore(string gkey, int cost) {
+                if ([any a == gkey for a in exploring]) return;
+                exploring ~= gkey;
+                auto gvalue = g[gkey];
+                if (gvalue.rate > 0) {
+                    if (gkey != key && [all cost < a.cost for a in edges where a.name == gkey]) {
+                        edges = [a for a in edges where a.name != gkey] ~ (gkey, cost);
+                    }
+                }
+                for (to in gvalue.to) explore(to.name, cost + to.cost);
+                exploring = exploring[0 .. $ - 1];
+            }
+            explore(key, 0);
+            auto promise = edge => (30 - edge.cost) * g[edge.name].rate;
+            return edges.sort((a, b) => a.promise > b.promise);
+        }
+        if (value.rate > 0 || key == "AA") {
+            res[key] = (
+                rate=value.rate,
+                to=transitiveTo);
+        }
+    }
+    return res;
+}
+
+string between(string str, string from, string to) {
+    return str.after(from).before(to);
+}
+
+string after(string str, string marker) {
+    auto pos = str.find(marker);
+    assert(pos != -1);
+    return str[pos + marker.length .. $];
+}
+
+string after(string str, string marker1, string marker2) {
+    if (str.find(marker1) != -1) return str.after(marker1);
+    return str.after(marker2);
+}
+
+string before(string str, string marker) {
+    auto pos = str.find(marker);
+    assert(pos != -1);
+    return str[0 .. pos];
+}

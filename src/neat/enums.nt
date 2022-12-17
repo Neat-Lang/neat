@@ -1,6 +1,7 @@
 module neat.enums;
 
 macro import std.macro.listcomprehension;
+macro import std.macro.quasiquoting;
 
 import backend.base;
 import helpers;
@@ -47,7 +48,10 @@ class Enum : Type
     override (nullable Symbol | fail Error) accessMember(
         Context context, nullable Expression base, string field, Protection _, LocRange locRange)
     {
-        if (base) return null;
+        if (auto base = base) {
+            if (field == "toString") return enumToString(context, base);
+            return null;
+        }
         Symbol asEnum(int value) {
             return context.compiler.castTo(this,
                 context.compiler.intLiteral(value));
@@ -106,4 +110,34 @@ class ASTEnumDecl : ASTSymbolDeclaration
         entries ~= EnumEntry(entryName, cast(int) entries.length);
     }
     return new ASTEnumDecl(name, entries, locRange);
+}
+
+(Expression | fail Error) enumToString(Context context, Expression enum_) {
+    import neat.array : Array;
+
+    auto enumType = enum_.type.instanceOf(Enum).notNull;
+    auto compiler = context.compiler;
+
+    Parameter[] params = [
+        Parameter.simple("value", enumType),
+    ];
+
+    ASTStatement body_() {
+        mut ASTStatement ifTree = compiler.$stmt {
+            import neat.runtime : assert, print;
+            print("error: enum value outside domain");
+            assert(false);
+        };
+        for (enumEntry in enumType.entries) {
+            auto astValue = compiler.astNumberLiteral(enumEntry.value, __RANGE__);
+            auto astStr = compiler.astStringLiteral(enumEntry.name, __RANGE__);
+            ifTree = compiler.$stmt if (value == $astValue) return $astStr; else $stmt ifTree;;
+        }
+        return ifTree;
+    }
+
+    auto fn = compiler.createRuntimeFunction(
+        context, "enum_tostring", new Array(new Character, context.platform), params, &body_);
+
+    return context.compiler.mkCall(fn, [enum_], __RANGE__);
 }

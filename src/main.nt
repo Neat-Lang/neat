@@ -104,8 +104,46 @@ private string getEnv(string key, string default_ = "") {
 BackgroundCompilation emitModule(
     Module module_, CompilationVisitor[] visitors, BuildSettings settings, Mutex visitorLock, string earlyId)
 {
+    auto hash = new Hash;
+
+    hash.apply(compiler_hash_add, compiler_hash_mult);
+    settings.backend.hash(hash);
+
+    hash.adds("compiler($(hash.text))");
+    if (settings.x86_32) hash.adds("m32");
+    if (settings.optimize) hash.adds("opt");
+    // Macros and binaries must not share objects!
+    // Macros have special magic to avoid dlopen issues.
+    if (settings.forMacro) hash.adds("macro");
+    for (ver in settings.versions) hash.adds("version=$(ver)");
+    hash.adds(earlyId);
+
+    auto symbols = module_.finishedSymbols;
+    [symbol.hash(hash) for symbol in symbols];
+    visitorLock.lock;
+    [[visitor.visit(symbol) for symbol in symbols] for visitor in visitors];
+    visitorLock.unlock;
+
+    mut string objFile = ".obj/$(hash.text).o";
+    version (LLVMBackend) {
+        if (settings.backend.instanceOf(LLVMBackend) && settings.optimize) {
+            objFile = ".obj/$(hash.text).bc";
+        }
+    }
+
+    mut string srcFile;
+    version (LLVMBackend) {
+        if (settings.backend.instanceOf(LLVMBackend)) {
+            srcFile = objFile;
+        }
+    }
+    if (!srcFile.length) {
+        assert(!!settings.backend.instanceOf(CBackend));
+        srcFile = ".obj/module_$(hash.text).c";
+    }
+
     auto backendModule = settings.backend.createModule(
-        settings.platform, module_.locRange.toBackendLoc, settings.forMacro);
+        settings.platform, srcFile, module_.locRange.toBackendLoc, settings.forMacro);
     version (LLVMBackend) {
         auto backendModuleLLVM = backendModule.instanceOf(LLVMBackendModule);
     }
@@ -133,44 +171,6 @@ BackgroundCompilation emitModule(
         return pid;
     }
 
-    auto hash = new Hash;
-
-    hash.apply(compiler_hash_add, compiler_hash_mult);
-    settings.backend.hash(hash);
-
-    hash.adds("compiler($(hash.text))");
-    if (settings.x86_32) hash.adds("m32");
-    if (settings.optimize) hash.adds("opt");
-    // Macros and binaries must not share objects!
-    // Macros have special magic to avoid dlopen issues.
-    if (settings.forMacro) hash.adds("macro");
-    for (ver in settings.versions) hash.adds("version=$(ver)");
-    hash.adds(earlyId);
-
-    auto symbols = module_.finishedSymbols;
-    [symbol.hash(hash) for symbol in symbols];
-    visitorLock.lock;
-    [[visitor.visit(symbol) for symbol in symbols] for visitor in visitors];
-    visitorLock.unlock;
-
-    mut string objFile = ".obj/$(hash.text).o";
-    version (LLVMBackend) {
-        if (backendModuleLLVM && settings.optimize) {
-            objFile = ".obj/$(hash.text).bc";
-        }
-    }
-
-    mut string srcFile;
-    version (LLVMBackend) {
-        if (backendModuleLLVM) {
-            srcFile = objFile;
-        }
-    }
-    if (!srcFile.length) {
-        assert(!!backendModuleC);
-        srcFile = ".obj/module_$(hash.text).c";
-    }
-
     if (settings.caching && exists(objFile) && exists(srcFile)) {
         // preexisting object
         mut string[] extraLibs;
@@ -187,7 +187,7 @@ BackgroundCompilation emitModule(
     int pid() {
         version (LLVMBackend) {
             if (backendModuleLLVM) {
-                backendModuleLLVM.writeOutput(srcFile);
+                backendModuleLLVM.writeOutput;
                 return 0;
             }
         }

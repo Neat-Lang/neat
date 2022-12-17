@@ -9,6 +9,7 @@ import neat.hash;
 import std.string;
 import std.thread;
 
+import c_header("llvm-c/Analysis.h");
 import c_header("llvm-c/BitWriter.h");
 import c_header("llvm-c/Core.h");
 import c_header("llvm-c/DebugInfo.h");
@@ -162,8 +163,10 @@ class LLVMBackend : Backend {
         LLVMInitializeX86AsmParser;
         LLVMInitializeX86AsmPrinter;
     }
-    override LLVMBackendModule createModule(Platform platform, BackendLocation loc, bool forMacro) {
-        return new LLVMBackendModule(platform, loc, forMacro);
+    override LLVMBackendModule createModule(
+        Platform platform, string targetFile, BackendLocation loc, bool forMacro)
+    {
+        return new LLVMBackendModule(platform, targetFile, loc, forMacro);
     }
     override void hash(Hash hash) {
         hash.adds("LLVM");
@@ -207,7 +210,9 @@ class LLVMBackendModule : BackendModule {
     LLVMDIBuilderRef dibuilder;
     LLVMMetadataRef dicu;
 
-    this(this.platform, BackendLocation loc, this.forMacro) {
+    string targetFile;
+
+    this(this.platform, this.targetFile, BackendLocation loc, this.forMacro) {
         this.context = LLVMContextCreate;
 
         auto comps = split(loc.file, "/");
@@ -262,17 +267,18 @@ class LLVMBackendModule : BackendModule {
         defineIntrinsics(this, platform);
     }
 
-    void writeOutput(string file) {
+    void writeOutput() {
         import std.string : cToString, endsWith;
 
-        // LLVMPrintModuleToFile(this.module_, (file ~ ".ll").toStringz, null);
-        if (file.endsWith(".bc")) {
-            LLVMWriteBitcodeToFile(this.module_, file.toStringz);
+        LLVMPrintModuleToFile(this.module_, (this.targetFile ~ ".ll").toStringz, null);
+        if (this.targetFile.endsWith(".bc")) {
+            LLVMWriteBitcodeToFile(this.module_, this.targetFile.toStringz);
             LLVMContextDispose(this.context);
             return;
         }
         char* error;
-        bool succ = LLVMTargetMachineEmitToFile(this.machine, this.module_, file.toStringz, LLVMObjectFile, &error) == 0;
+        bool succ = LLVMTargetMachineEmitToFile(
+            this.machine, this.module_, this.targetFile.toStringz, LLVMObjectFile, &error) == 0;
         if (!succ) {
             print("compilation failed: $(cToString(error))");
             assert(false);
@@ -410,6 +416,7 @@ class LLVMBackendModule : BackendModule {
     {
         LLVMDIBuilderFinalize(this.dibuilder);
         LLVMDisposeDIBuilder(this.dibuilder);
+        // LLVMVerifyModule(this.module_, LLVMAbortProcessAction, null);
     }
 }
 

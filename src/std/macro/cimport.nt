@@ -141,7 +141,15 @@ class CImportMacro : Macro
                 }
                 num.case {
                     (:failure): { cparser.eatline; continue; }
-                    (:success, int i): add(identifier, new ASTIntLiteral(i, start));
+                    (:success, long l):
+                        version (firstpassmacro) {
+                            add(identifier, new ASTIntLiteral(cast(int) l, start));
+                        } else {
+                            if (l >= int.min && l <= int.max)
+                                add(identifier, new ASTIntLiteral(cast(int) l, start));
+                            else
+                                add(identifier, new ASTLongLiteral(cast(int) l, start));
+                        }
                 }
                 cparser.assert_(cparser.text.startsWith("\n"), "unknown text")?;
                 // cparser.expect("\n");
@@ -388,8 +396,8 @@ class CParserHelper {
                 mut int num;
                 auto cn = parseCNumber?;
                 // TODO if ((:success, int i) <- parseCNumber?)
-                if (cn.case(:failure: false, (:success, int): true)) {
-                    num = cn.case(:failure: 0, (:success, int i): i);
+                if (cn.case(:failure: false, (:success, long): true)) {
+                    num = cn.case(:failure: 0, (:success, long l): cast(int) l);
                 } else if (
                     parser.accept("sizeof(void *) <= 8 ? 56 : sizeof(void *) == 16 ? 64 : 3 * sizeof(void *)")?) {
                     // Jesus Christ, SDL, what the fuck.
@@ -519,9 +527,9 @@ class CParserHelper {
                 auto num = parseCNumber?;
                 num.case {
                     (:failure): break;
-                    (:success, int i): {
-                        mod.addAliasDecl(name, Protection.public_, new ASTIntLiteral(i, start));
-                        lastNum = i;
+                    (:success, long l): {
+                        mod.addAliasDecl(name, Protection.public_, new ASTIntLiteral(cast(int) l, start));
+                        lastNum = cast(int) l;
                     }
                 }
             } else {
@@ -535,27 +543,28 @@ class CParserHelper {
         return type("int");
     }
 
-    (:failure | :success, int | fail Error) parseCNumber() {
-        // TODO fix refcount again
-        // with (parser) {
-            parser.begin;
-            mut int num;
-            (bool | fail Error) accept(string s) { return parser.accept(s)?; }
-            parser.parseNumber?.case {
-                (:failure): { parser.revert; return :failure; }
+    (:failure | :success, long | fail Error) parseCNumber() {
+        with (parser) {
+            begin;
+            mut long num;
+            version (firstpassmacro) parser.parseNumber?.case {
+                (:failure): { revert; return :failure; }
                 (:success, int i): num = i;
+            } else parser.parseNumber?.case {
+                (:failure): { revert; return :failure; }
+                (:success, long  l): num = l;
             }
             // weird C shit
             if (accept("e")? || accept("E")? || accept(".")?) {
-                parser.revert;
+                revert;
                 return :failure;
             }
             accept("U")?; accept("u")?;
             accept("L")?; accept("l")?;
             accept("L")?; accept("l")?;
-            parser.commit;
+            commit;
             return (:success, num);
-        // }
+        }
     }
 }
 

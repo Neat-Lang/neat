@@ -22,6 +22,7 @@ import neat.formatstring;
 import neat.function_;
 import neat.hash;
 import neat.hashmap;
+import neat.lexer;
 import neat.parser;
 import neat.pragmas;
 import neat.statements;
@@ -88,7 +89,7 @@ class DefineClassIntf : FinishedSymbol
     while (true)
     {
         auto from = parser.from?;
-        if (parser.accept("*")?)
+        if (parser.acceptToken(TokenType.asterisk))
         {
             current = new ASTPointer(current, parser.to(from));
             continue;
@@ -96,11 +97,11 @@ class DefineClassIntf : FinishedSymbol
         with (parser.transaction) {
             string identifier = parser.parseIdentifier?;
             if (identifier == "function" || identifier == "delegate") {
-                parser.expect("(")?;
+                parser.expectToken(TokenType.lparen)?;
                 mut ASTSymbol[] args;
-                while (!parser.accept(")")?) {
+                while (!parser.acceptToken(TokenType.rparen)) {
                     if (args.length) {
-                        if (!parser.accept(",")?)
+                        if (!parser.acceptToken(TokenType.comma))
                             return parser.fail("',' or ')' expected");
                     }
                     auto argType = parser.parseType(lexicalContext)?;
@@ -116,8 +117,8 @@ class DefineClassIntf : FinishedSymbol
             }
         }
         with (parser.transaction) {
-            if (parser.accept("[")?) {
-                if (parser.accept("]")?) {
+            if (parser.acceptToken(TokenType.lsquarebracket)) {
+                if (parser.acceptToken(TokenType.rsquarebracket)) {
                     commit;
 
                     current = new ASTArray(current, parser.to(from));
@@ -125,7 +126,7 @@ class DefineClassIntf : FinishedSymbol
                 }
                 // hashmap? might be assignment intro
                 auto keyType = parser.parseType(lexicalContext)?;
-                if (!keyType || !parser.accept("]")?) {
+                if (!keyType || !parser.acceptToken(TokenType.rsquarebracket)) {
                     return null;
                 }
                 commit;
@@ -141,7 +142,8 @@ class DefineClassIntf : FinishedSymbol
         with (parser.transaction) {
             auto instanceFrom = parser.from?;
             // TODO better way to exclude all the negated operators
-            if (parser.accept("!")? && !parser.accept("=")? && !parser.acceptIdentifier("is")?)
+            if (parser.acceptToken(TokenType.exclamationmark)
+                && !parser.acceptToken(TokenType.equal) && !parser.acceptIdentifier("is")?)
             {
                 mut ASTSymbol[] templateArgs;
                 (void | fail Error) getTemplateArg(bool short_) {
@@ -158,12 +160,12 @@ class DefineClassIntf : FinishedSymbol
                     }
                 }
 
-                if (parser.accept("(")?) {
+                if (parser.acceptToken(TokenType.lparen)) {
                     // ( [a [, a]*]? )
-                    if (!parser.accept(")")?) {
+                    if (!parser.acceptToken(TokenType.rparen)) {
                         getTemplateArg(false)?;
-                        while (!parser.accept(")")?) {
-                            parser.expect(",")?;
+                        while (!parser.acceptToken(TokenType.rparen)) {
+                            parser.expectToken(TokenType.comma)?;
                             getTemplateArg(false)?;
                         }
                     }
@@ -190,7 +192,7 @@ with (parser.transaction)
 {
     parser.begin;
     auto from = parser.from?;
-    if (!parser.accept("(")?) {
+    if (!parser.acceptToken(TokenType.lparen)) {
         parser.revert;
         return null;
     }
@@ -198,7 +200,7 @@ with (parser.transaction)
     mut ASTEitherDeclEntry[] declEntries;
     mut (string name, LocRange locRange, ASTSymbol sym)[] members;
     mut bool fail = false;
-    if (parser.accept("fail")?) fail = true;
+    if (parser.acceptIdentifier("fail")?) fail = true;
     void flush() {
         assert(members.length > 0);
 
@@ -213,12 +215,11 @@ with (parser.transaction)
         members = [];
         fail = false;
     }
-    while (!parser.accept(")")?)
-    {
+    while (!parser.acceptToken(TokenType.rparen)) {
         if (members.length) {
             mut bool tuplesep, eithersep;
-            if (parser.accept(",")?) tuplesep = true;
-            else if (parser.accept("|")?) eithersep = true;
+            if (parser.acceptToken(TokenType.comma)) tuplesep = true;
+            else if (parser.acceptToken(TokenType.bar)) eithersep = true;
             else {
                 // be a bit lenient for (bla bla)
                 if (members.length == 1) {
@@ -228,7 +229,7 @@ with (parser.transaction)
             }
             if (eithersep) {
                 flush;
-                if (parser.accept("fail")?) fail = true;
+                if (parser.acceptIdentifier("fail")?) fail = true;
             }
         }
         auto from = parser.from?;
@@ -275,13 +276,13 @@ with (parser.transaction)
     if (auto symbol = parser.parseTupleType(lexicalContext)?) return symbol;
 
     with (parser.transaction) {
-        if (parser.acceptIdentifier("Vector")? && parser.accept("(")?) {
+        if (parser.acceptIdentifier("Vector")? && parser.acceptToken(TokenType.lparen)) {
             auto element = lexicalContext.compiler.parseType(parser, lexicalContext)?;
             parser.assert_(!!element, "element type expected")?;
-            parser.expect(",")?;
+            parser.expectToken(TokenType.comma)?;
             auto count = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
             parser.assert_(count && count.instanceOf(ASTNumberLiteral), "number expected")?;
-            parser.expect(")")?;
+            parser.expectToken(TokenType.rparen)?;
             commit;
             return new ASTVectorType(
                 element.notNull,
@@ -289,17 +290,17 @@ with (parser.transaction)
                 parser.to(from));
         }
 
-        if (parser.accept("typeof")?)
+        if (parser.acceptIdentifier("typeof")?)
         {
-            parser.expect("(")?;
+            parser.expectToken(TokenType.lparen)?;
             auto expr = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
             if (!expr) return parser.fail("expression expected");
-            parser.expect(")")?;
+            parser.expectToken(TokenType.rparen)?;
             commit;
             return new ASTTypeof(expr.notNull, captureImplicitReturn=false, parser.to(from));
         }
 
-        if (parser.accept(":")?) {
+        if (parser.acceptToken(TokenType.colon)) {
             string symbolIdentifier = parser.parseIdentifier?;
             if (symbolIdentifier != "") {
                 commit;
@@ -910,18 +911,18 @@ class ASTCall : ASTSymbol
 (ASTArgument[] | fail Error) parseArgumentList(Parser parser, LexicalContext lexicalContext)
 {
     mut ASTArgument[] args;
-    while (!parser.accept(")")?)
+    while (!parser.acceptToken(TokenType.rparen))
     {
         if (args.length > 0)
-            parser.expect(",")?;
+            parser.expectToken(TokenType.comma)?;
         // foo(a, b, c, )
-        if (parser.accept(")")?) break;
+        if (parser.acceptToken(TokenType.rparen)) break;
 
         auto from = parser.from?;
         mut string name;
         with (parser.transaction) {
             string n = parser.parseIdentifier?;
-            if (n.length > 0 && parser.acceptButNot2("=", "==", "=>")?) {
+            if (n.length > 0 && parser.acceptToken2Not2(TokenType.equal, TokenType.equal, TokenType.greater)) {
                 commit;
                 name = n;
             }
@@ -937,7 +938,7 @@ class ASTCall : ASTSymbol
 with (parser.transaction)
 {
     auto from = parser.from?;
-    if (!parser.accept("(")?)
+    if (!parser.acceptToken(TokenType.lparen))
         return null;
     mut ASTArgument[] args = parser.parseArgumentList(lexicalContext)?;
     commit;
@@ -1076,12 +1077,12 @@ class ASTArraySlice : ASTSymbol
 with (parser.transaction)
 {
     auto from = parser.from?;
-    if (!parser.accept("[")?)
+    if (!parser.acceptToken(TokenType.lsquarebracket))
         return null;
     nullable ASTSymbol index = parseExpression(parser, lexicalContext)?;
     parser.to(from).assert(!!index, "index expected")?;
     auto index = index.notNull;
-    parser.expect("]")?;
+    parser.expectToken(TokenType.rsquarebracket)?;
     commit;
     if (auto iota = index.instanceOf(ASTIota)) {
         return new ASTArraySlice(base, iota.from, iota.to, parser.to(from));
@@ -1204,7 +1205,9 @@ class ASTMember : ASTMemberBase
 {
     parser.begin;
     // don't accept '..' or '.(': conflicting syntax
-    if (parser.accept("..")? || parser.accept(".(")? || !parser.accept(".")?)
+    if (parser.acceptToken2(TokenType.dot, TokenType.dot)
+        || parser.acceptToken2(TokenType.dot, TokenType.lparen)
+        || !parser.acceptToken(TokenType.dot))
     {
         parser.revert;
         return null;
@@ -1295,7 +1298,10 @@ class ASTParenPropertyExpression : ASTSymbol
 ) {
     parser.begin;
     auto from = parser.from?;
-    if (parser.accept("..")? || !parser.accept(".")? || !parser.accept("(")?) // don't accept '..'
+    // don't accept '..'
+    if (parser.acceptToken2(TokenType.dot, TokenType.dot)
+        || !parser.acceptToken(TokenType.dot)
+        || !parser.acceptToken(TokenType.lparen))
     {
         parser.revert;
         return null;
@@ -1350,7 +1356,7 @@ class ASTPropagateFailureExpr : ASTSymbol
 {
     auto from = parser.from?;
     parser.begin;
-    if (!parser.accept("?")?) {
+    if (!parser.acceptToken(TokenType.questionmark)) {
         parser.revert;
         return null;
     }
@@ -1362,8 +1368,8 @@ class ASTPropagateFailureExpr : ASTSymbol
 {
     mut (:inc | :dec | :none) preincdec = :none, postincdec = :none;
     auto fromPre = parser.from?;
-    if (parser.accept("--")?) preincdec = :dec;
-    else if (parser.accept("++")?) preincdec = :inc;
+    if (parser.acceptToken2(TokenType.minus, TokenType.minus)) preincdec = :dec;
+    else if (parser.acceptToken2(TokenType.plus, TokenType.plus)) preincdec = :inc;
     auto toPre = parser.to(fromPre);
 
     /**
@@ -1423,8 +1429,8 @@ class ASTPropagateFailureExpr : ASTSymbol
         break;
     }
     auto fromPost = parser.from?;
-    if (parser.accept("--")?) postincdec = :dec;
-    else if (parser.accept("++")?) postincdec = :inc;
+    if (parser.acceptToken2(TokenType.minus, TokenType.minus)) postincdec = :dec;
+    else if (parser.acceptToken2(TokenType.plus, TokenType.plus)) postincdec = :inc;
     auto toPost = parser.to(fromPost);
     if (preincdec != :none && postincdec != :none)
         return toPost.fail("cannot have both pre- and post-increment operator");
@@ -1619,9 +1625,9 @@ class ASTLambdaExpr : ASTSymbol
     parser.begin;
     auto from = parser.from?;
     mut string[] args;
-    if (parser.accept("(")?) {
-        while (!parser.accept(")")?) {
-            if (!args.empty && !parser.accept(",")?) {
+    if (parser.acceptToken(TokenType.lparen)) {
+        while (!parser.acceptToken(TokenType.rparen)) {
+            if (!args.empty && !parser.acceptToken(TokenType.comma)) {
                 parser.revert;
                 return null;
             }
@@ -1640,7 +1646,7 @@ class ASTLambdaExpr : ASTSymbol
         }
         args ~= arg;
     }
-    if (!parser.accept("=>")?) {
+    if (!parser.acceptToken2(TokenType.equal, TokenType.greater)) {
         parser.revert;
         return null;
     }
@@ -1657,14 +1663,14 @@ class ASTLambdaExpr : ASTSymbol
     // Leave it in anyway - otherwise, you can cause stack overflow by
     // just repeatedly spamming * or &.
     parser.begin;
-    if (parser.accept("*")?) {
+    if (parser.acceptToken(TokenType.asterisk)) {
         nullable ASTSymbol next = parseExpressionLeaf(parser, lexicalContext)?;
         parser.to(from).assert(!!next, "expression expected")?;
         parser.commit;
 
         return new ASTDereference(next.notNull, parser.to(from));
     }
-    if (parser.accept("&")?) {
+    if (parser.acceptToken(TokenType.ampersand)) {
         nullable ASTSymbol next = parseExpressionLeaf(parser, lexicalContext)?;
         parser.to(from).assert(!!next, "expression expected")?;
         parser.commit;
@@ -1677,7 +1683,7 @@ class ASTLambdaExpr : ASTSymbol
         parser.commit;
 
         mut ASTArgument[] args;
-        if (parser.accept("(")?)
+        if (parser.acceptToken(TokenType.lparen))
         {
             args = parseArgumentList(parser, lexicalContext)?;
         }
@@ -1686,25 +1692,25 @@ class ASTLambdaExpr : ASTSymbol
     }
     if (parser.acceptIdentifier("sizeof")?) {
         parser.commit;
-        parser.expect("(")?;
+        parser.expectToken(TokenType.lparen)?;
         parser.begin;
         mut nullable ASTSymbol sym = lexicalContext.compiler.parseType(parser, lexicalContext)?;
-        if (!sym || !parser.accept(")")?) {
+        if (!sym || !parser.acceptToken(TokenType.rparen)) {
             parser.revert;
             parser.begin;
             sym = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
             parser.to(from).assert(!!sym, "expression expected")?;
-            parser.expect(")")?;
+            parser.expectToken(TokenType.rparen)?;
         }
         parser.commit;
 
         return new ASTSizeOf(sym.notNull);
     }
     if (parser.acceptIdentifier("cast")?) {
-        parser.expect("(")?;
+        parser.expectToken(TokenType.lparen)?;
         nullable ASTSymbol target = parser.parseType(lexicalContext)?;
         parser.to(from).assert(!!target, "expression expected")?;
-        parser.expect(")")?;
+        parser.expectToken(TokenType.rparen)?;
         nullable ASTSymbol value = parseExpressionLeaf(parser, lexicalContext)?;
         parser.to(from).assert(!!value, "expression expected")?;
         parser.commit;
@@ -1733,14 +1739,14 @@ class ASTLambdaExpr : ASTSymbol
         return ret;
     }
     parser.begin;
-    if (parser.accept("!")?) {
+    if (parser.acceptToken(TokenType.exclamationmark)) {
         nullable ASTSymbol next = parser.parseExpressionLeaf(lexicalContext)?;
         parser.to(from).assert(!!next, "expression expected")?;
         parser.commit;
 
         return new ASTNegation(next.notNull, parser.to(from));
     }
-    if (parser.acceptButNot("-", "--")?) {
+    if (parser.acceptToken2Not(TokenType.minus, TokenType.minus)) {
         nullable ASTSymbol next = parser.parseExpressionLeaf(lexicalContext)?;
         parser.to(from).assert(!!next, "expression expected")?;
         parser.commit;
@@ -1753,106 +1759,114 @@ class ASTLambdaExpr : ASTSymbol
     return null;
 }
 
-(char | :dollar | fail Error) parseChar(Parser parser) {
-    string ch = parser.text[0 .. 1];
-    parser.drop(1);
-    if (ch != "\\") {
-        if (ch == "\$") return :dollar;
-        return ch[0];
+(string text, int size | fail :error, string) processChar(string text) {
+    assert(!text.empty);
+    if (text.front != "\\"[0]) {
+        return (text[0 .. 1], 1);
     }
-    if (parser.text.empty)
-        return parser.fail("expected control character, got end of file");
-    string ctl = parser.text[0 .. 1];
-    parser.drop(1);
+    if (text.length == 1)
+        return (:error, "expected control character");
+    string ctl = text[1 .. 2];
     // TODO use char literals
     if (ctl == "r") {
-        return "\r"[0];
+        return ("\r", 2);
     } else if (ctl == "\$") {
-        return "\$"[0];
+        return ("\$", 2);
     } else if (ctl == "n") {
-        return "\n"[0];
+        return ("\n", 2);
     } else if (ctl == "t") {
-        return "\t"[0];
+        return ("\t", 2);
     } else if (ctl == "\"") {
-        return "\""[0];
+        return ("\"", 2);
     } else if (ctl == "'") {
-        return "'"[0];
+        return ("'", 2);
     } else if (ctl == "\\") {
-        return "\\"[0];
+        return ("\\", 2);
     } else if (ctl == "0") {
-        return "\x00"[0]; // TODO \0
+        return ("\x00", 2); // TODO \0
     } else if (ctl == "x") {
-        if (parser.text.length < 2) return parser.fail("expected hex code, got end of file");
-        char ch1 = parser.text[0], ch2 = parser.text[1];
-        int decodeHex(char ch) {
+        if (text.length < 4) return (:error, "expected two-digit hex code");
+        char ch1 = text[2], ch2 = text[3];
+        (int | fail :error, string) decodeHex(char ch) {
             if (ch >= "0"[0] && ch <= "9"[0])
                 return ch - "0"[0];
             if (ch >= "a"[0] && ch <= "f"[0])
                 return ch + 10 - "a"[0];
             if (ch >= "A"[0] && ch <= "F"[0])
                 return ch + 10 - "A"[0];
-            print("Unknown hex digit '" ~ ch ~ "'");
-            assert(false);
+            return (:error, "unknown hex digit '" ~ ch ~ "'");
         }
-        char ord = cast(char) (decodeHex(ch1) * 16 + decodeHex(ch2));
-        parser.drop(2);
-        return ord;
+        return ("" ~ cast(char) (decodeHex(ch1)? * 16 + decodeHex(ch2)?), 4);
     } else {
-        return parser.fail("unknown control sequence \\$ctl");
+        return (:error, "unknown control sequence \\$ctl");
     }
+}
+
+(string | (:error, string msg)) cleanup(mut string s) {
+    mut string ret;
+    while (!s.empty) {
+        processChar(s).case {
+            (:error, string msg):
+                return (:error, msg);
+            (string text, int size):
+                ret ~= text;
+                s = s[size .. $];
+        }
+    }
+    return ret;
 }
 
 (ASTSymbol | fail Error) parseCharLiteral(
-    Parser parser, LexicalContext lexicalContext, LocRange from)
+    Parser parser, LexicalContext lexicalContext)
 {
-    if (parser.text.empty)
+    if (parser.hard_eof)
         return parser.fail("expected character, got end of file");
-    auto ch = parser.parseChar?.case(:dollar: "\$"[0]);
+
+    auto from = parser.from?;
+    auto res = parser.acceptTokenStr(TokenType.charLiteral)
+        .case(:none: return parser.fail("character expected"))
+        .processChar
+        .case((:error, string msg): return parser.fail(msg));
+    if (!parser.acceptToken(TokenType.singleQuote))
+        return parser.fail("closing quote expected");
     auto locRange = parser.to(from);
-    parser.expect("'")?;
-    return new ASTCharLiteral(ch, locRange);
+    return new ASTCharLiteral(res.text.front, locRange);
 }
 
 (ASTSymbol | fail Error) parseStringLiteral(
-    Parser parser, LexicalContext lexicalContext, string endMarker, LocRange from)
+    Parser parser, LexicalContext lexicalContext)
 {
-    mut string current;
+    auto from = parser.from?;
+    if (parser.acceptToken(TokenType.doubleQuote))
+        return new ASTStringLiteral("", parser.to(from));
+    mut string str = parser.acceptTokenStr(TokenType.stringLiteral)
+        .case(:none: return parser.fail("lexer error: string literal should be here"));
     mut ASTSymbol[] parts;
-    void flush() {
-        if (current != "") parts ~= new ASTStringLiteral(current, parser.to(from));
-        current = "";
-    }
-    while (parser.text.length < endMarker.length || parser.text[0 .. endMarker.length] != endMarker)
-    {
-        if (parser.text.length == 0) {
-            return parser.fail("expected end of string, got end of file");
-        }
-        auto ch = parser.parseChar?;
-        if (ch == :dollar) {
-            flush;
-            if (parser.accept("(")?) {
-                auto litFrom = parser.from?;
-                nullable ASTSymbol expr = parser.parseExpression(lexicalContext)?;
-                parser.to(litFrom).assert(!!expr, "Expression expected.")?;
-                parser.expect(")")?;
-                parts ~= expr.notNull;
-            } else {
-                auto varFrom = parser.from?;
-                auto var = parser.parseIdentifier?;
-                parser.to(varFrom).assert(var != "", "Identifier expected.")?;
-                parts ~= new ASTIdentifier(var, moduleLevel=false, parser.to(varFrom));
-            }
+    parts ~= new ASTStringLiteral(
+        str.cleanup.case((:error, string msg): return parser.fail(msg)), parser.to(from));
+    while (parser.acceptToken(TokenType.formatQuoteStart)) {
+        if (parser.acceptToken(TokenType.lparen)) {
+            auto litFrom = parser.from?;
+            nullable ASTSymbol expr = parser.parseExpression(lexicalContext)?;
+            parser.to(litFrom).assert(!!expr, "Expression expected.")?;
+            if (!parser.acceptToken(TokenType.rparen))
+                return parser.fail("closing ')' expected");
+            parts ~= expr.notNull;
         } else {
-            bottom die() { assert(false); }
-            current ~= ch.case(:dollar: die);
+            auto varFrom = parser.from?;
+            auto var = parser.parseIdentifier?;
+            parser.to(varFrom).assert(var != "", "Identifier expected.")?;
+            parts ~= new ASTIdentifier(var, moduleLevel=false, parser.to(varFrom));
         }
+        auto from = parser.from?;
+        mut string str = parser.acceptTokenStr(TokenType.stringLiteral)
+            .case(:none: continue);
+        parts ~= new ASTStringLiteral(
+            str.cleanup.case((:error, string msg): return parser.fail(msg)), parser.to(from));
     }
-    if (!parser.accept(endMarker)?)
-    {
-        return parser.fail("this should never happen");
-    }
-    flush;
-    if (parts.length == 0) return new ASTStringLiteral("", parser.to(from));
+    if (!parser.acceptToken(TokenType.doubleQuote))
+        return parser.fail("closing quote expected");
+
     if (parts.length == 1) {
         if (auto literal = parts[0].instanceOf(ASTStringLiteral))
             return literal;
@@ -1866,16 +1880,16 @@ with (parser.transaction)
 {
     auto from = parser.from?;
     mut string op;
-    if (parser.accept("__borrow")?) op = "borrow";
-    else if (parser.accept("__take")?) op = "take";
-    else if (parser.accept("__leak")?) op = "leak";
+    if (parser.acceptIdentifier("__borrow")?) op = "borrow";
+    else if (parser.acceptIdentifier("__take")?) op = "take";
+    else if (parser.acceptIdentifier("__leak")?) op = "leak";
     else return null;
-    parser.expect("(")?;
+    parser.expectToken(TokenType.lparen)?;
     auto fromSource = parser.from?;
     auto source = parser.parseExpression(lexicalContext)?;
     parser.to(fromSource).assert(!!source, "expression expected")?;
     auto source = source.notNull;
-    parser.expect(")")?;
+    parser.expectToken(TokenType.rparen)?;
     commit;
     if (op == "borrow")
         return new ASTOverrideLifetime(source, Lifetime.lexical, parser.to(from));
@@ -1957,10 +1971,10 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
     }
     if (auto destroy_ = parseDestroy(parser, lexicalContext)?) return destroy_;
     parser.begin;
-    parser.strip?;
+    parser.strip;
     auto loc = parser.loc;
     auto from = parser.from?;
-    if (parser.accept(".")?) {
+    if (parser.acceptToken(TokenType.dot)) {
         // .name is module level
         string name = parser.parseIdentifier?;
         if (name.length) {
@@ -1979,7 +1993,7 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
     }
     {
         parser.begin;
-        if (parser.accept(":")?) {
+        if (parser.acceptToken(TokenType.colon)) {
             string symbolIdentifier = parser.parseIdentifier?;
             if (symbolIdentifier != "") {
                 parser.commit;
@@ -2007,18 +2021,18 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
             }
             return new ASTNumberLiteral(l, parser.to(from));
     }
-    if (parser.accept("'")?) {
-        return parseCharLiteral(parser, lexicalContext, from);
+    if (parser.acceptToken(TokenType.singleQuote)) {
+        return parseCharLiteral(parser, lexicalContext);
     }
-    if (parser.accept("\"")?) {
-        return parseStringLiteral(parser, lexicalContext, "\"", from);
+    if (parser.acceptToken(TokenType.doubleQuote)) {
+        return parseStringLiteral(parser, lexicalContext);
     }
     if (auto statementExpr = parseStatementExpr(parser, lexicalContext)?)
         return statementExpr;
-    if (parser.accept("(")?) {
+    if (parser.acceptToken(TokenType.lparen)) {
         nullable ASTSymbol result = parseExpression(parser, lexicalContext)?;
 
-        parser.expect(")")?;
+        parser.expectToken(TokenType.rparen)?;
         return result.notNull;
     }
     if (auto result = parseArrayLiteral(parser, lexicalContext)?)
@@ -2033,7 +2047,7 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
     {
         parser.begin;
         auto from = parser.from?;
-        if (parser.acceptButNot("&", "&&")?)
+        if (parser.acceptToken2Not(TokenType.ampersand, TokenType.ampersand))
         {
             parser.commit;
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
@@ -2054,7 +2068,7 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
     {
         parser.begin;
         auto from = parser.from?;
-        if (parser.accept("^")?)
+        if (parser.acceptToken(TokenType.circumflex))
         {
             parser.commit;
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
@@ -2075,7 +2089,7 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
     {
         parser.begin;
         auto from = parser.from?;
-        if (parser.acceptButNot("|", "||")?)
+        if (parser.acceptToken2Not(TokenType.bar, TokenType.bar))
         {
             parser.commit;
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
@@ -2095,19 +2109,19 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
     while (true)
     {
         auto from = parser.from?;
-        if (parser.accept("<<")?)
+        if (parser.acceptToken2(TokenType.smaller, TokenType.smaller))
         {
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
             left = new ASTBinaryOp("<<", left, right, parser.to(from));
         }
-        else if (parser.accept(">>>")?)
+        else if (parser.acceptToken3(TokenType.greater, TokenType.greater, TokenType.greater))
         {
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
             left = new ASTBinaryOp(">>>", left, right, parser.to(from));
         }
-        else if (parser.accept(">>")?)
+        else if (parser.acceptToken2(TokenType.greater, TokenType.greater))
         {
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
@@ -2122,19 +2136,19 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
     while (true)
     {
         auto from = parser.from?;
-        if (parser.acceptButNot("+", "++")?)
+        if (parser.acceptToken2Not(TokenType.plus, TokenType.plus))
         {
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
             left = new ASTBinaryOp("+", left, right, parser.to(from));
         }
-        else if (parser.acceptButNot("-", "--")?)
+        else if (parser.acceptToken2Not(TokenType.minus, TokenType.minus))
         {
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
             left = new ASTBinaryOp("-", left, right, parser.to(from));
         }
-        else if (parser.accept("~")?)
+        else if (parser.acceptToken(TokenType.tilde))
         {
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
@@ -2149,19 +2163,19 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
     while (true)
     {
         auto from = parser.from?;
-        if (parser.accept("*")?)
+        if (parser.acceptToken(TokenType.asterisk))
         {
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
             left = new ASTBinaryOp("*", left, right, parser.to(from));
         }
-        else if (parser.accept("/")?)
+        else if (parser.acceptToken(TokenType.slash))
         {
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
             left = new ASTBinaryOp("/", left, right, parser.to(from));
         }
-        else if (parser.accept("%")?)
+        else if (parser.acceptToken(TokenType.percent))
         {
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
@@ -2176,7 +2190,7 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
     while (true)
     {
         auto from = parser.from?;
-        if (parser.accept("&&")?)
+        if (parser.acceptToken2(TokenType.ampersand, TokenType.ampersand))
         {
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
@@ -2190,7 +2204,7 @@ ASTSymbol locRangeExpr(LocRange locRange, LexicalContext lexicalContext)
     while (true)
     {
         auto from = parser.from?;
-        if (parser.accept("||")?)
+        if (parser.acceptToken2(TokenType.bar, TokenType.bar))
         {
             ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
@@ -2241,7 +2255,7 @@ class ASTIota : ASTSymbol
 (ASTSymbol | fail Error) parseIota(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
     auto from = parser.from?;
-    if (parser.accept("..")?)
+    if (parser.acceptToken2(TokenType.dot, TokenType.dot))
     {
         ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
@@ -2253,56 +2267,59 @@ class ASTIota : ASTSymbol
 (ASTSymbol | fail Error) parseComparison(Parser parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
 {
     auto from = parser.from?;
-    if (parser.accept("==")?)
+    if (parser.acceptToken2(TokenType.equal, TokenType.equal))
     {
         auto locRange = parser.to(from);
         ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
         return new ASTBinaryOp("==", left, right, locRange);
     }
-    if (parser.accept("!=")?) // same as !(a == b)
+    if (parser.acceptToken2(TokenType.exclamationmark, TokenType.equal)) // same as !(a == b)
     {
         auto locRange = parser.to(from);
         ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
         return new ASTNegation(new ASTBinaryOp("==", left, right, locRange), locRange);
     }
-    if (parser.accept("is")?)
+    if (parser.acceptIdentifier("is")?)
     {
         auto locRange = parser.to(from);
         ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
         return new ASTBinaryOp("is", left, right, locRange);
     }
-    if (parser.accept("!is")?)
-    {
-        auto locRange = parser.to(from);
-        ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
+    with (parser.transaction) {
+        if (parser.acceptToken(TokenType.exclamationmark) && parser.acceptIdentifier("is")?)
+        {
+            commit;
+            auto locRange = parser.to(from);
+            ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
-        return new ASTNegation(new ASTBinaryOp("is", left, right, locRange), locRange);
+            return new ASTNegation(new ASTBinaryOp("is", left, right, locRange), locRange);
+        }
     }
-    if (parser.accept(">=")?)
+    if (parser.acceptToken2(TokenType.greater, TokenType.equal))
     {
         auto locRange = parser.to(from);
         ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
         return new ASTBinaryOp(">=", left, right, locRange);
     }
-    if (parser.acceptButNot(">", ">>")?)
+    if (parser.acceptToken2Not(TokenType.greater, TokenType.greater))
     {
         auto locRange = parser.to(from);
         ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
         return new ASTBinaryOp(">", left, right, locRange);
     }
-    if (parser.accept("<=")?)
+    if (parser.acceptToken2(TokenType.smaller, TokenType.equal))
     {
         auto locRange = parser.to(from);
         ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
 
         return new ASTBinaryOp("<=", left, right, locRange);
     }
-    if (parser.acceptButNot("<", "<<")?)
+    if (parser.acceptToken2Not(TokenType.smaller, TokenType.smaller))
     {
         auto locRange = parser.to(from);
         ASTSymbol right = expectArithmetic(parser, lexicalContext, myLevel + 1)?;
@@ -2342,10 +2359,11 @@ class ASTTernaryIf : ASTSymbol
 (ASTSymbol | fail Error) parseTernaryOp(Parser parser, LexicalContext lexicalContext, mut ASTSymbol then, int myLevel) {
     with (parser.transaction) {
         auto from = parser.from?;
-        if (!parser.accept("if")?) return then;
+        if (!parser.acceptIdentifier("if")?) return then;
         auto cond = parseExpression(parser, lexicalContext)?;
         if (!cond) return then;
-        parser.expect("else")?;
+        if (!parser.acceptIdentifier("else")?)
+            return parser.fail("'else' expected");
         auto else_ = expectArithmetic(parser, lexicalContext, 0)?;
         commit;
         return new ASTTernaryIf(cond.notNull, then, else_, parser.to(from));
@@ -2379,8 +2397,9 @@ class ASTTernaryIf : ASTSymbol
 
 (nullable ASTSymbol | fail Error) parseExpression(Parser parser, LexicalContext lexicalContext)
 {
-    if (auto leaf = parseExpressionLeaf(parser, lexicalContext)?)
+    if (auto leaf = parseExpressionLeaf(parser, lexicalContext)?) {
         return parseArithmetic(parser, lexicalContext, leaf, 0);
+    }
     return null;
 }
 
@@ -2452,7 +2471,11 @@ class ASTVoidExpression : ASTSymbol
     // peek
     parser.begin;
     // TODO acceptExprTerminator
-    if (parser.accept(";")? || parser.accept(",")? || parser.accept(")")?) { // return;
+    if (parser.acceptToken(TokenType.semicolon)
+        || parser.acceptToken(TokenType.comma)
+        || parser.acceptToken(TokenType.rparen))
+    {
+        // return;
         parser.revert;
         expr = new ASTVoidExpression(parser.to(from));
     } else {
@@ -2695,7 +2718,7 @@ class ASTIfStatement : ASTStatement
     }
     mut uninitialized (ASTSymbol | ASTVarDeclStatement | ASTVarExtractDeclStatement) test;
     auto locRange = parser.to(from);
-    parser.expect("(")?;
+    parser.expectToken(TokenType.lparen)?;
     auto vardecl = parseVarDecl(parser, lexicalContext, requireInitializer=true)?;
     if (auto vardecl = vardecl)
         test = vardecl;
@@ -2706,10 +2729,10 @@ class ASTIfStatement : ASTStatement
             test = parseExpression(parser, lexicalContext)?.notNull;
         }
     }
-    parser.expect(")")?;
+    parser.expectToken(TokenType.rparen)?;
     ASTStatement thenStmt = parseStatement(parser, lexicalContext)?;
     mut nullable ASTStatement elseStatement;
-    if (parser.accept("else")?)
+    if (parser.acceptIdentifier("else")?)
     {
         elseStatement = parseStatement(parser, lexicalContext)?;
     }
@@ -2802,17 +2825,17 @@ class ASTSequenceStatement : ASTStatement
     // This is not necessary, but ensures we get an error instead of segfault if we just spam brackets.
     parser.begin;
     auto from = parser.from?;
-    if (!parser.accept("{")?) {
+    if (!parser.acceptToken(TokenType.lcurlybracket)) {
         parser.revert;
         return null;
     }
     mut ASTStatement[] statements;
-    while (!parser.accept("}")?)
+    while (!parser.acceptToken(TokenType.rcurlybracket))
     {
         (void | fail Error) appendStmt() {
             statements ~= parseStatement(parser, lexicalContext)?;
         }
-        parser.verifyTransactions("statement parse rule imbalance", &appendStmt)?;
+        parser.verifyTransactions("scope statement parse rule imbalance", &appendStmt)?;
     }
     parser.commit;
     return new ASTScopeStatement(statements, parser.to(from));
@@ -2829,17 +2852,27 @@ class ASTSequenceStatement : ASTStatement
     }
     auto from = parser.from?;
     mut string operator;
-    if (parser.accept("=")?) { }
-    else if (parser.accept("+=")?) operator = "+";
-    else if (parser.accept("-=")?) operator = "-";
-    else if (parser.accept("*=")?) operator = "*";
-    else if (parser.accept("/=")?) operator = "/";
-    else if (parser.accept("~=")?) operator = "~";
-    else if (parser.accept("&=")?) operator = "&";
-    else if (parser.accept("|=")?) operator = "|";
-    else if (parser.accept("^=")?) operator = "^";
-    else if (parser.accept("&&=")?) operator = "&&";
-    else if (parser.accept("||=")?) operator = "||";
+    if (parser.acceptToken(TokenType.equal)) { }
+    else if (parser.acceptToken2(TokenType.plus, TokenType.equal))
+        operator = "+";
+    else if (parser.acceptToken2(TokenType.minus, TokenType.equal))
+        operator = "-";
+    else if (parser.acceptToken2(TokenType.asterisk, TokenType.equal))
+        operator = "*";
+    else if (parser.acceptToken2(TokenType.slash, TokenType.equal))
+        operator = "/";
+    else if (parser.acceptToken2(TokenType.tilde, TokenType.equal))
+        operator = "~";
+    else if (parser.acceptToken2(TokenType.ampersand, TokenType.equal))
+        operator = "&";
+    else if (parser.acceptToken2(TokenType.bar, TokenType.equal))
+        operator = "|";
+    else if (parser.acceptToken2(TokenType.circumflex, TokenType.equal))
+        operator = "^";
+    else if (parser.acceptToken3(TokenType.ampersand, TokenType.ampersand, TokenType.equal))
+        operator = "&&";
+    else if (parser.acceptToken3(TokenType.bar, TokenType.bar, TokenType.equal))
+        operator = "||";
     else {
         parser.revert;
         return null;
@@ -3131,8 +3164,13 @@ class ASTVarDeclStatement : ASTStatement
     mut nullable ASTSymbol initial;
     auto from = parser.from?;
     mut string name;
+    bool accept() {
+        if (operator == "=") return parser.acceptToken(TokenType.equal);
+        if (operator == "<-") return parser.acceptToken2(TokenType.smaller, TokenType.minus);
+        assert(false);
+    }
     // <- is not as ambiguous as =
-    if ((infer || operator == "<-") && parser.accept(operator)?)
+    if ((infer || operator == "<-") && accept())
     {
         initial = parseExpression(parser, lexicalContext)?;
         if (!initial) return parser.fail("variable initializer expected");
@@ -3146,7 +3184,7 @@ class ASTVarDeclStatement : ASTStatement
             return null;
         }
         if (infer) {
-            if (!parser.accept(operator)?)
+            if (!accept())
             {
                 parser.revert;
                 return null;
@@ -3154,12 +3192,12 @@ class ASTVarDeclStatement : ASTStatement
             initial = parseExpression(parser, lexicalContext)?;
             if (!initial) return parser.fail("variable initializer expected");
         }
-        else if (parser.accept(operator)?) {
+        else if (accept()) {
             initial = parseExpression(parser, lexicalContext)?;
             if (!initial) return parser.fail("variable initializer expected");
         } else {
             // FIXME this is very hacky
-            if (operator == "=" && parser.accept("<-")?) {
+            if (operator == "=" && parser.acceptToken2(TokenType.smaller, TokenType.minus)) {
                 // recognize that we're failing to parse a <- instead of ==
                 // FIXME check for both here instead of passing a parameter
                 parser.revert;
@@ -3232,7 +3270,7 @@ class ASTVarDeclStatement : ASTStatement
     }
     mut ASTStatement[] decls;
     while (true) {
-        if (decls.length) parser.expect(",")?;
+        if (decls.length) parser.expectToken(TokenType.comma)?;
         auto decl = parseVarInitialization(parser, lexicalContext, infer, mutable, uninitialized, type, "=", false)?;
         if (auto decl = decl) {
             decls ~= decl;
@@ -3248,7 +3286,7 @@ class ASTVarDeclStatement : ASTStatement
                 return null;
             }
         }
-        if (parser.accept(";")?) break;
+        if (parser.acceptToken(TokenType.semicolon)) break;
     }
     parser.commit;
     return new ASTSequenceStatement(decls, parser.to(from));
@@ -3488,7 +3526,7 @@ class ASTNestedFunctionDeclExpr : ASTSymbol
     Parser parser, LexicalContext lexicalContext)
 {
     with (parser.transaction) {
-        if (!parser.accept("(")?) {
+        if (!parser.acceptToken(TokenType.lparen)) {
             return null;
         }
         auto from = parser.from?;
@@ -3496,7 +3534,9 @@ class ASTNestedFunctionDeclExpr : ASTSymbol
             .case(Error err: return null);
 
         // Extremely dirty hack.
-        if (parser.accept(",")? || parser.accept(")")? || parser.accept(";")?) {
+        if (parser.acceptToken(TokenType.comma) || parser.acceptToken(TokenType.rparen)
+            || parser.acceptToken(TokenType.semicolon))
+        {
             return null;
         }
         commit;
@@ -3551,9 +3591,9 @@ class ASTWhile : ASTStatement
         parser.revert;
         return null;
     }
-    parser.expect("(")?;
+    parser.expectToken(TokenType.lparen)?;
     nullable ASTSymbol cond = parseExpression(parser, lexicalContext)?;
-    parser.expect(")")?;
+    parser.expectToken(TokenType.rparen)?;
     parser.commit;
     ASTStatement body_ = parseStatement(parser, lexicalContext)?;
 
@@ -3622,10 +3662,13 @@ class ASTStatementExpression : ASTSymbol
 {
     parser.begin;
     auto from = parser.from?;
-    if (!parser.accept("({")?) { parser.revert; return null; }
+    if (!parser.acceptToken2(TokenType.lparen, TokenType.lcurlybracket)) {
+        parser.revert;
+        return null;
+    }
     parser.commit;
     mut ASTStatement[] statements;
-    while (!parser.accept("})")?) {
+    while (!parser.acceptToken2(TokenType.rcurlybracket, TokenType.rparen)) {
         (void | fail Error) appendStatement() {
             statements ~= parseStatement(parser, lexicalContext)?;
         }
@@ -3686,16 +3729,16 @@ class ASTForLoop : ASTStatement
         return null;
     }
     parser.commit;
-    parser.expect("(")?;
+    parser.expectToken(TokenType.lparen)?;
     nullable ASTVarDeclStatement varDecl = parseVarDecl(parser, lexicalContext, requireInitializer=false)?;
     if (!varDecl) {
         return parser.fail("loop declaration expected");
     }
-    parser.expect(";")?;
+    parser.expectToken(TokenType.semicolon)?;
     nullable ASTSymbol condition = parseExpression(parser, lexicalContext)?;
-    parser.expect(";")?;
+    parser.expectToken(TokenType.semicolon)?;
     nullable ASTStatement step = parseForStep(parser, lexicalContext)?;
-    parser.expect(")")?;
+    parser.expectToken(TokenType.rparen)?;
     ASTStatement body_ = parseStatement(parser, lexicalContext)?;
 
     return new ASTForLoop(varDecl.notNull, condition.notNull, step.notNull, body_, parser.to(from));
@@ -3730,7 +3773,7 @@ class ASTStatementStatement : ASTStatement
     parser.commit;
     auto variable = parser.parseIdentifier?;
     if (!variable.length) return parser.fail("ASTStatement variable expected");
-    parser.expect(";")?;
+    parser.expectToken(TokenType.semicolon)?;
     return new ASTStatementStatement(variable, parser.to(from));
 }
 
@@ -3752,7 +3795,10 @@ class ASTStatementStatement : ASTStatement
         auto ident = parser.parseIdentifier?;
         parser.begin;
         // peek ahead
-        if (parser.accept(",")? || parser.acceptIdentifier("in")? || parser.accept("<-")?) {
+        if (parser.acceptToken(TokenType.comma)
+            || parser.acceptIdentifier("in")?
+            || parser.acceptToken2(TokenType.smaller, TokenType.minus))
+        {
             // (i in 0..10)
             parser.revert; // revert peek
             parser.commit; // commit identifier
@@ -3884,7 +3930,7 @@ class ASTExtForLoop : ASTStatement
 {
     parser.begin;
     auto from = parser.from?;
-    if (!parser.acceptIdentifier("for")? || !parser.accept("(")?) {
+    if (!parser.acceptIdentifier("for")? || !parser.acceptToken(TokenType.lparen)) {
         parser.revert;
         return null;
     }
@@ -3904,7 +3950,7 @@ class ASTExtForLoop : ASTStatement
     }
     mut bool keyValueLoop = false;
     mut uninitialized ExtForVarDecl match2decl;
-    if (parser.accept(",")?) {
+    if (parser.acceptToken(TokenType.comma)) {
         parseExtForVarDecl(parser, lexicalContext).case {
             (:fail): {
                 parser.revert;
@@ -3917,7 +3963,7 @@ class ASTExtForLoop : ASTStatement
         }
         keyValueLoop = true;
     }
-    if (parser.accept("<-")?) {
+    if (parser.acceptToken2(TokenType.smaller, TokenType.minus)) {
         print("warn: $(parser.to(from).repr): use 'in'");
     } else if (!parser.acceptIdentifier("in")?) {
         parser.revert;
@@ -3927,7 +3973,7 @@ class ASTExtForLoop : ASTStatement
     if (!source) return parser.fail("expression expected");
     auto source = source.notNull;
     // array loop, for (i, k in array)
-    parser.expect(")")?;
+    parser.expectToken(TokenType.rparen)?;
     auto body_ = parseStatement(parser, lexicalContext)?;
     parser.commit;
 
@@ -3964,10 +4010,10 @@ class ASTDestroy : ASTSymbol
         parser.revert;
         return null;
     }
-    parser.expect("(")?;
+    parser.expectToken(TokenType.lparen)?;
     nullable ASTSymbol target = parseExpression(parser, lexicalContext)?;
     if (!target) return parser.fail("expression expected");
-    parser.expect(")")?;
+    parser.expectToken(TokenType.rparen)?;
     parser.commit;
 
     return new ASTDestroy(target.notNull, parser.to(from));
@@ -4009,18 +4055,18 @@ class ASTStaticIfStatement : ASTStatement
     mut nullable ASTSymbol cond;
     if (parser.acceptIdentifier("static")? && parser.acceptIdentifier("if")?) {
         parser.commit;
-        parser.expect("(")?;
+        parser.expectToken(TokenType.lparen)?;
         auto e = parser.parseExpression(lexicalContext)?;
         if (!e) {
             return parser.fail("static if condition expected");
         }
         cond = e;
-        parser.expect(")")?;
+        parser.expectToken(TokenType.rparen)?;
     } else if (parser.acceptIdentifier("version")?) {
         parser.commit;
-        parser.expect("(")?;
+        parser.expectToken(TokenType.lparen)?;
         string versionStr = parser.parseIdentifier?;
-        parser.expect(")")?;
+        parser.expectToken(TokenType.rparen)?;
         auto versionSym = lexicalContext.compiler.astStringLiteral(versionStr, __RANGE__);
         cond = new ASTTrait("versionSet", [versionSym], __RANGE__);
     } else {
@@ -4029,16 +4075,16 @@ class ASTStaticIfStatement : ASTStatement
     }
 
     mut ASTStatement[] then, else_;
-    if (parser.accept("{")?) {
-        while (!parser.accept("}")?) {
+    if (parser.acceptToken(TokenType.lcurlybracket)) {
+        while (!parser.acceptToken(TokenType.rcurlybracket)) {
             then ~= parser.parseStatement(lexicalContext)?;
         }
     } else {
         then ~= parser.parseStatement(lexicalContext)?;
     }
-    if (parser.accept("else")?) {
-        if (parser.accept("{")?) {
-            while (!parser.accept("}")?) {
+    if (parser.acceptIdentifier("else")?) {
+        if (parser.acceptToken(TokenType.lcurlybracket)) {
+            while (!parser.acceptToken(TokenType.rcurlybracket)) {
                 else_ ~= parser.parseStatement(lexicalContext)?;
             }
         } else {
@@ -4094,8 +4140,9 @@ class ASTStaticIfStatement : ASTStatement
 {
     if (auto stmt = parseAssignment(parser, lexicalContext)?)
         return stmt;
-    if (auto expr = parseExpression(parser, lexicalContext)?)
+    if (auto expr = parseExpression(parser, lexicalContext)?) {
         return new ASTExprStatement(expr, expr.locRange);
+    }
     return null;
 }
 
@@ -4131,7 +4178,7 @@ class ASTStaticIfStatement : ASTStatement
         if (ASTStatement ret = args.statement?) return ret;
     }
     if (ASTStatement stmt = parseForStep(parser, lexicalContext)?) {
-        parser.expect(";")?;
+        parser.expectToken(TokenType.semicolon)?;
         return stmt;
     }
     return parser.fail("statement expected");
@@ -4648,21 +4695,22 @@ class ASTExternFunction : ASTExternFunctionBase
 {
     parser.begin;
     auto from = parser.from?;
-    if (!parser.accept("extern")?)
+    if (!parser.acceptIdentifier("extern")?)
     {
         parser.revert;
         return :none;
     }
     parser.commit;
-    parser.expect("(")?;
-    parser.expect("C")?;
-    parser.expect(")")?;
+    parser.expectToken(TokenType.lparen)?;
+    if (parser.parseIdentifier? != "C")
+        return parser.fail("calling convention expected");
+    parser.expectToken(TokenType.rparen)?;
     auto retFrom = parser.from?;
     auto type = parser.parseType(lexicalContext)?.notNull;
     auto retLocRange = parser.to(retFrom);
     string name = parser.parseIdentifier?;
     if (!name.length) return parser.fail("identifier expected");
-    if (parser.accept("(")?) {
+    if (parser.acceptToken(TokenType.lparen)) {
         auto paramList = parseParameterList(parser, lexicalContext, variadic=true, thisAssignment=false)?;
         ASTParameter pick((ASTParameter | ASTThisAssignment) value) {
             value.case {
@@ -4671,10 +4719,10 @@ class ASTExternFunction : ASTExternFunctionBase
             }
         }
         auto params = [pick(entry) for entry in paramList.params];
-        parser.expect(";")?;
+        parser.expectToken(TokenType.semicolon)?;
         return new ASTExternFunction(name, type, params=params, variadic=paramList.variadic, retLocRange);
     } else {
-        parser.accept(";")?;
+        parser.expectToken(TokenType.semicolon)?;
         return new ASTExternVariable(type, name, parser.to(from));
     }
 }
@@ -4904,10 +4952,10 @@ class ImportTask : ITask
         mut string pak;
         if (parser.acceptIdentifier("package")?)
         {
-            parser.expect("(")?;
+            parser.expectToken(TokenType.lparen)?;
             pak = parser.parseIdentifier?;
-            parser.expect(")")?;
-            parser.expect(".")?;
+            parser.expectToken(TokenType.rparen)?;
+            parser.expectToken(TokenType.dot)?;
         }
 
         string modname = parser.parseModuleName?;
@@ -4915,7 +4963,7 @@ class ImportTask : ITask
     }
 
     mut string[] symbols;
-    if (!isMacroImport && parser.accept(":")?) {
+    if (!isMacroImport && parser.acceptToken(TokenType.colon)) {
         (string | fail Error) expectIdentifier(Parser parser) {
             auto ident = parser.parseIdentifier?;
             parser.assert_(ident.length > 0, "identifier expected")?;
@@ -4929,12 +4977,12 @@ class ImportTask : ITask
         }
         // : [symbol] [, symbol]* ,? ;
         symbols ~= parser.expectIdentifier?;
-        while (parser.accept(",")?) {
+        while (parser.acceptToken(TokenType.comma)) {
             if (parser.peek(";")?) { break; }
             symbols ~= parser.expectIdentifier?;
         }
     }
-    parser.expect(";")?;
+    parser.expectToken(TokenType.semicolon)?;
     return new ASTImportStatement(target, isMacroImport, symbols, parser.to(from));
 }
 
@@ -4942,7 +4990,7 @@ class ImportTask : ITask
     mut string ret;
     while (true) {
         ret ~= parser.parseIdentifier?;
-        if (!parser.accept(".")?) break;
+        if (!parser.acceptToken(TokenType.dot)) break;
         ret ~= ".";
     }
     return ret;
@@ -4962,15 +5010,15 @@ class ModuleParserConfig
 {
     parser.begin;
     auto from = parser.from?;
-    if (!parser.acceptIdentifier("macro")? || !parser.accept("(")?)
+    if (!parser.acceptIdentifier("macro")? || !parser.acceptToken(TokenType.lparen))
     {
         parser.revert;
         return null;
     }
     parser.commit;
     string identifier = parser.parseIdentifier?;
-    parser.expect(")")?;
-    parser.expect(";")?;
+    parser.expectToken(TokenType.rparen)?;
+    parser.expectToken(TokenType.semicolon)?;
 
     auto newMacroState = astModule.macroState.dup;
 
@@ -5006,21 +5054,21 @@ class LexicalContextImpl : LexicalContext
 
 (nullable ASTVersion | fail Error) parseModuleVersion(Parser parser, LexicalContext lexicalContext)
 {
-    if (parser.accept("version")?) {
+    if (parser.acceptIdentifier("version")?) {
         mut ASTModuleEntry[] then, else_;
-        parser.expect("(")?;
+        parser.expectToken(TokenType.lparen)?;
         string versionStr = parser.parseIdentifier?;
-        parser.expect(")")?;
-        if (parser.accept("{")?) {
-            while (!parser.accept("}")?) {
+        parser.expectToken(TokenType.rparen)?;
+        if (parser.acceptToken(TokenType.lcurlybracket)) {
+            while (!parser.acceptToken(TokenType.rcurlybracket)) {
                 then ~= parser.parseModuleEntry(lexicalContext, false)?;
             }
         } else {
             then ~= parser.parseModuleEntry(lexicalContext, false)?;
         }
-        if (parser.accept("else")?) {
-            if (parser.accept("{")?) {
-                while (!parser.accept("}")?) {
+        if (parser.acceptIdentifier("else")?) {
+            if (parser.acceptToken(TokenType.lcurlybracket)) {
+                while (!parser.acceptToken(TokenType.rcurlybracket)) {
                     else_ ~= parser.parseModuleEntry(lexicalContext, false)?;
                 }
             } else {
@@ -5037,9 +5085,9 @@ class LexicalContextImpl : LexicalContext
 {
     parser.begin;
     mut Protection protection = Protection.private_;
-    if (parser.accept("public")?) {
+    if (parser.acceptIdentifier("public")?) {
         protection = Protection.public_;
-    } else if (parser.accept("private")?) {
+    } else if (parser.acceptIdentifier("private")?) {
         protection = Protection.private_;
     }
 
@@ -5077,9 +5125,9 @@ class LexicalContextImpl : LexicalContext
     }
 
     mut (Protection | :none) protection = :none;
-    if (parser.accept("public")?) {
+    if (parser.acceptIdentifier("public")?) {
         protection = Protection.public_;
-    } else if (parser.accept("private")?) {
+    } else if (parser.acceptIdentifier("private")?) {
         protection = Protection.private_;
     }
     Protection getProtection() {
@@ -5361,12 +5409,12 @@ class ParseAstModuleTask : ITask
         // do not count references on the file source - it will end
         // up with lots of small inc/decs to fragments that we never free anyway
         (cast(size_t*) &code)[2] = 0;
-        Parser parser = new ParserImpl(path, code);
+        Parser parser = new ParserImpl(path, code, tokenize(code, path)?);
 
         auto fromAtModule = parser.from?;
         parser.expect("module")?;
         string modname = parser.parseModuleName?;
-        parser.expect(";")?;
+        parser.expectToken(TokenType.semicolon)?;
 
         import std.string : endsWith;
 

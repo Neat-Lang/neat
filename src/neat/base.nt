@@ -4,6 +4,47 @@ import backend.base;
 import helpers;
 import neat.hash;
 
+enum TokenType {
+    none,
+    end,
+    whitespace,
+    identifier,
+    number,
+    comment,
+    dot,
+    comma,
+    singleQuote,
+    charLiteral,
+    doubleQuote, // ["]foo $(bar) baz["]
+    stringLiteral, // "[foo ]$(bar)[ baz]"
+    formatQuoteStart, // "foo [$](bar)"
+    backtick,
+    colon,
+    semicolon,
+    lparen,
+    rparen,
+    smaller,
+    greater,
+    equal,
+    exclamationmark,
+    questionmark,
+    dollar,
+    lsquarebracket,
+    rsquarebracket,
+    lcurlybracket,
+    rcurlybracket,
+    plus,
+    minus,
+    asterisk,
+    slash,
+    backslash,
+    circumflex,
+    percent,
+    tilde,
+    ampersand,
+    bar,
+}
+
 // something that can be referenced by a name
 abstract class Symbol
 {
@@ -656,7 +697,7 @@ abstract class CompilerBase
     string[] cFlags;
 
     // parser
-    abstract Parser createParser(string filename, string fulltext);
+    abstract (Parser | fail Error) createParser(string filename, string fulltext);
 
     abstract (nullable ASTSymbol | fail Error) parseExpression(
         Parser parser, LexicalContext lexicalContext);
@@ -674,7 +715,13 @@ abstract class CompilerBase
         Parser parser, LexicalContext lexicalContext);
 
     abstract (ASTSymbol | fail Error) parseStringLiteral(
-        Parser parser, LexicalContext lexicalContext, string endMarker, LocRange from);
+        Parser parser, LexicalContext lexicalContext);
+
+    (ASTSymbol | fail Error) parseStringLiteral(
+        Parser parser, LexicalContext lexicalContext, string separator, LocRange from)
+    {
+        return parseStringLiteral(parser, lexicalContext);
+    }
 
     abstract (nullable ASTSymbolDeclaration | fail Error) parseTemplateStub(
         Parser parser, LexicalContext lexicalContext, string name, string comment,
@@ -1234,14 +1281,20 @@ abstract class Parser
     abstract LocRange loc();
     abstract (LocRange | fail Error) from();
     abstract LocRange to(LocRange from);
-    abstract (void | fail Error) strip();
-    abstract (string | fail Error) parseLastComment();
+    abstract void strip();
+    abstract string parseLastComment();
     abstract string text();
+    abstract bool acceptToken(TokenType type);
+    abstract bool acceptToken2(TokenType first, TokenType second);
+    abstract bool acceptToken3(TokenType first, TokenType second, TokenType third);
+    abstract bool acceptToken2Not(TokenType match, TokenType nomatch);
+    abstract bool acceptToken2Not2(TokenType match, TokenType nomatch1, TokenType nomatch2);
+    abstract (string | :none) acceptTokenStr(TokenType type);
+    abstract (bool | fail Error) acceptIdentifier(string identifier);
+    abstract (void | fail Error) expectToken(TokenType token);
+    abstract bool peekToken(TokenType type);
     abstract (bool | fail Error) eof();
     abstract bool hard_eof();
-    abstract void dropOneCharNonNewline(int length);
-    abstract void drop(int length);
-    abstract string peekUniChar();
     abstract (void | fail Error) verifyTransactions(string msg, (void | fail Error) delegate() dg);
     abstract (string | fail Error) parseIdentifier();
 
@@ -1256,19 +1309,6 @@ abstract class Parser
         if (this.accept(match)?)
             return;
         return this.fail("'" ~ match ~ "' expected");
-    }
-
-    (bool | fail Error) acceptIdentifier(string identifier)
-    with (transaction)
-    {
-        string nextIdent = parseIdentifier?;
-
-        if (nextIdent != identifier)
-        {
-            return false;
-        }
-        commit;
-        return true;
     }
 
     ParserTransaction transaction() {
@@ -1312,6 +1352,7 @@ struct ParserTransaction
         if (!committed) parser.revert;
     }
     void commit() {
+        assert(!committed);
         parser.commit;
         committed = true;
     }

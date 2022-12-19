@@ -4,6 +4,8 @@ macro import std.macro.assert;
 macro import std.macro.listcomprehension;
 
 import package(compiler).neat.base;
+version (firstpass) {}
+else import package(compiler).neat.lexer;
 import package(compiler).neat.parser;
 import std.string;
 
@@ -19,8 +21,11 @@ struct JSONValue
      * Parse a JSON value from a string.
      */
     static JSONValue parse(string str) {
-        auto parser = new ParserImpl("", str);
         (JSONValue | fail Error) result() {
+            version (firstpass)
+                auto parser = new ParserImpl("", str);
+            else
+                auto parser = new ParserImpl("", str, tokenize(str, filename="")?);
             auto ret = jsonParseImpl(parser)?;
             if (!parser.eof?) return parser.fail("text after json");
             return ret;
@@ -38,8 +43,12 @@ struct JSONValue
         import std.file : readText;
 
         auto str = readText(file);
-        auto parser = new ParserImpl(file, str);
         (JSONValue | fail Error) result() {
+            version (firstpass) {
+                auto parser = new ParserImpl(file, str);
+            } else {
+                auto parser = new ParserImpl(file, str, tokenize(str, filename=file)?);
+            }
             auto ret = jsonParseImpl(parser)?;
             if (!parser.eof?) return parser.fail("text after json");
             return ret;
@@ -107,66 +116,153 @@ unittest
     auto value = JSONValue([("Hello", JSONValue("World"))]);
     assert(value.str == "{\"Hello\": \"World\"}");
     assert(JSONValue.parse("{\"Hello\": \"World\"}").str == "{\"Hello\": \"World\"}");
-    // TODO
-    // auto value = JSONValue({ "Hello": "World" });
 }
 
-private (JSONValue | fail Error) jsonParseImpl(ParserImpl parser) {
-    if (parser.accept("\"")?) {
-        return JSONValue(parseStringLiteral(parser)?);
-    }
-    parser.parseJsonNumber?.case {
-        (:failure): {}
-        int value: return JSONValue(value);
-    }
-    if (parser.accept("[")?) {
-        mut JSONValue[] entries;
-        if (!parser.accept("]")?) while (true) {
-            entries ~= jsonParseImpl(parser)?;
-            if (parser.accept("]")?) break;
-            parser.expect(",")?;
+version (firstpass) {
+    private (JSONValue | fail Error) jsonParseImpl(Parser parser) {
+        if (parser.accept("\"")?) {
+            return JSONValue(parseStringLiteral(parser)?);
         }
-        return JSONValue(entries);
-    }
-    if (parser.accept("{")?) {
-        mut (string key, JSONValue value)[] entries;
-        if (!parser.accept("}")?) while (true) {
-            parser.expect("\"")?;
-            auto key = parseStringLiteral(parser)?;
-            parser.expect(":")?;
-            auto value = jsonParseImpl(parser)?;
-            entries ~= (key, value);
-            if (parser.accept("}")?) break;
-            parser.expect(",")?;
+        parser.parseJsonNumber?.case {
+            (:failure): {}
+            int value: return JSONValue(value);
         }
-        return JSONValue(entries);
+        if (parser.accept("[")?) {
+            mut JSONValue[] entries;
+            if (!parser.accept("]")?) while (true) {
+                entries ~= jsonParseImpl(parser)?;
+                if (parser.accept("]")?) break;
+                parser.expect(",")?;
+            }
+            return JSONValue(entries);
+        }
+        if (parser.accept("{")?) {
+            mut (string key, JSONValue value)[] entries;
+            if (!parser.accept("}")?) while (true) {
+                parser.expect("\"")?;
+                auto key = parseStringLiteral(parser)?;
+                parser.expect(":")?;
+                auto value = jsonParseImpl(parser)?;
+                entries ~= (key, value);
+                if (parser.accept("}")?) break;
+                parser.expect(",")?;
+            }
+            return JSONValue(entries);
+        }
+        return parser.fail("unexpected input: " ~ parser.text);
     }
-    return parser.fail("unexpected input: " ~ parser.text);
-}
 
-// reused by the macro
-(string | fail Error) parseStringLiteral(Parser parser)
-{
-    mut int matchLen;
-    auto loc = parser.loc;
-    string start = parser.text;
-    while (parser.text[0 .. 1] != "\"") {
-        if (parser.text.length == 0) {
-            return parser.fail("expected end of string, got end of file");
-        }
-        if (parser.text[0 .. 1] == "\\") {
+    // reused by the macro
+    (string | fail Error) parseStringLiteral(Parser parser)
+    {
+        mut int matchLen;
+        auto loc = parser.loc;
+        string start = parser.text;
+        while (parser.text[0 .. 1] != "\"") {
+            if (parser.text.length == 0) {
+                return parser.fail("expected end of string, got end of file");
+            }
+            if (parser.text[0 .. 1] == "\\") {
+                matchLen = matchLen + 1;
+                parser.drop(1);
+            }
             matchLen = matchLen + 1;
             parser.drop(1);
         }
-        matchLen = matchLen + 1;
-        parser.drop(1);
-    }
-    string str = start[0 .. matchLen];
-    if (!parser.accept("\"")?) {
-        return parser.fail("this should never happen");
+        string str = start[0 .. matchLen];
+        if (!parser.accept("\"")?) {
+            return parser.fail("this should never happen");
+        }
+
+        return replaceEscapes(str);
     }
 
-    return replaceEscapes(str);
+    // reused by the macro
+    (:failure | int | fail Error) parseJsonNumber(Parser parser)
+    {
+        parser.begin;
+        mut bool negative = parser.accept("-")?;
+        if (parser.accept("-")?)
+            negative = true;
+        parser.strip?;
+        if (parser.hard_eof || !isDigit(parser.text[0]))
+        {
+            parser.revert;
+            return :failure;
+        }
+        mut string number;
+        while (!parser.hard_eof && isDigit(parser.text[0]))
+        {
+            number ~= parser.text[0];
+            parser.drop(1);
+        }
+        parser.commit;
+        mut int i = atoi(number);
+        if (negative) i = -i;
+        return i;
+    }
+} else {
+    private (JSONValue | fail Error) jsonParseImpl(Parser parser) {
+        if (parser.acceptToken(TokenType.doubleQuote)) {
+            return JSONValue(parseStringLiteral(parser)?);
+        }
+        parser.parseJsonNumber?.case {
+            (:failure): {}
+            int value: return JSONValue(value);
+        }
+        if (parser.acceptToken(TokenType.lsquarebracket)) {
+            mut JSONValue[] entries;
+            if (!parser.acceptToken(TokenType.rsquarebracket)) while (true) {
+                entries ~= jsonParseImpl(parser)?;
+                if (parser.acceptToken(TokenType.rsquarebracket)) break;
+                parser.expect(",")?;
+            }
+            return JSONValue(entries);
+        }
+        if (parser.accept("{")?) {
+            mut (string key, JSONValue value)[] entries;
+            if (!parser.accept("}")?) while (true) {
+                parser.expect("\"")?;
+                auto key = parseStringLiteral(parser)?;
+                parser.expect(":")?;
+                auto value = jsonParseImpl(parser)?;
+                entries ~= (key, value);
+                if (parser.accept("}")?) break;
+                parser.expect(",")?;
+            }
+            return JSONValue(entries);
+        }
+        return parser.fail("unexpected input: " ~ parser.text);
+    }
+
+    // reused by the macro
+    (string | fail Error) parseStringLiteral(Parser parser)
+    {
+        auto str = parser.acceptTokenStr(TokenType.stringLiteral)
+            .case(:none: return parser.fail("lexer error: string expected"));
+        if (!parser.acceptToken(TokenType.doubleQuote))
+            return parser.fail("'\"' expected");
+        return replaceEscapes(str);
+    }
+
+    // reused by the macro
+    (:failure | int | fail Error) parseJsonNumber(Parser parser)
+    {
+        parser.begin;
+        mut bool negative = parser.acceptToken(TokenType.lparen);
+        if (parser.acceptToken(TokenType.minus))
+            negative = true;
+        parser.acceptTokenStr(TokenType.number).case {
+            :none:
+                parser.revert;
+                return (:failure);
+            string number:
+                parser.commit;
+                mut int i = atoi(number);
+                if (negative) i = -i;
+                return i;
+        }
+    }
 }
 
 // Helper used by the macro to convert anything into JSONValue - including a JSONValue.
@@ -181,31 +277,6 @@ public JSONValue __jv(
         (string key, JSONValue value)[] hash: JSONValue(hash),
         JSONValue value: value // TODO ,
     );
-}
-
-// reused by the macro
-(:failure | int | fail Error) parseJsonNumber(Parser parser)
-{
-    parser.begin;
-    mut bool negative = parser.accept("-")?;
-    if (parser.accept("-")?)
-        negative = true;
-    parser.strip?;
-    if (parser.hard_eof || !isDigit(parser.text[0]))
-    {
-        parser.revert;
-        return :failure;
-    }
-    mut string number;
-    while (!parser.hard_eof && isDigit(parser.text[0]))
-    {
-        number ~= parser.text[0];
-        parser.drop(1);
-    }
-    parser.commit;
-    mut int i = atoi(number);
-    if (negative) i = -i;
-    return i;
 }
 
 /**

@@ -16,7 +16,10 @@ import std.thread;
     parser.begin;
     auto instanceFrom = parser.from?;
     // TODO better way to exclude !operator cases
-    if (!parser.accept("!")? || parser.accept("=")? || parser.acceptIdentifier("is")?) {
+    if (!parser.acceptToken(TokenType.exclamationmark)
+        || parser.acceptToken(TokenType.equal)
+        || parser.acceptIdentifier("is")?)
+    {
         parser.revert;
         return null;
     }
@@ -36,12 +39,12 @@ import std.thread;
         }
     }
 
-    if (parser.accept("(")?) {
+    if (parser.acceptToken(TokenType.lparen)) {
         // ( [a [, a]*]? )
-        if (!parser.accept(")")?) {
+        if (!parser.acceptToken(TokenType.rparen)) {
             getTemplateArg(false)?;
-            while (!parser.accept(")")?) {
-                parser.expect(",")?;
+            while (!parser.acceptToken(TokenType.rparen)) {
+                parser.expectToken(TokenType.comma)?;
                 getTemplateArg(false)?;
             }
         }
@@ -192,6 +195,7 @@ class TemplateDecl : LatentSymbol
         }
 
         with (this.mutex.locked) {
+            // TODO account for false "loops" from threads somehow
             for (entry in this.instantiations) {
                 if (entry.types.areSame(parameters)) {
                     entry.value.case {
@@ -290,20 +294,20 @@ class ASTTemplateDecl : ASTSymbolDeclaration
 (nullable ASTTemplateDecl | fail Error) parseTemplateDecl(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
-    auto comment = parser.parseLastComment?;
+    auto comment = parser.parseLastComment;
     if (!parser.acceptIdentifier("template")?) {
         parser.revert;
         return null;
     }
     parser.commit;
     auto name = parser.parseIdentifier?;
-    parser.expect("(")?;
+    parser.expectToken(TokenType.lparen)?;
     string[] typeParameters = parser.parseTemplateParameters(lexicalContext, swallowErrors=false)?
         .case(:nothing: ({ assert(false); null; }));
-    parser.expect("{")?;
+    parser.expectToken(TokenType.lcurlybracket)?;
     // TODO generalize (parseSymbol)?
     mut uninitialized ASTSymbol member;
-    parser.strip?;
+    parser.strip;
     auto contentFrom = parser.from?;
     nullable ASTSymbolDeclaration member = parseTemplateContents(parser, lexicalContext)?
         .(that.instanceOf(ASTSymbolDeclaration) if that else null);
@@ -311,7 +315,7 @@ class ASTTemplateDecl : ASTSymbolDeclaration
         return parser.to(contentFrom).fail("template member expected");
     }
 
-    parser.expect("}")?;
+    parser.expectToken(TokenType.rcurlybracket)?;
     return new ASTTemplateDecl(name, typeParameters, member.notNull, comment);
 }
 
@@ -320,7 +324,7 @@ class ASTTemplateDecl : ASTSymbolDeclaration
     (nullable ASTSymbolDeclaration | fail Error) delegate() parseInner)
 {
     parser.begin;
-    if (!parser.accept("(")?) {
+    if (!parser.acceptToken(TokenType.lparen)) {
         parser.revert;
         return null;
     }
@@ -346,16 +350,16 @@ class ASTTemplateDecl : ASTSymbolDeclaration
     // ( [identifier [, identifier]*]? )
     auto typeParameter = parser.parseIdentifier?;
     if (typeParameter.length == 0) {
-        if (!parser.accept(")")?) {
+        if (!parser.acceptToken(TokenType.rparen)) {
             if (swallowErrors) return :nothing;
-            parser.expect(")")?;
+            parser.expectToken(TokenType.rparen)?;
         }
     } else {
         typeParameters ~= typeParameter;
-        while (!parser.accept(")")?) {
-            if (!parser.accept(",")?) {
+        while (!parser.acceptToken(TokenType.rparen)) {
+            if (!parser.acceptToken(TokenType.comma)) {
                 if (swallowErrors) return :nothing;
-                parser.expect(",")?;
+                parser.expectToken(TokenType.comma)?;
             }
             auto typeParameter = parser.parseIdentifier?;
             if (typeParameter.length == 0) {

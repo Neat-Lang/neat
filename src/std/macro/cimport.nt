@@ -7,12 +7,15 @@ module std.macro.cimport;
 import package(compiler).neat.base;
 import package(compiler).neat.decl;
 import package(compiler).neat.expr;
-import package(compiler).neat.parser;
+version (firstpassmacro) import package(compiler).neat.parser;
+else import package(compiler).neat.simple_parser;
 import package(compiler).neat.struct_;
 import package(compiler).neat.types;
 import package(compiler).neat.util;
 import package(compiler).helpers;
 import package(compiler).neat.union_;
+
+version (firstpassmacro) alias SimpleParser = ParserImpl;
 
 version (firstpassmacro) class ASTNumberLiteral : ASTSymbol
 {
@@ -47,13 +50,21 @@ class CImportMacro : Macro
         // TODO move into neat.base
         auto from = parser.loc;
         parser.expect("\"")?;
-        auto includeSym = compiler.parseStringLiteral(parser, lexicalContext, "\"", from)?.instanceOf(ASTStringLiteral);
+        version (firstpassmacro) {
+            auto includeSym = compiler.parseStringLiteral(parser, lexicalContext, "\"", from)?.instanceOf(ASTStringLiteral);
+        } else {
+            auto includeSym = compiler.parseStringLiteral(parser, lexicalContext)?.instanceOf(ASTStringLiteral);
+        }
         parser.assert_(!!includeSym, "string expected")?;
         mut string flags;
         if (parser.accept(",")?) {
             auto from = parser.loc;
             parser.expect("\"")?;
-            auto flagsSym = compiler.parseStringLiteral(parser, lexicalContext, "\"", from)?.instanceOf(ASTStringLiteral);
+            version (firstpassmacro) {
+                auto flagsSym = compiler.parseStringLiteral(parser, lexicalContext, "\"", from)?.instanceOf(ASTStringLiteral);
+            } else {
+                auto flagsSym = compiler.parseStringLiteral(parser, lexicalContext)?.instanceOf(ASTStringLiteral);
+            }
             parser.assert_(!!flagsSym, "flags string expected")?;
             flags = flagsSym.text ~ " ";
         }
@@ -88,8 +99,8 @@ class CImportMacro : Macro
         // do not count references on the file source - it will end
         // up with lots of small inc/decs to fragments that we never free anyway
         (cast(size_t*) &csource)[2] = 0;
-        auto cparser = lexicalContext.compiler.createParser(headerName ~ ".out", csource);
 
+        auto cparser = new SimpleParser(headerName ~ ".out", csource);
         auto cparserHelper = new CParserHelper(cparser);
 
         auto pak = new Package("c_header", "", []);
@@ -250,7 +261,7 @@ class CImportMacro : Macro
     }
 }
 
-void eatline(Parser parser) {
+void eatline(SimpleParser parser) {
     auto pos = parser.text.find("\n");
     if (pos == -1) parser.drop(cast(int) parser.text.length);
     else parser.drop(pos + 1);
@@ -304,7 +315,7 @@ class CStaticArray : ASTSymbol
 }
 
 class CParserHelper {
-    Parser parser;
+    SimpleParser parser;
 
     ASTModuleBase mod, sysmod;
 
@@ -329,7 +340,9 @@ class CParserHelper {
         }
         if (ident.length > 0) {
             if (auto definedSym = this.mod.getSymbolAlias(ident)) return definedSym;
-            if (auto definedSym = this.sysmod.getSymbolAlias(ident)) return definedSym;
+            // FIXME
+            if (this.sysmod)
+                if (auto definedSym = this.sysmod.getSymbolAlias(ident)) return definedSym;
             // print("No such ident " ~ ident);
         }
         return null;

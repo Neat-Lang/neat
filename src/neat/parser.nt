@@ -3,54 +3,13 @@ module neat.parser;
 import backend.base;
 import helpers;
 import neat.base;
-
-/**
- * Advance row/column by byte distance `distance`.
- */
-StackEntry advance(mut StackEntry entry, string fulltext, int distance) {
-    mut auto skiptext = fulltext[entry.offset .. entry.offset + distance];
-    entry.offset += distance;
-
-    mut auto nl = skiptext.find("\n");
-    if (nl == -1) {
-        // TODO unicode count
-        entry.column += cast(int) distance;
-        entry.stripped = false;
-        return entry;
-    }
-    while (nl != -1) {
-        skiptext = skiptext[nl + 1 .. $];
-        entry.row += 1;
-        nl = skiptext.find("\n");
-    }
-    // no more newlines found, remainder are columns
-    // TODO unicode count
-    entry.column = cast(int) skiptext.length;
-    entry.stripped = false;
-    return entry;
-}
-
-struct StackEntry
-{
-    int offset;
-    int row, column;
-    bool stripped;
-
-    /**
-     * Advance row/column by byte distance `distance`, known to represent one character that is not a \n.
-     */
-    void advanceOneCharNonNewline(int distance) {
-        offset += distance;
-        column += 1;
-        stripped = false;
-    }
-}
+import neat.lexer;
 
 final class ParserImpl : Parser
 {
-    StackEntry[] stack;
+    int[] stack;
 
-    StackEntry current;
+    int current;
 
     int level;
 
@@ -58,25 +17,24 @@ final class ParserImpl : Parser
 
     string fulltext;
 
-    (int from, int to) lastIdentifier;
+    Token[] tokens;
 
-    this(this.filename, this.fulltext)
+    this(this.filename, this.fulltext, this.tokens)
     {
-        this.stack = new StackEntry[](0);
+        this.stack = new int[](0);
         this.level = 0;
-        this.current = StackEntry(offset=0, row=0, column=0, stripped=false);
-        lastIdentifier = (-1, -1);
+        this.current = 0;
         verify;
     }
 
     override LocRange loc() {
-        auto tuple = this.current.((row, column));
+        auto tuple = tokens[current].((row, col));
         return LocRange(this.filename, tuple, tuple);
     }
 
     override (LocRange | fail Error) from() {
-        this.strip?;
-        auto tuple = this.current.((row, column));
+        strip;
+        auto tuple = tokens[current].((row, col));
         return LocRange(this.filename, tuple, tuple);
     }
 
@@ -84,7 +42,7 @@ final class ParserImpl : Parser
         return LocRange(
             this.filename,
             from.from,
-            this.current.((row, column)),
+            tokens[current].((row, col)),
         );
     }
 
@@ -96,45 +54,24 @@ final class ParserImpl : Parser
     }
 
     override (string | fail Error) parseIdentifier()
-    with (transaction)
     {
-        strip?;
-        if (current.offset == lastIdentifier.from) {
-            auto res = fulltext[lastIdentifier.from .. lastIdentifier.to];
-            drop(lastIdentifier.to - lastIdentifier.from);
-            commit;
-            return res;
+        strip;
+        // foo
+        if (tokens[current].type == TokenType.identifier) {
+            current++;
+            return fulltext[tokens[current - 1].pos .. tokens[current].pos];
         }
-        auto from = current.offset;
-        mut string identifier = "";
-        string startText = text;
-        {
-            if (hard_eof) {
-                return "";
-            }
-            string unichar = peekUniChar;
-            int codepoint = unichar.utf8Decode;
-            if (!isAlpha(codepoint)
-                && codepoint != cast(int) "_"[0] && codepoint != cast(int) "\$"[0])
-            {
-                return "";
-            }
-            identifier = startText[0 .. unichar.length];
-            dropOneCharNonNewline(cast(int) unichar.length);
+        // $foo
+        if (tokens[current].type == TokenType.dollar && tokens[current + 1].type == TokenType.identifier) {
+            current += 2;
+            return fulltext[tokens[current - 2].pos .. tokens[current].pos];
         }
-
-        while (!hard_eof) {
-            string unichar = peekUniChar;
-            int codepoint = unichar.utf8Decode;
-            if (!isAlnum(codepoint)
-                && codepoint != cast(int) "_"[0])
-                break;
-            dropOneCharNonNewline(cast(int) unichar.length);
-            identifier = startText[0 .. identifier.length + unichar.length];
+        // $
+        if (tokens[current].type == TokenType.dollar) {
+            current ++;
+            return fulltext[tokens[current - 1].pos .. tokens[current].pos];
         }
-        lastIdentifier = (from, current.offset);
-        commit;
-        return identifier;
+        return "";
     }
 
     void verify()
@@ -151,15 +88,95 @@ final class ParserImpl : Parser
 
     override string text()
     {
-        return this.fulltext[this.current.offset .. $];
+        return this.fulltext[tokens[this.current].pos .. $];
+    }
+
+    override bool acceptToken(TokenType type) {
+        strip;
+        if (tokens[current].type == type) {
+            current++;
+            return true;
+        }
+        return false;
+    }
+
+    override bool acceptToken2(TokenType first, TokenType second) {
+        strip;
+        if (tokens[current].type == first && tokens[current + 1].type == second) {
+            current += 2;
+            return true;
+        }
+        return false;
+    }
+
+    override bool acceptToken3(TokenType first, TokenType second, TokenType third) {
+        strip;
+        if (tokens[current].type == first
+            && tokens[current + 1].type == second
+            && tokens[current + 2].type == third)
+        {
+            current += 3;
+            return true;
+        }
+        return false;
+    }
+
+    override bool acceptToken2Not(TokenType match, TokenType nomatch) {
+        strip;
+        if (tokens[current].type == match && tokens[current + 1].type != nomatch) {
+            current ++;
+            return true;
+        }
+        return false;
+    }
+
+    override bool acceptToken2Not2(TokenType match, TokenType nomatch1, TokenType nomatch2) {
+        strip;
+        if (tokens[current].type == match && tokens[current + 1].type.(that != nomatch1 && that != nomatch2)) {
+            current ++;
+            return true;
+        }
+        return false;
+    }
+
+    override (string | :none) acceptTokenStr(TokenType type) {
+        strip;
+        if (tokens[current].type == type) {
+            current++;
+            return fulltext[tokens[current - 1].pos .. tokens[current].pos];
+        }
+        return :none;
+    }
+
+    override (bool | fail Error) acceptIdentifier(string identifier) {
+        strip;
+        if (tokens[current].type == TokenType.identifier
+            && fulltext[tokens[current].pos .. tokens[current + 1].pos] == identifier)
+        {
+            current++;
+            return true;
+        }
+        return false;
+    }
+
+    override (void | Error) expectToken(TokenType type) {
+        strip;
+        if (tokens[current].type != type) {
+            version (firstpass)
+                return fail("$(cast(int) type) expected");
+            else
+                return fail("$type expected");
+        }
+        current++;
     }
 
     override void begin()
     {
         this.verify;
+        // TODO why this weird manual doubling?
         if (this.level == this.stack.length)
         {
-            StackEntry[] newStack = new StackEntry[](this.stack.length * 2 + 1);
+            int[] newStack = new int[](this.stack.length * 2 + 1);
             for (i, stack in this.stack) newStack[i] = stack;
             this.stack = newStack;
         }
@@ -180,48 +197,39 @@ final class ParserImpl : Parser
         this.current = this.stack[this.level];
     }
 
-    override void drop(int length)
+    override bool peekToken(TokenType tokenType)
     {
-        this.current = this.current.advance(this.fulltext, length);
-    }
-
-    override void dropOneCharNonNewline(int length)
-    {
-        this.current.advanceOneCharNonNewline(length);
-    }
-
-    override string peekUniChar()
-    {
-        auto text = this.text;
-        auto len = text.utf8NextLength;
-        return text[0 .. len];
+        return tokens[current].type == tokenType;
     }
 
     override (bool | fail Error) accept(string match)
     {
-        this.begin;
-        this.strip?;
-        auto text = this.text;
-        if (text.length < match.length)
-        {
-            this.revert;
-            return false;
+        // print("accept '$match' $(text[0 .. 20])");
+        mut int pos = current;
+        while (tokens[pos].type == TokenType.whitespace || tokens[pos].type == TokenType.comment)
+            pos++;
+        auto matchTokens = match.tokenize?;
+        // ignore end token
+        for (i, token in matchTokens[0 .. $ - 1]) {
+            if (pos + i >= tokens.length
+                || token.type != tokens[pos + i].type
+                || match[token.pos .. matchTokens[i + 1].pos] !=
+                    fulltext[tokens[pos + i].pos .. tokens[pos + i + 1].pos])
+            {
+                // print(" $i fail $(cast(int) token.type) $(cast(int) tokens[pos + i].type)");
+                return false;
+            }
         }
-        if (text[0 .. match.length] == match)
-        {
-            this.drop(cast(int) match.length);
-            this.commit;
-            return true;
-        }
-        this.revert;
-        return false;
+        current = pos + cast(int) matchTokens[0 .. $ - 1].length;
+        // print(" succ $(text[0 .. 20])");
+        return true;
     }
 
     // checks that the text is at the hard end of the file,
     // ie. no more text at all.
     override bool hard_eof()
     {
-        return this.current.offset == this.fulltext.length;
+        return tokens[current].type == TokenType.end;
     }
 
     // checks that the parser is at the "soft" end of the file,
@@ -229,7 +237,7 @@ final class ParserImpl : Parser
     override (bool | fail Error) eof()
     {
         this.begin;
-        this.strip?;
+        this.strip;
         if (hard_eof)
         {
             this.commit;
@@ -239,79 +247,34 @@ final class ParserImpl : Parser
         return false;
     }
 
-    override (void | fail Error) strip()
+    override void strip()
     {
-        if (this.current.stripped) return;
-        parseLastComment?;
-        this.current.stripped = true;
+        while (current < tokens.length && tokens[current].type.(
+            that == TokenType.whitespace || that == TokenType.comment)
+        )
+            current++;
     }
 
     // Accept many comments; return the last one.
-    override (string | fail Error) parseLastComment()
+    override string parseLastComment()
     {
-        mut string lastComment;
+        mut (int | :none) lastComment = :none;
         while (true) {
-            /* this.text = this.text.strip; */
-            mut string text = this.text;
-            while (text.length > 0 && isWhitespace(text[0]))
-                text = text[1 .. $];
-            drop(cast(int) (this.text.length - text.length));
-            auto comment = parseComment?;
-            if (!comment.ptr) {
-                return lastComment;
+            while (current < tokens.length && tokens[current].type == TokenType.whitespace)
+                current++;
+            if (tokens[current].type == TokenType.comment) {
+                lastComment = current++;
             }
-            lastComment = comment;
+            else break;
         }
-    }
-
-    // Because it's called from strip(), this among all accept functions does not strip on its own.
-    (string | fail Error) parseComment()
-    {
-        if (startsWith(this.text, "//"))
-        {
-            int newline = find(this.text, "\n");
-            assert(newline != -1);
-            auto ret = this.text[0 .. newline];
-            drop(newline + 1);
-            return ret;
-        }
-        else if (startsWith(this.text, "/*"))
-        {
-            mut auto text = this.text;
-            text = text["/*".length .. $];
-            mut int commentLevel = 1;
-            while (commentLevel > 0)
-            {
-                int more = find(text, "/*");
-                int less = find(text, "*/");
-
-                if (more == -1 && less == -1) {
-                    drop(cast(int) (this.text.length - text.length));
-                    return this.fail("comment spans end of file");
-                }
-                if (less != -1 && (more == -1 || less < more))
-                {
-                    text = text[less + "*/".length .. $];
-                    commentLevel = commentLevel - 1;
-                }
-                if (more != -1 && (less == -1 || more < less))
-                {
-                    text = text[more + "/*".length .. $];
-                    commentLevel = commentLevel + 1;
-                }
-            }
-            auto offset = this.text.length - text.length;
-            auto ret = this.text[0 .. offset];
-            drop(cast(int) offset);
-            return ret;
-        } else {
-            return null;
-        }
+        return lastComment.case(
+            :none: null,
+            int t: fulltext[tokens[t].pos .. tokens[t + 1].pos]);
     }
 
     override Error fail(string message)
     {
-        this.strip?;
+        this.strip;
         return this.loc.fail(message);
     }
 
@@ -462,71 +425,61 @@ struct Loc {
     }
 }
 
-bool isAlpha(int ch) {
-    // TODO support full unicode
-    if ((ch >= cast(int) "a"[0] && ch <= cast(int) "z"[0])
-        || (ch >= cast(int) "A"[0] && ch <= cast(int) "Z"[0]))
-        return true;
-    if (ch < 0x80)
-        return false;
-    // greek letters
-    if (ch >= 0x0391 && ch <= 0x03c9)
-        return true;
-    return false;
-}
-
 bool isDigit(int ch) {
     return ch >= cast(int) "0"[0] && ch <= cast(int) "9"[0];
 }
 
 (:failure | :success, long, bool withBasePrefix | fail Error) parseNumber(Parser parser)
 {
+    import std.string : replace;
+
     parser.begin;
-    mut bool negative = parser.accept("-")?;
-    if (parser.accept("-")?)
-        negative = true;
-    parser.strip?;
-    if (parser.accept("0x")?)
-    {
-        return parseHexNumber(parser, negative).case(
-            :failure: :failure,
-            (:success, long value): (:success, value, withBasePrefix=true));
-    }
-    if (parser.accept("0b")?)
-    {
-        return parseBinaryNumber(parser, negative).case(
-            :failure: :failure,
-            (:success, long value): (:success, value, withBasePrefix=true));
-    }
-    if (parser.hard_eof || !isDigit(parser.text[0]))
-    {
-        parser.revert;
-        return :failure;
-    }
-    mut string number;
-    while (!parser.hard_eof && (parser.text[0].isDigit || parser.text[0] == "_"[0]))
-    {
-        if (parser.text[0] != "_"[0])
-            number ~= parser.text[0];
-        parser.dropOneCharNonNewline(1);
-    }
+    bool negative = parser.acceptToken(TokenType.minus);
+    parser.strip;
+    auto number = parser.acceptTokenStr(TokenType.number)
+        .case(:none: ({ parser.revert; return :failure; }));
+    // we definitely have at least a number.
     parser.commit;
+    if (number == "0") {
+        // check for 0x..., 0b...
+        parser.begin;
+        auto ident = parser.acceptTokenStr(TokenType.identifier).case(:none: "");
+        if (ident.startsWith("x")) {
+            parseHexNumber(ident[1 .. $], negative).case {
+                :failure:
+                    parser.revert;
+                    return (:failure);
+                (:success, long value):
+                    parser.commit;
+                    return (:success, value, withBasePrefix=true);
+            }
+        }
+        if (ident.startsWith("b")) {
+            parseBinaryNumber(ident[1 .. $], negative).case {
+                :failure:
+                    parser.revert;
+                    return (:failure);
+                (:success, long value):
+                    parser.commit;
+                    return (:success, value, withBasePrefix=true);
+            }
+        }
+        parser.revert;
+    }
+    auto number = number.replace("_", "");
     mut long l = atol(number);
     if (negative) l = -l;
     return (:success, l, withBasePrefix=false);
 }
 
-(:failure | :success, long value) parseHexNumber(Parser parser, bool negative)
+(:failure | :success, long value) parseHexNumber(mut string number, bool negative)
 {
-    if (parser.hard_eof || !isHexDigit(parser.text[0 .. 1]))
-    {
-        parser.revert;
+    if (number.empty || !isHexDigit(number.front))
         return :failure;
-    }
     mut long result;
-    while (!parser.hard_eof && (parser.text[0 .. 1].isHexDigit || parser.text[0] == "_"[0]))
+    while (!number.empty && (number.front.isHexDigit || number.front == "_"[0]))
     {
-        auto ch = parser.text[0 .. 1];
+        auto ch = number[0 .. 1];
         mut int digit;
         if (isDigit(ch[0])) digit = atoi(ch);
         else if (ch == "a" || ch == "A") digit = 10;
@@ -536,55 +489,53 @@ bool isDigit(int ch) {
         else if (ch == "e" || ch == "E") digit = 14;
         else if (ch == "f" || ch == "F") digit = 15;
         else if (ch == "_") {
-            parser.dropOneCharNonNewline(1);
+            number = number[1 .. $];
             continue;
         } else assert(false);
         result = result * 16 + digit;
-        parser.dropOneCharNonNewline(1);
+        number = number[1 .. $];
     }
-    parser.commit;
+    if (!number.empty) return :failure;
     if (negative) result = -result;
     return (:success, result);
 }
 
-bool isHexDigit(string digit)
+bool isHexDigit(char digit)
 {
-    if (isDigit(digit[0])) return true;
-    if (digit == "a" || digit == "A") return true;
-    if (digit == "b" || digit == "B") return true;
-    if (digit == "c" || digit == "C") return true;
-    if (digit == "d" || digit == "D") return true;
-    if (digit == "e" || digit == "E") return true;
-    if (digit == "f" || digit == "F") return true;
+    if (isDigit(digit)) return true;
+    if (digit == "a"[0] || digit == "A"[0]) return true;
+    if (digit == "b"[0] || digit == "B"[0]) return true;
+    if (digit == "c"[0] || digit == "C"[0]) return true;
+    if (digit == "d"[0] || digit == "D"[0]) return true;
+    if (digit == "e"[0] || digit == "E"[0]) return true;
+    if (digit == "f"[0] || digit == "F"[0]) return true;
     return false;
 }
 
-(:failure | :success, long value) parseBinaryNumber(Parser parser, bool negative)
+(:failure | :success, long value) parseBinaryNumber(mut string number, bool negative)
 {
-    bool isBinaryDigit(string d) {
-        return d == "0" || d == "1";
+    bool isBinaryDigit(char ch) {
+        return ch == "0"[0] || ch == "1"[0];
     }
-    if (parser.hard_eof || !parser.text[0 .. 1].isBinaryDigit)
-    {
-        parser.revert;
+    if (number.empty || !isBinaryDigit(number.front)) {
         return :failure;
     }
     mut long result;
-    while (!parser.hard_eof && (parser.text[0 .. 1].isBinaryDigit || parser.text[0] == "_"[0]))
+    while (!number.empty && (number.front.isBinaryDigit || number.front == "_"[0]))
     {
-        auto ch = parser.text[0 .. 1];
+        auto ch = number[0 .. 1];
         // mut int digit = if (ch == "0") 0; else 1;
         mut int digit;
         if (ch == "0") digit = 0;
         else if (ch == "1") digit = 1;
         else if (ch == "_") {
-            parser.dropOneCharNonNewline(1);
+            number = number[1 .. $];
             continue;
         } else assert(false);
         result = result * 2 + digit;
-        parser.dropOneCharNonNewline(1);
+        number = number[1 .. $];
     }
-    parser.commit;
+    if (!number.empty) return :failure;
     if (negative) result = -result;
     return (:success, result);
 }
@@ -592,35 +543,22 @@ bool isHexDigit(string digit)
 (:failure | :success, float | :success, double | fail Error) parseFloat(Parser parser)
 with (parser.transaction)
 {
-    bool negative = parser.accept("-")?;
-    parser.strip?;
-    mut string number;
-    while (!parser.hard_eof && isDigit(parser.text[0]))
-    {
-        number ~= parser.text[0];
-        parser.dropOneCharNonNewline(1);
-    }
-    if (parser.accept(".")?) {}
-    else return :failure;
+    bool negative = parser.acceptToken(TokenType.minus);
+    parser.strip;
+    mut string number = parser.acceptTokenStr(TokenType.number)
+        .case(:none: return :failure);
+    if (!parser.acceptToken(TokenType.dot)) return :failure;
     number ~= ".";
     // 2.foo
-    if (parser.hard_eof || !isDigit(parser.text[0])) return :failure;
-    while (!parser.hard_eof && isDigit(parser.text[0]))
-    {
-        number ~= parser.text[0];
-        parser.dropOneCharNonNewline(1);
-    }
+    auto cont = parser.acceptTokenStr(TokenType.number)
+        .case(:none: return :failure);
+    if (parser.hard_eof) return :failure;
+    number ~= cont;
     commit;
     mut double d = atof(number);
     if (negative) d = -d;
-    if (!parser.hard_eof && parser.text[0] == "f"[0]) {
-        parser.dropOneCharNonNewline(1);
+    if (parser.acceptIdentifier("f")?) {
         return (:success, cast(float) d);
     }
     return (:success, d);
-}
-
-bool isAlnum(int ch)
-{
-    return isAlpha(ch) || isDigit(ch);
 }

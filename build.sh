@@ -8,7 +8,7 @@ then
 else
     set -euxo pipefail
 fi
-OPTFLAG="-O"
+OPTFLAG="-O -release"
 #OPTFLAG=""
 
 JFLAG=""

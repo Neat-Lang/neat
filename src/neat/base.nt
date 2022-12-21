@@ -108,7 +108,8 @@ abstract class Statement
 {
     abstract void emit(Generator output);
     abstract void hash(Hash hash);
-    string repr() { return "TODO Statement.repr"; }
+    string repr() => "TODO Statement.repr";
+    string toString() => repr;
 }
 
 abstract class Reference : Expression
@@ -450,7 +451,9 @@ class ImmutableContext
 
     nullable ModuleBase compilingModule;
 
-    IdCounter idCounter;
+    LabelCounter labelCounter;
+
+    IUniqCounter uniqCounter;
 
     LocRange[] errorStack;
 
@@ -459,37 +462,42 @@ class ImmutableContext
     ModulePostProcessor modulePostProcessor;
 
     this(this.compiler, this.platform, this.macroState, this.nativeWordType,
-        this.framePointer, this.compilingModule, this.idCounter, this.errorStack,
-        this.modulePreProcessor, this.modulePostProcessor) { }
+        this.framePointer, this.compilingModule, this.labelCounter, this.uniqCounter,
+        this.errorStack, this.modulePreProcessor, this.modulePostProcessor) { }
 
     ImmutableContext withFramePointer(nullable Expression framePointer) {
         return new ImmutableContext(
             this.compiler, this.platform, this.macroState,
             this.nativeWordType, framePointer, this.compilingModule,
-            this.idCounter, this.errorStack, this.modulePreProcessor,
-            this.modulePostProcessor);
+            this.labelCounter, this.uniqCounter, this.errorStack,
+            this.modulePreProcessor, this.modulePostProcessor);
     }
 
     ImmutableContext withCompilingModule(ModuleBase compilingModule) {
         return new ImmutableContext(
             this.compiler, this.platform, this.macroState,
             this.nativeWordType, this.framePointer, compilingModule,
-            this.idCounter, this.errorStack, this.modulePreProcessor,
-            this.modulePostProcessor);
+            this.labelCounter, this.uniqCounter, this.errorStack,
+            this.modulePreProcessor, this.modulePostProcessor);
     }
 
     ImmutableContext withLabelPrefix(string prefix) {
-        auto idCounter = new IdCounter(prefix);
+        auto labelCounter = new LabelCounter(prefix);
+        auto uniqCounter = this.uniqCounter.dup;
 
         return new ImmutableContext(
             this.compiler, this.platform, this.macroState,
             this.nativeWordType, this.framePointer, this.compilingModule,
-            idCounter, this.errorStack, this.modulePreProcessor,
-            this.modulePostProcessor);
+            labelCounter, uniqCounter, this.errorStack,
+            this.modulePreProcessor, this.modulePostProcessor);
     }
 }
 
-class IdCounter
+/**
+ * Generates unique text labels with a prefix.
+ * Usually used for names that will appear in the output and must be stable between runs.
+ */
+class LabelCounter
 {
     string prefix;
 
@@ -498,10 +506,20 @@ class IdCounter
     this(this.prefix = "uniq") { }
 
     string next() {
-        int count = this.count;
-        this.count += 1;
-        return "$(this.prefix)$(count)";
+        auto count = this.count++;
+        return "$(this.prefix)$count";
     }
+}
+
+/**
+ * Generate a unique numeric label.
+ * This class is more performant than `LabelCounter`.
+ * The value is not stable between runs; however, it is guaranteed to be globally unique per program run.
+ * `dup` must be called when the UniqCounter will be passed to another thread.
+ */
+interface IUniqCounter {
+    int next();
+    IUniqCounter dup();
 }
 
 // Used by main to analyze the AST tree (docgen)
@@ -543,24 +561,16 @@ struct Context
         return Context(this.namespace, this.data.withLabelPrefix(prefix));
     }
 
-    // TODO alias, this is a bit too reliant on the inliner
-    CompilerBase compiler() { return data.compiler; }
-
-    Platform platform() { return data.platform; }
-
-    MacroState macroState() { return data.macroState; }
-
-    Type nativeWordType() { return data.nativeWordType; }
-
-    ModulePreProcessor modulePreProcessor() { return data.modulePreProcessor; }
-
-    ModulePostProcessor modulePostProcessor() { return data.modulePostProcessor; }
-
-    nullable Expression framePointer() { return data.framePointer; }
-
-    ModuleBase compilingModule() { return data.compilingModule.notNull; }
-
-    IdCounter idCounter() { return data.idCounter; }
+    alias compiler = (data.compiler);
+    alias platform = (data.platform);
+    alias macroState = (data.macroState);
+    alias nativeWordType = (data.nativeWordType);
+    alias modulePreProcessor = (data.modulePreProcessor);
+    alias modulePostProcessor = (data.modulePostProcessor);
+    alias framePointer = (data.framePointer);
+    alias compilingModule = (data.compilingModule);
+    alias labelCounter = (data.labelCounter);
+    alias uniqCounter = (data.uniqCounter);
 
     void pushErrorLoc(LocRange locRange) {
         this.data.errorStack ~= locRange;
@@ -575,7 +585,9 @@ struct Context
         return new Error(data.errorStack ~ locRange, msg);
     }
 
-    string getLabel() { return this.data.idCounter.next; }
+    string getLabel() { return this.data.labelCounter.next; }
+
+    int getUniqueId() { return this.data.uniqCounter.next; }
 }
 
 // bleh cycle
@@ -978,25 +990,25 @@ abstract class CompilerBase
     /// Create a temporary of `type`. Temporary is passed to `callback`, which returns an initializer.
     /// Returns Expression evaluating to "Initializer, then temporary".
     abstract (nullable Expression | fail Error) exprWithScratchspace(
-        string label, Type type, bool temporary, (nullable Statement | fail Error) delegate(Reference) callback);
+        int uniqId, Type type, bool temporary, (nullable Statement | fail Error) delegate(Reference) callback);
 
     abstract (Statement | fail Error) unwindScope(Context context, Namespace target, Statement next);
 
     abstract (nullable Statement | fail Error) stmtWithTemporary(
-        string label, Expression value, (nullable Statement | fail Error) delegate(Reference) callback);
+        int uniqId, Expression value, (nullable Statement | fail Error) delegate(Reference) callback);
 
     abstract (nullable Expression | fail Error) exprWithTemporary(
-        string label, Expression value, (nullable Expression | fail Error) delegate(Reference) callback);
+        int uniqId, Expression value, (nullable Expression | fail Error) delegate(Reference) callback);
 
     // don't create referenceable memory
     abstract (nullable Statement | fail Error) stmtWithTemporaryExpr(
-        string label, Expression value, (nullable Statement | fail Error) delegate(Expression) callback);
+        int uniqId, Expression value, (nullable Statement | fail Error) delegate(Expression) callback);
 
     abstract (nullable Expression | fail Error) exprWithTemporaryExpr(
-        string label, Expression value, (nullable Expression | fail Error) delegate(Expression) callback);
+        int uniqId, Expression value, (nullable Expression | fail Error) delegate(Expression) callback);
 
     abstract (nullable Expression | fail Error) exprWithTemporaryExpr(
-        string label, Expression value, bool copyLifetime,
+        int uniqId, Expression value, bool copyLifetime,
         (nullable Expression | fail Error) delegate(Expression) callback);
 
     /**
@@ -1047,6 +1059,8 @@ abstract class CompilerBase
     abstract string queueModuleCompilation(Context context, ASTModuleBase module_);
 
     abstract (ModuleBase | fail Error) getCompiledModule(string id);
+
+    abstract IUniqCounter uniqCounter();
 }
 
 abstract class FunctionDeclarationBase : Symbol

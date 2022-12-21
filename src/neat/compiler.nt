@@ -39,8 +39,11 @@ class CompilerImpl : CompilerBase
 
     Mutex mutex;
 
+    GlobalUniqCounter glob;
+
     this(this.defaultImports, this.modParseConfig, this.cFlags, this.workPool) {
         this.mutex = new Mutex;
+        this.glob = new GlobalUniqCounter;
     }
 
     CachedRuntimeFunction[] cachedRuntimeFunctions;
@@ -555,7 +558,7 @@ class CompilerImpl : CompilerBase
             return dg(expr);
         }
         auto type = expr.type;
-        auto temp = new PairedTemporaryExpr(type, Lifetime.ephemeral, context.getLabel);
+        auto temp = new PairedTemporaryExpr(type, Lifetime.ephemeral, context.getUniqueId);
         auto assign = new InitializeTemporaryExprStatement(temp, expr);
         auto cleanup = type.endLifetime(context, temp);
         auto result = dg(temp)?;
@@ -569,7 +572,7 @@ class CompilerImpl : CompilerBase
             return dg(expr);
         }
         auto type = expr.type;
-        auto temp = new PairedTemporaryExpr(type, Lifetime.ephemeral, context.getLabel);
+        auto temp = new PairedTemporaryExpr(type, Lifetime.ephemeral, context.getUniqueId);
         auto assign = new InitializeTemporaryExprStatement(temp, expr);
         auto cleanup = type.endLifetime(context, temp);
         auto result = dg(temp);
@@ -581,7 +584,7 @@ class CompilerImpl : CompilerBase
         (nullable Expression | fail Error) delegate(Expression) dg)
     {
         auto type = expr.type;
-        auto temp = new PairedTemporaryExpr(type, Lifetime.ephemeral, context.getLabel);
+        auto temp = new PairedTemporaryExpr(type, Lifetime.ephemeral, context.getUniqueId);
         auto result = dg(temp)?;
         if (!result) return null;
         auto result = result.notNull;
@@ -697,13 +700,13 @@ class CompilerImpl : CompilerBase
     }
 
     override (nullable Expression | fail Error) exprWithScratchspace(
-        string label, Type type, bool temporary, (nullable Statement | fail Error) delegate(Reference) callback)
+        int uniqId, Type type, bool temporary, (nullable Statement | fail Error) delegate(Reference) callback)
     {
         mut uninitialized Lifetime tempLifetime;
         if (temporary) tempLifetime = Lifetime.gifted;
         else tempLifetime = Lifetime.lexical;
 
-        auto temp = new PairedTemporary(type, tempLifetime, label);
+        auto temp = new PairedTemporary(type, tempLifetime, uniqId);
         auto initialize = new UninitializeTemporaryStatement(temp);
         auto stmt = callback(temp)?;
         if (!stmt) return null;
@@ -712,13 +715,13 @@ class CompilerImpl : CompilerBase
     }
 
     override (nullable Statement | fail Error) stmtWithTemporary(
-        string label, Expression value, (nullable Statement | fail Error) delegate(Reference) callback)
+        int uniqId, Expression value, (nullable Statement | fail Error) delegate(Reference) callback)
     {
         mut uninitialized Lifetime tempLifetime;
         if (value.info.lifetime == Lifetime.gifted) tempLifetime = Lifetime.gifted;
         else tempLifetime = Lifetime.lexical;
 
-        auto temp = new PairedTemporary(value.type, tempLifetime, label);
+        auto temp = new PairedTemporary(value.type, tempLifetime, uniqId);
         auto start = new InitializeTemporaryStatement(temp, value);
         auto stmt = callback(temp)?;
         if (!stmt) return null;
@@ -727,7 +730,7 @@ class CompilerImpl : CompilerBase
     }
 
     override (nullable Expression | fail Error) exprWithTemporary(
-        string label, Expression value, (nullable Expression | fail Error) delegate(Reference) callback)
+        int uniqId, Expression value, (nullable Expression | fail Error) delegate(Reference) callback)
     {
         // TODO: the way gifted works here is almost certainly wrong,
         // cause the Reference can be read multiple times - that's
@@ -736,7 +739,7 @@ class CompilerImpl : CompilerBase
         if (value.info.lifetime == Lifetime.gifted) tempLifetime = Lifetime.gifted;
         else tempLifetime = Lifetime.lexical;
 
-        auto temp = new PairedTemporary(value.type, tempLifetime, label);
+        auto temp = new PairedTemporary(value.type, tempLifetime, uniqId);
         auto start = new InitializeTemporaryStatement(temp, value);
         auto expr = callback(temp)?;
         if (!expr) return null;
@@ -745,9 +748,9 @@ class CompilerImpl : CompilerBase
     }
 
     override (nullable Statement | fail Error) stmtWithTemporaryExpr(
-        string label, Expression value, (nullable Statement | fail Error) delegate(Expression) callback)
+        int uniqId, Expression value, (nullable Statement | fail Error) delegate(Expression) callback)
     {
-        auto temp = new PairedTemporaryExpr(value.type, value.info.lifetime, label);
+        auto temp = new PairedTemporaryExpr(value.type, value.info.lifetime, uniqId);
         auto start = new InitializeTemporaryExprStatement(temp, value);
         auto stmt = callback(temp)?;
         if (!stmt) return null;
@@ -756,9 +759,9 @@ class CompilerImpl : CompilerBase
     }
 
     override (nullable Expression | fail Error) exprWithTemporaryExpr(
-        string label, Expression value, (nullable Expression | fail Error) delegate(Expression) callback)
+        int uniqId, Expression value, (nullable Expression | fail Error) delegate(Expression) callback)
     {
-        auto temp = new PairedTemporaryExpr(value.type, value.info.lifetime, label);
+        auto temp = new PairedTemporaryExpr(value.type, value.info.lifetime, uniqId);
         auto start = new InitializeTemporaryExprStatement(temp, value);
         auto expr = callback(temp)?;
         if (!expr) return null;
@@ -767,10 +770,10 @@ class CompilerImpl : CompilerBase
     }
 
     override (nullable Expression | fail Error) exprWithTemporaryExpr(
-        string label, Expression value, bool copyLifetime,
+        int uniqId, Expression value, bool copyLifetime,
         (nullable Expression | fail Error) delegate(Expression) callback)
     {
-        auto temp = new PairedTemporaryExpr(value.type, Lifetime.none, label);
+        auto temp = new PairedTemporaryExpr(value.type, Lifetime.none, uniqId);
         auto start = new InitializeTemporaryExprStatement(temp, value);
         auto expr = callback(temp)?;
         if (!expr) return null;
@@ -952,6 +955,8 @@ class CompilerImpl : CompilerBase
     override (ModuleBase | fail Error) getCompiledModule(string id) {
         return workPool.wait(id).instanceOf(AstCompileTask).module_?;
     }
+
+    override IUniqCounter uniqCounter() => new UniqCounter(this.glob);
 }
 
 struct CachedRuntimeFunction
@@ -961,4 +966,40 @@ struct CachedRuntimeFunction
     Module rtMod;
 
     string platformIdent;
+}
+
+class UniqCounter : IUniqCounter
+{
+    (int from, int to) range;
+
+    GlobalUniqCounter glob;
+
+    this(this.glob) { }
+
+    override int next() {
+        if (range.from == range.to) {
+            range = this.glob.genRange;
+        }
+        return range.from++;
+    }
+
+    override IUniqCounter dup() => new UniqCounter(this.glob);
+}
+
+class GlobalUniqCounter
+{
+    int value;
+
+    Mutex mutex;
+
+    this() { this.mutex = new Mutex; }
+
+    (int from, int to) genRange() {
+        int length = 1000;
+        mutex.lock;
+        int res = this.value;
+        this.value += length;
+        mutex.unlock;
+        return (res, res + length);
+    }
 }

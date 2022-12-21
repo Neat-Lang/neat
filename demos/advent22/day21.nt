@@ -1,0 +1,124 @@
+module day21;
+
+macro import std.macro.assert;
+macro import std.macro.listcomprehension;
+
+import std.algorithm;
+import std.stdio;
+import std.string;
+
+enum OpType {
+    add,
+    sub,
+    mul,
+    div,
+}
+
+alias Op = (
+    long
+    | :math, string left, string right, OpType);
+
+void main()
+{
+    Op decodeArith(string op) {
+        if ("$(atoi(op))" == op) return atoi(op);
+        auto parts = op.split(" ");
+        return (:math, parts[0], parts[2], OpType.(parts[1].case(
+            "+": add, "-": sub, "*": mul, "/": div)));
+    }
+    auto decode = line => (
+        name=line.before(": "),
+        arith=line.after(": ").decodeArith);
+    auto lines = stdin.byLine
+        .filter(a => !a.empty)
+        .map(decode)
+        .array;
+    mut Op[string] monkeyOp;
+    for (line in lines) monkeyOp[line.name] = line.arith;
+    mut long[string] monkeyCache;
+    long calc(string monkey) {
+        if (monkeyCache.has(monkey)) return monkeyCache[monkey];
+        auto op = monkeyOp[monkey];
+        auto ret = op.case(
+            long i: i,
+            (:math, string left, string right, OpType op):
+                op.case(
+                    (OpType.add): calc(left) + calc(right),
+                    (OpType.sub): calc(left) - calc(right),
+                    (OpType.mul): calc(left) * calc(right),
+                    (OpType.div): calc(left) / calc(right)));
+        monkeyCache[monkey] = ret;
+        return ret;
+    }
+    long ret = calc("root");
+    print("result 1 = $ret");
+
+    mut long[string] solveCache;
+    mut bool[string] used;
+    long solveFor(string targetMonkey) {
+        if (solveCache.has(targetMonkey)) return solveCache[targetMonkey];
+        if (targetMonkey != "humn")
+            monkeyOp[targetMonkey].case {
+                long l: return l;
+                (:math, string left, string right, OpType op): {}
+            }
+        bool matches(Op op) => op.case(
+            long l: false,
+            (:math, string left, string right, OpType op):
+                left == targetMonkey || right == targetMonkey);
+        auto opNames = [a.name for a in lines where a.arith.matches && !used.has(a.name)];
+        if (opNames.empty) {
+            // Fallback: since we can't solve this, pray that targetMonkey has a constant value.
+            return calc(targetMonkey);
+        }
+        auto opName = opNames[0];
+        auto opTarget = monkeyOp[opName];
+        used[opName] = true;
+        long doRoot() {
+            return opTarget.case(
+                long l: l,
+                (:math, string left, string right, OpType):
+                    // true = b == c, solve for b, c
+                        calc(right) if left == targetMonkey else calc(left));
+        }
+        auto ret = doRoot if opName == "root" else opTarget.case(
+            long l: l,
+            (:math, string left, string right, OpType opType):
+                opType.case(
+                    // a = b + c, solve for b, b = a - c
+                    (OpType.add):
+                        (solveFor(opName) - solveFor(right)) if left == targetMonkey
+                        else (solveFor(opName) - solveFor(left)),
+                    // a = b - c, solve for b, b = a + c
+                    // a = b - c, solve for c, c = b - a
+                    (OpType.sub):
+                        (solveFor(opName) + solveFor(right)) if left == targetMonkey
+                        else (solveFor(left) - solveFor(opName)),
+                    // a = b * c, solve for b, b = a / c
+                    (OpType.mul):
+                        (solveFor(opName) / solveFor(right)) if left == targetMonkey
+                        else (solveFor(opName) / solveFor(left)),
+                    // a = b / c, solve for b, b = a * c
+                    // a = b / c, solve for c, c = b / a
+                    (OpType.div):
+                        (solveFor(opName) * solveFor(right)) if left == targetMonkey
+                        else (solveFor(left) / solveFor(opName))));
+        solveCache[targetMonkey] = ret;
+        return ret;
+    }
+    monkeyCache.clear;
+    long ret2 = solveFor("humn");
+    print("result 2 = $ret2");
+}
+
+string before(string text, string marker) {
+    auto pos = text.find(marker);
+    assert(pos != -1);
+    return text[0 .. pos];
+}
+
+string after(string text, string marker) {
+    auto pos = text.find(marker);
+    assert(pos != -1);
+    return text[marker.length + pos .. $];
+}

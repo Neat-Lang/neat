@@ -1,0 +1,198 @@
+module day22;
+
+macro import std.macro.assert;
+macro import std.macro.listcomprehension;
+
+import std.algorithm;
+import std.math;
+import std.stdio;
+import std.string;
+
+void main()
+{
+    alias Step = (int | :turnLeft | :turnRight);
+    auto isDigit = ch => ch >= '0' && ch <= '9';
+    Step[] decodePath(mut string line) {
+        mut Step[] res;
+        while (!line.empty) {
+            int len = cast(int) [
+                first i for i, ch in line
+                where !ch.isDigit else line.length];
+            res ~= line[0 .. len].atoi;
+            if (len < line.length && line[len] == 'R')
+                res ~= :turnRight;
+            else if (len < line.length && line[len] == 'L')
+                res ~= :turnLeft;
+            line = line[min(line.length, len + 1) .. $];
+        }
+        return res;
+    }
+    auto input = stdin.byLine
+        .filter(a => !a.empty)
+        .array
+        .(
+            map=that[0 .. $ - 1],
+            path=that[$ - 1].decodePath);
+    auto start = V(
+        cast(int) [first i for i, ch in input.map[0] where ch == '.'],
+        0);
+    // print("input: $input; start $start");
+    // clockwise
+    int inverse(int face) => (face + 2) % 4;
+    auto motions = [V(1, 0), V(0, 1), V(-1, 0), V(0, -1)];
+    alias Stance = (V pos, int facing);
+    char tileAt(V v) {
+        if (v.y < 0 || v.y >= input.map.length) return ' ';
+        auto line = input.map[v.y];
+        if (v.x < 0 || v.x >= line.length) return ' ';
+        return line[v.x];
+    }
+    Stance stepForward(Stance stance) => stance.(pos + motions[facing], facing);
+    Stance stepForwardWrapping(Stance stance) with (stance) {
+        mut V newPos = pos + motions[facing];
+        if (tileAt(newPos) == ' ') {
+            newPos -= motions[facing];
+            while (tileAt(newPos) != ' ')
+                newPos -= motions[facing];
+            newPos += motions[facing];
+        }
+        if (tileAt(newPos) == '#') return stance;
+        assert(tileAt(newPos) == '.');
+        return (newPos, facing);
+    }
+    Stance turnLeft(Stance stance) => (stance.pos, (stance.facing - 1) % 4);
+    Stance turnRight(Stance stance) => (stance.pos, (stance.facing + 1) % 4);
+    int toSign(int i) {
+        if (i > 0) return 1;
+        if (i < 0) return -1;
+        return 0;
+    }
+    V toDir(V v) => V(v.x.toSign, v.y.toSign);
+    (int | :none) stepsRequired(V v, V dir) {
+        if (v.x == 0 && dir.x == 0) return v.y / dir.y;
+        if (v.y == 0 && dir.y == 0) return v.x / dir.x;
+        return :none;
+    }
+    (int | :none) stepsRequiredInbounds(V v, V dir) {
+        stepsRequired(v, dir).case {
+            :none: return :none;
+            int i:
+                if (i < 0 || i >= 50) return :none;
+                return i;
+        }
+    }
+    Stance glueLine(Stance stance, V a1, V a2, int from, V b1, V b2, int to) {
+        assert((a2 - a1).(max(x.abs, y.abs)) == 49);
+        assert((b2 - b1).(max(x.abs, y.abs)) == 49);
+        if (stance.facing == from) {
+            auto aDist = (stance.pos - a1).stepsRequiredInbounds((a2 - a1).toDir);
+            auto bDir = (b2 - b1).toDir;
+            aDist.case {
+                :none: {}
+                int i: return (b1 + bDir * i, to);
+            }
+        }
+        if (stance.facing == to.inverse) {
+            auto bDist = (stance.pos - b1).stepsRequiredInbounds((b2 - b1).toDir);
+            auto aDir = (a2 - a1).toDir;
+            bDist.case {
+                :none: {}
+                int i: return (a1 + aDir * i, from.inverse);
+            }
+        }
+        return stance;
+    }
+    // specify corners on face grid rather than cell grid.
+    Stance glueLineSketch(Stance stance, V a1, V a2, int from, V b1, V b2, int to) {
+        V adjust(V v, int face) {
+            if (face == 0 || face == 1) return v;
+            return v + motions[face];
+        }
+        // 0..50 => 0..49
+        // 50..0 => 49..0
+        (int from, int to) adjustRange(int from, int to) {
+            return (
+                from=from if from == min(from, to) else from - 1,
+                to=to if to == min(from, to) else to - 1);
+        }
+        (V from, V to) adjustVecRange(V a, V b) {
+            if (a.x == b.x) return adjustRange(a.y, b.y).(from=V(a.x, from), to=V(a.x, to));
+            else return adjustRange(a.x, b.x).(from=V(from, a.y), to=V(to, a.y));
+        }
+        auto a = adjustVecRange(a=(a1 * 50).adjust(from), b=(a2 * 50).adjust(from));
+        auto b = adjustVecRange(a=(b1 * 50).adjust(to.inverse), b=(b2 * 50).adjust(to.inverse));
+        return stance.glueLine(a.from, a.to, from=from, b.from, b.to, to=to);
+    }
+    Stance glueCube(Stance stance) {
+        auto glued = stance
+            .glueLineSketch(V(0, 2), V(1, 2), from=3, V(1, 1), V(1, 2), to=0)
+            .glueLineSketch(V(2, 1), V(3, 1), from=1, V(2, 1), V(2, 2), to=2)
+            .glueLineSketch(V(1, 3), V(2, 3), from=1, V(1, 3), V(1, 4), to=2)
+
+            .glueLineSketch(V(0, 2), V(0, 3), from=2, V(1, 1), V(1, 0), to=0)
+            .glueLineSketch(V(0, 3), V(0, 4), from=2, V(1, 0), V(2, 0), to=1)
+            .glueLineSketch(V(3, 0), V(2, 0), from=3, V(1, 4), V(0, 4), to=3)
+            .glueLineSketch(V(3, 0), V(3, 1), from=0, V(2, 3), V(2, 2), to=2)
+            ;
+        if (tileAt(stance.pos) == ' ') {
+            if (glued == stance) {
+                print("$stance: stepped outside, but no glue applied");
+                assert(false);
+            }
+            Stance fwd = glued.stepForward;
+            // print("glued: $stance to $fwd");
+            if (tileAt(fwd.pos) == ' ') {
+                print("$stance to $fwd: followed glue, but did not end up inside");
+                assert(false);
+            }
+            return fwd;
+        } else {
+            // glue must not apply to in-space tiles
+            if (glued != stance) {
+                print("$stance: inside, but glue matched");
+                assert(false);
+            }
+            return stance;
+        }
+    }
+    Stance stepCube(Stance stance) {
+        auto newStance = stance.stepForward.glueCube;
+        if (tileAt(newStance.pos) == '#') return stance;
+        // print("cube step: $stance => $newStance");
+        return newStance;
+    }
+    // debug
+    for (y in 0 .. 200) for (x in 0 .. 150) {
+        V v = V(x, y);
+        if (tileAt(v) == ' ') continue;
+        for (dir in 0 .. 3) {
+            stepCube((v, dir));
+        }
+    }
+    Stance step(Step step, Stance stance, bool cubeMode) {
+        step.case {
+            int i:
+                mut auto newStance = stance;
+                for (_ in 0 .. i) {
+                    if (cubeMode) newStance = newStance.stepCube;
+                    else newStance = newStance.stepForwardWrapping;
+                }
+                return newStance;
+            :turnLeft: return stance.turnLeft;
+            :turnRight: return stance.turnRight;
+        }
+    }
+    void puzzle(bool cubeMode) {
+        mut Stance stance = (start, 0);
+        for (action in input.path) stance = step(action, stance, cubeMode);
+        with (stance) {
+            auto row = pos.y + 1, col = pos.x + 1;
+            auto password = row * 1000 + col * 4 + facing;
+            print("final row = $row, col = $col, facing = $facing, pass $password");
+        }
+    }
+    puzzle(cubeMode=false);
+    puzzle(cubeMode=true);
+}
+
+alias V = Vector(int, 2);

@@ -1,0 +1,168 @@
+module day24;
+
+macro import std.macro.assert;
+macro import std.macro.listcomprehension;
+
+import std.algorithm;
+import std.container.binheap;
+import std.math;
+import std.stdio;
+import std.string;
+
+struct Storm
+{
+    V base;
+    V dir;
+    int offset;
+    int cycle;
+    V at(int time) {
+        return base + dir * ((time + offset) % cycle);
+    }
+    string toString() => "Storm(base=$base, dir=$dir, offset=$offset, cycle=$cycle)";
+}
+
+void main()
+{
+    auto lines = stdin.byLine
+        .filter(line => !line.empty)
+        .array;
+    (:wall | :air) at(V pos) {
+        if (pos.x < 0 || pos.y < 0) return :wall;
+        if (pos.y >= lines.length) return :wall;
+        if (pos.x >= lines[pos.y].length) return :wall;
+        if (lines[pos.y][pos.x] == '#') return :wall;
+        return :air;
+    }
+    mut Storm[] storms;
+    for (int y, line in lines) for (int x, ch in line) {
+        if (ch == '#' || ch == '.') continue;
+        auto pos = V(x, y);
+        auto dir = ch.case(
+            '>': V(1, 0),
+            'v': V(0, 1),
+            '<': V(-1, 0),
+            '^': V(0, -1));
+        mut Storm storm = Storm(pos, dir, 0, 0);
+        while (at(storm.(base - dir)) == :air) {
+            storm.base -= storm.dir;
+            storm.offset++;
+        }
+        while (at(storm.(base + dir * cycle)) == :air)
+            storm.cycle++;
+        storms ~= storm;
+    }
+    // print("Storms: $storms");
+    bool overlapsStorm(V pos, int cycle) {
+        return [any a.at(cycle) == pos for a in storms];
+    }
+    V spawn = V(
+        [first cast(int) x for x, ch in lines[0] where ch == '.'],
+        0);
+    V dest = V(
+        [first cast(int) x for x, ch in lines[$ - 1] where ch == '.'],
+        cast(int) lines.length - 1);
+    alias State = (:first | :returning | :second);
+    alias PathPos = (V pos, int cycle, State state);
+    State checkFlag(V pos, State state) {
+        if (state == :first && pos == dest) return :returning;
+        if (state == :returning && pos == spawn) return :second;
+        return state;
+    }
+    auto manhattan = (a, b) => (a - b).(x.abs + y.abs);
+    int heurDist(PathPos v) {
+        int dist = manhattan(spawn, dest);
+        return v.state.case(
+            :first: manhattan(v.pos, dest) + 2 * dist,
+            :returning: manhattan(v.pos, spawn) + dist,
+            :second: manhattan(v.pos, dest));
+    }
+    string key(PathPos pos) => "$(pos.pos), $(pos.cycle), $(pos.state)";
+    // A* from Wikipedia
+    alias HeapPathPos = (PathPos pathPos, int fScore);
+    auto fScoreSmaller = (a, b) => a.fScore < b.fScore;
+    PathPos spawnPos = (spawn, 0, :first);
+    auto spawnHeur = heurDist(spawnPos);
+    mut auto openSet = binHeap!HeapPathPos(fScoreSmaller);
+    mut bool[string] inOpenSet;
+    struct AStarInfo {
+        int fScore;
+        int gScore;
+        (PathPos | :none) cameFrom;
+    }
+    mut AStarInfo[string] aStar;
+    aStar[spawnPos.key] = AStarInfo(
+        fScore=spawnHeur, gScore=0, cameFrom=:none);
+    openSet.insert((spawnPos, fScore=spawnHeur));
+    mut int bestReached = int.max;
+    mut int bestIntermediate = int.max;
+    PathPos[] reconstructPath(PathPos current) {
+        mut PathPos[] ret = [current];
+        while (true) {
+            aStar[ret[$ - 1].key].cameFrom.case {
+                PathPos pos: ret ~= pos;
+                :none: break;
+            }
+        }
+        return [ret[$ - 1 - i] for i in 0 .. ret.length];
+    }
+    mut int[string] earliestAtPos;
+    mut int bestSeenDist = int.max;
+    while (!openSet.empty) {
+        auto current = openSet.extract.pathPos;
+        inOpenSet.remove(current.key);
+        auto dist = heurDist(current);
+        if (dist < bestSeenDist) {
+            print("closest approach: $dist");
+            bestSeenDist = dist;
+        }
+        if (current.pos == dest && current.state == :returning) {
+            auto path = reconstructPath(current);
+            if (current.cycle < bestIntermediate) {
+                print("intermediate goal reached at cycle $(current.cycle): $path");
+                bestIntermediate = current.cycle;
+            }
+        }
+        if (current.pos == dest && current.state == :second) {
+            auto path = reconstructPath(current);
+            if (current.cycle < bestReached) {
+                print("goal reached at cycle $(current.cycle): $path");
+                bestReached = current.cycle;
+            }
+        }
+        void step(V d) {
+            auto dest = current.pos + d;
+            if (at(dest) == :wall) return;
+            if (dest.overlapsStorm(current.cycle + 1)) return;
+            if (current.cycle + 1 >= bestReached)
+                return;
+            PathPos neighbor = (
+                dest,
+                current.cycle + 1,
+                checkFlag(dest, current.state));
+            auto tentativeGscore = current.cycle + 1;
+            auto neighborKey = neighbor.key;
+            auto currentGScore = aStar
+                .get(neighborKey, AStarInfo(0, gScore=int.max, :none))
+                .gScore;
+            if (tentativeGscore < currentGScore) {
+                auto newFscore = tentativeGscore + heurDist(neighbor);
+                aStar[neighborKey] = AStarInfo(
+                    fScore=newFscore,
+                    gScore=tentativeGscore,
+                    cameFrom=current);
+                if (!inOpenSet.has(neighborKey)) {
+                    inOpenSet[neighborKey] = true;
+                    openSet.insert((neighbor, newFscore));
+                }
+            }
+        }
+        step(V(0, 1));
+        step(V(1, 0));
+        step(V(0, -1));
+        step(V(-1, 0));
+        step(V(0, 0));
+    }
+    print("No further paths.");
+}
+
+alias V = Vector(int, 2);

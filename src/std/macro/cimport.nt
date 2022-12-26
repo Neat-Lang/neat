@@ -5,15 +5,7 @@ module std.macro.cimport;
 // That package takes like a second to compile!
 // Extend CompilerBase instead!
 import package(compiler).neat.base;
-import package(compiler).neat.decl;
-import package(compiler).neat.expr;
-import package(compiler).neat.lexer;
-import package(compiler).neat.parser;
-import package(compiler).neat.struct_;
-import package(compiler).neat.types;
-import package(compiler).neat.util;
 import package(compiler).helpers;
-import package(compiler).neat.union_;
 
 extern(C) void neat_runtime_system(string command);
 
@@ -36,28 +28,28 @@ class CImportMacro : Macro
         // TODO move into neat.base
         auto from = parser.loc;
         parser.expect("\"")?;
-        auto includeSym = compiler.parseStringLiteral(parser, lexicalContext)?.instanceOf(ASTStringLiteral);
-        parser.assert_(!!includeSym, "string expected")?;
+        auto includeSym = compiler.(
+            parseStringLiteral(parser, lexicalContext)?.destructAstStringLiteral.case(:none: ""));
+        parser.assert_(!includeSym.empty, "string expected")?;
         mut string flags;
         if (parser.accept(",")?) {
             auto from = parser.loc;
             parser.expect("\"")?;
-            auto flagsSym = compiler.parseStringLiteral(parser, lexicalContext)?.instanceOf(ASTStringLiteral);
-            parser.assert_(!!flagsSym, "flags string expected")?;
-            flags = flagsSym.text ~ " ";
+            auto flagsSym = compiler.(
+                parseStringLiteral(parser, lexicalContext)?.destructAstStringLiteral.case(:none: ""));
+            parser.assert_(!flagsSym.empty, "flags string expected")?;
+            flags = flagsSym ~ " ";
         }
         parser.expect(")")?;
         if (compiler.cFlags.length > 0)
             flags = (compiler.cFlags ~ flags).join(" ");
 
-        return parseIncludeModule(includeSym.text, flags, lexicalContext);
+        return parseIncludeModule(includeSym, flags, lexicalContext);
     }
 
     (nullable ASTModuleBase | fail Error) parseIncludeModule(
         string include, string flags, LexicalContext lexicalContext)
     {
-        import std.string : replace;
-
         auto compiler = lexicalContext.compiler;
         string modName = include.replace("/", "_").replace(".", "_").replace("-", "_");
 
@@ -78,8 +70,8 @@ class CImportMacro : Macro
         // up with lots of small inc/decs to fragments that we never free anyway
         (cast(size_t*) &csource)[2] = 0;
 
-        auto cparser = new ParserImpl(headerName ~ ".out", csource, tokenize(csource)?);
-        auto cparserHelper = new CParserHelper(cparser);
+        auto cparser = compiler.createParser(headerName ~ ".out", csource)?;
+        auto cparserHelper = new CParserHelper(cparser, compiler);
 
         auto pak = new Package("c_header", "", []);
         cparserHelper.mod = compiler.astModule(modName, pak, new MacroState, cparser.loc, null);
@@ -90,7 +82,7 @@ class CImportMacro : Macro
                     ASTExternFunctionBase ex:
                         print("define " ~ ex.name ~ ": " ~ ex.repr);
                     ASTSymbol sym:
-                        if (!sym.instanceOf(ASTNumberLiteral)) {
+                        if (compiler.destructAstNumberLiteral(sym) == :none) {
                             print("define " ~ name ~ " = " ~ sym.repr);
                         }
                 }
@@ -157,7 +149,7 @@ class CImportMacro : Macro
                     num.case {
                         (:failure): { cparser.revert; cparser.eatline; continue; }
                         (:success, long l):
-                            add(identifier, new ASTNumberLiteral(l, start));
+                            add(identifier, compiler.astNumberLiteral(l, start));
                     }
                     cparser.commit;
                     cparser.assert_(cparser.text.startsWith("\n"), "unknown text")?;
@@ -218,8 +210,8 @@ class CImportMacro : Macro
                             if (closeFunction?) {
                                 cparser.commit;
                                 if (params.length == 1) {
-                                    auto first = params[0].type.instanceOf(ASTIdentifier);
-                                    if (first && first.name == "void") {
+                                    auto first = compiler.destructAstIdentifier(params[0].type).case(:none: "");
+                                    if (first == "void") {
                                         params = [];
                                     }
                                 }
@@ -255,22 +247,18 @@ class CImportMacro : Macro
     }
 }
 
-void eatline(ParserImpl parser) {
+void eatline(Parser parser) {
     while (!parser.hard_eof) {
-        if (parser.tokens[parser.current].type == TokenType.whitespace) {
-            auto ws = parser.(fulltext[tokens[current].pos .. tokens[current + 1].pos]);
+        if (parser.peekToken(TokenType.whitespace)) {
+            bottom die() assert(false);
+            auto ws = parser.acceptTokenStr(TokenType.whitespace).case(:none: die);
             if (ws.find("\n") != -1) {
-                parser.dropToken;
                 return;
             }
+            continue;
         }
         parser.dropToken;
     }
-}
-
-void dropToken(ParserImpl parser) {
-    if (!parser.hard_eof)
-        parser.current++;
 }
 
 class CLong : ASTSymbol
@@ -286,16 +274,6 @@ class CLong : ASTSymbol
     override string repr() { return "long int(C)"; }
 }
 
-class CStruct : Struct
-{
-    override bool same(Type other) {
-        if (auto otherStruct = other.instanceOf(CStruct)) {
-            return this.name == otherStruct.name;
-        }
-        return false;
-    }
-}
-
 class CStaticArray : ASTSymbol
 {
     ASTSymbol type;
@@ -305,7 +283,11 @@ class CStaticArray : ASTSymbol
     this(this.type, this.count, this.locRange) { }
 
     override (Type | fail Error) compile(Context context) {
-        import package(compiler).neat.struct_ : Struct;
+        (Type | fail Error) beType(Symbol symbol, LocRange locRange) {
+            if (auto type = symbol.instanceOf(Type))
+                return type;
+            return locRange.fail("type expected");
+        }
 
         // TODO give this a better type
         mut StructMemberDeclaration[] members;
@@ -313,7 +295,7 @@ class CStaticArray : ASTSymbol
             members ~= new StructMemberDeclaration(
                 "_" ~ ltoa(i), Protection.public_, type.compile(context)?.beType(this.locRange)?);
 
-        return new Struct("SA_hack", members, this.locRange, context.namespace.mangle);
+        return context.compiler.struct_("SA_hack", members, this.locRange, context.namespace.mangle);
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'CStaticArray'!"); assert(false); }
@@ -321,11 +303,13 @@ class CStaticArray : ASTSymbol
 }
 
 class CParserHelper {
-    ParserImpl parser;
+    Parser parser;
+
+    CompilerBase compiler;
 
     ASTModuleBase mod, sysmod;
 
-    this(this.parser) { }
+    this(this.parser, this.compiler) { }
 
     (nullable ASTSymbol | fail Error) parseType() {
         parser.acceptIdentifier("const")?;
@@ -362,7 +346,7 @@ class CParserHelper {
             if (parser.acceptToken(TokenType.asterisk)
                 || parser.acceptToken2(TokenType.lsquarebracket, TokenType.rsquarebracket))
             {
-                current = new ASTPointer(current, parser.loc);
+                current = compiler.astPointer(current, parser.loc);
                 parser.acceptIdentifier("const")?;
                 parser.acceptIdentifier("restrict")?;
                 parser.acceptIdentifier("__restrict")?;
@@ -398,14 +382,12 @@ class CParserHelper {
                     params ~= notNull!ASTSymbol(arg.type);
                 }
                 if (params.length == 1) {
-                    if (auto identifier = params[0].instanceOf(ASTIdentifier)) {
-                        if (identifier.name == "void") {
-                            params = [];
-                        }
+                    if (compiler.destructAstIdentifier(params[0]).case(:none: false, string s: s == "void")) {
+                        params = [];
                     }
                 }
                 parser.commit;
-                return (new ASTFunctionPointer(current, params, start), name);
+                return (compiler.astFunctionPointer(current, params, start), name);
             }
             parser.revert;
             break;
@@ -416,7 +398,7 @@ class CParserHelper {
             auto start = parser.loc;
             while (parser.acceptToken(TokenType.lsquarebracket)) {
                 if (parser.acceptToken(TokenType.rsquarebracket)) {
-                    current = new ASTPointer(current, parser.loc);
+                    current = compiler.astPointer(current, parser.loc);
                     continue;
                 }
                 mut int num;
@@ -445,10 +427,10 @@ class CParserHelper {
         with (parser) {
             begin;
             auto type = parser.parseIdentifier?;
-            if (type == "void") { commit; return .type("void"); }
-            if (type == "float") { commit; return .type("float"); }
-            if (type == "double") { commit; return .type("double"); }
-            if (type == "_Bool") { commit; return .type("bool"); }
+            if (type == "void") { commit; return ident("void"); }
+            if (type == "float") { commit; return ident("float"); }
+            if (type == "double") { commit; return ident("double"); }
+            if (type == "_Bool") { commit; return ident("bool"); }
             revert;
             begin;
             mut bool signed, unsigned, long_, longlong, short_, char_, int_;
@@ -469,11 +451,11 @@ class CParserHelper {
                 revert;
                 break;
             }
-            if (longlong) { commit; return .type("long"); }
+            if (longlong) { commit; return ident("long"); }
             if (long_) { commit; return new CLong; }
-            if (short_) { commit; return .type("short"); }
-            if (char_) { commit; return .type("char"); }
-            if (signed || unsigned || int_) { commit; return .type("int"); }
+            if (short_) { commit; return ident("short"); }
+            if (char_) { commit; return ident("char"); }
+            if (signed || unsigned || int_) { commit; return ident("int"); }
             revert;
             return null;
         }
@@ -483,7 +465,7 @@ class CParserHelper {
         auto start = parser.loc;
         auto name = parser.parseIdentifier?;
         mut ASTStructMember[] members;
-        auto emptyStruct = new ASTStructDeclSym(new ASTStructDecl(name, [], start)); // opaque
+        auto emptyStruct = new ASTDeclSym(compiler.astStructDecl(name, [], externC=true, start)); // opaque
         if (!parser.accept("{")?) {
             return (new ASTFallbackIdentifier(name, emptyStruct), name);
         }
@@ -531,11 +513,9 @@ class CParserHelper {
         if (union_) {
             mut ASTUnionMember[] unionMembers;
             for (a in members) unionMembers ~= (a.name, a.type);
-            return (new ASTUnion(name, unionMembers, null, start), name);
+            return (compiler.astUnion(name, unionMembers, start), name);
         }
-        mut ASTStructEntry[] entries;
-        for (a in members) entries ~= a;
-        return (new ASTStructDeclSym(new ASTStructDecl(name, entries, start)), name);
+        return (new ASTDeclSym(compiler.astStructDecl(name, members, externC=true, start)), name);
     }
 
     (nullable ASTSymbol | fail Error) parseEnumType() {
@@ -553,20 +533,20 @@ class CParserHelper {
                     (:failure): break;
                     (:success, long l): {
                         if (!mod.getSymbolAlias(name))
-                            mod.addAliasDecl(name, Protection.public_, new ASTNumberLiteral(l, start));
+                            mod.addAliasDecl(name, Protection.public_, compiler.astNumberLiteral(l, start));
                         lastNum = l;
                     }
                 }
             } else {
                 if (!mod.getSymbolAlias(name))
-                    mod.addAliasDecl(name, Protection.public_, new ASTNumberLiteral(lastNum + 1, start));
+                    mod.addAliasDecl(name, Protection.public_, compiler.astNumberLiteral(lastNum + 1, start));
                 lastNum++;
             }
             parser.accept(",")?;
         }
         while (!parser.acceptToken(TokenType.rcurlybracket))
             parser.dropToken;
-        return type("int");
+        return ident("int");
     }
 
     (:failure | :success, long | fail Error) parseCNumber() {
@@ -589,10 +569,10 @@ class CParserHelper {
             return (:success, num);
         }
     }
-}
 
-private ASTSymbol type(string ident) {
-    return new ASTIdentifier(ident, false, __RANGE__);
+    ASTSymbol ident(string name) {
+        return compiler.astIdentifier(name, __RANGE__);
+    }
 }
 
 // the reason for this is we see `typedef struct Foo_ Foo` before we see `struct Foo_` -
@@ -600,7 +580,7 @@ private ASTSymbol type(string ident) {
 class ASTFallbackIdentifier : ASTSymbol
 {
     string name;
-    ASTStructDeclSym emptyStruct;
+    ASTSymbol emptyStruct;
     this(this.name, this.emptyStruct) {}
     override (Symbol | fail Error) compile(Context context) {
         if (auto res = context.namespace.lookup(this.name, context, LookupReason.identifier, __RANGE__)?) {
@@ -610,18 +590,12 @@ class ASTFallbackIdentifier : ASTSymbol
     }
 }
 
-class ASTStructDeclSym : ASTSymbol
+class ASTDeclSym : ASTSymbol
 {
-    ASTStructDecl decl;
-
+    ASTSymbolDeclaration decl;
     this(this.decl) { }
-
-    override (Symbol | fail Error) compile(Context context) {
-        auto struct_ = this.decl.compileSymbol(context)?;
-        auto cstruct = new CStruct(struct_.name, struct_.members, struct_.locRange, context.namespace.mangle);
-
-        return cstruct;
-    }
+    override (Symbol | fail Error) compile(Context context)
+        => this.decl.compileSymbol(context)?;
 }
 
 void addCImportMacro(MacroState macroState)

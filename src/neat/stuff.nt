@@ -2707,16 +2707,8 @@ class ASTIfStatement : ASTStatement
     }
 }
 
-(nullable ASTIfStatement | fail Error) parseIf(Parser parser, LexicalContext lexicalContext)
+(nullable ASTIfStatement | fail Error) parseIf(Parser parser, LexicalContext lexicalContext, LocRange from)
 {
-    parser.begin;
-    auto from = parser.from?;
-    string identifier = parser.parseIdentifier?;
-    if (identifier != "if")
-    {
-        parser.revert;
-        return null;
-    }
     mut uninitialized (ASTSymbol | ASTVarDeclStatement | ASTVarExtractDeclStatement) test;
     auto locRange = parser.to(from);
     parser.expectToken(TokenType.lparen)?;
@@ -2737,7 +2729,6 @@ class ASTIfStatement : ASTStatement
     {
         elseStatement = parseStatement(parser, lexicalContext)?;
     }
-    parser.commit;
     return new ASTIfStatement(test, thenStmt, elseStatement, locRange);
 }
 
@@ -3584,19 +3575,11 @@ class ASTWhile : ASTStatement
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTWhileStatement'"); assert(false); }
 }
 
-(nullable ASTWhile | fail Error) parseWhile(Parser parser, LexicalContext lexicalContext)
+(nullable ASTWhile | fail Error) parseWhile(Parser parser, LexicalContext lexicalContext, LocRange from)
 {
-    parser.begin;
-    auto from = parser.from?;
-    if (!parser.acceptIdentifier("while")?)
-    {
-        parser.revert;
-        return null;
-    }
     parser.expectToken(TokenType.lparen)?;
     nullable ASTSymbol cond = parseExpression(parser, lexicalContext)?;
     parser.expectToken(TokenType.rparen)?;
-    parser.commit;
     ASTStatement body_ = parseStatement(parser, lexicalContext)?;
 
     return new ASTWhile(cond.notNull, body_, parser.to(from));
@@ -3722,15 +3705,8 @@ class ASTForLoop : ASTStatement
     }
 }
 
-(nullable ASTForLoop | fail Error) parseFor(Parser parser, LexicalContext lexicalContext)
+(nullable ASTForLoop | fail Error) parseFor(Parser parser, LexicalContext lexicalContext, LocRange from)
 {
-    parser.begin;
-    auto from = parser.from?;
-    if (!parser.acceptIdentifier("for")?) {
-        parser.revert;
-        return null;
-    }
-    parser.commit;
     parser.expectToken(TokenType.lparen)?;
     nullable ASTVarDeclStatement varDecl = parseVarDecl(parser, lexicalContext, requireInitializer=false)?;
     if (!varDecl) {
@@ -3928,14 +3904,10 @@ class ASTExtForLoop : ASTStatement
 }
 
 // This is a placeholder for proper range semantics.
-(nullable ASTStatement | fail Error) parseExtFor(Parser parser, LexicalContext lexicalContext)
+(nullable ASTStatement | fail Error) parseExtFor(Parser parser, LexicalContext lexicalContext, LocRange from)
 {
     parser.begin;
-    auto from = parser.from?;
-    if (!parser.acceptIdentifier("for")? || !parser.acceptToken(TokenType.lparen)) {
-        parser.revert;
-        return null;
-    }
+    parser.expectToken(TokenType.lparen)?;
     auto compiler = lexicalContext.compiler;
     // TODO: parseExtForVarDecl(...).discard((:fail): { parser.revert; return null; });
     auto match1 = parseExtForVarDecl(parser, lexicalContext);
@@ -4050,13 +4022,17 @@ class ASTStaticIfStatement : ASTStatement
 }
 
 (nullable ASTStaticIfStatement | fail Error) parseStaticIfStmt(
-    Parser parser, LexicalContext lexicalContext)
+    Parser parser, LexicalContext lexicalContext, bool version_, LocRange from)
 {
-    parser.begin;
-    auto from = parser.from?;
     mut nullable ASTSymbol cond;
-    if (parser.acceptIdentifier("static")? && parser.acceptIdentifier("if")?) {
-        parser.commit;
+    if (version_) {
+        parser.expectToken(TokenType.lparen)?;
+        string versionStr = parser.parseIdentifier?;
+        parser.expectToken(TokenType.rparen)?;
+        auto versionSym = lexicalContext.compiler.astStringLiteral(versionStr, __RANGE__);
+        cond = new ASTTrait("versionSet", [versionSym], __RANGE__);
+    } else {
+        // static if
         parser.expectToken(TokenType.lparen)?;
         auto e = parser.parseExpression(lexicalContext)?;
         if (!e) {
@@ -4064,16 +4040,6 @@ class ASTStaticIfStatement : ASTStatement
         }
         cond = e;
         parser.expectToken(TokenType.rparen)?;
-    } else if (parser.acceptIdentifier("version")?) {
-        parser.commit;
-        parser.expectToken(TokenType.lparen)?;
-        string versionStr = parser.parseIdentifier?;
-        parser.expectToken(TokenType.rparen)?;
-        auto versionSym = lexicalContext.compiler.astStringLiteral(versionStr, __RANGE__);
-        cond = new ASTTrait("versionSet", [versionSym], __RANGE__);
-    } else {
-        parser.revert;
-        return null;
     }
 
     mut ASTStatement[] then, else_;
@@ -4150,14 +4116,37 @@ class ASTStaticIfStatement : ASTStatement
 
 (ASTStatement | fail Error) parseStatement(Parser parser, LexicalContext lexicalContext)
 {
-    if (ASTStatement stmt = parseIf(parser, lexicalContext)?)
-        return stmt;
-    if (ASTStatement stmt = parseWhile(parser, lexicalContext)?)
-        return stmt;
-    if (ASTStatement stmt = parseExtFor(parser, lexicalContext)?)
-        return stmt;
-    if (ASTStatement stmt = parseFor(parser, lexicalContext)?)
-        return stmt;
+    parser.begin;
+    auto from = parser.from?;
+    auto keyword = parser.parseIdentifier?;
+    if (keyword == "if") {
+        parser.commit;
+        return parseIf(parser, lexicalContext, from);
+    }
+    if (keyword == "while") {
+        parser.commit;
+        return parseWhile(parser, lexicalContext, from);
+    }
+    if (keyword == "with") {
+        parser.commit;
+        return parseWithStatement(parser, lexicalContext, from);
+    }
+    if (keyword == "static" && parser.acceptIdentifier("if")?) {
+        parser.commit;
+        return parseStaticIfStmt(parser, lexicalContext, version_=false, from);
+    }
+    if (keyword == "version") {
+        parser.commit;
+        return parseStaticIfStmt(parser, lexicalContext, version_=true, from);
+    }
+    if (keyword == "for") {
+        parser.commit;
+        if (ASTStatement stmt = parseExtFor(parser, lexicalContext, from)?) {
+            return stmt;
+        }
+        return parseFor(parser, lexicalContext, from);
+    }
+    parser.revert;
     if (ASTStatement stmt = parseScope(parser, lexicalContext)?)
         return stmt;
     if (ASTDeclaration decl = parseDeclaration(parser, lexicalContext)?)
@@ -4168,11 +4157,7 @@ class ASTStaticIfStatement : ASTStatement
         return stmt;
     if (ASTStatement stmt = parseMultiVarDecl(parser, lexicalContext)?)
         return stmt;
-    if (ASTStatement stmt = parseWithStatement(parser, lexicalContext)?)
-        return stmt;
     if (ASTStatement stmt = parseEitherCaseStmt(parser, lexicalContext)?)
-        return stmt;
-    if (ASTStatement stmt = parseStaticIfStmt(parser, lexicalContext)?)
         return stmt;
     {
         auto args = new ParseStatementArgs(parser, lexicalContext);

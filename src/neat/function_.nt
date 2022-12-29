@@ -144,7 +144,7 @@ class Function : FunctionDeclaration
             mut string framePtrName;
             if (this.hasThisArg) framePtrName = "this";
             thisDecl = new VariableDeclaration(
-                scope_, framePtrName, contextType,
+                scope_, framePtrName, context.platform, contextType,
                 mut=false, borrowed=true, hidden=framePtrName == "");
 
             Type voidp = once new Pointer(new Void);
@@ -176,14 +176,14 @@ class Function : FunctionDeclaration
                     // we're mutable, but functions borrow the caller args.
                     // So despite being lexical, we copy them.
                     auto argDecl = new VariableDeclaration(
-                        scope_, param.name, param.type, mut=true, borrowed=false, false);
+                        scope_, param.name, context.platform, param.type, mut=true, borrowed=false, false);
                     auto target = argDecl.accessDecl(context);
 
                     argAssignments[extra + i] = compiler.assignStatement(target, argExpr.copy(context)?);
                     scope_ = argDecl;
                 } else {
                     auto argDecl = new VariableDeclaration(
-                        scope_, param.name, param.type, mut=false, borrowed=true, false);
+                        scope_, param.name, context.platform, param.type, mut=false, borrowed=true, false);
 
                     argAssignments[extra + i] = compiler.assignStatement(argDecl.accessDecl(context), argExpr);
                     scope_ = argDecl;
@@ -254,7 +254,7 @@ class CompiledFunction : FinishedSymbol
             this.fun.locRange.toBackendLoc
         );
 
-        generator.frameReg = generator.fun.staticAlloca(this.stackframe.structType.emit(generator.platform));
+        generator.frameReg = generator.fun.staticAlloca(this.stackframe.(new BackendSpacerType(maxSize, maxAlignment)));
 
         [assignment.emit(generator) for assignment in this.argAssignments];
         this.compiledStatement.emit(generator);
@@ -286,20 +286,20 @@ class FunctionScope : Namespace, Returnable, Declarable
 
     nullable Type extra;
 
-    StructMemberDeclaration[] variables;
-
     string mangle_;
 
     string repr;
 
     LocRange locRange;
 
-    Type structType;
+    int maxSize;
+
+    int maxAlignment;
 
     this(this.compiler, this.ret, this.extra, this.parent, this.mangle_, this.repr, this.locRange) {
-        // TODO dedicated stackframe type so we don't need to keep recreating struct type instances
-        this.structType = compiler.struct_("", this.variables, this.locRange, this.mangle_);
         this.isContextScope = true;
+        this.maxSize = 0;
+        this.maxAlignment = 1;
     }
 
     Type finalRet() {
@@ -307,16 +307,24 @@ class FunctionScope : Namespace, Returnable, Declarable
         return ret.notNull;
     }
 
-    override LatentVariable declare(string name, Type type, bool mut, bool borrowed)
-    {
+    Type spacerType() {
+        return new StackframeSpacer(maxSize, maxAlignment);
+    }
+
+    override LatentVariable declare(string name, Type[] frame, bool mut, bool borrowed, Platform platform) {
         // borrowed == "no cleanup on scope exit".
         // This is not safe in conjunction with mut (cleanup on reassign).
         assert(!borrowed || !mut);
 
-        this.variables ~= new StructMemberDeclaration(name, Protection.public_, type);
-        this.structType = this.compiler.struct_("", this.variables, this.locRange, this.mangle_);
+        // TODO dedicated stackframe type so we don't need to keep recreating struct type instances
+        auto vars = [new StructMemberDeclaration(name, Protection.public_, type) for type in frame];
+        auto structType = this.compiler.struct_("", vars, this.locRange, this.mangle_);
+        auto backendType = structType.emit(platform);
 
-        return new LatentVariableImpl(name, this.structType, cast(int) this.variables.length - 1,
+        int max(int a, int b) => a if a > b else b;
+        this.maxSize = max(this.maxSize, backendType.size(platform));
+        this.maxAlignment = max(this.maxAlignment, backendType.alignment(platform));
+        return new LatentVariableImpl(name, type_=frame[$ - 1], structType, cast(int) vars.length - 1,
                                   mut=mut, borrowed=borrowed);
     }
 
@@ -347,6 +355,33 @@ class FunctionScope : Namespace, Returnable, Declarable
     }
 }
 
+class StackframeSpacer : Type
+{
+    int size, alignment;
+
+    BackendType type;
+
+    this(this.size, this.alignment) {
+        this.type = new BackendSpacerType(size, alignment);
+        this.zeroInitializable = true;
+    }
+
+    override BackendType emit(Platform platform) { return this.type; }
+
+    override bool same(Type other) {
+        if (auto otherSpacer = other.instanceOf(StackframeSpacer))
+            return size == otherSpacer.size && alignment == otherSpacer.alignment;
+        return false;
+    }
+
+    override string repr() => "stackframe($type)";
+
+    override string mangle() => "spacer_$(size)_$(alignment)";
+
+    override void hash(Hash hash) { hash.adds("spacer"); hash.addl(size); hash.addl(alignment); }
+}
+
+
 /**
  * Used to allow referencing the types of parameters from the return type,
  * for instance in typeof().
@@ -376,6 +411,8 @@ class LatentVariableImpl : LatentVariable
 {
     string name;
 
+    Type type_;
+
     Type stackFrameType;
 
     int offset;
@@ -386,11 +423,13 @@ class LatentVariableImpl : LatentVariable
 
     ExprInfo info;
 
-    this(this.name, this.stackFrameType, this.offset, this.mut, this.borrowed) {
+    this(this.name, this.type_, this.stackFrameType, this.offset, this.mut, this.borrowed) {
         assert (!mut || !borrowed);
         if (mut) this.info = ExprInfo(Lifetime.ephemeral);
         else this.info = ExprInfo(Lifetime.lexical);
     }
+
+    override Type type() => this.type_;
 
     override Expression localStackFrame(Context context) {
         return context.framePointer.notNull;
@@ -415,9 +454,20 @@ class VariableDeclaration : DeclarationHolder
 
     bool borrowed;
 
-    this(this.parent, this.name, Type type, bool mut, this.borrowed, this.hidden)
+    this(this.parent, this.name, Platform platform, Type type, bool mut, this.borrowed, this.hidden)
     {
-        this.variable = findParent!Declarable(this).notNull.declare(name, type, mut=mut, borrowed=borrowed);
+        mut Type[] reverseFrame = [type];
+        mut Namespace current = parent.notNull;
+        while (true) {
+            if (current.instanceOf(Declarable)) break;
+            if (auto vd = current.instanceOf(VariableDeclaration)) {
+                reverseFrame ~= vd.variable.type;
+            }
+            current = current.parent.notNull;
+        }
+        auto frame = [reverseFrame[$ - 1 - i] for i in 0 .. reverseFrame.length];
+        this.variable = findParent!Declarable(this).notNull.declare(
+            name, frame, mut=mut, borrowed=borrowed, platform);
         this.isContextScope = true;
     }
 
@@ -489,8 +539,17 @@ class InfoReference : Reference
 
     this(this.base, this.mutable, this.info) { this.type = base.type; }
 
-    override int emit(Generator output) { return base.emit(output); }
-    override int emitLocation(Generator output) { return base.emitLocation(output); }
+    override int emit(Generator output) {
+        int loc = emitLocation(output);
+        return output.fun.load(this.type.emit(output.platform), loc);
+    }
+
+    override int emitLocation(Generator output) {
+        int reg = base.emitLocation(output);
+        // immutable, meaning the value will never be muted.
+        if (!mutable) output.fun.markPointerInvariant(reg);
+        return reg;
+    }
     // TODO hash ExprInfo
     override void hash(Hash hash) { hash.adds("InfoReference"); base.hash(hash); }
     override string repr() { return "InfoReference($(base.repr): $(info.repr))"; }
@@ -661,11 +720,11 @@ class ASTFunction : ASTSymbolDeclaration
         }
 
         if (auto functionScope = findParent!FunctionScope(context.namespace)) {
-            auto structType = functionScope.structType;
+            auto spacerType = functionScope.spacerType;
             auto voidp = once new Pointer(new Void);
             auto latent = new LatentNestedFunction(fun);
 
-            fun.contextType = new Pointer(structType);
+            fun.contextType = new Pointer(spacerType);
             fun.uniqId = context.getLabel;
 
             // allow nested function to self-recurse

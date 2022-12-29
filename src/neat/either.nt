@@ -112,6 +112,7 @@ class EitherExpr : Expression
         generator.fun.store(new BackendIntType, offsetTarget, offsetValue);
         generator.fun.store(backendValueType, valueTarget, value);
 
+        generator.fun.markPointerInvariant(reg);
         return generator.fun.load(eitherType, reg);
     }
 
@@ -214,10 +215,9 @@ class EitherMember : Expression
     override int emit(Generator generator)
     {
         BackendType eitherType = this.value.type.emit(generator.platform);
-        int eitherValuePtr = generator.fun.staticAlloca(eitherType);
 
         int eitherValue = this.value.emit(generator);
-        generator.fun.store(eitherType, eitherValuePtr, eitherValue);
+        int eitherValuePtr = generator.fun.toPtr(eitherType, eitherValue);
 
         int eitherUnionPtr = generator.fun.fieldOffset(eitherType, eitherValuePtr, 1);
         // load the union value
@@ -256,7 +256,9 @@ class Either : Type
         }
         auto parts = new BackendType[](2);
         parts[0] = new BackendIntType;
-        parts[1] = new BackendSpacerType(size, alignment);
+        if (size <= 4 && alignment <= 4) parts[1] = new BackendIntType;
+        else if (size <= 8 && alignment <= 8) parts[1] = new BackendLongType;
+        else parts[1] = new BackendSpacerType(size, alignment);
         return new BackendStructType(parts);
     }
 
@@ -468,22 +470,35 @@ class SwitchExpr : Expression
         }
 
         auto resultType = this.type.emit(output.platform);
+
+        bool fake = resultType.size(output.platform) == 0;
         if (auto phiFun = output.fun.instanceOf(PhiCapable)) {
             int sample = this.sample.emit(output);
             output.fun.switch_(sample, targets, defaultLabel);
             mut (string pred, int reg)[] sourceRegs;
             for (i, branch in branches) {
                 output.fun.setLabel(branchLabels[i]);
-                int reg = branch.expr.emit(output);
-                sourceRegs ~= (output.fun.getCurrentLabel, reg);
+                if (fake) branch.expr.emit(output);
+                else {
+                    int reg = output.fun.toPtr(resultType, branch.expr.emit(output));
+                    sourceRegs ~= (output.fun.getCurrentLabel, reg);
+                }
                 output.fun.branch(dest);
             }
             output.fun.setLabel(defaultLabel);
-            auto defaultReg = default_.emit(output);
-            sourceRegs ~= (output.fun.getCurrentLabel, defaultReg);
+            if (fake) default_.emit(output);
+            else {
+                auto defaultReg = output.fun.toPtr(resultType, default_.emit(output));
+                sourceRegs ~= (output.fun.getCurrentLabel, defaultReg);
+            }
             output.fun.branch(dest);
             output.fun.setLabel(dest);
-            return phiFun.phi(resultType, sourceRegs);
+            if (fake) return output.fun.voidLiteral;
+            else {
+                auto phi = phiFun.phi(new BackendPointerType(resultType), sourceRegs);
+                output.fun.markPointerInvariant(phi);
+                return output.fun.load(resultType, phi);
+            }
         } else {
             int target = output.fun.staticAlloca(resultType);
             int sample = this.sample.emit(output);
@@ -583,7 +598,7 @@ class ASTEitherCaseExpr : ASTSymbol
             matchIndexes[i] = matchIndex;
 
             auto namespace = context.compiler.variableDeclaration(
-                context.namespace, case_.identifier, caseType, mut=false, borrowed=false, false);
+                context.namespace, case_.identifier, context.platform, caseType, mut=false, borrowed=false, false);
             auto subContext = context.withNamespace(namespace);
 
             Expression expr = case_.expr.compile(subContext)?.beExpressionImplCall(context, caseLoc)?;
@@ -608,15 +623,7 @@ class ASTEitherCaseExpr : ASTSymbol
             mergeType = new Either(members);
         }
         // as ASTReturn
-        mut uninitialized PairedTemporary resultVal;
-        if (!singleUse)
-            resultVal = new PairedTemporary(mergeType, Lifetime.gifted, context.getUniqueId);
-        else
-            resultVal = new PairedTemporary(mergeType, baseExpr.info.lifetime, context.getUniqueId);
-        Statement initResultVal = new UninitializeTemporaryStatement(resultVal);
-        mut nullable Statement ifTree;
-
-        (void | fail Error) handleCase(ASTEitherCaseExprCase case_, int matchIndex)
+        (Expression | fail Error) handleCase(ASTEitherCaseExprCase case_, int matchIndex)
         {
             auto caseLoc = case_.locRange;
             Type type = case_.type.compile(context)?.beType(caseLoc)?;
@@ -630,7 +637,7 @@ class ASTEitherCaseExpr : ASTSymbol
             mut uninitialized Reference variable;
             if (!singleUse) {
                 auto namespace = context.compiler.variableDeclaration(
-                    context.namespace, case_.identifier, type, mut=false, borrowed=!cleanup, false);
+                    context.namespace, case_.identifier, context.platform, type, mut=false, borrowed=!cleanup, false);
                 context = context.withNamespace(namespace);
                 variable = namespace.accessDecl(context);
                 // Borrow the case base.
@@ -640,11 +647,15 @@ class ASTEitherCaseExpr : ASTSymbol
                     context.namespace, case_.identifier, castMember);
                 context = context.withNamespace(namespace);
             }
+            PairedTemporaryExpr resultVal = new PairedTemporaryExpr(
+                mergeType, baseExpr.info.lifetime if singleUse else Lifetime.gifted, context.getUniqueId);
             Expression userExpr = case_.expr.compile(context)?
                 .beExpressionImplCall(context, caseLoc)?;
             (Statement | fail Error) userStmt() {
                 Expression expr = context.compiler.expectImplicitConvertTo(context, userExpr, mergeType, caseLoc)?;
-                return context.compiler.move(context, resultVal, expr);
+                if (expr.info.lifetime == Lifetime.gifted)
+                    return new InitializeTemporaryExprStatement(resultVal, expr);
+                return new InitializeTemporaryExprStatement(resultVal, expr.copy(context)?);
             }
             thenSteps ~= userStmt?;
             if (cleanup && !singleUse) {
@@ -652,20 +663,28 @@ class ASTEitherCaseExpr : ASTSymbol
                     thenSteps ~= destroy;
                 }
             }
-            Statement then = context.compiler.sequenceStatement(thenSteps);
-            Expression test = context.compiler.binaryOp(
-                "==", context, new EitherType(baseExprTemp), context.compiler.intLiteral(matchIndex + 1), locRange)?;
-
-            ifTree = context.compiler.ifStatement(test, then, ifTree);
+            return context.compiler.statementExpression(
+                context.compiler.sequenceStatement(thenSteps),
+                resultVal, resultVal.info);
         }
 
+        mut (int case_, Expression expr)[] branches;
         for (i, case_ in this.cases) {
             int matchIndex = matchIndexes[i];
 
             assert(matchIndex != -1);
 
-            handleCase(case_, matchIndex)?;
+            branches ~= (matchIndex + 1, handleCase(case_, matchIndex)?);
         }
+        auto astMergeType = new ASTSymbolHelper(mergeType);
+        auto default_ = (context.compiler.$expr ({
+            // import package(compiler).neat.runtime : die, print;
+            // print("Unhandled case!");
+            // die;
+            mut uninitialized $astMergeType res;
+            res;
+        })).compile(context)?.beExpression(__RANGE__)?;
+        auto default_ = context.compiler.expectImplicitConvertTo(context, default_, mergeType, __RANGE__)?;
         for (int i, handled in handled) {
             if (!handled) {
                 // generate passthrough expr
@@ -675,13 +694,15 @@ class ASTEitherCaseExpr : ASTSymbol
                     "a",
                     fail=false,
                     new ASTIdentifier("a", moduleLevel=false, __RANGE__));
-                handleCase(passthroughCase, i)?;
+                branches ~= (i + 1, handleCase(passthroughCase, i)?);
             }
         }
-        assert(!!ifTree);
-
-        return context.compiler.statementExpression(
-            context.compiler.sequenceStatement([baseExprInit, initResultVal, ifTree.notNull]), resultVal);
+        auto switch_ = new SwitchExpr(
+            mergeType,
+            baseExpr.info if singleUse else ExprInfo(Lifetime.gifted),
+            new EitherType(baseExprTemp),
+            branches, default_);
+        return context.compiler.statementExpression(baseExprInit, switch_);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -866,7 +887,7 @@ class ASTEitherCaseStmt : ASTStatement
 
                 with (context.compiler) {
                     auto namespace = variableDeclaration(
-                        context.namespace, case_.identifier, type, mut=false, borrowed=true, false);
+                        context.namespace, case_.identifier, context.platform, type, mut=false, borrowed=true, false);
                     Reference variable = namespace.accessDecl(context);
                     auto member = trivialCastTo(type, new EitherMember(baseExpr, matched));
                     Statement assignment = assignStatement(variable, member);

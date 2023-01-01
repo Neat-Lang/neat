@@ -22,25 +22,25 @@ class CImportMacro : Macro
 
     (nullable ASTModuleBase | fail Error) parse(Parser parser, LexicalContext lexicalContext) {
         auto compiler = lexicalContext.compiler;
-        if (!parser.acceptIdentifier("c_header")?)
+        if (!parser.acceptIdentifier("c_header"))
             return null;
-        parser.expect("(")?;
+        parser.expectToken(TokenType.lparen)?;
         // TODO move into neat.base
         auto from = parser.loc;
-        parser.expect("\"")?;
+        parser.expectToken(TokenType.doubleQuote)?;
         auto includeSym = compiler.(
             parseStringLiteral(parser, lexicalContext)?.destructAstStringLiteral.case(:none: ""));
         parser.assert_(!includeSym.empty, "string expected")?;
         mut string flags;
-        if (parser.accept(",")?) {
+        if (parser.acceptToken(TokenType.comma)) {
             auto from = parser.loc;
-            parser.expect("\"")?;
+            parser.expectToken(TokenType.doubleQuote)?;
             auto flagsSym = compiler.(
                 parseStringLiteral(parser, lexicalContext)?.destructAstStringLiteral.case(:none: ""));
             parser.assert_(!flagsSym.empty, "flags string expected")?;
             flags = flagsSym ~ " ";
         }
-        parser.expect(")")?;
+        parser.expectToken(TokenType.rparen)?;
         if (compiler.cFlags.length > 0)
             flags = (compiler.cFlags ~ flags).join(" ");
 
@@ -98,8 +98,8 @@ class CImportMacro : Macro
         }
 
         (void | fail Error) eatAttribute() {
-            while (cparser.accept("__attribute__")?) {
-                cparser.accept("(")?; cparser.accept("(")?;
+            while (cparser.acceptIdentifier("__attribute__")) {
+                cparser.acceptToken(TokenType.lparen); cparser.acceptToken(TokenType.lparen);
                 mut int parenlevel = 2;
                 while (parenlevel) {
                     if (cparser.acceptToken(TokenType.lparen))
@@ -127,7 +127,7 @@ class CImportMacro : Macro
             commit;
             return true;
         }
-        while (!cparser.eof?) {
+        while (!cparser.eof) {
             // print("> $(cparser.text[0 .. 100])");
             if (!cparserHelper.sysmod && acceptCmdLineSep) {
                 // start of actual include
@@ -135,8 +135,8 @@ class CImportMacro : Macro
                 cparserHelper.mod = compiler.astModule(modName, pak, new MacroState, cparser.loc, null);
             }
             if (cparser.acceptToken(TokenType.hash)) {
-                if (cparser.acceptIdentifier("define")?) {
-                    auto identifier = cparser.parseIdentifier?;
+                if (cparser.acceptIdentifier("define")) {
+                    auto identifier = cparser.parseIdentifier;
                     cparser.begin;
                     if (cparser.acceptToken(TokenType.lparen)) { cparser.revert; cparser.eatline; continue; }
                     auto start = cparser.loc;
@@ -152,14 +152,14 @@ class CImportMacro : Macro
                             add(identifier, compiler.astNumberLiteral(l, start));
                     }
                     cparser.commit;
-                    cparser.assert_(cparser.text.startsWith("\n"), "unknown text")?;
+                    cparser.assert_(cparser.loc.from.column == 0, "unknown text")?;
                     // cparser.expect("\n");
                     continue;
                 }
                 cparser.eatline;
                 continue;
             }
-            if (cparser.acceptIdentifier("typedef")?) {
+            if (cparser.acceptIdentifier("typedef")) {
                 auto type = cparserHelper.parseType?;
                 if (!type) { cparser.eatline; continue; }
                 auto type = notNull!ASTSymbol(type);
@@ -171,26 +171,26 @@ class CImportMacro : Macro
                 continue;
             }
             // match struct foo { }; as "foo"
-            if (cparser.acceptIdentifier("struct")?) {
+            if (cparser.acceptIdentifier("struct")) {
                 auto pair = cparserHelper.parseStructType?;
                 if (!pair.type) { cparser.eatline; continue; }
                 add(pair.name, pair.type);
                 continue;
             }
-            if (cparser.acceptIdentifier("union")?) {
+            if (cparser.acceptIdentifier("union")) {
                 auto pair = cparserHelper.parseStructType(union_=true)?;
                 if (!pair.type) { cparser.eatline; continue; }
                 add(pair.name, pair.type);
                 continue;
             }
-            if (cparser.acceptIdentifier("enum")?) {
+            if (cparser.acceptIdentifier("enum")) {
                 auto type = cparserHelper.parseEnumType?;
                 if (!type) { cparser.eatline; continue; }
                 continue;
             }
-            cparser.acceptIdentifier("extern")?;
+            cparser.acceptIdentifier("extern");
             eatAttribute?;
-            cparser.acceptIdentifier("extern")?;
+            cparser.acceptIdentifier("extern");
             {
                 (bool | fail Error) closeFunction() {
                     if (!cparser.acceptToken(TokenType.rparen)) return false;
@@ -312,11 +312,11 @@ class CParserHelper {
     this(this.parser, this.compiler) { }
 
     (nullable ASTSymbol | fail Error) parseType() {
-        parser.acceptIdentifier("const")?;
+        parser.acceptIdentifier("const");
         if (auto ret = parseBasicCType?) {
             return ret;
         }
-        auto ident = parser.parseIdentifier?;
+        auto ident = parser.parseIdentifier;
         if (ident == "struct") {
             auto ret = parseStructType?;
             return ret.type;
@@ -347,16 +347,16 @@ class CParserHelper {
                 || parser.acceptToken2(TokenType.lsquarebracket, TokenType.rsquarebracket))
             {
                 current = compiler.astPointer(current, parser.loc);
-                parser.acceptIdentifier("const")?;
-                parser.acceptIdentifier("restrict")?;
-                parser.acceptIdentifier("__restrict")?;
+                parser.acceptIdentifier("const");
+                parser.acceptIdentifier("restrict");
+                parser.acceptIdentifier("__restrict");
                 continue;
             }
             // function pointer
 
             parser.begin;
             if (parser.acceptToken(TokenType.lparen) && parser.acceptToken(TokenType.asterisk)) {
-                auto name = parser.parseIdentifier?;
+                auto name = parser.parseIdentifier;
                 // I fucking hate C type syntax. No arrays of function pointers for you.
                 if (!parser.acceptToken(TokenType.rparen)) {
                     parser.revert;
@@ -394,7 +394,7 @@ class CParserHelper {
         }
         // name can be empty!
         with (parser.transaction) {
-            auto name = parser.parseIdentifier?;
+            auto name = parser.parseIdentifier;
             auto start = parser.loc;
             while (parser.acceptToken(TokenType.lsquarebracket)) {
                 if (parser.acceptToken(TokenType.rsquarebracket)) {
@@ -407,7 +407,7 @@ class CParserHelper {
                 if (cn.case(:failure: false, (:success, long): true)) {
                     num = cn.case(:failure: 0, (:success, long l): cast(int) l);
                 } else if (
-                    parser.accept("sizeof(void *) <= 8 ? 56 : sizeof(void *) == 16 ? 64 : 3 * sizeof(void *)")?) {
+                    parser.accept("sizeof(void *) <= 8 ? 56 : sizeof(void *) == 16 ? 64 : 3 * sizeof(void *)")) {
                     // Jesus Christ, SDL, what the fuck.
                     // TODO full C expression parser, apparently
                     num = 64;
@@ -426,7 +426,7 @@ class CParserHelper {
     (nullable ASTSymbol | fail Error) parseBasicCType() {
         with (parser) {
             begin;
-            auto type = parser.parseIdentifier?;
+            auto type = parser.parseIdentifier;
             if (type == "void") { commit; return ident("void"); }
             if (type == "float") { commit; return ident("float"); }
             if (type == "double") { commit; return ident("double"); }
@@ -436,13 +436,13 @@ class CParserHelper {
             mut bool signed, unsigned, long_, longlong, short_, char_, int_;
             while (true) {
                 begin;
-                auto part = parser.parseIdentifier?;
+                auto part = parser.parseIdentifier;
                 if (part == "signed") { commit; signed = true; continue; }
                 if (part == "unsigned") { commit; unsigned = true; continue; }
                 if (part == "long") {
                     commit;
                     long_ = true;
-                    if (parser.acceptIdentifier("long")?) longlong = true;
+                    if (parser.acceptIdentifier("long")) longlong = true;
                     continue;
                 }
                 if (part == "short") { commit; short_ = true; continue; }
@@ -463,10 +463,10 @@ class CParserHelper {
 
     (ASTSymbol type, string name | fail Error) parseStructType(bool union_=false) {
         auto start = parser.loc;
-        auto name = parser.parseIdentifier?;
+        auto name = parser.parseIdentifier;
         mut ASTStructMember[] members;
         auto emptyStruct = new ASTDeclSym(compiler.astStructDecl(name, [], externC=true, start)); // opaque
-        if (!parser.accept("{")?) {
+        if (!parser.acceptToken(TokenType.lcurlybracket)) {
             return (new ASTFallbackIdentifier(name, emptyStruct), name);
         }
         void scanToClosingBracket() {
@@ -482,12 +482,12 @@ class CParserHelper {
                 else return;
             }
         }
-        while (!parser.accept("}")?) {
+        while (!parser.acceptToken(TokenType.rcurlybracket)) {
             parser.begin;
             // #defines inside structs happen occasionally
-            if (parser.accept("#define ")?) { parser.eatline; parser.commit; continue; }
+            if (parser.accept("#define ")) { parser.eatline; parser.commit; continue; }
             // line number annotation
-            if (parser.accept("# ")?) { parser.eatline; parser.commit; continue; }
+            if (parser.accept("# ")) { parser.eatline; parser.commit; continue; }
             auto baseType = parseType?;
             if (!baseType) { parser.revert; scanToClosingBracket; return (emptyStruct, name); }
             auto baseType = notNull!ASTSymbol(baseType);
@@ -495,19 +495,23 @@ class CParserHelper {
             void flush() {
                 members ~= (memberDecl.name, Protection.public_, notNull!ASTSymbol(memberDecl.type));
             }
-            while (parser.accept(",")?) {
+            while (parser.acceptToken(TokenType.comma)) {
                 if (!memberDecl.type) { parser.revert; scanToClosingBracket; return (emptyStruct, name); }
                 flush;
                 memberDecl = parseTypedDecl(baseType)?;
             }
             if (!memberDecl.type) { parser.revert; scanToClosingBracket; return (emptyStruct, name); }
             flush;
-            if (parser.accept(":")?) {
+            if (parser.acceptToken(TokenType.colon)) {
                 // It's hopeless. Just try, I guess.
                 parser.parseNumber?;
             }
-            // parser.expect(";")?;
-            if (!parser.accept(";")?) { parser.revert; scanToClosingBracket; return (emptyStruct, name); }
+            // parser.expectToken(TokenType.semicolon)?;
+            if (!parser.acceptToken(TokenType.semicolon)) {
+                parser.revert;
+                scanToClosingBracket;
+                return (emptyStruct, name);
+            }
             parser.commit;
         }
         if (union_) {
@@ -521,13 +525,13 @@ class CParserHelper {
     (nullable ASTSymbol | fail Error) parseEnumType() {
         // TODO export enum members as aliases
         auto start = parser.loc;
-        parser.parseIdentifier?;
-        if (!parser.accept("{")?) return null; // wat
+        parser.parseIdentifier;
+        if (!parser.acceptToken(TokenType.lcurlybracket)) return null; // wat
         mut long lastNum = -1;
         while (true) {
-            auto name = parser.parseIdentifier?;
+            auto name = parser.parseIdentifier;
             if (!name.length) break;
-            if (parser.accept("=")?) {
+            if (parser.acceptToken(TokenType.equal)) {
                 auto num = parseCNumber?;
                 num.case {
                     (:failure): break;
@@ -542,7 +546,7 @@ class CParserHelper {
                     mod.addAliasDecl(name, Protection.public_, compiler.astNumberLiteral(lastNum + 1, start));
                 lastNum++;
             }
-            parser.accept(",")?;
+            parser.acceptToken(TokenType.comma);
         }
         while (!parser.acceptToken(TokenType.rcurlybracket))
             parser.dropToken;
@@ -558,13 +562,13 @@ class CParserHelper {
                 (:success, long l, bool withBasePrefix): num = l;
             }
             // weird C shit
-            if (accept("e")? || accept("E")? || accept(".")?) {
+            if (acceptIdentifier("e") || acceptIdentifier("E") || acceptToken(TokenType.dot)) {
                 revert;
                 return :failure;
             }
-            accept("U")?; accept("u")?;
-            accept("L")?; accept("l")?;
-            accept("L")?; accept("l")?;
+            acceptIdentifier("U"); acceptIdentifier("u");
+            acceptIdentifier("L"); acceptIdentifier("l");
+            acceptIdentifier("L"); acceptIdentifier("l");
             commit;
             return (:success, num);
         }

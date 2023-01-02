@@ -1043,26 +1043,22 @@ class ASTArraySlice : ASTSymbol
     {
         Type sizeT = context.nativeWordType;
         auto array = this.array.compile(context)?.beExpressionImplCall(context, this.locRange)?;
-
-        (nullable Expression | fail Error) do_(Expression array)
-        {
-            auto context = context.withNamespace(
-                context.compiler.exprAlias(context.namespace, "__array", array));
-
-            return new ArraySlice(
-                array,
-                expectImplicitConvertTo(
-                    context,
-                    this.lower.compile(context)?.beExpressionImplCall(context, this.locRange)?,
-                    sizeT, this.locRange)?,
-                expectImplicitConvertTo(
-                    context,
-                    this.upper.compile(context)?.beExpressionImplCall(context, this.locRange)?,
-                    sizeT, this.locRange)?,
-                this.locRange, context.platform);
-        }
-        return context.compiler.consumeTemporary(
-                context, allowRefReturn=false, array, &do_)?.notNull;
+        auto arrayTemp = new PairedTemporaryExpr(array.type, Lifetime.none, context.getUniqueId);
+        auto initTemp = new InitializeTemporaryExprStatement(arrayTemp, array);
+        auto context = context.withNamespace(
+            context.compiler.exprAlias(context.namespace, "__array", arrayTemp));
+        auto slice = new ArraySlice(
+            arrayTemp,
+            expectImplicitConvertTo(
+                context,
+                this.lower.compile(context)?.beExpressionImplCall(context, this.locRange)?,
+                sizeT, this.locRange)?,
+            expectImplicitConvertTo(
+                context,
+                this.upper.compile(context)?.beExpressionImplCall(context, this.locRange)?,
+                sizeT, this.locRange)?,
+            this.locRange, context.platform);
+        return new StatementExpression(initTemp, slice, array.info);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -3600,18 +3596,15 @@ class ASTStatementExpression : ASTSymbol
         auto resultValue = this.expr.compile(context)?.beExpressionImplCall(context, locRange)?;
         auto resultType = resultValue.type;
 
-        // as ASTReturn
-        auto temp = new PairedTemporary(resultType, Lifetime.lexical, context.getUniqueId);
-        auto init = new UninitializeTemporaryStatement(temp);
+        auto temp = new PairedTemporaryExpr(resultType, Lifetime.none, context.getUniqueId);
 
-        (Statement | fail Error) assignEscapeValue() {
+        (Statement | fail Error) initEscapeValue() {
             if (resultValue.info.lifetime == Lifetime.gifted)
-                return new AssignStatement(temp, resultValue, this.locRange);
-            return new AssignStatement(temp, resultValue.copy(context)?, this.locRange);
+                return new InitializeTemporaryExprStatement(temp, resultValue);
+            return new InitializeTemporaryExprStatement(temp, resultValue.copy(context)?);
         }
-        auto initAndCopy = sequence(init, assignEscapeValue?);
 
-        auto sequence = new SequenceStatement(statements ~ initAndCopy);
+        auto sequence = new SequenceStatement(statements ~ initEscapeValue?);
         // unwind variables declared in the ({ })
         auto stmtExpr = unwindScope(context, baseNamespace, sequence)?;
 

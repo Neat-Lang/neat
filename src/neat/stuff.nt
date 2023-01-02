@@ -677,15 +677,26 @@ class WrapReference : Reference
     }
 
     mut nullable Statement pre, post;
-    Expression[] addLifetime(Expression[] args) {
+    (Expression[] | fail Error) addLifetime(Expression[] args) {
         Expression[] result = new Expression[](args.length);
         for (i in 0 .. args.length) {
             mut Expression arg = args[i];
-            // we must free arg after the call, so make a copy
             if (arg.info.lifetime == Lifetime.gifted) {
-                auto temp = new PairedTemporaryExpr(arg.type, Lifetime.lexical, context.getUniqueId);
+                auto temp = new PairedTemporaryExpr(arg.type, Lifetime.none, context.getUniqueId);
                 // no copy() because we're taking ownership.
                 auto set = new InitializeTemporaryExprStatement(temp, arg);
+                // as we take it over, we have to clean up the gifted reference
+                if (auto destructor = arg.type.endLifetime(context, temp)) {
+                    pre = sequence2(pre, set);
+                    post = sequence(destructor, post);
+                    arg = temp;
+                }
+            } else if (arg.info.lifetime == Lifetime.ephemeral) {
+                auto temp = new PairedTemporaryExpr(arg.type, Lifetime.none, context.getUniqueId);
+                // copy! as it's ephemeral, we have no idea when it will disappear; it might
+                // even be during the call!
+                auto set = new InitializeTemporaryExprStatement(temp, arg.copy(context)?);
+                // as we copied, we have to clean up our reference.
                 if (auto destructor = arg.type.endLifetime(context, temp)) {
                     pre = sequence2(pre, set);
                     post = sequence(destructor, post);
@@ -716,7 +727,7 @@ class WrapReference : Reference
             )?.case(
                 (:argCastError, Error err): return (:argCastError, err),
                 (:mismatch, Error err): return (:mismatch, err));
-            args = result.args.addLifetime;
+            args = result.args.addLifetime?;
             quality = result.quality;
         } else {
             return locRange.fail("function reference or funcptr expected? but is '$(funcPtr.type.repr)'");
@@ -734,7 +745,7 @@ class WrapReference : Reference
             .case(
                 (:argCastError, Error err): return (:argCastError, err),
                 (:mismatch, Error err): return (:mismatch, err));
-        return (wrap(new Call(fundecl, result.args.addLifetime, locRange)), result.quality);
+        return (wrap(new Call(fundecl, result.args.addLifetime?, locRange)), result.quality);
     }
     if (autoCall) return (:mismatch, locRange.fail("cannot call"));
     nullable Expression expr = target.instanceOf(Expression);
@@ -746,7 +757,7 @@ class WrapReference : Reference
         auto result = validateCall(context, funcptr.params, astArgs, "", variadic=false, locRange)?.case(
             (:argCastError, Error err): return (:argCastError, err),
             (:mismatch, Error err): return (:mismatch, err));
-        return (wrap(new FuncPtrCall(expr.notNull, result.args.addLifetime, locRange)), result.quality);
+        return (wrap(new FuncPtrCall(expr.notNull, result.args.addLifetime?, locRange)), result.quality);
     }
     mut nullable NestedFunctionPointer nestedfuncptr;
     if (expr) nestedfuncptr = expr.type.instanceOf(NestedFunctionPointer);
@@ -761,7 +772,7 @@ class WrapReference : Reference
         auto thisPtr = new DelegateDataPtr(expr);
         mut Expression[] combinedArgs;
         combinedArgs ~= thisPtr;
-        combinedArgs ~= result.args.addLifetime;
+        combinedArgs ~= result.args.addLifetime?;
         return (wrap(new FuncPtrCall(funcPtr, combinedArgs, locRange)), result.quality);
     }
     return locRange.fail("unknown call target");

@@ -5,7 +5,8 @@ macro import package(compiler).std.macro.listcomprehension;
 import neat.base;
 import neat.runtime : assert;
 import package(compiler).std.thread;
-import package(compiler).std.time;
+// TODO package(compiler).
+import std.time;
 
 /*
  * Threadpool for pure tasks identified by a string.
@@ -13,7 +14,7 @@ import package(compiler).std.time;
  */
 class WorkPool : WorkPoolBase
 {
-    TaskEntry[] tasks;
+    TaskEntry[string] tasks;
 
     Mutex mutex;
 
@@ -26,19 +27,24 @@ class WorkPool : WorkPoolBase
     this(this.pool) {
         this.mutex = new Mutex;
         this.currentTaskId = new ThreadLocal!string;
-        // Represents the "main" thread.
-        auto main = new TaskEntry("", new FailITask, currentTaskId);
 
         // For comparison with CPA.
         this.total = new Stopwatch;
         this.total.start;
 
-        this.tasks ~= main;
+        reset;
+    }
+
+    void reset() {
+        this.total.reset;
+        // Represents the "main" thread.
+        auto main = new TaskEntry("", new FailITask, currentTaskId);
+        this.tasks[""] = main;
         main.slice.start;
     }
 
     void report() {
-        auto main = this.tasks[0];
+        auto main = this.tasks[""];
         main.slice.stop;
         this.total.stop;
         mut TaskSlice[] criticalPath;
@@ -59,54 +65,94 @@ class WorkPool : WorkPoolBase
 
     private TaskEntry currentTask() {
         auto id = this.currentTaskId.get;
-        return [first a for a in tasks where a.id == id];
+        return tasks[id];
+    }
+
+    /**
+     * Kick out tasks that are no longer fresh.
+     * Kick out all tasks that waited on them, recursively.
+     */
+    public void refresh() {
+        mut bool removedAny = false;
+        void removeId(string id) {
+            if (!this.tasks.has(id)) return;
+            auto task = this.tasks[id];
+            // print("workpool: remove $id");
+            this.tasks.remove(id);
+            removedAny = true;
+            for (subtask in task.dependents.keys)
+                removeId(subtask);
+        }
+        string[] keys = this.tasks.keys;
+        for (key in keys) if (this.tasks.has(key)) {
+            if (!this.tasks[key].fresh)
+                removeId(key);
+        }
+        if (removedAny) {
+            // any removal must have kicked out the main task, so reinit it.
+            assert(![any key == "" for key in this.tasks.keys]);
+            reset;
+        }
     }
 
     // Start task running if it isn't running yet.
-    override void queue(string id, ITask task) {
+    override void queue(ITask task) {
+        auto id = task.id;
         mut uninitialized TaskEntry entry;
         with (mutex.locked) {
-            if ([any a.id == id for a in tasks]) {
+            if (tasks.has(id)) {
                 return;
             }
             entry = new TaskEntry(id, task, currentTaskId);
-            tasks ~= entry;
-            auto oldSlice = currentTask.splitSlice;
+            tasks[id] = entry;
+            auto ct = currentTask;
+            auto oldSlice = ct.splitSlice;
             entry.slice.criticalPathParent = oldSlice;
         }
         pool.addTask(entry);
     }
 
+    // if `provider` is not fresh, `consumer` is not fresh.
+    override void dependency((string | :current) provider, (string | :current) consumer) {
+        with (mutex.locked) {
+            auto ct = currentTask;
+            auto provider = provider.case(:current: ct.id);
+            auto consumer = consumer.case(:current: ct.id);
+            // print("'$consumer' depends on '$provider'");
+            // main can't be provider. what would that mean?
+            assert(provider != "");
+            auto task = tasks[provider];
+            task.dependents[consumer] = true;
+        }
+    }
+
     override ITask wait(string id) {
-        mut uninitialized TaskEntry task;
+        mut uninitialized TaskEntry taskEntry;
         mut bool preempted;
         with (mutex.locked) {
-            int offs = [first cast(int) i for i, a in tasks
-                where a.id == id
-                else -1];
-            assert(offs != -1);
-            task = tasks[offs];
-            preempted = task.tryPreempt;
+            assert(tasks.has(id));
+            taskEntry = tasks[id];
+            preempted = taskEntry.tryPreempt;
         }
         mut bool waited;
         if (preempted) {
             // The pool didn't get around to even starting the task yet.
             // So we run it ourselves.
-            task.runDirectly;
+            taskEntry.runDirectly;
             waited = true;
         } else {
-            waited = task.wait_;
+            waited = taskEntry.wait_;
         }
-        if (waited) {
-            assert(task.slice.time.stopped);
-            with (mutex.locked) {
-                // TODO should be able to assign to reference in expression
-                auto ct = currentTask;
+        with (mutex.locked) {
+            // TODO should be able to assign to reference in expression
+            auto ct = currentTask;
+            if (waited) {
+                assert(taskEntry.slice.time.stopped);
                 ct.splitSlice;
-                ct.slice.criticalPathParent = task.slice;
+                ct.slice.criticalPathParent = taskEntry.slice;
             }
         }
-        return task.task;
+        return taskEntry.task;
     }
 }
 
@@ -157,13 +203,9 @@ private class TaskSlice
 
     this(this.id, this.index, this.time) { }
 
-    void start() {
-        this.time.start;
-    }
-
-    void stop() {
-        this.time.stop;
-    }
+    void start() this.time.start;
+    void stop() this.time.stop;
+    void reset() this.time.reset;
 }
 
 private class TaskEntry : Task
@@ -181,6 +223,9 @@ private class TaskEntry : Task
     ThreadLocal!string currentTaskId;
 
     TaskSlice slice;
+
+    // tasks we depend on
+    bool[string] dependents;
 
     this(this.id, this.task, this.currentTaskId) {
         this.mutex = new Mutex;
@@ -202,6 +247,8 @@ private class TaskEntry : Task
         }
         return false;
     }
+
+    bool fresh() => this.task.fresh;
 
     TaskSlice splitSlice() {
         auto oldSlice = this.slice;
@@ -245,7 +292,7 @@ private class TaskEntry : Task
 class FailITask : ITask
 {
     this() { }
-    override void run() {
-        assert(false);
-    }
+    override void run() assert(false);
+    override string id() => "";
+    override bool fresh() => true;
 }

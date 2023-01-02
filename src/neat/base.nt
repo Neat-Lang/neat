@@ -1066,7 +1066,8 @@ abstract class CompilerBase
 
     abstract (void | fail Error) addDefaultImports(Context context, ModuleBase module_);
 
-    abstract ModuleBase createModule(string name, string mangle, LocRange locRange, nullable ModuleBase parent);
+    abstract ModuleBase createModule(
+        string name, string mangle, string moduleParseTaskId, LocRange locRange, nullable ModuleBase parent);
 
     abstract string queueModuleCompilation(Context context, ASTModuleBase module_);
 
@@ -1401,12 +1402,13 @@ abstract class LexicalContext
 
     Package pak;
 
+    // here so downstream tasks can be declared as depending on parsing this module
+    string moduleParseTaskId;
+
     MacroState macroState;
 
     // break an annoying dependency cycle
     abstract (ASTModuleBase | fail Error) resolveImport(ASTImportStatementBase importStmt);
-
-    this(this.compiler, this.pak, this.macroState) { }
 }
 
 class Package
@@ -1444,13 +1446,19 @@ class Package
 
 abstract class WorkPoolBase
 {
-    abstract void queue(string id, ITask task) { }
-    abstract ITask wait(string id) { }
+    abstract void queue(ITask task);
+    abstract ITask wait(string id);
+    // if `provider` is not fresh, `consumer` is not fresh.
+    abstract void dependency((string | :current) provider, (string | :current) consumer);
 }
 
 interface ITask
 {
     void run();
+    string id();
+    // Return false if environment conditions have changed from when the task was added.
+    // For instance, if a file changed checksum or last-modified date.
+    bool fresh();
 }
 
 /**
@@ -1531,11 +1539,15 @@ template notNull(T) {
 }
 
 bottom exitWithError(Error err) {
+    printError(err);
+    exit(1);
+}
+
+void printError(Error err) {
     assert(err.stack.length > 0);
     for (loc in err.stack[0 .. $ - 1])
         print(loc.repr ~ ":");
     printAtErrorLoc(err.stack[$ - 1], err.msg);
-    exit(1);
 }
 
 void printAtErrorLoc(LocRange locRange, string message) {

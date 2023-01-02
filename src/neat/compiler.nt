@@ -453,8 +453,9 @@ class CompilerImpl : CompilerBase
     override ASTModule astModule(
         string name, Package pak, MacroState macroState, LocRange locRange, nullable ASTModuleBase parent)
     {
-        if (!parent) return new ASTModule(name, pak, macroState, locRange, null);
-        return new ASTModule(name, pak, macroState, locRange, parent.instanceOf(ASTModule));
+        // hope parse task id doesn't matter (this is only needed for CImport macro)
+        if (!parent) return new ASTModule(name, pak, moduleParseTaskId="", macroState, locRange, null);
+        return new ASTModule(name, pak, moduleParseTaskId="", macroState, locRange, parent.instanceOf(ASTModule));
     }
 
     override ASTDeclaration astImport(string name, string pak, string[] symbols, LocRange locRange)
@@ -825,10 +826,12 @@ class CompilerImpl : CompilerBase
         [module_.addImport(mod, public_=false, []) for mod in defaultMods];
     }
 
-    override ModuleBase createModule(string name, string mangle, LocRange locRange, nullable ModuleBase parent) {
+    override ModuleBase createModule(
+        string name, string mangle, string moduleParseTaskId, LocRange locRange, nullable ModuleBase parent
+    ) {
         mut nullable Module parentMod = null;
         if (parent) parentMod = parent.instanceOf(Module);
-        return new Module(name, mangle, locRange, parentMod);
+        return new Module(name, mangle, locRange, parentMod, moduleParseTaskId);
     }
 
     override FunctionDeclaration createRuntimeFunction(
@@ -851,7 +854,8 @@ class CompilerImpl : CompilerBase
 
         auto fun = new Function(mangledName, ret, params, makeBody(), context.macroState, false, __RANGE__);
         auto pak = new Package("rt_" ~ mangledName, "", []);
-        auto rtMod = new Module(name, mangleModuleName(name, pak, 0), __RANGE__, null);
+        // parse task doesn't matter - there's no ASTModule that contains a rt fun, so they'll never need reparsing.
+        auto rtMod = new Module(name, mangleModuleName(name, pak, 0), __RANGE__, null, moduleParseTaskId="");
         rtMod.register("free", Protection.public_, new FunctionDeclaration(
             "free", new Void, [Parameter.fromType(new Pointer(new Void))]));
         rtMod.register("print", Protection.public_, new FunctionDeclaration(
@@ -973,15 +977,19 @@ class CompilerImpl : CompilerBase
     }
 
     override string queueModuleCompilation(Context context, ASTModuleBase astModule) {
-        auto id = "compile platform $(context.platform.ident) ast $(astModule.mangledName)";
-        auto task = new AstCompileTask(astModule.instanceOf(ASTModule).notNull, context.data);
+        auto astModule = astModule.instanceOf(ASTModule).notNull;
+        auto taskId = "compile platform $(context.platform.ident) ast $(astModule.mangledName)";
+        auto task = new AstCompileTask(taskId, astModule, context.data);
 
-        workPool.queue(id, task);
-        return id;
+        if (astModule.moduleParseTaskId != "")
+            workPool.dependency(provider=astModule.moduleParseTaskId, consumer=taskId);
+        workPool.queue(task);
+        return taskId;
     }
 
-    override (ModuleBase | fail Error) getCompiledModule(string id) {
-        return workPool.wait(id).instanceOf(AstCompileTask).module_?;
+    override (ModuleBase | fail Error) getCompiledModule(string taskId) {
+        workPool.dependency(provider=taskId, consumer=:current);
+        return workPool.wait(taskId).instanceOf(AstCompileTask).module_?;
     }
 
     override IUniqCounter uniqCounter() => new UniqCounter(this.glob);

@@ -268,7 +268,7 @@ class CompilationTask : ITask
     BuildSettings settings;
     Mutex visitorLock;
     (:none | BackgroundCompilation) result;
-    string id;
+    string id_;
     bool done;
 
     BackgroundCompilation compilation() {
@@ -280,10 +280,12 @@ class CompilationTask : ITask
 
     this(this.module_, this.visitors, this.settings, this.visitorLock) {
         this.result = :none;
-        if (settings.forMacro) this.id = "emit $(module_.mangle) macro";
-        else this.id = "emit $(module_.mangle)";
+        if (settings.forMacro) this.id_ = "emit $(module_.mangle) macro";
+        else this.id_ = "emit $(module_.mangle)";
     }
 
+    override string id() => id_;
+    override bool fresh() => true;
     override void run() {
         this.result = emitModule(
             this.module_, this.visitors, this.settings, this.visitorLock, this.id);
@@ -352,7 +354,10 @@ class ModulePostProcessorImpl : ModulePostProcessor
 
                 auto task = new CompilationTask(module_, this.visitors, this.settings, this.visitorLock);
 
-                this.settings.pool.queue(task.id, task);
+                this.settings.pool.queue(task);
+                if (module_.moduleParseTaskId != "")
+                    this.settings.pool.dependency(provider=module_.moduleParseTaskId, consumer=task.id);
+                this.settings.pool.dependency(provider=task.id, consumer=:current);
                 this.taskIds ~= task.id;
             }
 
@@ -697,6 +702,7 @@ class Options
     bool cpr; // critical path report
     PlatformFlags platformFlags, macroPlatformFlags;
     bool run;
+    bool loop;
     string[] runArgs;
     string[] cFlags; // for std.macro.cimport
     string[] versions, macroVersions;
@@ -754,6 +760,8 @@ class Options
                 this.requestedCompilerVersion = ver;
             } else if (flag == "-I") {
                 cFlags ~= arg;
+            } else if (arg == "-loop") {
+                this.loop = true;
             } else if (flag == "-l") {
                 this.linkerArgs ~= arg;
             } else if (flag == "-L") {
@@ -890,7 +898,10 @@ class Options
 }
 
 ASTModule builtinSymbols(Options options) {
-    auto builtins = new ASTModule("", new Package("builtins", "", []), new MacroState, __RANGE__, null);
+    // parse task id doesn't matter; they're builtins.
+    auto builtins = new ASTModule(
+        "", new Package("builtins", "", []), moduleParseTaskId="",
+        new MacroState, __RANGE__, null);
 
     builtins.addAliasDecl("string", Protection.public_,
         new ASTArray(new ASTIdentifier("char", false, __RANGE__), __RANGE__));
@@ -902,15 +913,13 @@ ASTModule builtinSymbols(Options options) {
     return builtins;
 }
 
-void buildBinary(Options options, string mainFile, string execPath, Package[] packages) {
+void buildBinary(Options options, WorkPool workPool, string mainFile, string execPath, Package[] packages) {
     /*print("packages:");
     for (pkg in packages) {
         print("  '" ~ pkg.name ~ "' at " ~ pkg.path ~ ": deps " ~ [join ", " "'" ~ a.name ~ "'" for a in pkg.deps]);
     }*/
     neat_runtime_system("mkdir -p .obj");
 
-    auto pool = new ThreadPool(options.threads);
-    auto workPool = new WorkPool(pool);
     auto builtins = builtinSymbols(options);
     auto defaultImports = [builtins];
     auto modParseConfig = new ModuleParserConfig(packages, defaultImports);
@@ -947,10 +956,10 @@ void buildBinary(Options options, string mainFile, string execPath, Package[] pa
 
     auto astModule = getModule(compiler, mainFile, null, false, helper, modParseConfig, __RANGE__).case(
         ASTModule mod: mod,
-        Error err: exitWithError(err));
+        Error err: return printError(err));
     auto result = buildAstModule(astModule, settings, moduleVisitors, compilationVisitors, options).case(
         BuildResult result: result,
-        Error err: exitWithError(err));
+        Error err: return printError(err));
     mut string fileArgs = [join " " ~ a for a in result.objFiles];
     string[] intermediateFiles = result.intermediateFiles;
 
@@ -1056,15 +1065,31 @@ void main(mut string[] args)
         help(executable);
         return;
     }
-
-    if (args[0] == "build") {
-        buildPackage(options, allArgs, execPath);
+    auto pool = new ThreadPool(options.threads);
+    auto workPool = new WorkPool(pool);
+    // TODO void build() => .build
+    void build() .build(options, workPool=workPool, args=args, allArgs=allArgs, execPath=execPath);
+    if (options.loop) {
+        while (true) {
+            build;
+            print("Press <return> to continue.");
+            getchar;
+            workPool.refresh;
+        }
     } else {
-        buildFile(options, args[0], execPath=execPath);
+        build;
     }
 }
 
-void buildFile(Options options, string mainFile, string execPath) {
+void build(Options options, WorkPool workPool, string[] args, string[] allArgs, string execPath) {
+    if (args[0] == "build") {
+        buildPackage(options, workPool, allArgs, execPath);
+    } else {
+        buildFile(options, workPool, args[0], execPath=execPath);
+    }
+}
+
+void buildFile(Options options, WorkPool workPool, string mainFile, string execPath) {
     // Add "." default package for commandline builds
     // This must be first in the list so that commandline can always override it.
     auto packages = options.astPackages.resolvePackages(execPath);
@@ -1072,10 +1097,10 @@ void buildFile(Options options, string mainFile, string execPath) {
 
     if (!options.output.length) options.output = mainFile.withoutExtension;
 
-    buildBinary(options, mainFile, execPath=execPath, packages);
+    buildBinary(options, workPool, mainFile, execPath=execPath, packages);
 }
 
-void buildPackage(Options options, string[] allArgs, string execPath) {
+void buildPackage(Options options, WorkPool workPool, string[] allArgs, string execPath) {
     mut Package[] packages = options.astPackages.resolvePackages(execPath);
     BinaryPackageFile pkgFile() {
         loadPkgFile(".", options.runningCompilerVersion).case {
@@ -1130,7 +1155,7 @@ void buildPackage(Options options, string[] allArgs, string execPath) {
 
     packages ~= allRecursiveDeps;
     // print("Packages: " ~ [join ", " a.repr for a in packages]);
-    buildBinary(options, pkgFile.main, execPath=execPath, packages);
+    buildBinary(options, workPool, pkgFile.main, execPath=execPath, packages);
 }
 
 /**
@@ -1171,3 +1196,5 @@ void swapCompilerVersion(Options options, string[] allArgs, string reqVerStr, st
     // TODO shell escape
     exit(system_iret_v("$targetPath/$dirName/neat " ~ allArgs.join(" ")));
 }
+
+extern(C) int getchar();

@@ -24,6 +24,7 @@ import neat.hashmap;
 import neat.lexer;
 import neat.parser;
 import neat.pragmas;
+import neat.runtime : die;
 import neat.statements;
 import neat.struct_;
 import neat.templ;
@@ -1583,7 +1584,10 @@ class ASTLambdaExpr : ASTSymbol
 
     MacroState macroState;
 
-    this(this.paramNames, this.value, this.macroState, this.locRange) { }
+    // so the template decl can be declared to depend on our module parse
+    string moduleParseTaskId;
+
+    this(this.paramNames, this.value, this.macroState, this.locRange, this.moduleParseTaskId) { }
 
     override (Symbol | fail Error) compile(Context context) {
         /**
@@ -1610,7 +1614,9 @@ class ASTLambdaExpr : ASTSymbol
         auto lambdaFun = new ASTFunction(
             lambdaName, :auto_, astParameters,
             isDeclaration=false, __RANGE__, statement=returnLambdaExpr, this.macroState, null);
-        auto astTemplateDecl = new ASTTemplateDecl(lambdaName, ["T$i" for i, _ in paramNames], lambdaFun, "");
+        auto astTemplateDecl = new ASTTemplateDecl(
+            lambdaName, ["T$i" for i, _ in paramNames], lambdaFun, comment="",
+            moduleParseTaskId=this.moduleParseTaskId);
         auto templateDecl = new ScopeBoundTemplateDecl(
             new TemplateDecl(context.namespace, astTemplateDecl),
             context.framePointer);
@@ -1657,7 +1663,9 @@ class ASTLambdaExpr : ASTSymbol
     parser.commit;
     auto expr = parser.parseExpression(lexicalContext)?;
     parser.to(from).assert(!!expr, "lambda expression expected")?;
-    return new ASTLambdaExpr(args, expr.notNull, lexicalContext.macroState, parser.to(from));
+    return new ASTLambdaExpr(
+        args, expr.notNull, lexicalContext.macroState, parser.to(from),
+        moduleParseTaskId=lexicalContext.moduleParseTaskId);
 }
 
 (nullable ASTSymbol | fail Error) parseExpressionLeaf(Parser parser, LexicalContext lexicalContext)
@@ -4070,10 +4078,10 @@ class ASTStaticIfStatement : ASTStatement
             parser.to(from).assert(!importStmt.isMacroImport, "can't import macro in function")?;
             auto pool = lexicalContext.compiler.workPool;
             auto id = importStmt.repr(lexicalContext.pak.name);
-            auto task = new ImportTask(lexicalContext, importStmt);
-            auto import_ = new ASTImport(importStmt, (pool, id, task));
+            auto task = new ImportTask(id, lexicalContext, importStmt, lexicalContext.moduleParseTaskId);
+            auto import_ = new ASTImport(importStmt, (pool, task));
 
-            pool.queue(id, task);
+            pool.queue(task);
             return import_;
     }
     parser.revert;
@@ -4199,6 +4207,8 @@ class ASTModule : ASTModuleBase
 
     Package pak;
 
+    string moduleParseTaskId;
+
     MacroState macroState;
 
     // separated from this module with a divergent macro state
@@ -4213,7 +4223,7 @@ class ASTModule : ASTModuleBase
 
     LocRange locRange;
 
-    this(this.name, this.pak, this.macroState, this.locRange, this.parent) {
+    this(this.name, this.pak, this.moduleParseTaskId, this.macroState, this.locRange, this.parent) {
         if (this.parent) this.depth = this.parent.depth + 1;
         this.mangledName = mangleModuleName(this.name, this.pak, this.depth);
     }
@@ -4440,7 +4450,10 @@ class Module : ModuleBase
     // Inert imports have no lookup effect, they solely define a module dependency
     (Module mod, (:inert|:private_|:public_) visibility, string[] symbols)[] imports;
 
-    this(this.name, this.mangledName, this.locRange, this.parentModule) {
+    // so we can make a CompilationTask->ParseAstModuleTask dep
+    string moduleParseTaskId;
+
+    this(this.name, this.mangledName, this.locRange, this.parentModule, this.moduleParseTaskId) {
         this.isContextScope = false;
         this.resolver = new Resolver;
     }
@@ -4790,14 +4803,18 @@ class ImportNamespace : Namespace
 
 class AstCompileTask : ITask
 {
+    string id_;
     ASTModule astModule;
     (:none | Module | Error) result;
 
     ImmutableContext icontext;
 
-    this(this.astModule, this.icontext) {
+    this(this.id_, this.astModule, this.icontext) {
         this.result = :none;
     }
+
+    override string id() => id_;
+    override bool fresh() => true;
 
     (Module | fail Error) module_() {
         result.case {
@@ -4826,15 +4843,16 @@ class ASTImport : ASTDeclaration
     ASTImportStatement statement;
 
     // running in the background
-    (WorkPoolBase pool, string id, ImportTask task | ASTModule) moduleSource;
+    (WorkPoolBase pool, ImportTask task | ASTModule) moduleSource;
 
     (ASTModule | fail Error) module_() {
         this.moduleSource.case {
-            (WorkPoolBase pool, string id, ImportTask task): {
+            (WorkPoolBase pool, ImportTask task): {
                 // if the task was not prequeued (ie. an import in a version()),
                 // queue it now.
-                pool.queue(id, task);
-                return pool.wait(id).instanceOf(ImportTask).notNull.module_;
+                pool.queue(task);
+                pool.dependency(provider=task.id, consumer=:current);
+                return pool.wait(task.id).instanceOf(ImportTask).notNull.module_;
             }
             ASTModule mod: return mod;
         }
@@ -4885,15 +4903,22 @@ class ASTImport : ASTDeclaration
 
 class ImportTask : ITask
 {
+    string id_;
+
     LexicalContext lexicalContext;
 
     ASTImportStatement import_;
 
+    string moduleParseTaskId;
+
     (ASTModule | :none | Error) result;
 
-    this(this.lexicalContext, this.import_) {
+    this(this.id_, this.lexicalContext, this.import_, this.moduleParseTaskId) {
         this.result = :none;
     }
+
+    override string id() => id_;
+    override bool fresh() => true;
 
     (ASTModule | fail Error) module_() {
         result.case {
@@ -4904,6 +4929,8 @@ class ImportTask : ITask
     }
 
     override void run() {
+        this.lexicalContext.compiler.workPool
+            .dependency(provider=id_, consumer=moduleParseTaskId);
         this.result = this.lexicalContext.resolveImport(import_).case(
             ASTModuleBase base: base.instanceOf(ASTModule).notNull,
             Error err: err);
@@ -4996,7 +5023,9 @@ class ModuleParserConfig
 
     helper.proxyCall(astModule, identifier, newMacroState, parser.to(from))?;
 
-    auto subModule = new ASTModule(astModule.name, astModule.pak, newMacroState, astModule.locRange, astModule);
+    auto subModule = new ASTModule(
+        astModule.name, astModule.pak, astModule.moduleParseTaskId,
+        newMacroState, astModule.locRange, astModule);
 
     return parseModuleBody(compiler, parser, helper, subModule, config);
 }
@@ -5014,7 +5043,7 @@ class LexicalContextImpl : LexicalContext
 
     ModuleParserConfig config;
 
-    this(this.compiler, this.pak, this.macroState, this.helper, this.config) { }
+    this(this.compiler, this.pak, this.moduleParseTaskId, this.macroState, this.helper, this.config) { }
 
     override (ASTModuleBase | fail Error) resolveImport(ASTImportStatementBase importStmt) {
         return .resolveImport(
@@ -5079,10 +5108,10 @@ class LexicalContextImpl : LexicalContext
 
             auto pool = lexicalContext.compiler.workPool;
             auto id = importStmt.repr(lexicalContext.pak.name);
-            auto task = new ImportTask(lexicalContext, importStmt);
-            auto import_ = new ASTImport(importStmt, (pool, id, task));
+            auto task = new ImportTask(id, lexicalContext, importStmt, lexicalContext.moduleParseTaskId);
+            auto import_ = new ASTImport(importStmt, (pool, task));
 
-            if (toplevel) pool.queue(id, task);
+            if (toplevel) pool.queue(task);
 
             return (protection, import_);
     }
@@ -5152,7 +5181,9 @@ class LexicalContextImpl : LexicalContext
 (ASTModule | fail Error) parseModuleBody(CompilerBase compiler, Parser parser, ParserHelper helper, ASTModule module_,
     ModuleParserConfig config)
 {
-    mut LexicalContext lexicalContext = new LexicalContextImpl(compiler, module_.pak, module_.macroState, helper, config);
+    mut LexicalContext lexicalContext = new LexicalContextImpl(
+        compiler, module_.pak, moduleParseTaskId=module_.moduleParseTaskId,
+        module_.macroState, helper, config);
 
     /*
      * Why is there a group of import statements?
@@ -5177,8 +5208,11 @@ class LexicalContextImpl : LexicalContext
             auto id = import_.statement.repr(lexicalContext.pak.name);
 
             module_.macroState = module_.macroState.dup;
-            lexicalContext = new LexicalContextImpl(compiler, module_.pak, module_.macroState, helper, config);
+            lexicalContext = new LexicalContextImpl(
+                compiler, module_.pak, moduleParseTaskId=module_.moduleParseTaskId,
+                module_.macroState, helper, config);
 
+            lexicalContext.compiler.workPool.dependency(provider=id, consumer=:current);
             lexicalContext.macroState.addImport(
                 lexicalContext.compiler.workPool.wait(id)
                     .instanceOf(ImportTask).module_?.macroState);
@@ -5249,7 +5283,9 @@ class LexicalContextImpl : LexicalContext
         parent = compileModule(astParent, icontext, addDefaultImports)?;
     }
 
-    Module module_ = new Module(astModule.name, astModule.mangledName, astModule.locRange, parent);
+    Module module_ = new Module(
+        astModule.name, astModule.mangledName, astModule.locRange, parent,
+        moduleParseTaskId=astModule.moduleParseTaskId);
     auto icontext = makeIContext(
         icontext.compiler, icontext.platform, astModule.macroState,
         module_, icontext.modulePreProcessor, icontext.modulePostProcessor);
@@ -5349,7 +5385,9 @@ class LexicalContextImpl : LexicalContext
     assert(!!pak);
     auto pak = pak.notNull;
     // FIXME the workpool queueing here is 100% redundant with the ImportTask queueing, p sure
-    compiler.workPool.queue(path, new ParseAstModuleTask(compiler, filename, path, pak, helper, config, locRange));
+    auto task = new ParseAstModuleTask(compiler, filename, path, pak, helper, config, locRange);
+    compiler.workPool.queue(task);
+    compiler.workPool.dependency(provider=path, consumer=:current);
     return compiler.workPool.wait(path).instanceOf(ParseAstModuleTask).module_;
 }
 
@@ -5362,9 +5400,12 @@ class ParseAstModuleTask : ITask
     ParserHelper helper;
     ModuleParserConfig config;
     LocRange locRange;
+    string code;
+    (string | :none) newCode;
     (ASTModule | :none | Error) result;
     this(this.compiler, this.filename, this.path, this.pak, this.helper, this.config, this.locRange) {
         this.result = :none;
+        this.newCode = :none;
     }
     (ASTModule | fail Error) module_() {
         result.case {
@@ -5373,11 +5414,23 @@ class ParseAstModuleTask : ITask
             Error err: return err;
         }
     }
+    override string id() => path;
+    override bool fresh() {
+        this.newCode = read(path);
+        // FIXME: code == newCode
+        return code == newCode.case(:none: die);
+    }
     override void run() {
         this.result = parse;
     }
     (ASTModule | fail Error) parse() {
-        string code = read(path);
+        // TODO: if (string newCode <- this.newCode)
+        if (this.newCode != :none) {
+            this.code = this.newCode.case(:none: die);
+            this.newCode = null;
+        } else {
+            this.code = read(path);
+        }
         // do not count references on the file source - it will end
         // up with lots of small inc/decs to fragments that we never free anyway
         (cast(size_t*) &code)[2] = 0;
@@ -5394,7 +5447,7 @@ class ParseAstModuleTask : ITask
             filename.endsWith(modname.moduleToFile),
             "$filename: module doesn't match filename")?;
 
-        ASTModule baseModule = new ASTModule(modname, pak, new MacroState, parser.to(fromAtModule), null);
+        ASTModule baseModule = new ASTModule(modname, pak, path, new MacroState, parser.to(fromAtModule), null);
         return parseModuleBody(compiler, parser, helper, baseModule, config);
     }
 }

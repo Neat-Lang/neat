@@ -248,6 +248,8 @@ class BuildSettings
 
     string extraCFlags;
 
+    int loopPass;
+
     Platform platform() {
         BackendType macroWordType() {
             if (x86_32) return new BackendIntType;
@@ -258,7 +260,7 @@ class BuildSettings
 
     this(this.compiler, this.backend, this.x86_32, this.caching, this.versions,
          this.platformFlags, this.optimize, this.forMacro,
-         this.extraCFlags, this.pool) { }
+         this.extraCFlags, this.pool, this.loopPass) { }
 }
 
 class CompilationTask : ITask
@@ -393,7 +395,7 @@ class ModulePostProcessorImpl : ModulePostProcessor
 
     auto icontext = makeIContext(
         settings.compiler, settings.platform, astModule.macroState,
-        null, preProcessor, postProcessor);
+        null, settings.loopPass, preProcessor, postProcessor);
     Module module_ = compileModule(astModule, icontext, addDefaultImports=true)?;
 
     postProcessor.wait;
@@ -916,7 +918,10 @@ ASTModule builtinSymbols(Options options) {
     return builtins;
 }
 
-void buildBinary(Options options, WorkPool workPool, string mainFile, string execPath, Package[] packages) {
+void buildBinary(
+    Options options, WorkPool workPool,
+    string mainFile, string execPath, Package[] packages, int loopPass,
+) {
     /*print("packages:");
     for (pkg in packages) {
         print("  '" ~ pkg.name ~ "' at " ~ pkg.path ~ ": deps " ~ [join ", " "'" ~ a.name ~ "'" for a in pkg.deps]);
@@ -931,11 +936,11 @@ void buildBinary(Options options, WorkPool workPool, string mainFile, string exe
     auto settings = new BuildSettings(compiler, options.backend.notNull,
         x86_32=options.x86_32, caching=options.caching, versions=options.allVersions,
         platformFlags=options.platformFlags, optimize=options.optimize, forMacro=false,
-        extraCFlags=options.extraCFlags, pool=workPool);
+        extraCFlags=options.extraCFlags, pool=workPool, loopPass=loopPass);
     auto macroSettings = new BuildSettings(compiler, options.macroBackend.notNull,
         x86_32=options.macro_x86_32, caching=options.caching, versions=options.allMacroVersions,
         platformFlags=options.macroPlatformFlags, optimize=false, forMacro=true,
-        extraCFlags = options.macroExtraCFlags, pool=workPool);
+        extraCFlags = options.macroExtraCFlags, pool=workPool, loopPass=loopPass);
     auto helper = new ParserHelperImpl(macroSettings);
     // FIXME break reference loop
     compiler.helper = helper;
@@ -1073,28 +1078,30 @@ void main(mut string[] args)
     auto pool = new ThreadPool(options.threads);
     auto workPool = new WorkPool(pool);
     // TODO void build() => .build
-    void build() .build(options, workPool=workPool, args=args, allArgs=allArgs, execPath=execPath);
+    void build(int loopPass)
+        .build(options, workPool=workPool, args=args, allArgs=allArgs, execPath=execPath, loopPass=loopPass);
     if (options.loop) {
+        mut int loopPass = 0;
         while (true) {
-            build;
+            build(loopPass=loopPass++);
             print("Press <return> to continue.");
             getchar;
             workPool.refresh;
         }
     } else {
-        build;
+        build(loopPass=0);
     }
 }
 
-void build(Options options, WorkPool workPool, string[] args, string[] allArgs, string execPath) {
+void build(Options options, WorkPool workPool, string[] args, string[] allArgs, string execPath, int loopPass) {
     if (args[0] == "build") {
-        buildPackage(options, workPool, allArgs, execPath);
+        buildPackage(options, workPool, allArgs, execPath, loopPass=loopPass);
     } else {
-        buildFile(options, workPool, args[0], execPath=execPath);
+        buildFile(options, workPool, args[0], execPath=execPath, loopPass=loopPass);
     }
 }
 
-void buildFile(Options options, WorkPool workPool, string mainFile, string execPath) {
+void buildFile(Options options, WorkPool workPool, string mainFile, string execPath, int loopPass) {
     // Add "." default package for commandline builds
     // This must be first in the list so that commandline can always override it.
     auto packages = options.astPackages.resolvePackages(execPath);
@@ -1102,10 +1109,10 @@ void buildFile(Options options, WorkPool workPool, string mainFile, string execP
 
     if (!options.output.length) options.output = mainFile.withoutExtension;
 
-    buildBinary(options, workPool, mainFile, execPath=execPath, packages);
+    buildBinary(options, workPool, mainFile, execPath=execPath, packages, loopPass=loopPass);
 }
 
-void buildPackage(Options options, WorkPool workPool, string[] allArgs, string execPath) {
+void buildPackage(Options options, WorkPool workPool, string[] allArgs, string execPath, int loopPass) {
     mut Package[] packages = options.astPackages.resolvePackages(execPath);
     BinaryPackageFile pkgFile() {
         loadPkgFile(".", options.runningCompilerVersion).case {
@@ -1160,7 +1167,7 @@ void buildPackage(Options options, WorkPool workPool, string[] allArgs, string e
 
     packages ~= allRecursiveDeps;
     // print("Packages: " ~ [join ", " a.repr for a in packages]);
-    buildBinary(options, workPool, pkgFile.main, execPath=execPath, packages);
+    buildBinary(options, workPool, pkgFile.main, execPath=execPath, packages, loopPass=loopPass);
 }
 
 /**

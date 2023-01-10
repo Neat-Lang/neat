@@ -133,7 +133,7 @@ void *neat_runtime_alloc(size_t size) {
 extern void _run_unittests();
 
 #ifndef NEAT_NO_MAIN
-extern void _main(struct StringArray args);
+extern void MAIN(struct StringArray args);
 #endif
 
 int main(int argc, char **argv) {
@@ -146,7 +146,7 @@ int main(int argc, char **argv) {
     }
     _run_unittests();
 #ifndef NEAT_NO_MAIN
-    _main(args);
+    MAIN(args);
 #endif
     free(args.ptr);
     return 0;

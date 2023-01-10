@@ -435,6 +435,20 @@ class SimpleModulePostProcessor : ModulePostProcessor
     }
 }
 
+(Function | fail Error) extractFunction(Module module_, string name, BuildSettings settings, LocRange locRange) {
+    auto preProcessor = new SimpleModulePreProcessor;
+    auto postProcessor = new SimpleModulePostProcessor;
+    auto icontext = makeIContext(
+        settings.compiler, settings.platform, new MacroState,
+        module_, settings.loopPass, preProcessor, postProcessor);
+    auto simpleContext = makeContext(icontext, module_);
+    auto fun = module_.lookup(name, simpleContext, LookupReason.identifier, locRange)?;
+    locRange.assert(!!fun, "undefined function '$(name)'")?;
+    auto fun = fun.instanceOf(Function);
+    locRange.assert(!!fun, "'$(name)' is not a function")?;
+    return fun.notNull;
+}
+
 class ParserHelperImpl : ParserHelper
 {
     BuildSettings settings;
@@ -462,18 +476,7 @@ class ParserHelperImpl : ParserHelper
         mut string baseCmd = baseCmd;
         if (settings.extraCFlags) baseCmd ~= " $(settings.extraCFlags)";
 
-        auto preProcessor = new SimpleModulePreProcessor;
-        auto postProcessor = new SimpleModulePostProcessor;
-        auto icontext = makeIContext(
-            settings.compiler, settings.platform, new MacroState,
-            result.module_, preProcessor, postProcessor);
-        auto simpleContext = makeContext(icontext, result.module_);
-        auto fun = result.module_.lookup(
-                function_, simpleContext, LookupReason.identifier, __RANGE__)?;
-        locRange.assert(!!fun, "undefined macro function '$function_'")?;
-        auto fun = fun.instanceOf(Function);
-        locRange.assert(!!fun, "'$function_' is not a function")?;
-        string name = fun.mangle;
+        string name = result.module_.extractFunction(function_, settings, locRange)?.mangle;
         (string soname, string cmd) soCmd() {
             string soname = ".obj/macro_$(name)_$(result.hash.text).so";
             version (LLVMBackend) {
@@ -954,14 +957,15 @@ void buildBinary(Options options, WorkPool workPool, string mainFile, string exe
         moduleVisitors ~= docGenVisitor;
     }
 
-    auto astModule = getModule(compiler, mainFile, null, false, helper, modParseConfig, __RANGE__).case(
-        ASTModule mod: mod,
-        Error err: return printError(err));
-    auto result = buildAstModule(astModule, settings, moduleVisitors, compilationVisitors, options).case(
-        BuildResult result: result,
-        Error err: return printError(err));
+    auto astModule = getModule(compiler, mainFile, null, false, helper, modParseConfig, __RANGE__)
+        .case(Error err: return printError(err));
+    BuildResult result = buildAstModule(astModule, settings, moduleVisitors, compilationVisitors, options)
+        .case(Error err: return printError(err));
     mut string fileArgs = [join " " ~ a for a in result.objFiles];
     string[] intermediateFiles = result.intermediateFiles;
+    string mainName = result.module_.extractFunction("main", settings, __RANGE__)
+        .case(Error err: return printError(err))
+        .mangle;
 
     if (options.umlFile != "") {
         umlVisitor.writeTo(options.umlFile);
@@ -1028,6 +1032,7 @@ long long int compiler_hash_mult() { return $(mult)LL; }
     if (options.backend.instanceOf(CBackend)) compilerCmd = getEnv("CC", "gcc");
     if (options.noMain)
         flags ~= " -DNEAT_NO_MAIN";
+    flags ~= " -DMAIN=$(mainName)";
     string runtime = execPath ~ "/src/runtime.c";
     string cmd = "$compilerCmd$flags$fileArgs $runtime -o $(options.output)$linkerFlags";
     print("\$ $cmd");

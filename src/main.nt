@@ -918,7 +918,7 @@ ASTModule builtinSymbols(Options options) {
     return builtins;
 }
 
-void buildBinary(
+(void | :exit, int) buildBinary(
     Options options, WorkPool workPool,
     string mainFile, string execPath, Package[] packages, int loopPass,
 ) {
@@ -960,6 +960,11 @@ void buildBinary(
     auto docGenVisitor = new DocGenVisitor;
     if (options.docGenFolder != "") {
         moduleVisitors ~= docGenVisitor;
+    }
+
+    (:exit, int) printError(Error err) {
+        .printError(err);
+        return (:exit, 1);
     }
 
     auto astModule = getModule(compiler, mainFile, null, false, helper, modParseConfig, __RANGE__)
@@ -1077,9 +1082,8 @@ void main(mut string[] args)
     }
     auto pool = new ThreadPool(options.threads);
     auto workPool = new WorkPool(pool);
-    // TODO void build() => .build
-    void build(int loopPass)
-        .build(options, workPool=workPool, args=args, allArgs=allArgs, execPath=execPath, loopPass=loopPass);
+    (void | :exit, int) build(int loopPass)
+        => .build(options, workPool=workPool, args=args, allArgs=allArgs, execPath=execPath, loopPass=loopPass);
     if (options.loop) {
         mut int loopPass = 0;
         while (true) {
@@ -1089,19 +1093,24 @@ void main(mut string[] args)
             workPool.refresh;
         }
     } else {
-        build(loopPass=0);
+        build(loopPass=0).case {
+            void: return;
+            (:exit, int i): exit(i);
+        }
     }
 }
 
-void build(Options options, WorkPool workPool, string[] args, string[] allArgs, string execPath, int loopPass) {
+(void | :exit, int) build(
+    Options options, WorkPool workPool, string[] args, string[] allArgs, string execPath, int loopPass
+) {
     if (args[0] == "build") {
-        buildPackage(options, workPool, allArgs, execPath, loopPass=loopPass);
+        return buildPackage(options, workPool, allArgs, execPath, loopPass=loopPass);
     } else {
-        buildFile(options, workPool, args[0], execPath=execPath, loopPass=loopPass);
+        return buildFile(options, workPool, args[0], execPath=execPath, loopPass=loopPass);
     }
 }
 
-void buildFile(Options options, WorkPool workPool, string mainFile, string execPath, int loopPass) {
+(void | :exit, int) buildFile(Options options, WorkPool workPool, string mainFile, string execPath, int loopPass) {
     // Add "." default package for commandline builds
     // This must be first in the list so that commandline can always override it.
     auto packages = options.astPackages.resolvePackages(execPath);
@@ -1109,10 +1118,10 @@ void buildFile(Options options, WorkPool workPool, string mainFile, string execP
 
     if (!options.output.length) options.output = mainFile.withoutExtension;
 
-    buildBinary(options, workPool, mainFile, execPath=execPath, packages, loopPass=loopPass);
+    return buildBinary(options, workPool, mainFile, execPath=execPath, packages, loopPass=loopPass);
 }
 
-void buildPackage(Options options, WorkPool workPool, string[] allArgs, string execPath, int loopPass) {
+(void | :exit, int) buildPackage(Options options, WorkPool workPool, string[] allArgs, string execPath, int loopPass) {
     mut Package[] packages = options.astPackages.resolvePackages(execPath);
     BinaryPackageFile pkgFile() {
         loadPkgFile(".", options.runningCompilerVersion).case {
@@ -1167,7 +1176,7 @@ void buildPackage(Options options, WorkPool workPool, string[] allArgs, string e
 
     packages ~= allRecursiveDeps;
     // print("Packages: " ~ [join ", " a.repr for a in packages]);
-    buildBinary(options, workPool, pkgFile.main, execPath=execPath, packages, loopPass=loopPass);
+    return buildBinary(options, workPool, pkgFile.main, execPath=execPath, packages, loopPass=loopPass);
 }
 
 /**

@@ -274,7 +274,7 @@ class CLong : ASTSymbol
     override string repr() { return "long int(C)"; }
 }
 
-class CStaticArray : ASTSymbol
+class ASTCStaticArray : ASTSymbol
 {
     ASTSymbol type;
 
@@ -298,7 +298,7 @@ class CStaticArray : ASTSymbol
         return context.compiler.struct_("SA_hack", members, this.locRange, context.namespace.mangle);
     }
 
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'CStaticArray'!"); assert(false); }
+    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTCStaticArray'!"); assert(false); }
     override string repr() { return type.repr ~ "[" ~ itoa(count) ~ "](C)"; }
 }
 
@@ -343,10 +343,17 @@ class CParserHelper {
         assert(!!current);
         auto start = parser.loc;
         while (true) {
-            if (parser.acceptToken(TokenType.asterisk)
-                || parser.acceptToken2(TokenType.lsquarebracket, TokenType.rsquarebracket))
+            if (parser.acceptToken(TokenType.asterisk))
             {
                 current = compiler.astPointer(current, parser.loc);
+                parser.acceptIdentifier("const");
+                parser.acceptIdentifier("restrict");
+                parser.acceptIdentifier("__restrict");
+                continue;
+            }
+            if (parser.acceptToken2(TokenType.lsquarebracket, TokenType.rsquarebracket))
+            {
+                current = new ASTCArray(current, parser.loc);
                 parser.acceptIdentifier("const");
                 parser.acceptIdentifier("restrict");
                 parser.acceptIdentifier("__restrict");
@@ -398,7 +405,7 @@ class CParserHelper {
             auto start = parser.loc;
             while (parser.acceptToken(TokenType.lsquarebracket)) {
                 if (parser.acceptToken(TokenType.rsquarebracket)) {
-                    current = compiler.astPointer(current, parser.loc);
+                    current = new ASTCArray(current, parser.loc);
                     continue;
                 }
                 mut int num;
@@ -416,7 +423,7 @@ class CParserHelper {
                 }
                 // parser.expectToken(TokenType.rsquarebracket)?;
                 if (!parser.acceptToken(TokenType.rsquarebracket)) return (null, "");
-                current = new CStaticArray(current, num, start);
+                current = new ASTCStaticArray(current, num, start);
             }
             commit;
             return (current, name);
@@ -519,6 +526,11 @@ class CParserHelper {
             for (a in members) unionMembers ~= (a.name, a.type);
             return (compiler.astUnion(name, unionMembers, start), name);
         }
+        if (members.length) {
+            if (auto type = members[$ - 1].type.instanceOf(ASTCArray)) {
+                members[$ - 1].type = new ASTCStaticArray(type.target, 0, type.locRange);
+            }
+        }
         return (new ASTDeclSym(compiler.astStructDecl(name, members, externC=true, start)), name);
     }
 
@@ -577,6 +589,19 @@ class CParserHelper {
     ASTSymbol ident(string name) {
         return compiler.astIdentifier(name, __RANGE__);
     }
+}
+
+// Behaves like a pointer but allows recognizing if it's the last field in a struct
+// (that's a "trailing array")
+class ASTCArray : ASTSymbol
+{
+    ASTSymbol target;
+    this(this.target, this.locRange) {}
+    override (Symbol | fail Error) compile(Context context) {
+        auto ptr = context.compiler.astPointer(target, this.locRange);
+        return ptr.compile(context);
+    }
+    override string repr() => this.target.repr ~ "[]";
 }
 
 // the reason for this is we see `typedef struct Foo_ Foo` before we see `struct Foo_` -

@@ -1,5 +1,6 @@
 module main;
 
+macro import package(compiler).std.macro.cimport;
 macro import package(compiler).std.macro.listcomprehension;
 
 import backend.base;
@@ -28,6 +29,7 @@ import package(compiler).std.file;
 import package(compiler).std.json;
 import package(compiler).std.string;
 import package(compiler).std.thread;
+import c_header("sys/inotify.h");
 
 extern(C) int getpid();
 extern(C) void neat_runtime_system(string command);
@@ -711,7 +713,7 @@ class Options
     bool cpr; // critical path report
     PlatformFlags platformFlags, macroPlatformFlags;
     bool run;
-    bool loop;
+    bool loop, watch;
     string[] runArgs;
     string[] cFlags; // for std.macro.cimport
     string[] versions, macroVersions;
@@ -771,6 +773,8 @@ class Options
                 cFlags ~= arg;
             } else if (arg == "-loop") {
                 this.loop = true;
+            } else if (arg == "-watch") {
+                this.watch = true;
             } else if (flag == "-l") {
                 this.linkerArgs ~= arg;
             } else if (flag == "-L") {
@@ -849,6 +853,10 @@ class Options
             } else {
                 remArgs ~= arg;
             }
+        }
+        if (watch && !loop) {
+            print("error: -watch makes no sense without -loop");
+            exit(1);
         }
         if (!run && !runArgs.empty) {
             print("error: -run not specified but extra args were given");
@@ -1092,8 +1100,12 @@ void main(mut string[] args)
         mut int loopPass = 0;
         while (true) {
             build(loopPass=loopPass++);
-            print("Press <return> to continue.");
-            getchar;
+            if (options.watch) {
+                watchForChanges(workPool);
+            } else {
+                print("Press <return> to continue.");
+                getchar;
+            }
             workPool.refresh;
         }
     } else {
@@ -1102,6 +1114,32 @@ void main(mut string[] args)
             (:exit, int i): exit(i);
         }
     }
+}
+
+void watchForChanges(WorkPool workPool) {
+    import c.unistd : read, close;
+
+    auto files = [task.instanceOf(ReadFileTask).path for task in workPool.allDependencies("")
+        where task.instanceOf(ReadFileTask)];
+    print("Change any file to continue.");
+    int fd = inotify_init;
+    auto watches = [fd.inotify_add_watch(file.toStringz, IN_MODIFY | IN_DELETE_SELF) for file in files];
+    auto buf = new ubyte[](8192);
+    while (true) {
+        long len = read(fd, buf.ptr, buf.length);
+        mut int offs = 0;
+        while (offs < len) {
+            auto event = cast(inotify_event*) &buf[offs];
+            auto target = [first file for i, file in files where watches[i] == event.wd];
+            print("File '$target' changed, continuing...");
+            break;
+            // print("event $(event.mask), $(event.len), $(event.wd) for target=$target");
+            offs += sizeof(inotify_event) + event.len;
+        }
+        break;
+    }
+    [fd.inotify_rm_watch(watch) for watch in watches];
+    close(fd);
 }
 
 (void | :exit, int) build(

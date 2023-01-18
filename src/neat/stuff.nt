@@ -36,6 +36,7 @@ import neat.unittest_;
 import neat.util;
 import neat.vectors;
 import neat.with_;
+import neat.workpool : ReadFileTask;
 import package(compiler).std.thread;
 import polyhash;
 
@@ -5390,8 +5391,8 @@ class LexicalContextImpl : LexicalContext
     // FIXME the workpool queueing here is 100% redundant with the ImportTask queueing, p sure
     auto task = new ParseAstModuleTask(compiler, filename, path, pak, helper, config, locRange);
     compiler.workPool.queue(task);
-    compiler.workPool.dependency(provider=path, consumer=:current);
-    return compiler.workPool.wait(path).instanceOf(ParseAstModuleTask).module_;
+    compiler.workPool.dependency(provider=task.id, consumer=:current);
+    return compiler.workPool.wait(task.id).instanceOf(ParseAstModuleTask).module_;
 }
 
 class ParseAstModuleTask : ITask
@@ -5399,16 +5400,19 @@ class ParseAstModuleTask : ITask
     CompilerBase compiler;
     string filename;
     string path;
+    ReadFileTask readSource;
     Package pak;
     ParserHelper helper;
     ModuleParserConfig config;
     LocRange locRange;
-    string code;
-    (string | :none) newCode;
     (ASTModule | :none | Error) result;
-    this(this.compiler, this.filename, this.path, this.pak, this.helper, this.config, this.locRange) {
+    this(
+        this.compiler, this.filename, this.path,
+        this.pak, this.helper, this.config, this.locRange,
+    ) {
         this.result = :none;
-        this.newCode = :none;
+        this.readSource = new ReadFileTask(path);
+        compiler.workPool.queue(readSource);
     }
     (ASTModule | fail Error) module_() {
         result.case {
@@ -5417,23 +5421,15 @@ class ParseAstModuleTask : ITask
             Error err: return err;
         }
     }
-    override string id() => path;
-    override bool fresh() {
-        this.newCode = read(path);
-        // FIXME: code == newCode
-        return code == newCode.case(:none: die);
-    }
+    override string id() => "parse ast $path";
+    override bool fresh() => true;
     override void run() {
         this.result = parse;
     }
     (ASTModule | fail Error) parse() {
-        // TODO: if (string newCode <- this.newCode)
-        if (this.newCode != :none) {
-            this.code = this.newCode.case(:none: die);
-            this.newCode = null;
-        } else {
-            this.code = read(path);
-        }
+        compiler.workPool.queue(readSource);
+        compiler.workPool.dependency(provider=readSource.id, consumer=this.id);
+        auto code = compiler.workPool.wait(readSource.id).instanceOf(ReadFileTask).text;
         // do not count references on the file source - it will end
         // up with lots of small inc/decs to fragments that we never free anyway
         (cast(size_t*) &code)[2] = 0;
@@ -5450,7 +5446,8 @@ class ParseAstModuleTask : ITask
             filename.endsWith(modname.moduleToFile),
             "$filename: module doesn't match filename")?;
 
-        ASTModule baseModule = new ASTModule(modname, pak, path, new MacroState, parser.to(fromAtModule), null);
+        ASTModule baseModule = new ASTModule(
+            modname, pak, moduleParseTaskId=this.id, new MacroState, parser.to(fromAtModule), null);
         return parseModuleBody(compiler, parser, helper, baseModule, config);
     }
 }

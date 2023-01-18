@@ -3,7 +3,7 @@ module neat.workpool;
 macro import package(compiler).std.macro.listcomprehension;
 
 import neat.base;
-import neat.runtime : assert;
+import neat.runtime : assert, die;
 import package(compiler).std.thread;
 // TODO package(compiler).
 import std.time;
@@ -68,6 +68,25 @@ class WorkPool : WorkPoolBase
         return tasks[id];
     }
 
+    ITask[] allDependencies(string rootId)
+    {
+        mut ITask[] res = null;
+        mut bool[string] seen;
+        void recurse(string name) {
+            if (!this.tasks.has(name) || seen.has(name)) {
+                return;
+            }
+            seen[name] = true;
+            // FIXME refcounting bug when calling .keys on gifted rvalue
+            auto v = this.tasks[name].dependencies;
+            string[] keys = v.keys;
+            [recurse(key) for key in keys];
+            res ~= this.tasks[name].task;
+        }
+        recurse(rootId);
+        return res;
+    }
+
     /**
      * Kick out tasks that are no longer fresh.
      * Kick out all tasks that waited on them, recursively.
@@ -121,8 +140,10 @@ class WorkPool : WorkPoolBase
             // print("'$consumer' depends on '$provider'");
             // main can't be provider. what would that mean?
             assert(provider != "");
-            auto task = tasks[provider];
-            task.dependents[consumer] = true;
+            auto providerTask = tasks[provider];
+            providerTask.dependents[consumer] = true;
+            auto consumerTask = tasks[consumer];
+            consumerTask.dependencies[provider] = true;
         }
     }
 
@@ -224,7 +245,10 @@ private class TaskEntry : Task
 
     TaskSlice slice;
 
-    // tasks we depend on
+    // tasks that depend on us
+    bool[string] dependencies;
+
+    // tasks that we depend on
     bool[string] dependents;
 
     this(this.id, this.task, this.currentTaskId) {
@@ -285,6 +309,41 @@ private class TaskEntry : Task
             if (this.state == :done) return false;
             while (this.state != :done) this.condvar.wait;
             return true;
+        }
+    }
+}
+
+class ReadFileTask : ITask
+{
+    string path;
+
+    string text;
+
+    (string | :none) newText;
+
+    this(this.path) {
+        this.newText = :none;
+    }
+
+    override string id() => path;
+
+    override bool fresh() {
+        import package(compiler).helpers : read;
+
+        this.newText = read(path);
+        // FIXME: text == newText
+        return this.text == this.newText.case(:none: die);
+    }
+
+    override void run() {
+        import package(compiler).helpers : read;
+
+        // TODO: if (string newText <- this.newText)
+        if (this.newText != :none) {
+            this.text = this.newText.case(:none: die);
+            this.newText = :none;
+        } else {
+            this.text = read(path);
         }
     }
 }

@@ -18,7 +18,20 @@ then
     JFLAG="-j8"
 fi
 
-LLVM_CONFIG=${LLVM_CONFIG:-"/usr/lib/llvm/14/bin/llvm-config"}
+if [ -v LLVM_CONFIG ]
+then
+    :
+elif [ -f "/usr/lib/llvm-14/bin/llvm-config" ]
+then
+    LLVM_CONFIG="/usr/lib/llvm-14/bin/llvm-config"
+elif [ -f "/usr/lib/llvm/14/bin/llvm-config" ]
+then
+    LLVM_CONFIG="/usr/lib/llvm/14/bin/llvm-config"
+else
+    echo "Cannot find llvm-14 llvm-config!"
+    exit 1
+fi
+
 FLAGS="$JFLAG -I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir)"
 
 TAG=v0.2.1

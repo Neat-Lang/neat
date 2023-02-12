@@ -20,6 +20,7 @@ import neat.enums;
 import neat.expr;
 import neat.formatstring;
 import neat.function_;
+import neat.hash;
 import neat.hashmap;
 import neat.lexer;
 import neat.parser;
@@ -553,6 +554,15 @@ class WrapReference : Reference
 (Expression | fail Error) call(Context context, ASTSymbol astTarget,
     ASTArgument[] astArgs, LocRange locRange, bool autoCall)
 {
+    if (auto astIdentifier = astTarget.instanceOf(ASTIdentifier)) {
+        auto targetName = astIdentifier.name;
+        // built-ins
+        // TODO __borrow, __leak, __take too
+        if (targetName == "__hash") {
+            locRange.assert(astArgs.length == 1, "__hash() expects one parameter")?;
+            return hash(astArgs[0].sym, context, locRange);
+        }
+    }
     context.assert2(!!context.namespace, locRange, "namespace not set; cannot call here")?;
     if (!autoCall) {
         auto callMacroArgs = once new CallMacroArgs;
@@ -1159,6 +1169,7 @@ with (parser.transaction)
     Context context, Symbol base, string member, LocRange locRange, bool allowUndefined)
 {
     if (!context.namespace) return null;
+
     if (auto type = base.instanceOf(Type)) {
         auto protection = type.protectionAt(context.namespace);
         return type.accessMember(context, null, member, protection, locRange);
@@ -1203,7 +1214,19 @@ class ASTMember : ASTMemberBase
         return this.locRange.fail("Member '$(this.member)' not found");
     }
 
-    override ASTSymbol quote(Quoter quoter) {
+    override ASTSymbol quote(Quoter quoter)
+    {
+        /**
+         * quote rewriting
+         * foo.$bar
+         * => astMember(foo, bar)
+         */
+        if (member.length && member[0 .. 1] == "\$") {
+            return quoter.compilerCall("astMember", [
+                this.base.quote(quoter),
+                quoter.compiler.astIdentifier(member[1 .. $], locRange)
+            ], locRange);
+        }
         return quoter.compilerCall("astMember", [
             this.base.quote(quoter),
             quoter.compiler.astStringLiteral(this.member, locRange)], locRange);
@@ -1732,8 +1755,8 @@ class ASTLambdaExpr : ASTSymbol
     if (auto trait = parser.parseTrait(lexicalContext)?) {
         return trait;
     }
-    if (auto override_ = parser.parseLifetimeExpr(lexicalContext)?) {
-        return override_;
+    if (auto builtin = parser.parseBuiltin(lexicalContext)?) {
+        return builtin;
     }
     if (auto lambda = parser.parseLambdaExpression(lexicalContext)?) {
         return lambda;
@@ -1886,14 +1909,14 @@ class ASTLambdaExpr : ASTSymbol
     return new ASTFormatString(parts, parser.to(from));
 }
 
-(nullable ASTSymbol | fail Error) parseLifetimeExpr(Parser parser, LexicalContext lexicalContext)
+(nullable ASTSymbol | fail Error) parseBuiltin(Parser parser, LexicalContext lexicalContext)
 with (parser.transaction)
 {
     auto from = parser.from;
-    mut string op;
-    if (parser.acceptIdentifier("__borrow")) op = "borrow";
-    else if (parser.acceptIdentifier("__take")) op = "take";
-    else if (parser.acceptIdentifier("__leak")) op = "leak";
+    mut uninitialized (:borrow | :take | :leak) op;
+    if (parser.acceptIdentifier("__borrow")) op = :borrow;
+    else if (parser.acceptIdentifier("__take")) op = :take;
+    else if (parser.acceptIdentifier("__leak")) op = :leak;
     else return null;
     parser.expectToken(TokenType.lparen)?;
     auto fromSource = parser.from;
@@ -1902,11 +1925,11 @@ with (parser.transaction)
     auto source = source.notNull;
     parser.expectToken(TokenType.rparen)?;
     commit;
-    if (op == "borrow")
+    if (op == :borrow)
         return new ASTOverrideLifetime(source, Lifetime.lexical, parser.to(from));
-    if (op == "take")
+    if (op == :take)
         return new ASTOverrideLifetime(source, Lifetime.gifted, parser.to(from));
-    if (op == "leak")
+    if (op == :leak)
         return new ASTLeakExpr(source, parser.to(from));
     assert(false);
 }

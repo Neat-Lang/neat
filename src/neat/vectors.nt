@@ -1,6 +1,7 @@
 module neat.vectors;
 
 macro import package(compiler).std.macro.listcomprehension;
+macro import package(compiler).std.macro.quasiquoting;
 
 import backend.base;
 import helpers;
@@ -95,7 +96,7 @@ class VectorMemberReference : Reference
     override string repr() return "$(base.repr)[$index]";
 }
 
-class VectorType : Type
+class VectorType : Type, Hashable
 {
     Type elementType;
 
@@ -167,6 +168,16 @@ class VectorType : Type
         if (auto base = base)
             return context.compiler.exprWithTemporaryExpr(context.getUniqueId, base, &do_);
         return null;
+    }
+
+    override (nullable Expression | fail Error) index(
+        Context context, Expression base, Expression index, LocRange locRange)
+    {
+        if (auto intLiteral = index.instanceOf(IntLiteral))
+        {
+            return new VectorMember(base, intLiteral.value);
+        }
+        context.assert2(false, locRange, "vector index expression must be literal")?;
     }
 
     override (nullable Expression | fail Error) binaryOp(
@@ -271,6 +282,30 @@ class VectorType : Type
             initialize = context.compiler.sequence(initialize, stmt);
         }
         return context.compiler.statementExpression(initialize, result);
+    }
+
+
+    override (ASTSymbol | fail Error) hash(Context context, Expression value, LocRange locRange)
+    {
+        // very much like structs
+        auto value = new ASTSymbolHelper(value);
+        mut ASTStatement[] parts;
+        for (i in 0 .. this.length) {
+            // fix: sumtype
+            auto iSym = context.compiler.astNumberLiteral(i, __RANGE__);
+            parts ~= context.compiler.$stmt {
+                hash ^= __hash($value[$iSym]);
+                hash *= 0x01000193;
+            };
+        }
+        auto partsStmt = context.compiler.astSequence(parts, __RANGE__);
+        return context.compiler.$expr ({
+            // fnv composition
+            mut int hash = 0x811c9dc5;
+            $stmt partsStmt;
+            if (hash < 0) hash = -hash;
+            hash;
+        });
     }
 }
 

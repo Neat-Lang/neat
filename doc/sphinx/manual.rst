@@ -542,6 +542,12 @@ nullable::
     assert(!foo);
     Foo bar = foo; // errors
 
+As a special treat, the `case` expression allows treating a nullable class as a sumtype
+of a non-nullable class and `null`::
+
+    nullable Foo foo;
+    Foo bar = foo.case(null: return false);
+
 Symbol Identifier
 ^^^^^^^^^^^^^^^^^
 

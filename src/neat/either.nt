@@ -569,7 +569,15 @@ class ASTEitherCaseExpr : ASTSymbol
     this(this.locRange, this.base, this.cases) { }
 
     override (Expression | fail Error) compile(Context context) {
-        auto baseExpr = base.compile(context)?.beExpressionImplCall(context, locRange)?;
+        (Expression | fail Error) baseExpr() {
+            auto baseExpr = base.compile(context)?.beExpressionImplCall(context, locRange)?;
+            if (auto eitherIntf = baseExpr.type.instanceOf(CanTreatAsEither)) {
+                if (auto eitherExpr = eitherIntf.toEitherType(context, baseExpr)?)
+                    return eitherExpr;
+            }
+            return baseExpr;
+        }
+        auto baseExpr = baseExpr?;
         auto either = baseExpr.type.instanceOf(Either);
 
         if (!either) {
@@ -598,6 +606,7 @@ class ASTEitherCaseExpr : ASTSymbol
             resultTypes ~= exprType;
         }
         for (i, case_ in this.cases) {
+            auto case_ = case_.rewriteNullAsNullptr;
             auto caseLoc = case_.locRange;
             auto caseType = case_.type.compile(context)?.beType(caseLoc)?;
 
@@ -649,6 +658,7 @@ class ASTEitherCaseExpr : ASTSymbol
         // as ASTReturn
         (Expression | fail Error) handleCase(ASTEitherCaseExprCase case_, int matchIndex)
         {
+            auto case_ = case_.rewriteNullAsNullptr;
             auto caseLoc = case_.locRange;
             Type type = case_.type.compile(context)?.beType(caseLoc)?;
 
@@ -966,6 +976,30 @@ class ASTEitherCaseStmt : ASTStatement
             ], locRange);
         }
     }
+}
+
+/**
+ * This hack exists solely to enable this shortcut:
+ * ```
+ * nullable Object obj;
+ * Object obj = obj.case(null: return false);
+ * ```
+ASTEitherCaseExprCase rewriteNullAsNullptr(ASTEitherCaseExprCase case_)
+{
+    if (!case_.identifier.empty) return case_;
+    if (auto astIdentifier = case_.type.instanceOf(ASTIdentifier)) {
+        if (astIdentifier.moduleLevel) return case_;
+        if (astIdentifier.name == "null") {
+            return ASTEitherCaseExprCase(
+                case_.locRange,
+                new ASTIdentifier("nullptr_t", moduleLevel=false, case_.locRange),
+                identifier="",
+                fail=case_.fail,
+                expr=case_.expr,
+            );
+        }
+    }
+    return case_;
 }
 
 (nullable ASTStatement | fail Error) parseEitherCaseStmt(Parser parser, LexicalContext lexicalContext)

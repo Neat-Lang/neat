@@ -566,23 +566,40 @@ class CParserHelper {
     }
 
     (:failure | :success, long | fail Error) parseCNumber() {
+        import package(compiler).neat.parser : parseHexNumber;
+        import std.string : endsWith;
+
         with (parser) {
             begin;
+            bool negative = acceptToken(TokenType.minus);
             mut long num;
-            parser.parseNumber?.case {
-                (:failure): { revert; return :failure; }
-                (:success, long l, bool withBasePrefix): num = l;
+            auto number = parser.acceptTokenStr(TokenType.number)
+                .case(:none: ({ revert; return :failure; }));
+            if (number == "0") {
+                // check for 0x...
+                mut string ident = acceptTokenStr(TokenType.identifier).case(:none: "");
+                // weird C shit
+                if (ident.endsWith("e") || ident.endsWith("E")) {
+                    revert;
+                    return :failure;
+                }
+                while (ident.endsWith("u") || ident.endsWith("U") || ident.endsWith("l") || ident.endsWith("L"))
+                    ident = ident[0 .. $ - 1];
+                if (ident.startsWith("x")) {
+                    parseHexNumber(ident[1 .. $], negative).case {
+                        :failure:
+                            revert;
+                            return :failure;
+                        (:success, long value):
+                            commit;
+                            return (:success, value);
+                    }
+                }
             }
-            // weird C shit
-            if (acceptIdentifier("e") || acceptIdentifier("E") || acceptToken(TokenType.dot)) {
-                revert;
-                return :failure;
-            }
-            acceptIdentifier("U"); acceptIdentifier("u");
-            acceptIdentifier("L"); acceptIdentifier("l");
-            acceptIdentifier("L"); acceptIdentifier("l");
             commit;
-            return (:success, num);
+            mut long l = atol(number);
+            if (negative) l = -l;
+            return (:success, l);
         }
     }
 

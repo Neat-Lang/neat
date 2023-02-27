@@ -75,5 +75,5 @@ echo "Building stage 2..."
 $NEAT $FLAGS $OPTFLAG -backend=llvm -macro-backend=c -Pcompiler:src -j src/main.nt -o build/neat_stage2
 NEAT=build/neat_stage2
 
-cp $NEAT build/neat
+cp -f $NEAT build/neat
 rm build/neat_stage*

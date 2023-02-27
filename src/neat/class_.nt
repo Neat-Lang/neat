@@ -124,6 +124,8 @@ class Class
 
     ClassMethod[] methods;
 
+    (Symbol symbol, Protection protection)[string] staticDecls;
+
     /*
      * Methods appearing in the classinfo struct.
      * Wait, IntfMethod? Sure: an abstract class overriding an interface.
@@ -627,6 +629,12 @@ class ClassType : Type, CanTreatAsEither
                 return 2;
             }
             return rank(symbol) <= rank(protection);
+        }
+        if (!baseExpr) {
+            if (this.class_.staticDecls.has(member)) {
+                auto entry = this.class_.staticDecls[member];
+                if (allowed(entry.protection)) return entry.symbol;
+            }
         }
         bool test(typeof(this.class_.vtable[0]) entry, bool mustInThisClass) {
             if (mustInThisClass) {
@@ -1379,7 +1387,11 @@ class ASTClassVersionBlock
     this(this.name, this.then, this.else_) { }
 }
 
-alias ASTClassEntry = (ASTClassDeclMember | ASTClassDeclMethod | ASTDeclaration | ASTClassVersionBlock);
+alias ASTClassEntry = (
+    ASTClassDeclMember
+    | ASTClassDeclMethod
+    | ASTDeclaration astDecl, Protection protection
+    | ASTClassVersionBlock);
 
 class ASTClassDecl : ASTSymbolDeclaration
 {
@@ -1428,6 +1440,7 @@ class ASTClassDecl : ASTSymbolDeclaration
         mut (string name, Protection protection, Type type)[] memberFields;
         // Do those later; they need fields resolved for this.field assignments.
         mut (ASTClassDeclMethod method, Context context)[] lateMemberMethods;
+        mut (Symbol symbol, Protection protection)[string] staticDecls;
 
         (void | fail Error) walk(ASTClassEntry entry) {
             entry.case {
@@ -1442,9 +1455,16 @@ class ASTClassDecl : ASTSymbolDeclaration
                  * Note: currentContext gets overwritten even in version blocks,
                  * because version blocks *don't* open a scope.
                  */
-                ASTDeclaration astDecl:
-                    currentContext = currentContext.withNamespace(
-                        astDecl.compile(currentContext)?);
+                (ASTDeclaration astDecl, Protection protection):
+                    if (auto astSymDecl = astDecl.instanceOf(ASTSymbolDeclaration)) {
+                        auto sym = astSymDecl.compileSymbol(currentContext)?;
+                        staticDecls[astSymDecl.name] = (sym, protection);
+                        currentContext = currentContext.withNamespace(
+                            context.compiler.exprAlias(currentContext.namespace, astSymDecl.name, sym));
+                    } else {
+                        currentContext = currentContext.withNamespace(
+                            astDecl.compile(currentContext)?);
+                    }
                 ASTClassVersionBlock ver:
                     if ([any a == ver.name for a in context.platform.versions]) {
                         [walk(entry)? for entry in ver.then];
@@ -1455,6 +1475,7 @@ class ASTClassDecl : ASTSymbolDeclaration
         }
         [walk(a)? for a in this.members];
 
+        target.staticDecls = staticDecls;
         target.members = memberFields;
 
         target.methods = new ClassMethod[](lateMemberMethods.length);
@@ -1703,7 +1724,7 @@ class ASTIntfDecl : ASTSymbolDeclaration
 
     if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)?) {
         // TODO return [ASTClassEntry: decl];
-        ASTClassEntry entry = decl;
+        ASTClassEntry entry = (decl, protection);
         return [entry];
     }
 

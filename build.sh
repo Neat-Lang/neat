@@ -59,8 +59,9 @@ echo "Building stage 1..."
 FLAGS="$FLAGS -version=LLVMBackend"
 # see generation.md
 NEXT=compiler$(($($NEAT -print-generation) + 1))
-# -version=firstpass -macro-version=firstpassmacro
-$NEAT $FLAGS -backend=c -macro-backend=c -next-generation -P$NEXT:src -j src/main.nt -o build/neat_stage1
+# firstpass_2 because firstpass is already in use in the bootstrapped sources
+$NEAT $FLAGS -backend=c -macro-backend=c -next-generation -P$NEXT:src -j src/main.nt \
+    -version=firstpass_2 -macro-version=firstpassmacro_2 -o build/neat_stage1
 cat <<EOF > build/neat.ini
 -syspackage compiler:src
 -running-compiler-version=$TAG

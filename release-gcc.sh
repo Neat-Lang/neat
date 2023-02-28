@@ -51,7 +51,8 @@ do
         $ARCHFLAGS $NTFLAGS
 
     mkdir $TARGET/intermediate_$ARCH
-    cp $(cat build/intermediates.txt) $TARGET/intermediate_$ARCH/
+    cp $(tail -n +2 build/intermediates.txt) $TARGET/intermediate_$ARCH/
+    head -1 build/intermediates.txt > $TARGET/main.txt
 done
 
 if [ $LLVM -eq 0 ]
@@ -83,6 +84,7 @@ then
     # force targetting the ARCH architecture
     ARCHFLAG="-m\${ARCH}"
 fi
+DMAIN="-DMAIN=\$(cat main.txt)"
 CFLAGS="\${CFLAGS} -Ofast -fno-strict-aliasing -pthread"
 I=0
 JOBS=16
@@ -90,7 +92,7 @@ OBJECTS=()
 # poor man's make -j
 for file in intermediate_\${ARCH}/*.c src/runtime.c; do
     obj=\${file%.c}.o
-    gcc \$ARCHFLAG -c -fpic -rdynamic -fno-strict-aliasing \$file -o \$obj &
+    gcc \$ARCHFLAG -c -fpic -rdynamic -fno-strict-aliasing \$DMAIN \$file -o \$obj &
     OBJECTS+=(\$obj)
     if [ \$I -ge \$JOBS ]; then wait -n; fi
     I=\$((I+1))
@@ -166,6 +168,7 @@ then
     # force targetting the ARCH architecture
     ARCHFLAG="-m\${ARCH}"
 fi
+DMAIN="-DMAIN=\$(cat main.txt)"
 CFLAGS="\${CFLAGS:+ } \${LLVM_CFLAGS} -O2 -fno-strict-aliasing -pthread"
 I=0
 JOBS=16
@@ -173,7 +176,7 @@ OBJECTS=()
 # poor man's make -j
 for file in intermediate_\${ARCH}/*.c src/runtime.c; do
     obj=\${file%.c}.o
-    gcc \$ARCHFLAG -c -fpic -rdynamic -fno-strict-aliasing \$file -o \$obj &
+    gcc \$ARCHFLAG -c -fpic -rdynamic -fno-strict-aliasing \$DMAIN \$file -o \$obj &
     OBJECTS+=(\$obj)
     if [ \$I -ge \$JOBS ]; then wait -n; fi
     I=\$((I+1))

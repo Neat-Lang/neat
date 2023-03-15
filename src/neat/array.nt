@@ -821,29 +821,60 @@ class ASTArrayLiteral : ASTSymbol
         }
         auto mergeType = getType?;
         for (i in 0 .. this.elements.length) {
-            if (auto castValue = context.compiler.implicitConvertTo(context, values[i], mergeType))
-                values[i] = castValue;
+            if (auto castValue = context.compiler.implicitConvertTo(context, values[i], mergeType)) {
+                if (castValue.info.lifetime.(Lifetime.(that == gifted || that == none)))
+                    values[i] = castValue;
+                else
+                    values[i] = castValue.copy(context)?;
+            }
             else
                 return this.elements[i].locRange.fail("cannot convert to shared type $(mergeType.repr)");
         }
-        auto target = new ArrayAllocation(mergeType, values.length, context.platform);
-        (nullable Expression | fail Error) do_(Expression target) {
-            mut Statement[] moves;
-            auto base = new ArrayPointer(mergeType, target);
-            for (int i, value in values) {
-                auto target = context.compiler.dereference(
-                    context.compiler.pointerOffset(base, context.compiler.intLiteral(i)));
-                moves ~= context.compiler.move(context, target, value)?;
-            }
-            return context.compiler.statementExpression(
-                context.compiler.sequenceStatement(moves), target);
-        }
-        return context.compiler.exprWithTemporaryExpr(context.getUniqueId, target, &do_).case(
-            nullable Expression e: e.notNull,
-            Error err: err);
+        return new ArrayLiteral(mergeType, values, context.platform);
     }
 
     override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTArrayLiteral'"); assert(false); }
+}
+
+class ArrayLiteral : ArrayAllocation
+{
+    Expression[] values;
+
+    // TODO super()
+    this(this.elementType, this.values, Platform platform) {
+        this.length = this.values.length;
+        this.type = new Array(this.elementType, platform);
+        this.info = ExprInfo(Lifetime.gifted);
+    }
+
+    override int emit(Generator output)
+    {
+        auto targetReg = super.emit(output);
+        auto ptrReg = getArrayPtr(output, this.type.instanceOf(Array).notNull, targetReg);
+        auto backendElementType = elementType.emit(output.platform);
+        for (i, value in values) {
+            int offsetReg = output.fun.wordLiteral(output.platform, i);
+            int offsetPtrReg = output.fun.ptrOffset(backendElementType, ptrReg, offsetReg);
+            int valueReg = value.emit(output);
+            output.fun.store(backendElementType, offsetPtrReg, valueReg);
+        }
+        return targetReg;
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("ArrayLiteral");
+        super.hash(hash);
+        for (value in values) value.hash(hash);
+    }
+
+    override string repr() {
+        mut string res;
+        for (i, value in this.values) {
+            if (i) res ~= ", ";
+            res ~= value.repr;
+        }
+        return "[$res]";
+    }
 }
 
 /**

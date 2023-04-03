@@ -707,3 +707,47 @@ class ExternCVariable : Expression
     }
     override string repr() return "extern(C) $(this.type.repr) $name;";
 }
+
+// TODO implicitConvertTo should only require Type - ie. return a Expression function(Expression).
+class TypeMerger
+{
+    Context context;
+
+    Expression[] samples;
+
+    this(this.context) { }
+
+    (void | fail Error) add(Expression value, LocRange locRange) {
+        import neat.bottom : Bottom;
+
+        if (value.type.instanceOf(Bottom)) return;
+        for (i, sample in samples) {
+            if (sample.type.same(value.type)) return;
+            if (tryMergeSingle(i, value, locRange)? == :merged)
+                return;
+        }
+        samples ~= value;
+    }
+
+    nullable Type type() {
+        if (samples.empty) return null;
+        if (samples.length == 1) return samples[0].type;
+        mut (bool fail, Type)[] members;
+        for (sample in samples) members ~= (false, sample.type);
+        return context.compiler.eitherType(members);
+    }
+
+    (:merged | :add | fail Error) tryMergeSingle(size_t index, Expression value, LocRange locRange) {
+        auto sample = samples[index];
+        auto left = context.compiler.implicitConvertTo(context, value, sample.type);
+        auto right = context.compiler.implicitConvertTo(context, sample, value.type);
+        if (!left && !right) {
+            return :add;
+        } else if (left && right && !left.type.same(right.type)) {
+            return :add;
+        }
+        if (auto left = left) samples[index] = left;
+        else if (auto right = right) samples[index] = right;
+        return :merged;
+    }
+}

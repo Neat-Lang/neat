@@ -72,13 +72,8 @@ class ASTEitherDecl : ASTSymbol
                     quoter.quoteLocRange(entry.locRange),
                 ], __RANGE__);
             }
-            auto typeHint = astTupleType([
-                ("symbol", astIdentifier("ASTSymbol", __RANGE__)),
-                ("fail", astBasicType("bool", __RANGE__)),
-                ("locRange", astIdentifier("LocRange", __RANGE__)),
-            ], __RANGE__);
             return quoter.compilerCall("astEitherType", [
-                astArrayLiteralTypeHint(typeHint, quotedParts, this.locRange),
+                astArrayLiteral(quotedParts, this.locRange),
             ], locRange);
         }
     }
@@ -595,16 +590,7 @@ class ASTEitherCaseExpr : ASTSymbol
         int[] matchIndexes = new int[](this.cases.length);
         for (i, _ in matchIndexes) matchIndexes[i] = -1;
 
-        // TODO implicitConvertTo should only require Type - ie. return a Expression function(Expression).
-        mut Type[] resultTypes;
-        void mergeType(LocRange locRange, Type exprType) {
-            // TODO centralize!
-            import neat.bottom : Bottom;
-            if (exprType.instanceOf(Bottom)) return;
-            for (resultType in resultTypes)
-                if (resultType.same(exprType)) return;
-            resultTypes ~= exprType;
-        }
+        auto merger = new TypeMerger(context);
         for (i, case_ in this.cases) {
             auto case_ = case_.rewriteNullAsNullptr;
             auto caseLoc = case_.locRange;
@@ -635,7 +621,7 @@ class ASTEitherCaseExpr : ASTSymbol
             auto subContext = context.withNamespace(namespace);
 
             Expression expr = case_.expr.compile(subContext)?.beExpressionImplCall(context, caseLoc)?;
-            mergeType(caseLoc, expr.type);
+            merger.add(expr, caseLoc)?;
         }
 
         for (i, handled in handled) {
@@ -643,18 +629,11 @@ class ASTEitherCaseExpr : ASTSymbol
                 // print("type $(either.types[i].type.repr) not handled, default type");
                 // return locRange.fail("Type " ~ either.types[i].type.repr() ~ " not handled!");
                 // silently pass through
-                mergeType(__RANGE__, either.types[i].type);
+                merger.add(new NullExpr(either.types[i].type), __RANGE__)?;
             }
         }
 
-        assert(resultTypes.length > 0);
-        mut uninitialized Type mergeType;
-        if (resultTypes.length == 1) mergeType = resultTypes[0];
-        else {
-            mut (bool fail, Type)[] members;
-            for (type in resultTypes) members ~= (false, type);
-            mergeType = new Either(members);
-        }
+        auto mergeType = merger.type.notNull;
         // as ASTReturn
         (Expression | fail Error) handleCase(ASTEitherCaseExprCase case_, int matchIndex)
         {
@@ -751,10 +730,9 @@ class ASTEitherCaseExpr : ASTSymbol
                         astBoolLiteral(case_.fail, __RANGE__),
                         case_.expr.quote(quoter)], __RANGE__);
             }
-            auto typeHint = astIdentifier("ASTEitherCaseExprCase", __RANGE__);
             return quoter.compilerCall("astEitherCaseExpr", [
                 this.base.quote(quoter),
-                astArrayLiteralTypeHint(typeHint, quotedCases, this.locRange),
+                astArrayLiteral(quotedCases, this.locRange),
             ], locRange);
         }
     }
@@ -767,29 +745,13 @@ private (Expression | fail Error) compileExprCaseExpr(Context context, Expressio
     auto baseExprTemp = new PairedTemporaryExpr(
         baseExpr.type, Lifetime.permanent, context.getUniqueId);
     Statement baseExprInit = new InitializeTemporaryExprStatement(baseExprTemp, baseExpr);
-    mut Type[] resultTypes;
-    void mergeType(LocRange locRange, Type exprType) {
-        // TODO centralize!
-        import neat.bottom : Bottom;
-        if (exprType.instanceOf(Bottom)) return;
-        for (resultType in resultTypes)
-            if (resultType.same(exprType)) return;
-        resultTypes ~= exprType;
-    }
+    auto merger = new TypeMerger(context);
     for (case_ in cases) {
         Expression expr = case_.expr.compile(context)?.beExpressionImplCall(context, case_.locRange)?;
-        mergeType(case_.locRange, expr.type);
+        merger.add(expr, case_.locRange)?;
     }
 
-    assert(resultTypes.length > 0);
-    mut uninitialized Type mergeType;
-    if (resultTypes.length == 1) mergeType = resultTypes[0];
-    else {
-        mut (bool fail, Type)[] members;
-        for (type in resultTypes) members ~= (false, type);
-        mergeType = new Either(members);
-    }
-
+    auto mergeType = merger.type.notNull;
     PairedTemporary resultVal = new PairedTemporary(mergeType, Lifetime.gifted, context.getUniqueId);
     Statement initResultVal = new UninitializeTemporaryStatement(resultVal);
 
@@ -968,10 +930,9 @@ class ASTEitherCaseStmt : ASTStatement
                 if (auto either = either) return either.quote(quoter);
                 else return quoter.compiler.astIdentifier("null", __RANGE__);
             }
-            auto typeHint = astIdentifier("ASTEitherCaseStmtCase", __RANGE__);
             return quoter.compilerCall("astEitherCaseStmt", [
                 this.base.quote(quoter),
-                astArrayLiteralTypeHint(typeHint, quotedCases, this.locRange),
+                astArrayLiteral(quotedCases, this.locRange),
                 quote(this.default_),
             ], locRange);
         }

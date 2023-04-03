@@ -724,7 +724,7 @@ Expression releaseArray(Context context, Expression value) {
         parser.expectToken(TokenType.comma)?;
     }
     parser.commit;
-    return new ASTArrayLiteral(null, values);
+    return new ASTArrayLiteral(values);
 }
 
 // marker: type that converts to any array type.
@@ -796,11 +796,9 @@ struct ASTArrayLiteralElement
 
 class ASTArrayLiteral : ASTSymbol
 {
-    nullable ASTSymbol typeHint;
-
     ASTArrayLiteralElement[] elements;
 
-    this(this.typeHint, this.elements) { }
+    this(this.elements) { }
 
     override (Expression | fail Error) compile(Context context) {
         if (!this.elements.length)
@@ -808,29 +806,11 @@ class ASTArrayLiteral : ASTSymbol
         mut Expression[] values;
         for (element in this.elements)
             values ~= element.value.compile(context)?.beExpressionImplCall(context, element.locRange)?;
-        (Type | fail Error) getType() {
-            if (this.typeHint) {
-                return this.typeHint.compile(context)?.beType(__RANGE__)?;
-            }
-            mut nullable Expression mergedReference;
-            for (i, element in this.elements) {
-                if (!mergedReference) mergedReference = values[i];
-                else {
-                    // TODO centralize somewhere
-                    auto value = values[i];
-                    auto left = context.compiler.implicitConvertTo(context, value, mergedReference.type);
-                    auto right = context.compiler.implicitConvertTo(context, mergedReference.notNull, value.type);
-                    if (!left && !right)
-                        return element.locRange.fail("incompatible expression type");
-                    else if (left && right && !left.type.same(right.type))
-                        return element.locRange.fail("ambiguous expression type");
-                    if (left) mergedReference = left;
-                    else if (right) mergedReference = right;
-                }
-            }
-            return mergedReference.type;
+        auto merger = new TypeMerger(context);
+        for (i, element in this.elements) {
+            merger.add(values[i], element.locRange)?;
         }
-        auto mergeType = getType?;
+        auto mergeType = merger.type.notNull;
         for (i in 0 .. this.elements.length) {
             if (auto castValue = context.compiler.implicitConvertTo(context, values[i], mergeType)) {
                 if (castValue.info.lifetime.(Lifetime.(that == gifted || that == none)))

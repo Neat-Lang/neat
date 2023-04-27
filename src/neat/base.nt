@@ -277,13 +277,15 @@ class Generator
 
     nullable BackendFunction fun;
 
+    FileIdTable fileIdTable;
+
     Platform platform;
 
     int frameReg;
 
     string[] extraLibs; // from pragma(lib)
 
-    this(this.platform, this.mod)
+    this(this.platform, this.mod, this.fileIdTable)
     {
         this.fun = null;
     }
@@ -308,7 +310,7 @@ abstract class ASTSymbol
     ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTSymbol'! this=$(cast(size_t) this)"); assert(false); }
 
     // TODO this.classname
-    string repr() { return "TODO repr(ASTSymbol): $(locRange.repr)"; }
+    string repr() { return "TODO repr(ASTSymbol): $(locRange.toString)"; }
     string toString() => repr;
 }
 
@@ -329,7 +331,7 @@ abstract class ASTStatement
     ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTStatement'!"); assert(false); }
 
     // TODO this.classname
-    string repr() { return "TODO repr(ASTStatement): $(locRange.repr)"; }
+    string repr() { return "TODO repr(ASTStatement): $(locRange.toString)"; }
 }
 
 /**
@@ -726,6 +728,9 @@ abstract class CompilerBase
     // parser
     abstract (Parser | fail Error) createParser(string filename, string fulltext);
 
+    // must be called or LocRange IDs may be wrong.
+    abstract void disposeParser(Parser parser);
+
     abstract (nullable ASTSymbol | fail Error) parseExpression(
         Parser parser, LexicalContext lexicalContext);
 
@@ -1080,6 +1085,11 @@ abstract class CompilerBase
 
     abstract (ModuleBase | fail Error) getCompiledModule(string id);
 
+    LocRange makeLocRange((string | int) fileName, int fromRow, int fromColumn, int toRow, int toColumn) {
+        int fileId = fileName.case(string s: -1, int i: i);
+        return LocRange(fileId, (fromRow, fromColumn), (toRow, toColumn));
+    }
+
     abstract IUniqCounter uniqCounter();
 }
 
@@ -1318,6 +1328,9 @@ class ParseImportArgs : MacroArgs
 
 abstract class Parser
 {
+    // Whether our file ID must be preserved in the next binary.
+    bool pinned;
+
     abstract void begin();
     abstract void commit();
     abstract void revert();
@@ -1503,16 +1516,71 @@ class Error
 
 extern(C) void exit(int);
 
+class FileIdTable
+{
+    int[string] fileIds;
+
+    string[int] fileNames;
+
+    bool[int] pinnedFileIds;
+
+    this() { }
+
+    int toFileId(string filename) {
+        mut int i = 0;
+        while (true) {
+            if (!fileNames.has(i)) {
+                fileNames[i] = filename;
+                fileIds[filename] = i;
+                return i;
+            }
+            i++;
+        }
+    }
+
+    void setInheritedFileId(int id, string filename) {
+        assert(!fileNames.has(id));
+        assert(!fileIds.has(filename));
+        fileIds[filename] = id;
+        fileNames[id] = filename;
+    }
+
+    string toFileName(int fileId) {
+        if (!fileNames.has(fileId)) return "[UNKNOWN]";
+        return fileNames[fileId];
+    }
+
+    /**
+     * When compiling an expression that will evaluate to a fileId in the target binary,
+     * the fileId used must be pinned so that the FileIdTable created in the target binary
+     * can be prepopulated.
+     */
+    void pin(int fileId) {
+        pinnedFileIds[fileId] = true;
+    }
+}
+
 struct LocRange {
-    string filename;
+    int fileId;
     (int row, int column) from;
     (int row, int column) to;
 
-    string repr() {
-        return filename ~ ":" ~ itoa(from.row + 1) ~ ":" ~ itoa(from.column + 1);
+    version (firstpass_2) {
+        this((string | int) filename, (int row, int column) from, (int row, int column) to) {
+            this.fileId = filename.case(string s: -1, int i: i);
+            this.from = from;
+            this.to = to;
+        }
+    } else {
     }
 
-    string toString() return repr;
+    string repr(FileIdTable fileIdTable) {
+        return fileIdTable.toFileName(fileId) ~ ":" ~ itoa(from.row + 1) ~ ":" ~ itoa(from.column + 1);
+    }
+
+    string toString() {
+        return "[?$fileId]:" ~ itoa(from.row + 1) ~ ":" ~ itoa(from.column + 1);
+    }
 
     Error fail(string message) {
         return new Error([*this], message);
@@ -1521,14 +1589,14 @@ struct LocRange {
     // This should have been caught earlier.
     void hardCheck(bool flag, string message) {
         if (flag) return;
-        print("$(repr): Internal compiler error!");
+        print("$(toString): Internal compiler error!");
         print(message);
         exit(1);
     }
 
-    BackendLocation toBackendLoc() {
+    BackendLocation toBackendLoc(FileIdTable fileIdTable) {
         mut BackendLocation ret;
-        ret.file = filename;
+        ret.file = fileIdTable.toFileName(fileId);
         ret.line = from.row;
         ret.column = from.column;
         return ret;
@@ -1558,25 +1626,33 @@ template notNull(T) {
     }
 }
 
-bottom exitWithError(Error err) {
-    printError(err);
+bottom exitWithError(Error err, nullable FileIdTable fileIdTable = null) {
+    printError(err, fileIdTable);
     exit(1);
 }
 
-void printError(Error err) {
+void printError(Error err, nullable FileIdTable fileIdTable = null) {
     assert(err.stack.length > 0);
-    for (loc in err.stack[0 .. $ - 1])
-        print(loc.repr ~ ":");
-    printAtErrorLoc(err.stack[$ - 1], err.msg);
+    if (auto fileIdTable = fileIdTable) {
+        for (loc in err.stack[0 .. $ - 1])
+            print(loc.repr(fileIdTable) ~ ":");
+    } else {
+        for (loc in err.stack[0 .. $ - 1])
+            print(loc.toString ~ ":");
+    }
+    err.stack[$ - 1].printAtErrorLoc(fileIdTable, err.msg);
 }
 
-void printAtErrorLoc(LocRange locRange, string message) {
-    if (!exists(locRange.filename)) {
-        print("$(locRange.filename):$(locRange.from.row + 1):$(locRange.from.column + 1): $message");
+void printAtErrorLoc(LocRange locRange, nullable FileIdTable fileIdTable, string message) {
+    mut string filename = "";
+    if (auto fileIdTable = fileIdTable)
+        filename = fileIdTable.toFileName(locRange.fileId);
+    if (filename.empty || !exists(filename)) {
+        print("$(filename):$(locRange.from.row + 1):$(locRange.from.column + 1): $message");
         return;
     }
-    auto text = read(locRange.filename);
-    print("$(locRange.filename):$(locRange.from.row + 1):");
+    auto text = read(filename);
+    print("$(filename):$(locRange.from.row + 1):");
     auto line = text.getLine(locRange.from.row);
     print(line);
     if (locRange.(from.row != to.row || from.column == to.column)) {

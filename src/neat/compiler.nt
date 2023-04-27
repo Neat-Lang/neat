@@ -42,9 +42,15 @@ class CompilerImpl : CompilerBase
 
     GlobalUniqCounter glob;
 
-    this(this.defaultImports, this.modParseConfig, this.cFlags, this.workPool) {
+    FileIdTable fileIdTable;
+
+    this(this.defaultImports, this.modParseConfig, this.cFlags, this.workPool, string[int] inheritedFileIds) {
         this.mutex = new Mutex;
         this.glob = new GlobalUniqCounter;
+        this.fileIdTable = new FileIdTable;
+        for (key in inheritedFileIds.keys) {
+            fileIdTable.setInheritedFileId(key, inheritedFileIds[key]);
+        }
     }
 
     CachedRuntimeFunction[] cachedRuntimeFunctions;
@@ -56,8 +62,16 @@ class CompilerImpl : CompilerBase
     }
 
     // parser
-    override (Parser | fail Error) createParser(string filename, string fulltext) {
-        return new ParserImpl(filename, fulltext, tokenize(fulltext)?);
+    override (Parser | fail Error) createParser(string filename, string text) {
+        auto fileId = this.fileIdTable.toFileId(filename);
+        return new ParserImpl(filename, fileId, text, tokenize(text, filename)?);
+    }
+
+    override void disposeParser(Parser parser) {
+        auto parserImpl = parser.instanceOf(ParserImpl).notNull;
+        if (parserImpl.pinned) {
+            this.fileIdTable.pin(parserImpl.fileId);
+        }
     }
 
     override (nullable ASTSymbol | fail Error) parseExpression(Parser parser, LexicalContext lexicalContext)
@@ -490,7 +504,7 @@ class CompilerImpl : CompilerBase
         .resolveImport(this, pak, import_.instanceOf(ASTImportStatement).notNull, this.helper, this.modParseConfig)
             .case {
                 ASTModule mod: return mod;
-                Error error: exitWithError(error);
+                Error error: exitWithError(error, this.fileIdTable);
             }
     }
 
@@ -876,7 +890,7 @@ class CompilerImpl : CompilerBase
         rtMod.track(fun);
         addDefaultImports(context, rtMod).case {
             void: {}
-            Error err: exitWithError(err);
+            Error err: exitWithError(err, this.fileIdTable);
         }
         context.compilingModule.addImport(rtMod, public_=false, []);
 
@@ -886,7 +900,7 @@ class CompilerImpl : CompilerBase
         // run AFTER module was added to cache, to break dependency loop for recursive types
         rtMod.compile(context).case {
             void: {}
-            Error err: exitWithError(err);
+            Error err: exitWithError(err, this.fileIdTable);
         }
 
         return fun;

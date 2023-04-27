@@ -104,7 +104,8 @@ private string getEnv(string key, string default_ = "") {
 }
 
 BackgroundCompilation emitModule(
-    Module module_, CompilationVisitor[] visitors, BuildSettings settings, Mutex visitorLock, string earlyId)
+    Module module_, CompilationVisitor[] visitors, BuildSettings settings, FileIdTable fileIdTable,
+    Mutex visitorLock, string earlyId)
 {
     auto hash = new Hash;
 
@@ -145,7 +146,7 @@ BackgroundCompilation emitModule(
     }
 
     auto backendModule = settings.backend.createModule(
-        settings.platform, srcFile, module_.locRange.toBackendLoc, settings.forMacro);
+        settings.platform, srcFile, module_.locRange.toBackendLoc(fileIdTable), settings.forMacro);
     version (LLVMBackend) {
         auto backendModuleLLVM = backendModule.instanceOf(LLVMBackendModule);
     }
@@ -182,7 +183,7 @@ BackgroundCompilation emitModule(
         return BackgroundCompilation(hash, srcFile, objFile, 0, extraLibs);
     }
 
-    auto generator = new Generator(settings.platform, backendModule);
+    auto generator = new Generator(settings.platform, backendModule, fileIdTable);
     module_.emit(generator);
     backendModule.done;
 
@@ -270,6 +271,7 @@ class CompilationTask : ITask
     Module module_;
     CompilationVisitor[] visitors;
     BuildSettings settings;
+    FileIdTable fileIdTable;
     Mutex visitorLock;
     (:none | BackgroundCompilation) result;
     string id_;
@@ -282,7 +284,7 @@ class CompilationTask : ITask
         }
     }
 
-    this(this.module_, this.visitors, this.settings, this.visitorLock) {
+    this(this.module_, this.visitors, this.settings, this.fileIdTable, this.visitorLock) {
         this.result = :none;
         if (settings.forMacro) this.id_ = "emit $(module_.mangle) macro";
         else this.id_ = "emit $(module_.mangle)";
@@ -292,7 +294,7 @@ class CompilationTask : ITask
     override bool fresh() => true;
     override void run() {
         this.result = emitModule(
-            this.module_, this.visitors, this.settings, this.visitorLock, this.id);
+            this.module_, this.visitors, this.settings, this.fileIdTable, this.visitorLock, this.id);
     }
 
     void waitDone() {
@@ -332,13 +334,15 @@ class ModulePostProcessorImpl : ModulePostProcessor
 
     BuildSettings settings;
 
+    FileIdTable fileIdTable;
+
     Mutex mutex, visitorLock;
 
     ModuleSet allModules;
 
     string[] taskIds;
 
-    this(this.visitors, this.settings) {
+    this(this.visitors, this.settings, this.fileIdTable) {
         this.visitorLock = new Mutex;
         this.mutex = new Mutex;
         this.allModules = new ModuleSet;
@@ -356,7 +360,8 @@ class ModulePostProcessorImpl : ModulePostProcessor
             with (this.mutex.locked) {
                 if (!this.allModules.add(module_)) return false;
 
-                auto task = new CompilationTask(module_, this.visitors, this.settings, this.visitorLock);
+                auto task = new CompilationTask(
+                    module_, this.visitors, this.settings, this.fileIdTable, this.visitorLock);
 
                 this.settings.pool.queue(task);
                 if (module_.moduleParseTaskId != "")
@@ -389,10 +394,10 @@ class ModulePostProcessorImpl : ModulePostProcessor
 (BuildResult | fail Error) buildAstModule(
     ASTModule astModule, BuildSettings settings,
     ASTModuleVisitor[] moduleVisitors, CompilationVisitor[] compilationVisitors,
-    Options options)
+    FileIdTable fileIdTable, Options options)
 {
     auto preProcessor = new ModulePreProcessorImpl(moduleVisitors);
-    auto postProcessor = new ModulePostProcessorImpl(compilationVisitors, settings);
+    auto postProcessor = new ModulePostProcessorImpl(compilationVisitors, settings, fileIdTable);
     preProcessor.process(astModule);
 
     auto icontext = makeIContext(
@@ -461,7 +466,9 @@ class ParserHelperImpl : ParserHelper
 {
     BuildSettings settings;
 
-    this(this.settings) { }
+    FileIdTable fileIdTable;
+
+    this(this.settings, this.fileIdTable) { }
 
     override (void | fail Error) proxyCall(ASTModule astModule, string function_, MacroState macroState,
         LocRange locRange)
@@ -469,7 +476,7 @@ class ParserHelperImpl : ParserHelper
         print("# stageM $function_");
         // ignore pragma(lib) in macro (what are you doing)
         auto dummyOptions = new Options;
-        auto result = buildAstModule(astModule, this.settings, [], [], dummyOptions)?;
+        auto result = buildAstModule(astModule, this.settings, [], [], this.fileIdTable, dummyOptions)?;
         string objFiles = [join " " ~ a for a in result.objFiles];
 
         string baseCmd() {
@@ -721,6 +728,9 @@ class Options
     string runningCompilerVersion;
     string requestedCompilerVersion;
     string extraCFlags, macroExtraCFlags;
+    string fileIdOutput;
+    // file IDs used by LocRange literals compiled into us.
+    string[int] inheritedFileIds;
     int threads;
 
     this() {
@@ -850,6 +860,16 @@ class Options
                 this.extraCFlags = rest;
             } else if (string rest = arg.startsWith("-macro-extra-cflags=")) {
                 this.macroExtraCFlags = rest;
+            } else if (arg == "-file-id-pin") {
+                assert(i + 2 < args.length);
+                auto id = args[i + 1].atoi;
+                auto path = args[i + 2];
+                this.inheritedFileIds[id] = path;
+                i += 2;
+            } else if (arg == "-file-id-output") {
+                assert(i + 1 < args.length);
+                this.fileIdOutput = args[i + 1];
+                i += 1;
             } else {
                 remArgs ~= arg;
             }
@@ -905,10 +925,14 @@ class Options
         auto lines = path.read.split("\n");
         mut string[] args;
         for (line in lines) {
-            // TODO slice()
             auto words = line.split(" ");
             args ~= words[0];
-            if (words.length > 1) args ~= words[1 .. $].join(" ");
+            mut int used = 1;
+            if (words[0] == "-file-id-pin") {
+                args ~= words[1];
+                used = 2;
+            }
+            if (words.length > used) args ~= words[used .. $].join(" ");
         }
         parseArgs("neat.ini", args);
     }
@@ -944,7 +968,7 @@ ASTModule builtinSymbols(Options options) {
     auto defaultImports = [builtins];
     auto modParseConfig = new ModuleParserConfig(packages, defaultImports);
     auto compiler = new CompilerImpl(
-        defaultImports, modParseConfig, options.cFlags, workPool);
+        defaultImports, modParseConfig, options.cFlags, workPool, options.inheritedFileIds);
     auto settings = new BuildSettings(compiler, options.backend.notNull,
         x86_32=options.x86_32, caching=options.caching, versions=options.allVersions,
         platformFlags=options.platformFlags, optimize=options.optimize, forMacro=false,
@@ -953,7 +977,7 @@ ASTModule builtinSymbols(Options options) {
         x86_32=options.macro_x86_32, caching=options.caching, versions=options.allMacroVersions,
         platformFlags=options.macroPlatformFlags, optimize=false, forMacro=true,
         extraCFlags = options.macroExtraCFlags, pool=workPool, loopPass=loopPass);
-    auto helper = new ParserHelperImpl(macroSettings);
+    auto helper = new ParserHelperImpl(macroSettings, compiler.fileIdTable);
     // FIXME break reference loop
     compiler.helper = helper;
     mut CompilationVisitor[] compilationVisitors;
@@ -975,13 +999,15 @@ ASTModule builtinSymbols(Options options) {
     }
 
     (:exit, int) printError(Error err) {
-        .printError(err);
+        .printError(err, compiler.fileIdTable);
         return (:exit, 1);
     }
 
     auto astModule = getModule(compiler, mainFile, null, false, helper, modParseConfig, __RANGE__)
         .case(Error err: return printError(err));
-    BuildResult result = buildAstModule(astModule, settings, moduleVisitors, compilationVisitors, options)
+    BuildResult result = buildAstModule(astModule, settings, moduleVisitors,
+        compilationVisitors, compiler.fileIdTable, options,
+    )
         .case(Error err: return printError(err));
     mut string fileArgs = [join " " ~ a for a in result.objFiles];
     string[] intermediateFiles = result.intermediateFiles;
@@ -1059,6 +1085,14 @@ long long int compiler_hash_mult() { return $(mult)LL; }
     string cmd = "$compilerCmd$flags$fileArgs $runtime -o $(options.output)$linkerFlags";
     print("\$ $cmd");
     neat_runtime_system(cmd);
+    if (!options.fileIdOutput.empty) {
+        mut string content;
+        for (id in compiler.fileIdTable.pinnedFileIds.keys) {
+            auto name = compiler.fileIdTable.toFileName(id);
+            content ~= "-file-id-pin $id $name\n";
+        }
+        options.fileIdOutput.write(content);
+    }
     compiler.clear;
     if (options.cpr) workPool.report;
     if (options.run) {

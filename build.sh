@@ -62,6 +62,7 @@ NEXT=compiler$(($($NEAT -print-generation) + 1))
 # firstpass_2 because firstpass is already in use in the bootstrapped sources
 $NEAT $FLAGS -backend=c -macro-backend=c -next-generation -P$NEXT:src -j src/main.nt \
     -version=firstpass_2 -macro-version=firstpassmacro_2 -o build/neat_stage1
+# TODO move -file-id-output up here
 cat <<EOF > build/neat.ini
 -syspackage compiler:src
 -running-compiler-version=$TAG
@@ -73,8 +74,13 @@ rm -rf build/src
 cp -R src build/
 
 echo "Building stage 2..."
+FLAGS="$FLAGS -file-id-output build/fileIdPins"
 $NEAT $FLAGS $OPTFLAG -backend=llvm -macro-backend=c -Pcompiler:src -j src/main.nt -o build/neat_stage2
 NEAT=build/neat_stage2
 
 cp -f $NEAT build/neat
 rm build/neat_stage*
+
+# TODO regenerate neat.ini here
+cat build/fileIdPins >> build/neat.ini
+rm build/fileIdPins

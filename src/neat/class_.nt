@@ -455,8 +455,6 @@ class Class
     ClassMethod genInstanceofMethod(Context context)
     {
         mut ASTStatement[] castStmts;
-        castStmts ~= context.compiler.$stmt
-            import package(compiler).neat.runtime : neat_runtime_refcount_inc, neat_runtime_refcount_dec;;
         mut nullable Class current = this;
         while (current)
         {
@@ -766,18 +764,14 @@ class ClassType : Type, CanTreatAsEither
         (nullable Statement | fail Error) do_(Expression expr) {
             mut auto context = context;
             auto sizeT = context.nativeWordType;
-            context = context.withNamespace(
-                context.compiler.exprAlias(context.namespace, "this", expr));
-            context = context.withNamespace(
-                context.compiler.exprAlias(context.namespace, "size_t", sizeT));
-
-            // TODO do in __destroy() once we have function imports
-            auto freeFun = once new FunctionDeclaration(
-                "free", new Void, [Parameter.simple("ptr", new Pointer(new Void))]);
             auto refCountDecFun = once new FunctionDeclaration(
                 "neat_runtime_class_refcount_dec", new Integer, [
                     Parameter.simple("ptr", new Pointer(new Void))]);
 
+            context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, "this", expr));
+            context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, "size_t", sizeT));
             context = context.withNamespace(context.compiler.exprAlias(
                         context.namespace, "neat_runtime_class_refcount_dec", refCountDecFun));
             auto stmt = context.compiler.$stmt neat_runtime_class_refcount_dec(cast(void*) this);;
@@ -1105,28 +1099,19 @@ class IntfType : Type, CanTreatAsEither
         mut Context context = context;
         (nullable Expression | fail Error) do_(Expression source) {
             auto sizeT = context.nativeWordType;
+            auto voidp = once new Pointer(new Void);
             auto refCountIncFun = new FunctionDeclaration(
-                "neat_runtime_refcount_inc", new Void, [
-                    Parameter.simple("label", new Array(new Character, context.platform)),
-                    Parameter.simple("ptr", new Pointer(new Void))]);
+                "neat_runtime_intf_refcount_inc", once new Void, [
+                    Parameter.simple("ptr", voidp)]);
 
             // why do we need to ignore lifetime? what actually eats a lifetime here??
             context = context.withNamespace(context.compiler.exprAlias(
                 context.namespace, "this",
                 new OverrideLifetimeExpr(source, ExprInfo(Lifetime.permanent))));
-            context = context.withNamespace(
-                context.compiler.exprAlias(context.namespace, "size_t", sizeT));
             context = context.withNamespace(context.compiler.exprAlias(
-                        context.namespace, "neat_runtime_refcount_inc", refCountIncFun));
-            context = context.withNamespace(context.compiler.exprAlias(
-                        context.namespace, "inc_name", new StringLiteral("inc " ~ this.intf.name, context.platform)));
+                        context.namespace, "neat_runtime_intf_refcount_inc", refCountIncFun));
 
-            auto incref = context.compiler.$stmt
-            if (!!this) {
-                auto baseOffset = **cast(size_t**) this;
-                auto object = &(cast(char*) this)[-baseOffset];
-                neat_runtime_refcount_inc(inc_name, &(cast(size_t*) object)[1]);
-            };
+            auto incref = context.compiler.$stmt neat_runtime_intf_refcount_inc(cast(void*) this);;
             return context.compiler.statementExpression(
                 incref.compile(context)?.statement,
                 source);
@@ -1143,39 +1128,15 @@ class IntfType : Type, CanTreatAsEither
         // ending its lifetime (ad infinitum).
         auto tempThis = new PairedTemporaryExpr(expr.type, Lifetime.permanent, context.getUniqueId);
         auto initTemp = new InitializeTemporaryExprStatement(tempThis, expr);
-
+        auto refCountDecFun = once new FunctionDeclaration(
+            "neat_runtime_intf_refcount_dec", new Integer, [
+                Parameter.simple("ptr", new Pointer(new Void))]);
         auto sizeT = context.nativeWordType;
         context = context.withNamespace(
             context.compiler.exprAlias(context.namespace, "this", tempThis));
-        context = context.withNamespace(
-            context.compiler.exprAlias(context.namespace, "size_t", sizeT));
-
-        // TODO do in __destroy() once we have function imports
-        auto freeFun = once new FunctionDeclaration(
-            "free", new Void, [Parameter.simple("ptr", new Pointer(new Void))]);
-        auto refCountDecFun = new FunctionDeclaration(
-            "neat_runtime_refcount_dec", new Integer, [
-                Parameter.simple("label", new Array(new Character, context.platform)),
-                Parameter.simple("ptr", new Pointer(new Void))]);
-
         context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "free", freeFun));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "neat_runtime_refcount_dec", refCountDecFun));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "dec_name", new StringLiteral("dec " ~ this.intf.name, context.platform)));
-        auto stmt = context.compiler.$stmt
-            if (!!this) {
-                auto baseOffset = **cast(size_t**) this;
-                auto object = &(cast(char*) this)[-baseOffset];
-                if (neat_runtime_refcount_dec(dec_name, &(cast(size_t*) object)[1]))
-                {
-                    // manually call __destroy method, second entry in the object vtable
-                    auto fn = (*cast(void function(void*)**) object)[1];
-                    fn(object);
-                    free(object);
-                }
-            };
+                    context.namespace, "neat_runtime_intf_refcount_dec", refCountDecFun));
+        auto stmt = context.compiler.$stmt neat_runtime_intf_refcount_dec(cast(void*) this);;
         stmt.compile(context).case {
             StatementCompileResult res:
                 return context.compiler.sequence(initTemp, res.statement);

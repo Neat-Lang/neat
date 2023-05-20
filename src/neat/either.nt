@@ -356,11 +356,11 @@ class Either : Type, Hashable
             return source;
         }
         (nullable Expression | fail Error) do_(Expression source) {
-            mut (int, Expression)[] branches;
+            mut (int, Expression, bool unlikely)[] branches;
             for (int i, entry in types) {
                 auto sourceMember = new EitherMember(source, i);
                 auto newExpr = new EitherExpr(this, sourceMember.type.copy(context, sourceMember)?, i);
-                branches ~= (i + 1, newExpr);
+                branches ~= (i + 1, newExpr, false);
             }
             auto sourceType = new EitherType(source);
             return new SwitchExpr(source.type, ExprInfo(Lifetime.gifted), sourceType, branches, default_=source);
@@ -443,13 +443,13 @@ class Either : Type, Hashable
     override (ASTSymbol | fail Error) hash(Context context, Expression value, LocRange locRange)
     {
         (nullable Expression | fail Error) do_(Expression value) {
-            mut (int, Expression)[] branches;
+            mut (int, Expression, bool unlikely)[] branches;
             for (int i, entry in types) {
                 auto member = new EitherMember(value, i);
                 auto hash = .hash(new ASTSymbolHelper(member), context, locRange)?;
                 auto hash = context.compiler.binaryOp(
                     "^", context, hash, context.compiler.intLiteral(i), __RANGE__)?;
-                branches ~= (i + 1, hash);
+                branches ~= (i + 1, hash, false);
             }
             auto valueType = new EitherType(value);
             return new SwitchExpr(
@@ -472,7 +472,7 @@ class SwitchExpr : Expression
 
     Expression default_;
 
-    (int case_, Expression expr)[] branches;
+    (int case_, Expression expr, bool unlikely)[] branches;
 
     this(this.type, this.info, this.sample, this.branches, this.default_) {}
 
@@ -482,11 +482,11 @@ class SwitchExpr : Expression
         string dest = label ~ "_done";
         string defaultLabel = label ~ "_default";
         mut string[] branchLabels;
-        mut (int, string)[] targets;
+        mut (int, string, bool unlikely)[] targets;
         for (i, branch in branches) {
             auto brLabel = label ~ "_br$i";
             branchLabels ~= brLabel;
-            targets ~= (branch.case_, brLabel);
+            targets ~= (branch.case_, brLabel, branch.unlikely);
         }
 
         auto resultType = this.type.emit(output.platform);
@@ -682,13 +682,14 @@ class ASTEitherCaseExpr : ASTSymbol
                 resultVal, resultVal.info);
         }
 
-        mut (int case_, Expression expr)[] branches;
+        mut (int case_, Expression expr, bool unlikely)[] branches;
         for (i, case_ in this.cases) {
             int matchIndex = matchIndexes[i];
 
             assert(matchIndex != -1);
 
-            branches ~= (matchIndex + 1, handleCase(case_, matchIndex)?);
+            bool unlikely = true if case_.fail else false;
+            branches ~= (matchIndex + 1, handleCase(case_, matchIndex)?, unlikely);
         }
         /*auto astMergeType = new ASTSymbolHelper(mergeType);
         auto default_ = (context.compiler.$expr ({
@@ -709,7 +710,7 @@ class ASTEitherCaseExpr : ASTSymbol
                     "a",
                     fail=false,
                     new ASTIdentifier("a", moduleLevel=false, __RANGE__));
-                branches ~= (i + 1, handleCase(passthroughCase, i)?);
+                branches ~= (i + 1, handleCase(passthroughCase, i)?, false);
             }
         }
         auto switch_ = new SwitchExpr(

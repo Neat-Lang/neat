@@ -1226,14 +1226,24 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
         LLVMBuildCondBr(this.builder, llIcmp, llLabel(thenLabel), llLabel(elseLabel));
         this.blockId += 1;
     }
-    override void switch_(int reg, (int value, string label)[] targets, string defaultTarget) {
+    override void switch_(int reg, (int value, string label, bool unlikely)[] targets, string defaultTarget) {
         auto lli32 = LLVMInt32TypeInContext(this.mod.context);
         auto switchInstr = LLVMBuildSwitch(
             this.builder, llReg(reg), llLabel(defaultTarget), cast(int) targets.length);
+        mut LLVMMetadataRef[] branchWeightsMetadata;
+        branchWeightsMetadata ~= LLVMMDStringInContext2(this.mod.context, "branch_weights", "branch_weights".length);
         for (target in targets) {
             LLVMAddCase(switchInstr, LLVMConstInt(lli32, target.value, false), llLabel(target.label));
+            branchWeightsMetadata ~= intMetadata(1 if target.unlikely else 1000);
         }
+        auto prof = LLVMGetMDKindIDInContext(this.mod.context, "prof", cast(int) "prof".length);
+        auto node = LLVMMDNodeInContext2(
+            this.mod.context, branchWeightsMetadata.ptr, cast(int) branchWeightsMetadata.length);
+        LLVMSetMetadata(switchInstr, prof, LLVMMetadataAsValue(this.mod.context, node));
         this.blockId += 1;
+    }
+    private LLVMMetadataRef intMetadata(int i) {
+        return LLVMValueAsMetadata(LLVMConstInt(LLVMInt32TypeInContext(this.mod.context), i, false));
     }
     override int materialize(BackendType backendType, int source) {
         if (llRegIsTransparentPtr(source)) {

@@ -3498,19 +3498,28 @@ ASTVarExtractDeclStatement extractFromVarDecl(ASTVarDeclStatement decl)
 
 class ASTNestedFunctionDeclStatement : ASTStatement
 {
-    ASTSymbolDeclaration fun;
+    // Multiple functions in sequence can mutual-recurse.
+    ASTSymbolDeclaration[] astFuns;
 
-    this(this.fun) { }
+    this(this.astFuns) { }
 
     override (StatementCompileResult | fail Error) compile(Context context)
     {
-        auto fun = this.fun.compileSymbol(context)?;
-        auto latent = fun.instanceOf(LatentNestedFunction).notNull;
+        mut Namespace allFunsNamespace = context.namespace;
+        mut LatentNestedFunction[] latents;
+        for (astFun in this.astFuns) {
+            auto fun = astFun.compileSymbol(context)?;
+            auto latent = fun.instanceOf(LatentNestedFunction).notNull;
 
-        return StatementCompileResult(
-            new NoopStatement,
-            new SymbolAlias(
-                context.namespace, latent.fun.name, latent));
+            allFunsNamespace = new SymbolAlias(allFunsNamespace, latent.fun.name, latent);
+            latents ~= latent;
+        }
+        // Actually enable mutual nested recursion.
+        for (i, latent in latents) {
+            latent.fun.parent = allFunsNamespace;
+            latent.fun.resetMangleCache;
+        }
+        return StatementCompileResult(new NoopStatement, allFunsNamespace);
     }
 
     override ASTSymbol quote(Quoter quoter) {
@@ -3519,11 +3528,18 @@ class ASTNestedFunctionDeclStatement : ASTStatement
     }
 }
 
-(nullable ASTNestedFunctionDeclStatement | fail Error) parseNestedFunctionDecl(
+(nullable ASTNestedFunctionDeclStatement | fail Error) parseNestedFunctionDecls(
     Parser parser, LexicalContext lexicalContext)
 {
-    if (auto fun_ = parseFunction(parser, lexicalContext)?)
-        return new ASTNestedFunctionDeclStatement(fun_.instanceOf(ASTSymbolDeclaration).notNull);
+    mut ASTSymbolDeclaration[] funs;
+    // TODO while (auto x = y)
+    while (true) {
+        if (auto fun = parseFunction(parser, lexicalContext)?)
+            funs ~= fun.instanceOf(ASTSymbolDeclaration).notNull;
+        else break;
+    }
+    if (!funs.empty)
+        return new ASTNestedFunctionDeclStatement(funs);
     return null;
 }
 
@@ -4187,7 +4203,7 @@ class ASTStaticIfStatement : ASTStatement
         return stmt;
     if (ASTDeclaration decl = parseDeclaration(parser, lexicalContext)?)
         return new ASTDeclarationStatement(decl);
-    if (ASTStatement stmt = parseNestedFunctionDecl(parser, lexicalContext)?)
+    if (ASTStatement stmt = parseNestedFunctionDecls(parser, lexicalContext)?)
         return stmt;
     if (ASTStatement stmt = parseStatementStatement(parser, lexicalContext)?)
         return stmt;

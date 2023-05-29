@@ -200,14 +200,14 @@ class Struct : Type, Hashable
         }
     }
 
-    override (Expression | fail Error) copy(Context context, Expression source) {
+    override (Expression | fail Error) copy(Context context, Expression source, LocRange locRange) {
         auto compiler = context.compiler;
 
         if (FunctionDeclaration copyCtor = getCopyCtor) {
             auto temp = new PairedTemporary(source.type, Lifetime.gifted, context.getUniqueId);
             auto initTemp = new UninitializeTemporaryStatement(temp);
             Expression tempPtr = compiler.castTo(new Pointer(new Void), new ReferenceExpression(temp));
-            auto call = compiler.mkCall(copyCtor, [tempPtr, source], this.locRange);
+            auto call = compiler.mkCall(copyCtor, [tempPtr, source], locRange);
             auto callStmt = new ExprStatement(call);
             auto stmt = sequence(initTemp, callStmt);
             return compiler.statementExpression(stmt, temp);
@@ -220,7 +220,7 @@ class Struct : Type, Hashable
             mut Expression[] exprs;
             for (i, member in members) {
                 auto sourceField = new StructMember(source, i);
-                exprs ~= sourceField.type.copy(context, sourceField)?;
+                exprs ~= sourceField.type.copy(context, sourceField, locRange)?;
             }
             return new StructLiteral(this, ExprInfo(Lifetime.gifted), exprs);
         }
@@ -278,7 +278,7 @@ class Struct : Type, Hashable
         mut Statement initialize = new UninitializeTemporaryStatement(temp);
         for (i, arg in result.args) {
             auto field = new StructMemberReference(temp, i);
-            mut auto stmt = context.compiler.move(context, field, arg)?;
+            mut auto stmt = context.compiler.move(context, field, arg, args[i].locRange)?;
             if (!stmt) stmt = new AssignStatement(field, arg, locRange);
 
             initialize = sequence(initialize, stmt);
@@ -590,11 +590,9 @@ class StructMethod : LateSymbol
     Expression baseExpr;
 
     /**
-     * You cannot take the address of struct methods.
-     * This is unavoidable, as struct methods take a pointer to the struct as a context ptr,
-     * and struct values are not refcountable.
+     * Structs aren't rc tracked, so don't allow refcounting struct methods.
      */
-    this(this.fun, this.baseExpr) { this.refcountable = false; }
+    this(this.fun, this.baseExpr) { this.refcounted = false; }
 
     override LateSymbolResult resolve(Context context) {
         auto funcPtr = new FunctionReference(this.fun);

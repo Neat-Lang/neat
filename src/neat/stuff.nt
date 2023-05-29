@@ -101,8 +101,9 @@ class DefineClassIntf : FinishedSymbol
         with (parser.transaction) {
             string identifier = parser.parseIdentifier;
             if (identifier == "function" || identifier == "delegate") {
-                // prep for uncopyable delegate syntax
-                parser.acceptToken(TokenType.exclamationmark);
+                mut bool copyable = true;
+                if (parser.acceptToken(TokenType.exclamationmark))
+                    copyable = false;
                 parser.expectToken(TokenType.lparen)?;
                 mut ASTSymbol[] args;
                 while (!parser.acceptToken(TokenType.rparen)) {
@@ -115,10 +116,12 @@ class DefineClassIntf : FinishedSymbol
                     args ~= argType.notNull;
                 }
                 commit;
-                if (identifier == "function")
+                if (identifier == "function") {
+                    parser.assert_(copyable, "cannot mark function noncopyable")?;
                     current = new ASTFunctionPointer(current, args, parser.to(from));
-                else
-                    current = new ASTNestedFunctionPointer(current, args, parser.to(from));
+                } else {
+                    current = new ASTNestedFunctionPointer(current, copyable, args, parser.to(from));
+                }
                 continue;
             }
         }
@@ -402,14 +405,16 @@ class DelegateExpr : Expression
 
     Expression thisPtr;
 
-    this(this.funcPtr, this.thisPtr) {
+    bool copyable;
+
+    this(this.funcPtr, this.thisPtr, this.copyable) {
         FunctionPointer type = this.funcPtr.type.instanceOf(FunctionPointer).notNull;
 
         // drop thisptr - implicit!
         assert(type.params.length >= 1);
-        // TODO this smells.
-        this.type = new NestedFunctionPointer(type.ret, [a.type for a in type.params[1 .. $]]);
-        this.info = ExprInfo(Lifetime.ephemeral);
+        this.type = new NestedFunctionPointer(type.ret, copyable=this.copyable, [a.type for a in type.params[1 .. $]]);
+        // local declaration, lexical lifetime? (TODO handle copyable here)
+        this.info = ExprInfo(Lifetime.lexical);
     }
 
     override int emit(Generator output)
@@ -713,7 +718,7 @@ class WrapReference : Reference
                 auto temp = new PairedTemporaryExpr(arg.type, Lifetime.none, context.getUniqueId);
                 // copy! as it's ephemeral, we have no idea when it will disappear; it might
                 // even be during the call!
-                auto set = new InitializeTemporaryExprStatement(temp, arg.copy(context)?);
+                auto set = new InitializeTemporaryExprStatement(temp, arg.copy(context, astArgs[i].locRange)?);
                 // as we copied, we have to clean up our reference.
                 if (auto destructor = arg.type.endLifetime(context, temp)) {
                     pre = sequence2(pre, set);
@@ -1043,7 +1048,7 @@ class ASTIndexAccess : ASTSymbol
                 auto temp = new PairedTemporary(deref.type, Lifetime.gifted, context.getUniqueId);
                 auto init = new UninitializeTemporaryStatement(temp);
                 return context.compiler.wrapRef(
-                    sequence(init, new AssignStatement(temp, deref.copy(context)?, this.locRange)),
+                    sequence(init, new AssignStatement(temp, deref.copy(context, this.locRange)?, this.locRange)),
                     temp, null);
             }
             return deref;
@@ -1150,7 +1155,7 @@ with (parser.transaction)
             .notNull;
         auto tempRet = new PairedTemporary(ret.type, Lifetime.gifted, context.getUniqueId); // temporary since we copy
         auto initTemp = new UninitializeTemporaryStatement(tempRet);
-        auto copyTemp = new AssignStatement(tempRet, ret.copy(context)?, locRange);
+        auto copyTemp = new AssignStatement(tempRet, ret.copy(context, locRange)?, locRange);
 
         nullable Statement endLifetime = baseType.endLifetime(context, baseExpr);
 
@@ -1279,7 +1284,7 @@ class ParenPropertyNamespace : Namespace
                 // Ephemeral 'that', usually a temporization of a gifted expr: leak our caller a reference.
                 auto copiedRes = new PairedTemporary(result.type, Lifetime.gifted, context.getUniqueId);
                 auto initCopy = new UninitializeTemporaryStatement(copiedRes);
-                auto fillCopy = new AssignStatement(copiedRes, result.copy(context)?, locRange);
+                auto fillCopy = new AssignStatement(copiedRes, result.copy(context, locRange)?, locRange);
                 return new StatementExpression(sequence(initCopy, fillCopy), copiedRes, false);
             }
             return result;
@@ -1520,9 +1525,8 @@ class ASTReference : ASTSymbol
         if (Function fun = base.instanceOf(Function))
             return new FunctionReference(fun);
         if (LateSymbol lateSym = base.instanceOf(LateSymbol)) {
-            this.locRange.assert(lateSym.refcountable, "cannot take this address: context is not refcountable")?;
             auto result = lateSym.resolve(context);
-            auto dg = new DelegateExpr(result.funcPtr, result.firstArg);
+            auto dg = new DelegateExpr(result.funcPtr, result.firstArg, copyable=lateSym.refcounted);
             this.locRange.assert(result.teardown is null, "cannot take address: reference base requires cleanup")?;
             return new WrapExpression(result.setup, dg, result.teardown);
         }
@@ -2471,7 +2475,7 @@ class ASTReturn : ASTSymbol
          * - ret the saved value
          */
         auto temp = new PairedTemporaryExpr(expr.type, Lifetime.none, context.getUniqueId);
-        auto init = new InitializeTemporaryExprStatement(temp, expr.take(context)?);
+        auto init = new InitializeTemporaryExprStatement(temp, expr.take(context, this.value.locRange)?);
         mut Statement returnStmt = unwindScope(context, findParent!FunctionScope(context.namespace), init)?;
         // Only implconv after we've taken the expr!
         // We often implconv to a wider sumtype on return. This way we can .take the narrower expr.
@@ -3038,7 +3042,7 @@ class ASTAssignStatement : ASTStatement
                 auto tmpLhs = compiler.dereference(tmpLhsPtr);
 
                 (nullable Statement | fail Error) do3(Expression oldLhs) {
-                    auto reassign = compiler.move(context, tmpLhs, tmpValue)?;
+                    auto reassign = compiler.move(context, tmpLhs, tmpValue, this.value.locRange)?;
                     auto cleanup = oldLhs.type.endLifetime(context, oldLhs);
 
                     return sequence(reassign, cleanup);
@@ -3118,7 +3122,7 @@ class ASTVarDeclStatement : ASTStatement
                 context.namespace, this.name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
 
             return StatementCompileResult(
-                move(context, decl.accessDecl(context), initial)?,
+                move(context, decl.accessDecl(context), initial, this.initial.locRange)?,
                 decl);
         }
         else if (this.uninitialized)
@@ -3396,7 +3400,7 @@ class ASTVarExtractDeclStatement : ASTStatement
         auto switchExpr = switch_.compile(context)?.beExpression(__RANGE__)?;
 
         return StatementCompileResult(
-            move(context, decl.accessDecl(context), switchExpr)?,
+            move(context, decl.accessDecl(context), switchExpr, switch_.locRange)?,
             decl);
     }
 
@@ -3419,7 +3423,8 @@ class ASTVarExtractDeclStatement : ASTStatement
 
         context.pushErrorLoc(this.locRange);
         auto ret = StatementCompileResult(
-            move(context, decl.accessDecl(context), initial.compile(context)?.beExpression(initial.locRange)?)?,
+            move(context, decl.accessDecl(context), initial.compile(context)?.beExpression(initial.locRange)?,
+                this.locRange)?,
             decl);
         context.popErrorLoc;
         return ret;
@@ -3671,7 +3676,7 @@ class ASTStatementExpression : ASTSymbol
         (Statement | fail Error) initEscapeValue() {
             if (resultValue.info.lifetime == Lifetime.gifted)
                 return new InitializeTemporaryExprStatement(temp, resultValue);
-            return new InitializeTemporaryExprStatement(temp, resultValue.copy(context)?);
+            return new InitializeTemporaryExprStatement(temp, resultValue.copy(context, this.locRange)?);
         }
 
         auto sequence = new SequenceStatement(statements ~ initEscapeValue?);
@@ -4545,7 +4550,7 @@ class Module : ModuleBase
 
     override string mangle() { return this.mangledName; }
 
-    void walkModules(bool delegate(Module) cb)
+    void walkModules(bool delegate!(Module) cb)
     {
         if (this.parentModule)
             this.parentModule.walkModules(cb);
@@ -4559,7 +4564,7 @@ class Module : ModuleBase
 
         this.resolver.resolveAll(context)?;
 
-        (void | fail Error) walkSymbols((void | fail Error) delegate((Symbol | FinishedSymbol)) dg) {
+        (void | fail Error) walkSymbols((void | fail Error) delegate!((Symbol | FinishedSymbol)) dg) {
             for (entry in this.resolver.entries) {
                 if (entry.shouldEmit) {
                     dg(entry.resolution?.notNull)?;

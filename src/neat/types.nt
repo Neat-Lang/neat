@@ -391,9 +391,11 @@ class ASTNestedFunctionPointer : ASTSymbol
 {
     ASTSymbol ret;
 
+    bool copyable;
+
     ASTSymbol[] params;
 
-    this(this.ret, this.params, this.locRange) { }
+    this(this.ret, this.copyable, this.params, this.locRange) { }
 
     override (Type | fail Error) compile(Context context)
     {
@@ -403,7 +405,7 @@ class ASTNestedFunctionPointer : ASTSymbol
             params ~= arg.compile(context)?.beType(arg.locRange)?;
         }
 
-        return new NestedFunctionPointer(ret, params);
+        return new NestedFunctionPointer(ret, copyable, params);
     }
 
     override string repr() {
@@ -423,6 +425,8 @@ class ASTNestedFunctionPointer : ASTSymbol
 /**
  * { void *base; void *data; Ret(Args...) funcptr; }
  * base is held in reserve for when we reference count delegates
+ * TODO: remove base, didn't need it after all
+ * void delegate!() is uncopyable, and the type of nested functions in stack functions
  */
 class NestedFunctionPointer : Type
 {
@@ -430,13 +434,21 @@ class NestedFunctionPointer : Type
 
     Type[] params;
 
-    this(this.ret, this.params) {
+    bool copyable;
+
+    this(this.ret, this.copyable, this.params) {
         // FIXME nullable qualifier
         this.zeroInitializable = true;
     }
 
-    override BackendType emit(Platform platform)
+    override (Expression | fail Error) copy(Context context, Expression source, LocRange locRange)
     {
+        if (copyable)
+            return source;
+        context.assert2(false, locRange, "cannot copy uncopyable delegate type")?;
+    }
+
+    override BackendType emit(Platform platform) {
         auto params = new BackendType[](this.params.length + 1);
         params[0] = platform.voidp;
         for (i, param in this.params) params[i + 1] = param.emit(platform);
@@ -444,10 +456,10 @@ class NestedFunctionPointer : Type
         return new BackendStructType([platform.voidp, platform.voidp, fp]);
     }
 
-    override bool same(Type other)
-    {
+    override bool same(Type other) {
         if (auto otherPtr = other.instanceOf(NestedFunctionPointer)) {
             if (!this.ret.same(otherPtr.ret)) return false;
+            if (copyable != otherPtr.copyable) return false;
             if (this.params.length != otherPtr.params.length) return false;
             for (i, param in this.params)
                 if (!param.same(otherPtr.params[i])) return false;
@@ -456,8 +468,27 @@ class NestedFunctionPointer : Type
         return false;
     }
 
+    override nullable Expression implicitConvertTo(Context context, Expression source, Type target)
+    {
+        // TODO
+        // auto otherPtr = target.instanceOf(NestedFunctionPointer).case(null: return null);
+        if (!target.instanceOf(NestedFunctionPointer)) return null;
+        auto otherPtr = target.instanceOf(NestedFunctionPointer).notNull;
+        if (!this.ret.same(otherPtr.ret)) return null;
+        if (this.params.length != otherPtr.params.length) return null;
+        for (i, param in this.params)
+            if (!param.same(otherPtr.params[i])) return null;
+
+        // this is the important bit: noncopyable doesn't implconv to copyable.
+        if (!copyable && otherPtr.copyable) return null;
+
+        return context.compiler.castTo(target, source);
+    }
+
     override string repr() {
-        mut string ret = this.ret.repr ~ " delegate(";
+        mut string ret = this.ret.repr ~ " delegate";
+        if (!copyable) ret ~= "!";
+        ret ~= "(";
         for (i, param in this.params) {
             if (i) ret ~= ", ";
             ret ~= param.repr;
@@ -466,8 +497,10 @@ class NestedFunctionPointer : Type
     }
 
     override string mangle() {
-        // return "fp_" ~ this.ret.repr ~ "_" ~ this.params.map!repr.join("_");
-        mut string ret = "dg_" ~ this.ret.mangle;
+        // return "dg_" ~ this.ret.repr ~ "_" ~ this.params.map!repr.join("_");
+        mut string ret = "dg_";
+        if (copyable) ret ~= "copyable_";
+        ret ~= this.ret.mangle;
         for (param in this.params)
             ret ~= "_" ~ param.mangle;
         return ret;
@@ -475,6 +508,7 @@ class NestedFunctionPointer : Type
 
     override void hash(Hash hash) {
         hash.adds("dgptr");
+        hash.addl(copyable);
         ret.hash(hash);
         hash.addl(params.length);
         for (param in this.params)

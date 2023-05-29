@@ -467,9 +467,7 @@ class Class
                 void* voidPtr = this;
                 return voidPtr;
             };
-            // TODO allow recursion in nested fn
-            mut void delegate(Intf) recurse;
-            void recurse_(Intf intf) {
+            void recurse(Intf intf) {
                 auto intfType = new IntfType(intf, zeroInitializable=false);
                 auto astIntf = new ASTSymbolHelper(intfType);
                 auto intfClassinfo = new ASTSymbolHelper(new ClassInfo(intfType));
@@ -482,7 +480,6 @@ class Class
                     recurse(superIntf);
                 }
             }
-            recurse = &recurse_;
             for (superIntf in current.superIntfs) {
                 recurse(superIntf);
             }
@@ -511,16 +508,13 @@ class Class
     ClassMethod genReleaseMethod(Context context)
     {
         mut ASTStatement[] statements;
-        // FIXME self-recursion in nested function
-        mut void delegate(Class) recurse;
-        void recurse_(Class self) {
+        void recurse(Class self) {
             if (auto superClass = self.superClass) recurse(superClass);
             for (member in self.members) {
                 auto name = context.compiler.astIdentifier(member.name, __RANGE__);
                 statements ~= context.compiler.$stmt __destroy($name);;
             }
         }
-        recurse = &recurse_;
         recurse(this);
         auto stmt = context.compiler.astSequence(statements, __RANGE__);
 
@@ -675,9 +669,7 @@ class ClassType : Type, CanTreatAsEither
 
         if (!baseExpr) return null;
 
-        // FIXME self-recursion in nested function
-        mut nullable Symbol delegate(Class) recurse;
-        nullable Symbol recurse_(Class self) {
+        nullable Symbol recurse(Class self) {
             size_t memberOffset = [first i for i, m in self.members where m.name == member && allowed(m.protection) else -1];
             if (memberOffset != -1) {
                 Reference asStruct = context.compiler.dereference(
@@ -699,7 +691,6 @@ class ClassType : Type, CanTreatAsEither
             }
             return null;
         }
-        recurse = &recurse_;
         return recurse(this.class_);
     }
 
@@ -742,7 +733,7 @@ class ClassType : Type, CanTreatAsEither
         hash.applyHash(this.class_.cachedHash);
     }
 
-    override (Expression | fail Error) copy(Context context, Expression source)
+    override (Expression | fail Error) copy(Context context, Expression source, LocRange locRange)
     {
         (nullable Expression | fail Error) do_(Expression source) {
             mut auto context = context;
@@ -855,13 +846,10 @@ class Intf
     }
 
     public int slots() {
-        // FIXME self-recursion in nested function
-        mut int delegate(Intf) recurse;
-        int recurse_(Intf current) {
+        int recurse(Intf current) {
             if (current.superIntfs.length == 0) return 1;
             return [sum recurse(i) for i in current.superIntfs];
         }
-        recurse = &recurse_;
         return recurse(this);
     }
 
@@ -980,9 +968,7 @@ class IntfType : Type, CanTreatAsEither
     // get slot pointer of target in our hierarchy
     // if not found, return the number of bases traversed
     private (Expression | int) getSlot(IntfType target, Expression islotTablePtr, mut int base) {
-        // FIXME self-recursion in nested function
-        mut int delegate(IntfType) recurse;
-        int recurse_(IntfType current) {
+        int recurse(IntfType current) {
             // implconv intf to nullable intf
             if (current.same(target) || current.makeNullable.same(target)) return base;
             if (current.superIntfs.length == 0) {
@@ -995,7 +981,6 @@ class IntfType : Type, CanTreatAsEither
             }
             return -1;
         }
-        recurse = &recurse_;
         int slot = recurse(this);
         if (slot != -1) {
             auto basePtr = new PointerCast(once new Pointer(new Pointer(new Void)), islotTablePtr);
@@ -1100,7 +1085,7 @@ class IntfType : Type, CanTreatAsEither
         hash.apply(intf.mangledHash.add, intf.mangledHash.mult);
     }
 
-    override (Expression | fail Error) copy(Context context, Expression source)
+    override (Expression | fail Error) copy(Context context, Expression source, LocRange locRange)
     {
         mut Context context = context;
         (nullable Expression | fail Error) do_(Expression source) {
@@ -1228,7 +1213,8 @@ class ClassMethodSymbol : LateSymbol
     bool staticLookup;
 
     this(this.class_, this.baseExpr, this.methodOffset, this.staticLookup) {
-        this.refcountable = true;
+        // class method takes a reference on copy
+        this.refcounted = true;
     }
 
     override LateSymbolResult resolve(Context context) {
@@ -1282,7 +1268,7 @@ class IntfMethodSymbol : LateSymbol
     size_t methodOffset;
 
     this(this.intfType, this.baseExpr, this.methodOffset) {
-        this.refcountable = true;
+        this.refcounted = true;
     }
 
     override LateSymbolResult resolve(Context context) {

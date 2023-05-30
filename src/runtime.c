@@ -234,6 +234,20 @@ void neat_runtime_intf_refcount_dec(void *ptr) {
     }
 }
 
+typedef struct {
+    void *base; // deprecated
+    void *ptr;
+    void (*funcptr)();
+} Delegate;
+
+void neat_runtime_dg_refcount_inc(Delegate delegate) {
+    neat_runtime_class_refcount_inc(delegate.ptr);
+}
+
+void neat_runtime_dg_refcount_dec(Delegate delegate) {
+    neat_runtime_class_refcount_dec(delegate.ptr);
+}
+
 void neat_runtime_refcount_set(size_t *ptr, size_t value)
 {
     // *ptr = value;

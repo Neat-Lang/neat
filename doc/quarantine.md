@@ -1,7 +1,3 @@
-# TODO notice
-
-Quarantine checking is not yet implemented.
-
 # Lambda Quarantine Checks
 
 Reminder: there are (basically) three classes of lifetimes

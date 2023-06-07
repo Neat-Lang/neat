@@ -11,4 +11,5 @@ and give insight into their motivations.
 
 - [The CompilerBase Class](./compilerbase.md)
 - [\_\_GENERATION\_\_ and bootstrapping](./generations.md)
+- [lambda quarantine checks](./quarantine.md)
 - TODO Multi-Stage Feature Transitions

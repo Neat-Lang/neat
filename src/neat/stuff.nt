@@ -1557,9 +1557,11 @@ class Lambda : Type
 
     string repr_;
 
+    Returnable containingReturnable;
+
     bool copyable;
 
-    this(this.decl, this.mangle_, this.repr_, this.copyable) {
+    this(this.decl, this.mangle_, this.repr_, this.containingReturnable, this.copyable) {
         this.zeroInitializable = true;
     }
 
@@ -1587,6 +1589,16 @@ class Lambda : Type
         return false;
     }
 
+    override QuarantinePolicy quarantinePolicy() {
+        return QuarantinePolicy(container=:occluded, value=:checked);
+    }
+
+    override (void | fail Error) checkQuarantine(Context context, LocRange locRange, QuarantineReason reason)
+    {
+        context.assert2(reason.returnable != this.containingReturnable || copyable, locRange
+            "cannot return scoped lambda from function where it was declared")?;
+    }
+
     override string mangle() => mangle_;
 
     override string repr() {
@@ -1605,10 +1617,8 @@ class LambdaExpr : Expression
 
     string repr_;
 
-    bool copyable;
-
-    this(this.templ, string mangle, this.repr_, this.copyable) {
-        this.type = new Lambda(this.templ.latent, mangle_=mangle, this.repr_, this.copyable);
+    this(this.templ, string mangle, this.repr_, Returnable returnable, bool copyable) {
+        this.type = new Lambda(this.templ.latent, mangle_=mangle, this.repr_, returnable, copyable);
         // copyable or not, our lifetime is at least lexical.
         this.info = ExprInfo(Lifetime.lexical);
     }
@@ -1680,8 +1690,10 @@ class ASTLambdaExpr : ASTSymbol
             return "($paramList) => $(this.value.repr)";
         }
 
+        Returnable returnable = context.namespace.findParent!Returnable.notNull;
+
         // TODO copyable based on function context
-        return new LambdaExpr(templateDecl, mangle=lambdaTypeMangle, repr, copyable=false);
+        return new LambdaExpr(templateDecl, mangle=lambdaTypeMangle, repr, returnable=returnable, copyable=false);
     }
 }
 
@@ -2478,8 +2490,10 @@ class ASTReturn : ASTSymbol
     override (Symbol | fail Error) compile(Context context)
     {
         mut Expression expr = this.value.compile(context)?.beExpressionImplCall(context, this.locRange)?;
-        Type ret = findParent!Returnable(context.namespace)
-            .mergeReturn(context, expr, this.locRange)?;
+        Returnable returnable = findParent!Returnable(context.namespace).notNull;
+        Type ret = returnable.mergeReturn(context, expr, this.locRange)?;
+
+        ret.checkQuarantine(context, this.locRange, (:returningFrom, returnable))?;
 
         /**
          * - save the value

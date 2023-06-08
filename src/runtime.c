@@ -225,8 +225,7 @@ void neat_runtime_intf_refcount_dec(void *ptr) {
     if (!ptr) return;
     size_t base_offset = **(size_t**) ptr;
     void **object = (void**) ((char*) ptr - base_offset);
-    if (neat_runtime_refcount_dec((struct String){9, "interface", NULL}, (ptrdiff_t*) &object[1]))
-    {
+    if (neat_runtime_refcount_dec((struct String){9, "interface", NULL}, (ptrdiff_t*) &object[1])) {
         void (**vtable)(void*) = *(void(***)(void*)) object;
         void (*destroy)(void*) = vtable[1];
         destroy(object);
@@ -245,7 +244,17 @@ void neat_runtime_dg_refcount_inc(Delegate delegate) {
 }
 
 void neat_runtime_dg_refcount_dec(Delegate delegate) {
-    neat_runtime_class_refcount_dec(delegate.ptr);
+    void **ptr = delegate.ptr;
+    if (!ptr) return;
+    if (neat_runtime_refcount_dec((struct String){5, "class", NULL}, (ptrdiff_t*) &ptr[1])) {
+        // otherwise it's a delegate
+        if (*(void**) ptr) {
+            void (**vtable)(void*) = *(void(***)(void*)) ptr;
+            void (*destroy)(void*) = vtable[1];
+            destroy(ptr);
+        }
+        free(ptr);
+    }
 }
 
 void neat_runtime_refcount_set(size_t *ptr, size_t value)

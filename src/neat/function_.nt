@@ -27,6 +27,8 @@ class Function : FunctionDeclaration
 
     bool hasThisArg;
 
+    bool heapAllocated;
+
     LocRange locRange;
 
     string comment; // for docgen
@@ -35,7 +37,8 @@ class Function : FunctionDeclaration
 
     string mangleCache;
 
-    this(this.name, this.retWIP, this.params, this.statement, this.macroState, this.hasThisArg, this.locRange)
+    this(this.name, this.retWIP, this.params, this.statement, this.macroState, this.hasThisArg, this.heapAllocated,
+         this.locRange)
     {
         this.contextType = null;
         this.parent = null;
@@ -123,7 +126,8 @@ class Function : FunctionDeclaration
         auto compiler = context.compiler;
 
         auto stackframe = new FunctionScope(
-            compiler, this.retWIP, this.contextType, this.parent.notNull, this.mangle, this.repr, this.locRange);
+            compiler, this.retWIP, this.contextType, this.parent.notNull, this.mangle, this.repr,
+            heapAllocated=this.heapAllocated, this.locRange);
         auto framePtr = compiler.reference(compiler.stackFrame(new Void));
         auto icontext = makeIContext(
             compiler, context.platform, this.macroState,
@@ -131,7 +135,7 @@ class Function : FunctionDeclaration
             context.modulePreProcessor, context.modulePostProcessor);
         auto context = makeContext(icontext, stackframe).withFramePointer(framePtr);
 
-       mut Namespace scope_ = stackframe;
+        mut Namespace scope_ = stackframe;
         mut int extra = 0;
         if (this.contextType)
             extra = 1;
@@ -143,6 +147,8 @@ class Function : FunctionDeclaration
             // unnamed variable because of "first field in stackframe is 'this'" logic
             mut string framePtrName;
             if (this.hasThisArg) framePtrName = "this";
+            // FIXME if heap allocated, copy, don't borrow! as below!
+            // Make sure the type is the right one! No void*!
             thisDecl = new VariableDeclaration(
                 scope_, framePtrName, context.platform, contextType,
                 mut=false, borrowed=true, hidden=framePtrName == "");
@@ -172,11 +178,13 @@ class Function : FunctionDeclaration
                 // TODO location
                 argAssignments[extra + i] = compiler.assignStatement(target, argExpr.copy(context, __RANGE__)?);
             } else {
-                if (param.mutable) {
-                    // we're mutable, but functions borrow the caller args.
+                if (param.mutable || this.heapAllocated) {
+                    // We're mutable, but functions borrow the caller args.
                     // So despite being lexical, we copy them.
+                    // (Also goes for heap allocated functions, as they outlive the caller.)
                     auto argDecl = new VariableDeclaration(
-                        scope_, param.name, context.platform, param.type, mut=true, borrowed=false, false);
+                        scope_, param.name, context.platform, param.type,
+                        mut=param.mutable, borrowed=false, hidden=false);
                     auto target = argDecl.accessDecl(context);
 
                     // TODO location
@@ -184,7 +192,7 @@ class Function : FunctionDeclaration
                     scope_ = argDecl;
                 } else {
                     auto argDecl = new VariableDeclaration(
-                        scope_, param.name, context.platform, param.type, mut=false, borrowed=true, false);
+                        scope_, param.name, context.platform, param.type, mut=false, borrowed=true, hidden=false);
 
                     argAssignments[extra + i] = compiler.assignStatement(argDecl.accessDecl(context), argExpr);
                     scope_ = argDecl;
@@ -255,7 +263,19 @@ class CompiledFunction : FinishedSymbol
             this.fun.locRange.toBackendLoc(generator.fileIdTable)
         );
 
-        generator.frameReg = generator.fun.staticAlloca(this.stackframe.(new BackendSpacerType(maxSize, maxAlignment)));
+        if (fun.heapAllocated) with (generator) {
+            auto sizeT = platform.nativeWordType;
+            int nullReg = fun.wordLiteral(platform, 0);
+            int oneReg = fun.wordLiteral(platform, 1);
+            int maxSizeReg = fun.wordLiteral(platform, this.stackframe.maxSize);
+            generator.frameReg = fun.call(platform.voidp, "neat_runtime_alloc", [maxSizeReg]);
+            // heap layout: null, refs, data
+            fun.store(sizeT, fun.ptrOffset(sizeT, generator.frameReg, nullReg), nullReg);
+            // initialize refs to 1
+            fun.store(sizeT, fun.ptrOffset(sizeT, generator.frameReg, oneReg), oneReg);
+        } else {
+            generator.frameReg = generator.fun.staticAlloca(this.stackframe.(new BackendSpacerType(maxSize, maxAlignment)));
+        }
 
         [assignment.emit(generator) for assignment in this.argAssignments];
         this.compiledStatement.emit(generator);
@@ -293,11 +313,13 @@ class FunctionScope : Namespace, Returnable, Declarable
 
     LocRange locRange;
 
+    bool heapAllocated;
+
     int maxSize;
 
     int maxAlignment;
 
-    this(this.compiler, this.ret, this.extra, this.parent, this.mangle_, this.repr_, this.locRange) {
+    this(this.compiler, this.ret, this.extra, this.parent, this.mangle_, this.repr_, this.heapAllocated, this.locRange) {
         this.isContextScope = true;
         this.maxSize = 0;
         this.maxAlignment = 1;
@@ -318,7 +340,14 @@ class FunctionScope : Namespace, Returnable, Declarable
         assert(!borrowed || !mut);
 
         // TODO dedicated stackframe type so we don't need to keep recreating struct type instances
-        auto vars = [new StructMemberDeclaration(name, Protection.public_, type) for type in frame];
+        mut auto vars = [new StructMemberDeclaration(name, Protection.public_, type) for type in frame];
+        if (heapAllocated) {
+            auto voidp = once new Pointer(new Void);
+            vars = [
+                new StructMemberDeclaration("__fake_vtable", Protection.private_, voidp),
+                new StructMemberDeclaration("__closure_refs", Protection.private_, voidp),
+            ] ~ vars;
+        }
         auto structType = this.compiler.struct_("", vars, this.locRange, this.mangle_);
         auto backendType = structType.emit(platform);
 
@@ -610,8 +639,9 @@ class NestedFunction : LateSymbol
     Expression baseExpr;
 
     this(this.fun, this.baseExpr) {
-        // TODO heap-allocated stackframes set this true
-        this.refcounted = false;
+        // note: refcounted concerns the *parent* of the nested function, because
+        // that's what decides to heap allocate the function's first-arg context.
+        this.refcounted = this.fun.parent.findParent!FunctionScope.notNull.heapAllocated;
     }
 
     override LateSymbolResult resolve(Context context) {
@@ -668,6 +698,8 @@ class ASTFunction : ASTSymbolDeclaration
 
     bool isDeclaration;
 
+    bool heapAllocated;
+
     ASTStatement statement;
 
     MacroState macroState;
@@ -675,8 +707,8 @@ class ASTFunction : ASTSymbolDeclaration
     // for docgen
     string comment;
 
-    this(this.name, this.ret, this.params, this.isDeclaration, this.locRange, this.statement, this.macroState,
-         this.comment) { }
+    this(this.name, this.ret, this.params, this.isDeclaration, this.heapAllocated, this.locRange, this.statement,
+         this.macroState, this.comment) { }
 
     override (Symbol | fail Error) compileSymbol(Context context)
     {
@@ -718,7 +750,7 @@ class ASTFunction : ASTSymbolDeclaration
             this.name,
             ret?,
             params,
-            this.statement, this.macroState, false, this.locRange);
+            this.statement, this.macroState, hasThisArg=false, heapAllocated=this.heapAllocated, this.locRange);
 
         fun.comment = this.comment;
 
@@ -799,8 +831,11 @@ class ASTFunction : ASTSymbolDeclaration
             }
         }
         auto params = [pick(entry) for entry in params.params];
+        bool heapAllocated = parser.acceptIdentifier("heap");
         ASTStatement stmt = lexicalContext.compiler.parseFunctionBody(parser, lexicalContext)?;
-        return new ASTFunction(name, ret, params, false, locRange, stmt, lexicalContext.macroState, comment);
+        return new ASTFunction(
+            name, ret, params, isDeclaration=false, heapAllocated=heapAllocated, locRange, stmt,
+            lexicalContext.macroState, comment);
     }
     if (auto ret = lexicalContext.compiler.parseTemplateStub(parser, lexicalContext, name, comment, &parseRest)?) {
         parser.commit;

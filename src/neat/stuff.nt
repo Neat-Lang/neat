@@ -414,8 +414,8 @@ class DelegateExpr : Expression
         assert(type.params.length >= 1);
         this.type = new Delegate(type.ret, copyable=this.copyable, [a.type for a in type.params[1 .. $]]);
         if (this.copyable) {
-            // class? we took a ref in ASTReference.
-            this.info = ExprInfo(Lifetime.gifted);
+            // class or nested function, we have to take a ref.
+            this.info = ExprInfo(Lifetime.ephemeral);
         } else {
             // local declaration, lexical lifetime
             this.info = ExprInfo(Lifetime.lexical);
@@ -1531,8 +1531,7 @@ class ASTReference : ASTSymbol
             return new FunctionReference(fun);
         if (LateSymbol lateSym = base.instanceOf(LateSymbol)) {
             auto result = lateSym.resolve(context);
-            auto firstArgCopy = result.firstArg.type.copy(context, result.firstArg, this.locRange)?;
-            auto dg = new DelegateExpr(result.funcPtr, firstArgCopy, copyable=lateSym.refcounted);
+            auto dg = new DelegateExpr(result.funcPtr, result.firstArg, copyable=lateSym.refcounted);
             this.locRange.assert(result.teardown is null, "cannot take address: reference base requires cleanup")?;
             return new WrapExpression(result.setup, dg, result.teardown);
         }
@@ -1676,7 +1675,7 @@ class ASTLambdaExpr : ASTSymbol
             for i, paramName in this.paramNames];
         auto lambdaFun = new ASTFunction(
             lambdaName, :auto_, astParameters,
-            isDeclaration=false, heapAllocated=false, __RANGE__, statement=returnLambdaExpr, this.macroState, null);
+            isDeclaration=false, __RANGE__, statement=returnLambdaExpr, this.macroState, null);
         auto astTemplateDecl = new ASTTemplateDecl(
             lambdaName, ["T$i" for i, _ in paramNames], lambdaFun, comment="",
             moduleParseTaskId=this.moduleParseTaskId);
@@ -3575,18 +3574,16 @@ class ASTNestedFunctionDeclExpr : ASTSymbol
 {
     ASTParameter[] params;
 
-    bool heapAllocated;
-
     ASTStatement stmt;
 
     MacroState macroState;
 
-    this(this.params, this.heapAllocated, this.stmt, this.macroState, this.locRange) {}
+    this(this.params, this.stmt, this.macroState, this.locRange) {}
 
     override (Symbol | fail Error) compile(Context context) {
         string name = "__nested_literal_$(this.locRange.from.row)_$(context.getLabel)";
         auto fun = new ASTFunction(
-            name, :auto_, this.params, isDeclaration=false, heapAllocated=this.heapAllocated,
+            name, :auto_, this.params, isDeclaration=false,
             this.locRange, this.stmt, this.macroState, comment=null);
 
         auto resolvedFun = fun.compileSymbol(context)?.instanceOf(LatentNestedFunction).notNull
@@ -3629,10 +3626,9 @@ class ASTNestedFunctionDeclExpr : ASTSymbol
             }
         }
         auto params = [pick(entry) for entry in params.params];
-        bool heapAllocated = parser.acceptIdentifier("heap");
         ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
         auto locRange = parser.to(from);
-        return new ASTNestedFunctionDeclExpr(params, heapAllocated, stmt, lexicalContext.macroState, locRange);
+        return new ASTNestedFunctionDeclExpr(params, stmt, lexicalContext.macroState, locRange);
     }
 }
 

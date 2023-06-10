@@ -240,12 +240,13 @@ typedef struct {
 } Delegate;
 
 void neat_runtime_dg_refcount_inc(Delegate delegate) {
+    /*if (delegate.ptr)
+        printf("dg refcount inc from %zd\n", *(ptrdiff_t*) &((void**)delegate.ptr)[1]);*/
     neat_runtime_class_refcount_inc(delegate.ptr);
 }
 
-void neat_runtime_dg_refcount_dec(Delegate delegate) {
-    void **ptr = delegate.ptr;
-    if (!ptr) return;
+void neat_runtime_stackframe_refcount_dec(void **ptr) {
+    // printf("dg refcount dec from %zd\n", *(ptrdiff_t*) &ptr[1]);
     if (neat_runtime_refcount_dec((struct String){5, "class", NULL}, (ptrdiff_t*) &ptr[1])) {
         // otherwise it's a delegate
         if (*(void**) ptr) {
@@ -255,6 +256,11 @@ void neat_runtime_dg_refcount_dec(Delegate delegate) {
         }
         free(ptr);
     }
+}
+
+void neat_runtime_dg_refcount_dec(Delegate delegate) {
+    if (!delegate.ptr) return;
+    neat_runtime_stackframe_refcount_dec(delegate.ptr);
 }
 
 void neat_runtime_refcount_set(size_t *ptr, size_t value)

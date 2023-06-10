@@ -27,8 +27,6 @@ class Function : FunctionDeclaration
 
     bool hasThisArg;
 
-    bool heapAllocated;
-
     LocRange locRange;
 
     string comment; // for docgen
@@ -37,7 +35,7 @@ class Function : FunctionDeclaration
 
     string mangleCache;
 
-    this(this.name, this.retWIP, this.params, this.statement, this.macroState, this.hasThisArg, this.heapAllocated,
+    this(this.name, this.retWIP, this.params, this.statement, this.macroState, this.hasThisArg,
          this.locRange)
     {
         this.contextType = null;
@@ -127,7 +125,7 @@ class Function : FunctionDeclaration
 
         auto stackframe = new FunctionScope(
             compiler, this.retWIP, this.contextType, this.parent.notNull, this.mangle, this.repr,
-            heapAllocated=this.heapAllocated, this.locRange);
+            this.locRange);
         auto framePtr = compiler.reference(compiler.stackFrame(new Void));
         auto icontext = makeIContext(
             compiler, context.platform, this.macroState,
@@ -178,7 +176,7 @@ class Function : FunctionDeclaration
                 // TODO location
                 argAssignments[extra + i] = compiler.assignStatement(target, argExpr.copy(context, __RANGE__)?);
             } else {
-                if (param.mutable || this.heapAllocated) {
+                if (param.mutable) {
                     // We're mutable, but functions borrow the caller args.
                     // So despite being lexical, we copy them.
                     // (Also goes for heap allocated functions, as they outlive the caller.)
@@ -262,20 +260,7 @@ class CompiledFunction : FinishedSymbol
             paramTypes,
             this.fun.locRange.toBackendLoc(generator.fileIdTable)
         );
-
-        if (fun.heapAllocated) with (generator) {
-            auto sizeT = platform.nativeWordType;
-            int nullReg = fun.wordLiteral(platform, 0);
-            int oneReg = fun.wordLiteral(platform, 1);
-            int maxSizeReg = fun.wordLiteral(platform, this.stackframe.maxSize);
-            generator.frameReg = fun.call(platform.voidp, "neat_runtime_alloc", [maxSizeReg]);
-            // heap layout: null, refs, data
-            fun.store(sizeT, fun.ptrOffset(sizeT, generator.frameReg, nullReg), nullReg);
-            // initialize refs to 1
-            fun.store(sizeT, fun.ptrOffset(sizeT, generator.frameReg, oneReg), oneReg);
-        } else {
-            generator.frameReg = generator.fun.staticAlloca(this.stackframe.(new BackendSpacerType(maxSize, maxAlignment)));
-        }
+        generator.frameReg = generator.fun.staticAlloca(this.stackframe.(new BackendSpacerType(maxSize, maxAlignment)));
 
         [assignment.emit(generator) for assignment in this.argAssignments];
         this.compiledStatement.emit(generator);
@@ -313,13 +298,11 @@ class FunctionScope : Namespace, Returnable, Declarable
 
     LocRange locRange;
 
-    bool heapAllocated;
-
     int maxSize;
 
     int maxAlignment;
 
-    this(this.compiler, this.ret, this.extra, this.parent, this.mangle_, this.repr_, this.heapAllocated, this.locRange) {
+    this(this.compiler, this.ret, this.extra, this.parent, this.mangle_, this.repr_, this.locRange) {
         this.isContextScope = true;
         this.maxSize = 0;
         this.maxAlignment = 1;
@@ -341,13 +324,6 @@ class FunctionScope : Namespace, Returnable, Declarable
 
         // TODO dedicated stackframe type so we don't need to keep recreating struct type instances
         mut auto vars = [new StructMemberDeclaration(name, Protection.public_, type) for type in frame];
-        if (heapAllocated) {
-            auto voidp = once new Pointer(new Void);
-            vars = [
-                new StructMemberDeclaration("__fake_vtable", Protection.private_, voidp),
-                new StructMemberDeclaration("__closure_refs", Protection.private_, voidp),
-            ] ~ vars;
-        }
         auto structType = this.compiler.struct_("", vars, this.locRange, this.mangle_);
         auto backendType = structType.emit(platform);
 
@@ -639,9 +615,8 @@ class NestedFunction : LateSymbol
     Expression baseExpr;
 
     this(this.fun, this.baseExpr) {
-        // note: refcounted concerns the *parent* of the nested function, because
-        // that's what decides to heap allocate the function's first-arg context.
-        this.refcounted = this.fun.parent.findParent!FunctionScope.notNull.heapAllocated;
+        // becomes true in 'new &bla' formalism (TODO parameter?)
+        this.refcounted = false;
     }
 
     override LateSymbolResult resolve(Context context) {
@@ -698,8 +673,6 @@ class ASTFunction : ASTSymbolDeclaration
 
     bool isDeclaration;
 
-    bool heapAllocated;
-
     ASTStatement statement;
 
     MacroState macroState;
@@ -707,7 +680,7 @@ class ASTFunction : ASTSymbolDeclaration
     // for docgen
     string comment;
 
-    this(this.name, this.ret, this.params, this.isDeclaration, this.heapAllocated, this.locRange, this.statement,
+    this(this.name, this.ret, this.params, this.isDeclaration, this.locRange, this.statement,
          this.macroState, this.comment) { }
 
     override (Symbol | fail Error) compileSymbol(Context context)
@@ -750,7 +723,7 @@ class ASTFunction : ASTSymbolDeclaration
             this.name,
             ret?,
             params,
-            this.statement, this.macroState, hasThisArg=false, heapAllocated=this.heapAllocated, this.locRange);
+            this.statement, this.macroState, hasThisArg=false, this.locRange);
 
         fun.comment = this.comment;
 
@@ -831,10 +804,9 @@ class ASTFunction : ASTSymbolDeclaration
             }
         }
         auto params = [pick(entry) for entry in params.params];
-        bool heapAllocated = parser.acceptIdentifier("heap");
         ASTStatement stmt = lexicalContext.compiler.parseFunctionBody(parser, lexicalContext)?;
         return new ASTFunction(
-            name, ret, params, isDeclaration=false, heapAllocated=heapAllocated, locRange, stmt,
+            name, ret, params, isDeclaration=false, locRange, stmt,
             lexicalContext.macroState, comment);
     }
     if (auto ret = lexicalContext.compiler.parseTemplateStub(parser, lexicalContext, name, comment, &parseRest)?) {

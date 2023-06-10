@@ -444,51 +444,26 @@ class Delegate : Type
     }
 
     override (Expression | fail Error) copy(Context context, Expression source, LocRange locRange) {
+        import neat.runtime : die;
         if (!copyable) {
             context.assert2(false, locRange, "cannot copy uncopyable delegate type")?;
         }
         // For now, assume the delegate data pointer is a class.
-        mut auto context = context;
-        auto refCountIncFun = new FunctionDeclaration(
-            "neat_runtime_dg_refcount_inc", new Void, [
-                Parameter.simple("dg", this)]);
-        auto sourceArg = new OverrideLifetimeExpr(source, ExprInfo(Lifetime.none));
-        context = context.withNamespace(context.compiler.exprAlias(
-            context.namespace, "dg", sourceArg));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "neat_runtime_dg_refcount_inc", refCountIncFun));
-
-        auto astCallStmt = context.compiler.astExpressionStmt(
-            context.compiler.astCall(
-                context.compiler.astIdentifier("neat_runtime_dg_refcount_inc", __RANGE__),
-                [context.compiler.astIdentifier("dg", __RANGE__)],
-                __RANGE__),
-            __RANGE__);
-
-        return context.compiler.statementExpression(astCallStmt.compile(context)?.statement, source);
+        (nullable Expression | fail Error) do_(Expression source) {
+            return context.compiler.statementExpression(
+                context.compiler.exprStatement(
+                    context.compiler.simpleCall(
+                        context, "neat_runtime_dg_refcount_inc", new Void, [source], __RANGE__)),
+                source);
+        }
+        return context.compiler.exprWithTemporaryExpr(context.getUniqueId, source, &do_)
+            .case(Error: die).notNull;
     }
 
     override nullable Statement endLifetime(Context context, Expression value) {
         if (!copyable) return null;
-        mut auto context = context;
-        auto refCountDecFun = new FunctionDeclaration(
-            "neat_runtime_dg_refcount_dec", new Void, [
-                Parameter.simple("dg", this)]);
-        auto valueArg = new OverrideLifetimeExpr(value, ExprInfo(Lifetime.none));
-        context = context.withNamespace(context.compiler.exprAlias(
-            context.namespace, "dg", valueArg));
-        context = context.withNamespace(context.compiler.exprAlias(
-                    context.namespace, "neat_runtime_dg_refcount_dec", refCountDecFun));
-
-        auto astCallStmt = context.compiler.astExpressionStmt(
-            context.compiler.astCall(
-                context.compiler.astIdentifier("neat_runtime_dg_refcount_dec", __RANGE__),
-                [context.compiler.astIdentifier("dg", __RANGE__)],
-                __RANGE__),
-            __RANGE__);
-
-        // TODO error handling
-        return astCallStmt.compile(context).case(Error err: return null).statement;
+        return context.compiler.exprStatement(
+            context.compiler.simpleCall(context, "neat_runtime_dg_refcount_dec", new Void, [value], __RANGE__));
     }
 
     override BackendType emit(Platform platform) {

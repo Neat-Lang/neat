@@ -151,13 +151,21 @@ class Function : FunctionDeclaration
                 scope_, framePtrName, context.platform, contextType,
                 mut=false, borrowed=true, hidden=framePtrName == "");
 
-            Type voidp = once new Pointer(new Void);
+            Type voidpp = once new Pointer(new Pointer(new Void));
 
             scope_ = thisDecl;
 
+            auto firstArg = new ArgExpr(0, voidpp);
+            // munge frame pointer for nested functions (TODO represent this by an enum or something)
+            mut int offset = 0 if hasThisArg else 2;
+            // TODO
+            version (firstpass) if ([any a == "macro" for a in context.platform.versions]) {
+                offset = 0;
+            }
+            auto correctedFramePointer = compiler.pointerOffset(firstArg, compiler.intLiteral(offset));
             argAssignments[0] = compiler.assignStatement(
                 thisDecl.accessDecl(context),
-                new PointerCast(contextType, new ArgExpr(0, voidp)));
+                new PointerCast(contextType, correctedFramePointer));
         }
 
         mut auto context = context.withNamespace(scope_);
@@ -622,9 +630,17 @@ class NestedFunction : LateSymbol
     override LateSymbolResult resolve(Context context) {
         // no need for setup/teardown here - nested functions can't depend on complex expressions.
         auto funcPtr = new FunctionReference(this.fun);
-        auto firstArg = new PointerCast(once new Pointer(new Void), baseExpr);
+        auto voidpp = once new Pointer(new Pointer(new Void));
+        auto firstArg = new PointerCast(voidpp, baseExpr);
+        // nested function context pointer is at -2w offset to create abi compatibility between
+        // class method and nested function references.
+        mut int offset = -2;
+        version (firstpass) if ([any a == "macro" for a in context.platform.versions]) {
+            offset = 0;
+        }
+        auto mungedFirstArg = context.compiler.(pointerOffset(firstArg, intLiteral(offset)));
 
-        return LateSymbolResult(setup=null, funcPtr=funcPtr, firstArg=firstArg, teardown=null);
+        return LateSymbolResult(setup=null, funcPtr=funcPtr, firstArg=mungedFirstArg, teardown=null);
     }
     override string repr() return "TODO NestedFunction";
 }

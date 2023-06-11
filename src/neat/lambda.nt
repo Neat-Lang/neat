@@ -1,0 +1,199 @@
+module neat.lambda;
+
+macro import package(compiler).std.macro.listcomprehension;
+macro import package(compiler).std.macro.once;
+
+import backend.base;
+import neat.base;
+import neat.function_;
+import neat.hash;
+import neat.parser;
+import neat.statements;
+import neat.templ;
+import neat.types;
+import neat.util;
+
+class Lambda : Type
+{
+    TemplateDecl decl;
+
+    string mangle_;
+
+    string repr_;
+
+    Returnable containingReturnable;
+
+    bool copyable;
+
+    this(this.decl, this.mangle_, this.repr_, this.containingReturnable, this.copyable) {
+        this.zeroInitializable = true;
+    }
+
+    override BackendType emit(Platform platform) {
+        return once (new Pointer(new Void)).emit(platform);
+    }
+
+    override (nullable Expression | fail Error) callExpr(
+        Context context, LocRange locRange, Expression base, ASTArgument[] args)
+    {
+        // Reconstruct a ScopeBoundTemplateDecl using `base`
+        auto scopeTempl = new ScopeBoundTemplateDecl(this.decl, base);
+        // Instantiate with `args`' types
+        Expression[] argExprs = [
+            arg.sym.compile(context)?.beExpressionImplCall(context, locRange)? for arg in args];
+        auto instance = scopeTempl.instantiate(context, locRange, [arg.type for arg in argExprs])?;
+        // call(`args`)
+        return context.compiler.call(context, new ASTSymbolHelper(instance), args, locRange, isImplCall=true);
+    }
+
+    override bool same(Type other) {
+        if (auto otherLambda = other.instanceOf(Lambda)) {
+            return this.decl.same(otherLambda.decl);
+        }
+        return false;
+    }
+
+    override QuarantinePolicy quarantinePolicy() {
+        return QuarantinePolicy(container=:occluded, value=:checked);
+    }
+
+    override (void | fail Error) checkQuarantine(Context context, LocRange locRange, QuarantineReason reason) {
+        context.assert2(reason.returnable != this.containingReturnable || copyable, locRange
+            "cannot return scoped lambda from function where it was declared")?;
+    }
+
+    override string mangle() => mangle_;
+
+    override string repr() {
+        return "typeof($(this.repr_))";
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("lambda");
+        hash.adds(this.decl.mangle);
+    }
+}
+
+class LambdaExpr : Expression
+{
+    ScopeBoundTemplateDecl templ;
+
+    string repr_;
+
+    this(this.templ, string mangle, this.repr_, Returnable returnable, bool copyable) {
+        this.type = new Lambda(this.templ.latent, mangle_=mangle, this.repr_, returnable, copyable);
+        // copyable or not, our lifetime is at least lexical.
+        this.info = ExprInfo(Lifetime.lexical);
+    }
+
+    override int emit(Generator output) {
+        int reg = this.templ.frame.emit(output);
+
+        return output.fun.bitcast(reg, this.type.emit(output.platform));
+    }
+    override string repr() {
+        return this.repr_;
+    }
+    override void hash(Hash hash) {
+        hash.adds("lambdaexpr");
+        hash.adds(this.templ.latent.mangle);
+        this.templ.frame.hash(hash);
+    }
+}
+
+class ASTLambdaExpr : ASTSymbol
+{
+    string[] paramNames;
+
+    ASTSymbol value;
+
+    MacroState macroState;
+
+    // so the template decl can be declared to depend on our module parse
+    string moduleParseTaskId;
+
+    this(this.paramNames, this.value, this.macroState, this.locRange, this.moduleParseTaskId) { }
+
+    override (Symbol | fail Error) compile(Context context) {
+        /**
+         * ({
+         *     template lambda__(T, U) {
+         *          typeof(({ mut uninitialized T $paramName; ...; $value; })) lambda__(T $paramName, U ...) {
+         *              return $value;
+         *          }
+         *      }
+         *      __lambda(lambda__);
+         * })
+         */
+        auto returnLambdaExpr = new ASTExprStatement(context.compiler.astReturn(value, __RANGE__), __RANGE__);
+        // Hax: Every compilation is unique!
+        string label = context.getLabel;
+        string lambdaName = "__lambda_$(this.locRange.from.row)_$(label)";
+        string lambdaTypeMangle = "$(context.namespace.mangle)_lambda_$(this.locRange.from.row)_$(label)";
+        auto astParameters = [
+            ASTParameter(
+                paramName,
+                mutable=false,
+                type=new ASTIdentifier("T$i", false, __RANGE__),
+                defaultValue=null,
+                __RANGE__)
+            for i, paramName in this.paramNames];
+        auto lambdaFun = new ASTFunction(
+            lambdaName, :auto_, astParameters,
+            isDeclaration=false, __RANGE__, statement=returnLambdaExpr, this.macroState, null);
+        auto astTemplateDecl = new ASTTemplateDecl(
+            lambdaName, ["T$i" for i, _ in paramNames], lambdaFun, comment="",
+            moduleParseTaskId=this.moduleParseTaskId);
+        auto templateDecl = new ScopeBoundTemplateDecl(
+            new TemplateDecl(context.namespace, astTemplateDecl),
+            context.framePointer);
+        string repr() {
+            if (paramNames.length == 1) return "$(paramNames[0]) => $(this.value.repr)";
+            string paramList = [join with ", " name for name in paramNames];
+            return "($paramList) => $(this.value.repr)";
+        }
+
+        Returnable returnable = context.namespace.findParent!Returnable.notNull;
+
+        // TODO copyable based on function context
+        return new LambdaExpr(templateDecl, mangle=lambdaTypeMangle, repr, returnable=returnable, copyable=false);
+    }
+}
+
+(nullable ASTSymbol | fail Error) parseLambdaExpression(ParserImpl parser, LexicalContext lexicalContext)
+{
+    parser.begin;
+    auto from = parser.from;
+    mut string[] args;
+    if (parser.acceptToken(TokenType.lparen)) {
+        while (!parser.acceptToken(TokenType.rparen)) {
+            if (!args.empty && !parser.acceptToken(TokenType.comma)) {
+                parser.revert;
+                return null;
+            }
+            auto arg = parser.parseIdentifier;
+            if (!arg.length) {
+                parser.revert;
+                return null;
+            }
+            args ~= arg;
+        }
+    } else {
+        auto arg = parser.parseIdentifier;
+        if (!arg.length) {
+            parser.revert;
+            return null;
+        }
+        args ~= arg;
+    }
+    if (!parser.acceptToken2(TokenType.equal, TokenType.greater)) {
+        parser.revert;
+        return null;
+    }
+    parser.commit;
+    auto expr = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
+    parser.to(from).assert(!!expr, "lambda expression expected")?;
+    return new ASTLambdaExpr(
+        args, expr.notNull, lexicalContext.macroState, parser.to(from),
+        moduleParseTaskId=lexicalContext.moduleParseTaskId);
+}

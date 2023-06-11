@@ -234,7 +234,6 @@ void neat_runtime_intf_refcount_dec(void *ptr) {
 }
 
 typedef struct {
-    void *base; // deprecated
     void *ptr;
     void (*funcptr)();
 } Delegate;

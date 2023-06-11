@@ -1144,3 +1144,89 @@ class ASTSizeOf : ASTSymbol
                 this.target.quote(quoter)], __RANGE__);
     }
 }
+
+class DelegateExpr : Expression
+{
+    Expression funcPtr;
+
+    Expression thisPtr;
+
+    bool copyable;
+
+    this(this.funcPtr, this.thisPtr, this.copyable) {
+        FunctionPointer type = this.funcPtr.type.instanceOf(FunctionPointer).notNull;
+
+        // drop thisptr - implicit!
+        assert(type.params.length >= 1);
+        mut Type[] types;
+        for (a in type.params[1 .. $]) types ~= a.type;
+        this.type = new Delegate(type.ret, copyable=this.copyable, types);
+        if (this.copyable) {
+            // if it's a class, we took a ref in ASTReference.
+            // if it's a nested function, we allocated it with 1 ref.
+            this.info = ExprInfo(Lifetime.gifted);
+        } else {
+            // local declaration, lexical lifetime
+            this.info = ExprInfo(Lifetime.lexical);
+        }
+    }
+
+    override int emit(Generator output)
+    {
+        int thisReg = this.thisPtr.emit(output);
+        int funcReg = this.funcPtr.emit(output);
+        auto voidp = output.platform.voidp;
+        auto thisType = this.type.emit(output.platform);
+        int nullReg = output.fun.bitcast(output.fun.wordLiteral(output.platform, 0), voidp);
+        return output.fun.structLiteral(thisType, [nullReg, thisReg, funcReg]);
+    }
+
+    override void hash(Hash hash) { hash.adds("DelegateExpr"); this.funcPtr.hash(hash); this.thisPtr.hash(hash); }
+    override string repr() return "TODO DelegateExpr";
+}
+
+class DelegateDataPtr : Expression
+{
+    Expression dg;
+
+    this(this.dg) {
+        this.type = once new Pointer(new Void);
+        this.info = ExprInfo(Lifetime.permanent);
+    }
+
+    override int emit(Generator output)
+    {
+        int reg = this.dg.emit(output);
+
+        return output.fun.field(this.dg.type.emit(output.platform), reg, 1);
+    }
+
+    override void hash(Hash hash) { hash.adds("DelegateDataPtr"); this.dg.hash(hash); }
+    override string repr() return "$(dg.repr).data";
+}
+
+class DelegateFuncPtr : Expression
+{
+    Expression dg;
+
+    this(this.dg) {
+        auto nestfp = this.dg.type.instanceOf(Delegate);
+        assert(!!nestfp);
+        mut Parameter[] params;
+        params ~= Parameter.fromType(once new Pointer(new Void));
+        for (paramType in nestfp.params)
+            params ~= Parameter.fromType(paramType);
+        this.type = new FunctionPointer(nestfp.ret, params);
+        this.info = ExprInfo(Lifetime.permanent);
+    }
+
+    override int emit(Generator output)
+    {
+        int reg = this.dg.emit(output);
+
+        return output.fun.field(this.dg.type.emit(output.platform), reg, 2);
+    }
+
+    override void hash(Hash hash) { hash.adds("DelegateFuncPtr"); this.dg.hash(hash); }
+    override string repr() return "$(dg.repr).funcptr";
+}

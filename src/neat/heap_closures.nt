@@ -1,0 +1,138 @@
+module neat.heap_closures;
+
+macro import package(compiler).std.macro.once;
+
+import neat.base;
+import neat.expr;
+import neat.function_;
+import neat.hash;
+import neat.statements;
+import neat.struct_;
+import neat.util;
+
+// new &foo, used for nested function allocation
+class ASTNewReference : ASTSymbol
+{
+    ASTSymbol base;
+
+    this(this.base, this.locRange) { }
+
+    override (Expression | fail Error) compile(Context context) {
+        auto base = this.base.compile(context)?;
+        // TODO find a better builtin way for this idiom.
+        auto nestedFun = base.instanceOf(NestedFunction);
+        if (!nestedFun) {
+            locRange.assert(false, "`new &sym` expects a nested function")?;
+        }
+        auto nestedFun = nestedFun.notNull;
+        // TODO what to do if we're referencing a nested function at a deeper level?
+        // Probably we should find the FunctionScope of that level.
+        auto funcPtr = new FunctionReference(nestedFun.fun);
+        auto voidp = once new Pointer(new Void);
+        auto dataSpacer = context.namespace.findParent!FunctionScope.notNull.spacerType;
+        auto heapAllocMembers = [
+            new StructMemberDeclaration("__fake_vtable", Protection.private_, voidp),
+            new StructMemberDeclaration("__closure_refs", Protection.private_, context.nativeWordType),
+            new StructMemberDeclaration("data", Protection.public_, dataSpacer),
+        ];
+        auto heapAllocStruct = context.compiler.struct_(
+            "", heapAllocMembers, this.locRange, nestedFun.fun.mangle ~ "_heap_frame");
+        auto backendStruct = heapAllocStruct.emit(context.platform);
+        auto heapAlloc = context.compiler.simpleCall(
+            context, "neat_runtime_alloc", new Pointer(heapAllocStruct),
+            [context.compiler.wordLiteral(context.platform, backendStruct.size(context.platform))], this.locRange);
+        auto heapAllocTemp = new PairedTemporary(heapAlloc.type, Lifetime.gifted, context.getUniqueId);
+
+        mut Statement[] initializers;
+        initializers ~= new InitializeTemporaryStatement(heapAllocTemp, heapAlloc);
+
+        // initialize refs to 1
+        auto refsMember = new StructMemberReference(new Dereference(heapAllocTemp), 1);
+        initializers ~= context.compiler.assignStatement(refsMember, context.compiler.wordLiteral(context.platform, 1));
+        // copy assign all vars
+        auto mungedFramePointer = new ReferenceExpression(new StructMemberReference(new Dereference(heapAllocTemp), 2));
+        auto destContext = context.withFramePointer(mungedFramePointer);
+        // for the destructor AST helper
+        mut DeclarationHolder[] declHolders;
+        mut nullable Namespace current = context.namespace;
+        while (!current.instanceOf(FunctionScope)) {
+            if (auto declHolder = current.instanceOf(DeclarationHolder)) {
+                declHolders ~= declHolder;
+                auto sourceVar = declHolder.accessDecl(context);
+                auto destVar = declHolder.accessDecl(destContext);
+                auto copy = sourceVar.type.copy(context, sourceVar, this.locRange)?;
+                initializers ~= context.compiler.assignStatement(destVar, copy);
+            }
+            current = current.parent;
+        }
+
+        // initialize vtable slot to fake vtable
+        ASTStatement destructorBody() {
+            return new ASTDestroyClosureHelper("ptr", declHolders, __RANGE__);
+        }
+        auto destructor = context.compiler.createRuntimeFunction(
+            context, "destroy_closure_$(this.locRange.fileId)_$(this.locRange.from.row)", new Void,
+            [Parameter.simple("ptr", new Pointer(new Void))], &destructorBody);
+        auto vtableMember = new StructMemberReference(new Dereference(heapAllocTemp), 0);
+        initializers ~= context.compiler.assignStatement(vtableMember, new FakeVtable(destructor));
+
+        auto initialization = context.compiler.sequenceStatement(initializers);
+        auto heapPtr = new StatementExpression(initialization, heapAllocTemp, gifted=true);
+        auto funcPtr = new FunctionReference(nestedFun.fun);
+        return new DelegateExpr(funcPtr, heapPtr, copyable=true);
+    }
+}
+
+class FakeVtable : Expression
+{
+    FunctionDeclarationBase destructor;
+
+    this(this.destructor) {
+        this.type = new Pointer(new Void);
+        this.info = ExprInfo(Lifetime.none);
+    }
+
+    private string symbol() => this.destructor.mangle ~ "_vtable";
+
+    override int emit(Generator output) {
+        this.destructor.declare(output);
+        // vtable layout: __instanceof, __destroy(void*)
+        output.mod.defineSymbolList(symbol, [0, destructor.mangle]);
+        return output.fun.symbolList(symbol)
+    }
+
+    override void hash(Hash hash) {
+        hash.adds("fake_vtable");
+        hash.adds(symbol);
+    }
+}
+
+class ASTDestroyClosureHelper : ASTStatement
+{
+    string paramName;
+
+    DeclarationHolder[] declHolders;
+
+    this(this.paramName, this.declHolders, this.locRange) { }
+
+    override (StatementCompileResult | fail Error) compile(Context context) {
+        auto ptr = (new ASTIdentifier("ptr", moduleLevel=false, __RANGE__))
+            .compile(context)?
+            .beExpression(__RANGE__)?;
+        auto voidpp = once new Pointer(new Pointer(new Void));
+        auto ptr = new PointerCast(voidpp, ptr);
+        // arg pointer is at offset -2w to the actual frame
+        auto correctedFramePointer = context.compiler.(pointerOffset(ptr, intLiteral(2)));
+        auto surroundingContext = context.withFramePointer(correctedFramePointer);
+        mut Statement[] destructors;
+        // destroy the variables in the surrounding context
+        for (declHolder in declHolders) {
+            auto var = declHolder.accessDecl(surroundingContext);
+            if (auto stmt = var.type.endLifetime(surroundingContext, var)) {
+                destructors ~= stmt;
+            }
+        }
+        auto destructor = context.compiler.sequenceStatement(destructors);
+        return StatementCompileResult(destructor, context.namespace);
+    }
+}

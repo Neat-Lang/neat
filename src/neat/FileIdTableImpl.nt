@@ -1,0 +1,119 @@
+module neat.FileIdTableImpl;
+
+macro import std.macro.listcomprehension;
+
+import std.file;
+import std.json;
+import std.thread;
+
+import neat.base;
+import neat.runtime;
+
+final class FileIdTableImpl : FileIdTable
+{
+    int[string] fileIds;
+
+    string[int] fileNames;
+
+    bool[int] pinnedFileIds;
+
+    FileIdCache fileIdCache;
+
+    Mutex mutex;
+
+    this() { this.fileIdCache = new FileIdCache; this.mutex = new Mutex; }
+
+    override int toFileId(string filename) with (this.mutex.locked) {
+        bool check(int id) {
+            if (fileNames.has(id)) return false;
+            fileNames[id] = filename;
+            fileIds[filename] = id;
+            return true;
+        }
+        for (id in fileIdCache.getCachedIdsFor(filename)) {
+            if (check(id)) return id;
+        }
+        mut int i = 0;
+        while (true) {
+            if (check(i)) {
+                fileIdCache.addCachedIdFor(filename, i);
+                return i;
+            }
+            i++;
+        }
+    }
+
+    override void setInheritedFileId(int id, string filename) with (this.mutex.locked) {
+        assert(!fileNames.has(id));
+        assert(!fileIds.has(filename));
+        fileIds[filename] = id;
+        fileNames[id] = filename;
+    }
+
+    override string toFileName(int fileId) with (this.mutex.locked) {
+        if (!fileNames.has(fileId)) return "[UNKNOWN]";
+        return fileNames[fileId];
+    }
+
+    /**
+     * When compiling an expression that will evaluate to a fileId in the target binary,
+     * the fileId used must be pinned so that the FileIdTable created in the target binary
+     * can be prepopulated.
+     */
+    override void pin(int fileId) with (this.mutex.locked) {
+        pinnedFileIds[fileId] = true;
+    }
+}
+
+/**
+ * Cache assigned file IDs between runs.
+ * Avoids file ID divergence in multithreaded builds.
+ */
+class FileIdCache
+{
+    Mutex mutex;
+
+    alias file = (".obj/file_id_cache.json");
+
+    int[][string] cached;
+
+    this() {
+        this.mutex = new Mutex;
+
+        load;
+    }
+
+    int[] getCachedIdsFor(string name) with (this.mutex.locked) {
+        return this.cached.get(name, null);
+    }
+
+    void addCachedIdFor(string name, int id) with (this.mutex.locked) {
+        this.cached[name] = this.cached.get(name, null) ~ id;
+        save;
+    }
+
+    private void load() {
+        if (!file.exists) return;
+        JSONValue cache = JSONValue.loadFile(file);
+        auto obj = cache.expect!((string key, JSONValue value)[])?;
+        for (kv in obj) {
+            this.cached[kv.key] = [a.expect!int? for a in kv.value.expect!(JSONValue[])?];
+        }
+    }
+
+    private void save() {
+        mut (string key, JSONValue value)[] entries;
+        for (key in cached.keys) {
+            entries ~= (key, JSONValue([JSONValue(i) for i in cached[key]]));
+        }
+        auto cache = JSONValue(entries);
+        file.writeText(cache.toString);
+    }
+}
+
+private (T | fail void) expect(T)(JSONValue value) {
+    value.value.case {
+        T t: return t;
+        default: return;
+    }
+}

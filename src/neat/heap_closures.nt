@@ -30,59 +30,62 @@ class ASTNewReference : ASTSymbol
         // TODO what to do if we're referencing a nested function at a deeper level?
         // Probably we should find the FunctionScope of that level.
         auto funcPtr = new FunctionReference(nestedFun.fun);
-        auto voidp = once new Pointer(new Void);
-        auto dataSpacer = context.namespace.findParent!FunctionScope.notNull.spacerType;
-        auto heapAllocMembers = [
-            new StructMemberDeclaration("__fake_vtable", Protection.private_, voidp),
-            new StructMemberDeclaration("__closure_refs", Protection.private_, context.nativeWordType),
-            new StructMemberDeclaration("data", Protection.public_, dataSpacer),
-        ];
-        auto heapAllocStruct = context.compiler.struct_(
-            "", heapAllocMembers, this.locRange, nestedFun.fun.mangle ~ "_heap_frame");
-        auto backendStruct = heapAllocStruct.emit(context.platform);
-        auto heapAlloc = context.compiler.simpleCall(
-            context, "neat_runtime_alloc", new Pointer(heapAllocStruct),
-            [context.compiler.wordLiteral(context.platform, backendStruct.size(context.platform))], this.locRange);
-        auto heapAllocTemp = new PairedTemporary(heapAlloc.type, Lifetime.gifted, context.getUniqueId);
-
-        mut Statement[] initializers;
-        initializers ~= new InitializeTemporaryStatement(heapAllocTemp, heapAlloc);
-
-        // initialize refs to 1
-        auto refsMember = new StructMemberReference(new Dereference(heapAllocTemp), 1);
-        initializers ~= context.compiler.assignStatement(refsMember, context.compiler.wordLiteral(context.platform, 1));
-        // copy assign all vars
-        auto mungedFramePointer = new ReferenceExpression(new StructMemberReference(new Dereference(heapAllocTemp), 2));
-        auto destContext = context.withFramePointer(mungedFramePointer);
-        // for the destructor AST helper
-        mut DeclarationHolder[] declHolders;
-        mut nullable Namespace current = context.namespace;
-        while (!current.instanceOf(FunctionScope)) {
-            if (auto declHolder = current.instanceOf(DeclarationHolder)) {
-                declHolders ~= declHolder;
-                auto sourceVar = declHolder.accessDecl(context);
-                auto destVar = declHolder.accessDecl(destContext);
-                auto copy = sourceVar.type.copy(context, sourceVar, this.locRange)?;
-                initializers ~= context.compiler.assignStatement(destVar, copy);
-            }
-            current = current.parent;
-        }
-
-        // initialize vtable slot to fake vtable
-        ASTStatement destructorBody() {
-            return new ASTDestroyClosureHelper("ptr", declHolders, __RANGE__);
-        }
-        auto destructor = context.compiler.createRuntimeFunction(
-            context, "destroy_closure_$(this.locRange.fileId)_$(this.locRange.from.row)", new Void,
-            [Parameter.simple("ptr", new Pointer(new Void))], &destructorBody);
-        auto vtableMember = new StructMemberReference(new Dereference(heapAllocTemp), 0);
-        initializers ~= context.compiler.assignStatement(vtableMember, new FakeVtable(destructor));
-
-        auto initialization = context.compiler.sequenceStatement(initializers);
-        auto heapPtr = new StatementExpression(initialization, heapAllocTemp, gifted=true);
-        auto funcPtr = new FunctionReference(nestedFun.fun);
+        auto heapPtr = heapAllocateStackframe(context, nestedFun.fun.mangle, this.locRange)?;
         return new DelegateExpr(funcPtr, heapPtr, copyable=true);
     }
+}
+
+(Expression | fail Error) heapAllocateStackframe(Context context, string mangle, LocRange locRange) {
+    auto voidp = once new Pointer(new Void);
+    auto dataSpacer = context.namespace.findParent!FunctionScope.notNull.spacerType;
+    auto heapAllocMembers = [
+        new StructMemberDeclaration("__fake_vtable", Protection.private_, voidp),
+        new StructMemberDeclaration("__closure_refs", Protection.private_, context.nativeWordType),
+        new StructMemberDeclaration("data", Protection.public_, dataSpacer),
+    ];
+    auto heapAllocStruct = context.compiler.struct_(
+        "", heapAllocMembers, locRange, mangle ~ "_heap_frame");
+    auto backendStruct = heapAllocStruct.emit(context.platform);
+    auto heapAlloc = context.compiler.simpleCall(
+        context, "neat_runtime_alloc", new Pointer(heapAllocStruct),
+        [context.compiler.wordLiteral(context.platform, backendStruct.size(context.platform))], locRange);
+    auto heapAllocTemp = new PairedTemporary(heapAlloc.type, Lifetime.gifted, context.getUniqueId);
+
+    mut Statement[] initializers;
+    initializers ~= new InitializeTemporaryStatement(heapAllocTemp, heapAlloc);
+
+    // initialize refs to 1
+    auto refsMember = new StructMemberReference(new Dereference(heapAllocTemp), 1);
+    initializers ~= context.compiler.assignStatement(refsMember, context.compiler.wordLiteral(context.platform, 1));
+    // copy assign all vars
+    auto mungedFramePointer = new ReferenceExpression(new StructMemberReference(new Dereference(heapAllocTemp), 2));
+    auto destContext = context.withFramePointer(mungedFramePointer);
+    // for the destructor AST helper
+    mut DeclarationHolder[] declHolders;
+    mut nullable Namespace current = context.namespace;
+    while (!current.instanceOf(FunctionScope)) {
+        if (auto declHolder = current.instanceOf(DeclarationHolder)) {
+            declHolders ~= declHolder;
+            auto sourceVar = declHolder.accessDecl(context);
+            auto destVar = declHolder.accessDecl(destContext);
+            auto copy = sourceVar.type.copy(context, sourceVar, locRange)?;
+            initializers ~= context.compiler.assignStatement(destVar, copy);
+        }
+        current = current.parent;
+    }
+
+    // initialize vtable slot to fake vtable
+    ASTStatement destructorBody() {
+        return new ASTDestroyClosureHelper("ptr", declHolders, __RANGE__);
+    }
+    auto destructor = context.compiler.createRuntimeFunction(
+        context, "destroy_closure_$(locRange.fileId)_$(locRange.from.row)", new Void,
+        [Parameter.simple("ptr", new Pointer(new Void))], &destructorBody);
+    auto vtableMember = new StructMemberReference(new Dereference(heapAllocTemp), 0);
+    initializers ~= context.compiler.assignStatement(vtableMember, new FakeVtable(destructor));
+
+    auto initialization = context.compiler.sequenceStatement(initializers);
+    return new StatementExpression(initialization, heapAllocTemp, gifted=true);
 }
 
 class FakeVtable : Expression

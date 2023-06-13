@@ -7,6 +7,7 @@ import backend.base;
 import neat.base;
 import neat.function_;
 import neat.hash;
+import neat.heap_closures;
 import neat.parser;
 import neat.statements;
 import neat.templ;
@@ -54,8 +55,15 @@ class Lambda : Type
     }
 
     override QuarantinePolicy quarantinePolicy() {
-        return QuarantinePolicy(container=:occluded, value=:checked);
+        // FIXME make `a if b else c` merge a and c
+        (:checked | :harmless) value() {
+            if (copyable) return :harmless;
+            return :checked;
+        }
+        return QuarantinePolicy(container=:occluded, value=value);
     }
+
+    // FIXME copy, endLifetime if copyable
 
     override (void | fail Error) checkQuarantine(Context context, LocRange locRange, QuarantineReason reason) {
         context.assert2(reason.returnable != this.containingReturnable || copyable, locRange
@@ -76,18 +84,24 @@ class Lambda : Type
 
 class LambdaExpr : Expression
 {
+    bool heapAlloc;
+
     ScopeBoundTemplateDecl templ;
 
     string repr_;
 
-    this(this.templ, string mangle, this.repr_, Returnable returnable, bool copyable) {
-        this.type = new Lambda(this.templ.latent, mangle_=mangle, this.repr_, returnable, copyable);
+    this(this.templ, string mangle, this.repr_, Returnable returnable, this.heapAlloc) {
+        this.type = new Lambda(this.templ.latent, mangle_=mangle, this.repr_, returnable, copyable=heapAlloc);
         // copyable or not, our lifetime is at least lexical.
         this.info = ExprInfo(Lifetime.lexical);
     }
 
     override int emit(Generator output) {
-        int reg = this.templ.frame.emit(output);
+        mut int reg = this.templ.frame.emit(output);
+        if (heapAlloc) {
+            auto voidpp = once new BackendPointerType(new BackendPointerType(new BackendVoidType));
+            reg = output.fun.ptrOffset(voidpp, reg, output.fun.intLiteral(2));
+        }
 
         return output.fun.bitcast(reg, this.type.emit(output.platform));
     }
@@ -103,6 +117,8 @@ class LambdaExpr : Expression
 
 class ASTLambdaExpr : ASTSymbol
 {
+    bool heapAlloc;
+
     string[] paramNames;
 
     ASTSymbol value;
@@ -112,7 +128,7 @@ class ASTLambdaExpr : ASTSymbol
     // so the template decl can be declared to depend on our module parse
     string moduleParseTaskId;
 
-    this(this.paramNames, this.value, this.macroState, this.locRange, this.moduleParseTaskId) { }
+    this(this.heapAlloc, this.paramNames, this.value, this.macroState, this.locRange, this.moduleParseTaskId) { }
 
     override (Symbol | fail Error) compile(Context context) {
         /**
@@ -144,9 +160,15 @@ class ASTLambdaExpr : ASTSymbol
         auto astTemplateDecl = new ASTTemplateDecl(
             lambdaName, ["T$i" for i, _ in paramNames], lambdaFun, comment="",
             moduleParseTaskId=this.moduleParseTaskId);
+        (Expression | fail Error) framePointer() {
+            if (heapAlloc)
+                return heapAllocateStackframe(context, lambdaName, this.locRange)?;
+            else
+                return context.framePointer.notNull;
+        }
         auto templateDecl = new ScopeBoundTemplateDecl(
             new TemplateDecl(context.namespace, astTemplateDecl),
-            context.framePointer);
+            framePointer?);
         string repr() {
             if (paramNames.length == 1) return "$(paramNames[0]) => $(this.value.repr)";
             string paramList = [join with ", " name for name in paramNames];
@@ -155,12 +177,12 @@ class ASTLambdaExpr : ASTSymbol
 
         Returnable returnable = context.namespace.findParent!Returnable.notNull;
 
-        // TODO copyable based on function context
-        return new LambdaExpr(templateDecl, mangle=lambdaTypeMangle, repr, returnable=returnable, copyable=false);
+        return new LambdaExpr(templateDecl, mangle=lambdaTypeMangle, repr, returnable=returnable, heapAlloc=heapAlloc);
     }
 }
 
-(nullable ASTSymbol | fail Error) parseLambdaExpression(ParserImpl parser, LexicalContext lexicalContext)
+(nullable ASTSymbol | fail Error) parseLambdaExpression(ParserImpl parser, LexicalContext lexicalContext,
+    bool heapAlloc)
 {
     parser.begin;
     auto from = parser.from;
@@ -194,6 +216,6 @@ class ASTLambdaExpr : ASTSymbol
     auto expr = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
     parser.to(from).assert(!!expr, "lambda expression expected")?;
     return new ASTLambdaExpr(
-        args, expr.notNull, lexicalContext.macroState, parser.to(from),
+        heapAlloc=heapAlloc, args, expr.notNull, lexicalContext.macroState, parser.to(from),
         moduleParseTaskId=lexicalContext.moduleParseTaskId);
 }

@@ -54,6 +54,29 @@ class Lambda : Type
         return false;
     }
 
+    // as with delegate
+    override (Expression | fail Error) copy(Context context, Expression source, LocRange locRange) {
+        import neat.runtime : die;
+        // covered by lambda quarantining
+        if (!copyable) return source;
+        (nullable Expression | fail Error) do_(Expression source) {
+            return context.compiler.statementExpression(
+                context.compiler.exprStatement(
+                    context.compiler.simpleCall(
+                        context, "neat_runtime_lambda_refcount_inc", new Void, [source], __RANGE__)),
+                source);
+        }
+        return context.compiler.exprWithTemporaryExpr(context.getUniqueId, source, &do_)
+            .case(Error: die).notNull;
+    }
+
+    override nullable Statement endLifetime(Context context, Expression value) {
+        // covered by lambda quarantining
+        if (!copyable) return null;
+        return context.compiler.exprStatement(
+            context.compiler.simpleCall(context, "neat_runtime_lambda_refcount_dec", new Void, [value], __RANGE__));
+    }
+
     override QuarantinePolicy quarantinePolicy() {
         // FIXME make `a if b else c` merge a and c
         (:checked | :harmless) value() {
@@ -92,8 +115,11 @@ class LambdaExpr : Expression
 
     this(this.templ, string mangle, this.repr_, Returnable returnable, this.heapAlloc) {
         this.type = new Lambda(this.templ.latent, mangle_=mangle, this.repr_, returnable, copyable=heapAlloc);
-        // copyable or not, our lifetime is at least lexical.
-        this.info = ExprInfo(Lifetime.lexical);
+        if (heapAlloc)
+            // allocated with one ref
+            this.info = ExprInfo(Lifetime.gifted);
+        else
+            this.info = ExprInfo(Lifetime.lexical);
     }
 
     override int emit(Generator output) {

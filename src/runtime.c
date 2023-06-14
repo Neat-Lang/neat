@@ -247,6 +247,14 @@ void neat_runtime_dg_refcount_dec(Delegate delegate) {
     neat_runtime_class_refcount_dec(delegate.ptr);
 }
 
+void neat_runtime_lambda_refcount_inc(void **lambda) {
+    neat_runtime_class_refcount_inc(&lambda[-2]);
+}
+
+void neat_runtime_lambda_refcount_dec(void **lambda) {
+    neat_runtime_class_refcount_dec(&lambda[-2]);
+}
+
 void neat_runtime_refcount_set(size_t *ptr, size_t value)
 {
     // *ptr = value;

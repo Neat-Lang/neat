@@ -37,11 +37,7 @@ class Lambda : Type
     override (nullable Expression | fail Error) callExpr(
         Context context, LocRange locRange, Expression base, ASTArgument[] args)
     {
-        // Reconstruct a ScopeBoundTemplateDecl using `base`
-        auto voidpp = once new Pointer(new Pointer(new Void));
-        auto baseAsPtr = new PointerCast(voidpp, base);
-        auto mungedBase = context.compiler.(pointerOffset(baseAsPtr, intLiteral(2)));
-        auto scopeTempl = new ScopeBoundTemplateDecl(this.decl, mungedBase);
+        auto scopeTempl = reconstructScopeTempl(context, base);
         // Instantiate with `args`' types
         Expression[] argExprs = [
             arg.sym.compile(context)?.beExpressionImplCall(context, locRange)? for arg in args];
@@ -55,6 +51,36 @@ class Lambda : Type
             return this.decl.same(otherLambda.decl);
         }
         return false;
+    }
+
+    override nullable Expression implicitConvertTo(Context context, Expression source, Type target) {
+        import neat.expr : DelegateExpr;
+
+        auto delegateType = target.instanceOf(Delegate).case(null: return null);
+        (nullable Expression | fail Error) do_(Expression source) {
+            auto scopeTempl = reconstructScopeTempl(context, source);
+            // TODO locRange, fail Error from implicitConvertTo
+            auto instance = scopeTempl.instantiate(context, __RANGE__, delegateType.params)?;
+            auto lateSym = instance.instanceOf(LateSymbol)
+                .case(null: return __RANGE__.fail("Internal error: Lambda didn't instantiate to LateSymbol."));
+            auto resolved = lateSym.resolve(context);
+            return new DelegateExpr(resolved.funcPtr, source, copyable=this.copyable);
+        }
+        bottom die(Error e) {
+            import c.stdlib : exit;
+            print("Error $(e.msg) in implicitConvertTo! TODO LocRange and fail Error");
+            exit(1);
+        }
+        return context.compiler.exprWithTemporaryExpr(context.getUniqueId, source, &do_)
+            .case(Error e: return die(e)).notNull;
+    }
+
+    private ScopeBoundTemplateDecl reconstructScopeTempl(Context context, Expression base) {
+        // Reconstruct a ScopeBoundTemplateDecl using `base`
+        auto voidpp = once new Pointer(new Pointer(new Void));
+        auto baseAsPtr = new PointerCast(voidpp, base);
+        auto mungedBase = context.compiler.(pointerOffset(baseAsPtr, intLiteral(2)));
+        return new ScopeBoundTemplateDecl(this.decl, mungedBase);
     }
 
     // as with delegate
@@ -88,8 +114,6 @@ class Lambda : Type
         }
         return QuarantinePolicy(container=:occluded, value=value);
     }
-
-    // FIXME copy, endLifetime if copyable
 
     override (void | fail Error) checkQuarantine(Context context, LocRange locRange, QuarantineReason reason) {
         context.assert2(reason.returnable != this.containingReturnable || copyable, locRange

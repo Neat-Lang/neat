@@ -168,7 +168,8 @@ class Array : Type
         return null;
     }
 
-    override nullable Expression implicitConvertFrom(Context context, Expression source)
+    override (nullable Expression | fail Error) implicitConvertFrom(
+        Context context, Expression source, LocRange locRange)
     {
         if (source.type.instanceOf(NullPointer) && this.zeroInitializable) {
             return new EmptyArrayLiteral(this);
@@ -177,7 +178,7 @@ class Array : Type
         if (auto arrayLit = source.instanceOf(ArrayLiteral)) {
             mut Expression[] replacements;
             for (value in arrayLit.values) {
-                if (auto casted = context.compiler.implicitConvertTo(context, value, this.elementType)) {
+                if (auto casted = context.compiler.implicitConvertTo(context, value, this.elementType, locRange)?) {
                     replacements ~= casted;
                 } else {
                     return null;
@@ -188,8 +189,10 @@ class Array : Type
         return null;
     }
 
-    override nullable Expression implicitConvertTo(Context context, Expression source, Type target)
+    override (nullable Expression | fail Error) implicitConvertTo(
+        Context context, Expression source, Type target, LocRange locRange)
     {
+        // trivial array conversion
         if (auto targetArray = target.instanceOf(Array)) {
             if (elementType.triviallyConvertsTo(targetArray.elementType)) {
                 return context.compiler.trivialCastTo(target, source);
@@ -525,25 +528,25 @@ Expression releaseArray(Context context, Expression value) {
     Array leftArray = left.type.instanceOf(Array).notNull;
 
     mut (nullable Expression | :unknown) ltr_ = :unknown;
-    nullable Expression ltr() {
+    (nullable Expression | fail Error) ltr() {
         if (ltr_ == :unknown)
-            ltr_ = context.compiler.implicitConvertTo(context, left, right.type);
+            ltr_ = context.compiler.implicitConvertTo(context, left, right.type, locRange)?;
         // TODO bottom assert
         return ltr_.case(:unknown: return null);
     }
 
     mut (nullable Expression | :unknown) rtl_ = :unknown;
-    nullable Expression rtl() {
+    (nullable Expression | fail Error) rtl() {
         if (rtl_ == :unknown)
-            rtl_ = context.compiler.implicitConvertTo(context, right, left.type);
+            rtl_ = context.compiler.implicitConvertTo(context, right, left.type, locRange)?;
         // TODO bottom assert
         return rtl_.case(:unknown: return null);
     }
 
     bool sameType = left.type.same(right.type);
     bool appendElementType = leftArray.elementType.same(right.type)
-        || leftArray.elementType.implicitConvertFrom(context, right);
-    bool appendArrays = sameType || ltr || rtl;
+        || leftArray.elementType.implicitConvertFrom(context, right, locRange)?;
+    bool appendArrays = sameType || ltr? || rtl?;
 
     // TODO should element append really live in this function?
     // if we factor it out the logic gets a bit easier probably.
@@ -551,12 +554,12 @@ Expression releaseArray(Context context, Expression value) {
         return locRange.fail("incompatible types for concat: " ~ left.type.repr ~ " and " ~ right.type.repr);
     }
 
-    (Expression left, Expression right) merge() {
+    (Expression left, Expression right | fail Error) merge() {
         if (sameType || appendElementType) return (left, right);
-        if (auto rtl = rtl) return (left, rtl);
-        return (ltr.notNull, right);
+        if (auto rtl = rtl?) return (left, rtl);
+        return (ltr?.notNull, right);
     }
-    auto = merge;
+    auto = merge?;
 
     ASTStatement body_() {
         if (appendElementType) {
@@ -620,7 +623,7 @@ Expression releaseArray(Context context, Expression value) {
 
     Array leftArray = left.type.instanceOf(Array).notNull;
     bool appendElementType = leftArray.elementType.same(right.type)
-        || leftArray.elementType.implicitConvertFrom(context, right);
+        || leftArray.elementType.implicitConvertFrom(context, right, locRange)?;
     bool appendArrays = leftArray.same(right.type);
 
     if (!appendElementType && !appendArrays) {
@@ -741,7 +744,8 @@ class EmptyArrayType : Type
         return !!other.instanceOf(EmptyArrayType);
     }
 
-    override nullable Expression implicitConvertTo(Context context, Expression source, Type target)
+    override (nullable Expression | fail Error) implicitConvertTo(
+        Context context, Expression source, Type target, LocRange locRange)
     {
         if (target.instanceOf(Array)) {
             return new EmptyArrayLiteral(target);
@@ -812,7 +816,8 @@ class ASTArrayLiteral : ASTSymbol
         }
         auto mergeType = merger.type.notNull;
         for (i in 0 .. this.elements.length) {
-            if (auto castValue = context.compiler.implicitConvertTo(context, values[i], mergeType)) {
+            auto elemLocRange = this.elements[i].value.locRange;
+            if (auto castValue = context.compiler.implicitConvertTo(context, values[i], mergeType, elemLocRange)?) {
                 if (castValue.info.lifetime.(Lifetime.(that == gifted || that == none)))
                     values[i] = castValue;
                 else

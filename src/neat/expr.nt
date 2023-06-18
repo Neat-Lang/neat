@@ -17,7 +17,7 @@ import polyhash;
  * This will require types such as nullptr_t - but also "decaying types" such as StringLiteralType,
  * which when assigned to a variable implicitly converts to string.
  */
-nullable Expression implicitConvertTo(Context context, Expression from, Type to)
+(nullable Expression | fail Error) implicitConvertTo(Context context, Expression from, Type to, LocRange locRange)
 {
     auto fromType = from.type;
 
@@ -80,9 +80,9 @@ nullable Expression implicitConvertTo(Context context, Expression from, Type to)
     {
         return new ArrayPointer(new Character, from);
     }
-    nullable Expression fromImplicit = to.implicitConvertFrom(context, from);
+    nullable Expression fromImplicit = to.implicitConvertFrom(context, from, locRange)?;
     if (fromImplicit) return fromImplicit;
-    nullable Expression toImplicit = fromType.implicitConvertTo(context, from, to);
+    nullable Expression toImplicit = fromType.implicitConvertTo(context, from, to, locRange)?;
     if (toImplicit) return toImplicit;
     return null;
 }
@@ -647,7 +647,7 @@ enum CallQuality
         if (argExpr.type.same(param.type)) {
             finalArgs[i] = argExpr;
         }
-        else if (auto conv = implicitConvertTo(context, argExpr, param.type)) {
+        else if (auto conv = implicitConvertTo(context, argExpr, param.type, locRange)?) {
             finalArgs[i] = conv;
             withConv = true;
         } else {
@@ -684,7 +684,7 @@ enum CallQuality
 
         return new BinaryOp("!=", new CastExpr(sizeT, value), once new IntLiteral(0), locRange);
     }
-    if (auto converted = implicitConvertTo(context, value, once new Boolean)) {
+    if (auto converted = implicitConvertTo(context, value, once new Boolean, locRange)?) {
         return converted;
     }
     if (!type.instanceOf(Integer) && !type.instanceOf(Long)) {
@@ -724,7 +724,9 @@ class ASTBinaryOp : ASTSymbol
             if (!left.type.instanceOf(Array)) {
                 return locRange.fail("Left hand side of concatenation isn't array, but $(left.type.repr)");
             }
-            if (auto converted = implicitConvertTo(context, right, left.type.instanceOf(Array).elementType)) {
+            if (auto converted = implicitConvertTo(
+                context, right, left.type.instanceOf(Array).elementType, locRange)?)
+            {
                 return context.compiler.binaryOp("~", context, left, converted, this.locRange);
             }
 
@@ -957,8 +959,8 @@ class InitializeTemporaryExprStatement : Statement
     }
 }
 
-Expression castTo(Expression from, Type to, Context context) {
-    if (auto implconv = implicitConvertTo(context, from, to)) return implconv;
+(Expression | fail Error) castTo(Expression from, Type to, Context context, LocRange locRange) {
+    if (auto implconv = implicitConvertTo(context, from, to, locRange)?) return implconv;
     if (from.type.instanceOf(Integer) && to.instanceOf(Long))
         return new IntToLong(from);
     if (from.type.instanceOf(Short) && to.instanceOf(Integer))
@@ -1054,7 +1056,7 @@ class ASTCastExpr : ASTSymbol
 
         this.locRange.assert(!value.type.instanceOf(Array), "what are you doing, casting array to non?")?;
 
-        return value.castTo(target, context);
+        return value.castTo(target, context, this.locRange);
     }
 
     override ASTSymbol quote(Quoter quoter) {

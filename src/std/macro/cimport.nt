@@ -21,7 +21,7 @@ class CImportMacro : Macro
         }
     }
 
-    (nullable ASTModuleBase | fail Error) parse(Parser parser, LexicalContext lexicalContext) {
+    (typeof(null) | CImportTask | fail Error) parse(Parser parser, LexicalContext lexicalContext) {
         auto compiler = lexicalContext.compiler;
         if (!parser.acceptIdentifier("c_header"))
             return null;
@@ -45,207 +45,242 @@ class CImportMacro : Macro
         if (compiler.cFlags.length > 0)
             flags = (compiler.cFlags ~ flags).join(" ");
 
-        return parseIncludeModule(includeSym, flags, lexicalContext);
+        auto id = "cimport $includeSym";
+        auto task = new CImportTask(id, lexicalContext, includeSym, flags);
+        lexicalContext.compiler.workPool.queue(task);
+        return task;
+    }
+}
+
+class CImportTask : ImportModuleBaseTask
+{
+    string id_;
+
+    LexicalContext lexicalContext;
+
+    string includeSym;
+
+    string flags;
+
+    (:none | ASTModuleBase | Error) result;
+
+    this(this.id_, this.lexicalContext, this.includeSym, this.flags) {
+        this.result = :none;
     }
 
-    (nullable ASTModuleBase | fail Error) parseIncludeModule(
-        string include, string flags, LexicalContext lexicalContext)
-    {
-        auto compiler = lexicalContext.compiler;
-        string modName = include.replace("/", "_").replace(".", "_").replace("-", "_");
+    override string id() => id_;
+    override bool fresh() => true;
 
-        auto headerBase = "#include <" ~ include ~ ">\n";
-        auto headerName = ".obj/cimport." ~ modName ~ ".h";
-
-        // Assume system headers don't change.
-        // TODO: Is this legitimate? Can we timestamp the includes?
-        if (!exists(headerName ~ ".out")) {
-            // TODO randomize
-            headerName.write(headerBase);
-            string cmd = "gcc " ~ flags ~ "-dD -E " ~ headerName ~ " > " ~ headerName ~ ".out";
-            print("\$ " ~ cmd);
-            neat_runtime_system(cmd);
+    override (ASTModuleBase | fail Error) module_() {
+        result.case {
+            ASTModuleBase mod: return mod;
+            Error err: return err;
+            (:none): assert(false);
         }
-        string csource = read(headerName ~ ".out");
-        // do not count references on the file source - it will end
-        // up with lots of small inc/decs to fragments that we never free anyway
-        (cast(size_t*) &csource)[2] = 0;
+    }
 
-        auto cparser = compiler.createParser(headerName ~ ".out", csource)?;
-        auto cparserHelper = new CParserHelper(cparser, compiler);
+    override void run() {
+        this.result = parseIncludeModule(this.includeSym, this.flags, this.lexicalContext);
+    }
+}
 
-        auto pak = new Package("c_header", "", []);
-        cparserHelper.mod = compiler.astModule(modName, pak, new MacroState, cparser.loc, null);
+(ASTModuleBase | fail Error) parseIncludeModule(
+    string include, string flags, LexicalContext lexicalContext)
+{
+    auto compiler = lexicalContext.compiler;
+    string modName = include.replace("/", "_").replace(".", "_").replace("-", "_");
 
-        void add(string name, (ASTExternFunctionBase | ASTSymbol) symbol) {
-            if (false)
-                symbol.case {
-                    ASTExternFunctionBase ex:
-                        print("define " ~ ex.name ~ ": " ~ ex.repr);
-                    ASTSymbol sym:
-                        if (compiler.destructAstNumberLiteral(sym) == :none) {
-                            print("define " ~ name ~ " = " ~ sym.repr);
-                        }
-                }
+    auto headerBase = "#include <" ~ include ~ ">\n";
+    auto headerName = ".obj/cimport." ~ modName ~ ".h";
+
+    // Assume system headers don't change.
+    // TODO: Is this legitimate? Can we timestamp the includes?
+    if (!exists(headerName ~ ".out")) {
+        // TODO randomize
+        headerName.write(headerBase);
+        string cmd = "gcc " ~ flags ~ "-dD -E " ~ headerName ~ " > " ~ headerName ~ ".out";
+        print("\$ " ~ cmd);
+        neat_runtime_system(cmd);
+    }
+    string csource = read(headerName ~ ".out");
+    // do not count references on the file source - it will end
+    // up with lots of small inc/decs to fragments that we never free anyway
+    (cast(size_t*) &csource)[2] = 0;
+
+    auto cparser = compiler.createParser(headerName ~ ".out", csource)?;
+    auto cparserHelper = new CParserHelper(cparser, compiler);
+
+    auto pak = new Package("c_header", "", []);
+    cparserHelper.mod = compiler.astModule(modName, pak, new MacroState, cparser.loc, null);
+
+    void add(string name, (ASTExternFunctionBase | ASTSymbol) symbol) {
+        if (false)
             symbol.case {
-                ASTExternFunctionBase a:
-                    cparserHelper.mod.addEntry(Protection.public_, a);
-                ASTSymbol sym: {
-                    if (!cparserHelper.mod.getSymbolAlias(name)) {
-                        cparserHelper.mod.addAliasDecl(name, Protection.public_, sym);
+                ASTExternFunctionBase ex:
+                    print("define " ~ ex.name ~ ": " ~ ex.repr);
+                ASTSymbol sym:
+                    if (compiler.destructAstNumberLiteral(sym) == :none) {
+                        print("define " ~ name ~ " = " ~ sym.repr);
                     }
+            }
+        symbol.case {
+            ASTExternFunctionBase a:
+                cparserHelper.mod.addEntry(Protection.public_, a);
+            ASTSymbol sym: {
+                if (!cparserHelper.mod.getSymbolAlias(name)) {
+                    cparserHelper.mod.addAliasDecl(name, Protection.public_, sym);
                 }
             }
         }
+    }
 
-        (void | fail Error) eatAttribute() {
-            while (cparser.acceptIdentifier("__attribute__")) {
-                cparser.acceptToken(TokenType.lparen); cparser.acceptToken(TokenType.lparen);
-                mut int parenlevel = 2;
-                while (parenlevel) {
-                    if (cparser.acceptToken(TokenType.lparen))
-                        parenlevel++;
-                    else if (cparser.acceptToken(TokenType.rparen))
-                        parenlevel--;
-                    else if (!cparser.hard_eof)
-                        cparser.dropToken;
-                    else return cparser.fail("paren imbalance");
-                }
+    (void | fail Error) eatAttribute() {
+        while (cparser.acceptIdentifier("__attribute__")) {
+            cparser.acceptToken(TokenType.lparen); cparser.acceptToken(TokenType.lparen);
+            mut int parenlevel = 2;
+            while (parenlevel) {
+                if (cparser.acceptToken(TokenType.lparen))
+                    parenlevel++;
+                else if (cparser.acceptToken(TokenType.rparen))
+                    parenlevel--;
+                else if (!cparser.hard_eof)
+                    cparser.dropToken;
+                else return cparser.fail("paren imbalance");
             }
         }
+    }
 
-        string acceptString() {
-            if (!cparser.acceptToken(TokenType.doubleQuote)) return "";
-            auto ret = cparser.acceptTokenStr(TokenType.stringLiteral).case(:none: "");
-            cparser.acceptToken(TokenType.doubleQuote);
-            return ret;
+    string acceptString() {
+        if (!cparser.acceptToken(TokenType.doubleQuote)) return "";
+        auto ret = cparser.acceptTokenStr(TokenType.stringLiteral).case(:none: "");
+        cparser.acceptToken(TokenType.doubleQuote);
+        return ret;
+    }
+    bool acceptCmdLineSep() with (cparser.transaction) {
+        if (!cparser.acceptToken(TokenType.hash)
+            || cparser.acceptTokenStr(TokenType.number).(that != "0" && that != "1")
+            || acceptString != "<command-line>")
+            return false;
+        commit;
+        return true;
+    }
+    while (!cparser.eof) {
+        // print("> $(cparser.text[0 .. 100])");
+        if (!cparserHelper.sysmod && acceptCmdLineSep) {
+            // start of actual include
+            cparserHelper.sysmod = cparserHelper.mod;
+            cparserHelper.mod = compiler.astModule(modName, pak, new MacroState, cparser.loc, null);
         }
-        bool acceptCmdLineSep() with (cparser.transaction) {
-            if (!cparser.acceptToken(TokenType.hash)
-                || cparser.acceptTokenStr(TokenType.number).(that != "0" && that != "1")
-                || acceptString != "<command-line>")
-                return false;
-            commit;
-            return true;
-        }
-        while (!cparser.eof) {
-            // print("> $(cparser.text[0 .. 100])");
-            if (!cparserHelper.sysmod && acceptCmdLineSep) {
-                // start of actual include
-                cparserHelper.sysmod = cparserHelper.mod;
-                cparserHelper.mod = compiler.astModule(modName, pak, new MacroState, cparser.loc, null);
-            }
-            if (cparser.acceptToken(TokenType.hash)) {
-                if (cparser.acceptIdentifier("define")) {
-                    auto identifier = cparser.parseIdentifier;
-                    cparser.begin;
-                    if (cparser.acceptToken(TokenType.lparen)) { cparser.revert; cparser.eatline; continue; }
-                    auto start = cparser.loc;
-                    auto num = cparserHelper.parseCNumber?;
-                    if (cparser.peekToken(TokenType.comma)) { // comma expression?!
-                        cparser.revert;
-                        cparser.eatline;
-                        continue;
-                    }
-                    num.case {
-                        (:failure): { cparser.revert; cparser.eatline; continue; }
-                        (:success, long l):
-                            add(identifier, compiler.astNumberLiteral(l, start));
-                    }
-                    cparser.commit;
-                    // cparser.assert_(cparser.loc.from.column == 0, "unknown text")?;
-                    // cparser.expect("\n");
+        if (cparser.acceptToken(TokenType.hash)) {
+            if (cparser.acceptIdentifier("define")) {
+                auto identifier = cparser.parseIdentifier;
+                cparser.begin;
+                if (cparser.acceptToken(TokenType.lparen)) { cparser.revert; cparser.eatline; continue; }
+                auto start = cparser.loc;
+                auto num = cparserHelper.parseCNumber?;
+                if (cparser.peekToken(TokenType.comma)) { // comma expression?!
+                    cparser.revert;
+                    cparser.eatline;
                     continue;
                 }
-                cparser.eatline;
-                continue;
-            }
-            if (cparser.acceptIdentifier("typedef")) {
-                auto type = cparserHelper.parseType?;
-                if (!type) { cparser.eatline; continue; }
-                auto type = notNull!ASTSymbol(type);
-                auto decl = cparserHelper.parseTypedDecl(type)?;
-                if (!decl.type) { cparser.eatline; continue; }
-                eatAttribute?;
-                if (!cparser.acceptToken(TokenType.semicolon)) { cparser.eatline; continue; }
-                add(decl.name, notNull!ASTSymbol(decl.type));
-                continue;
-            }
-            // match struct foo { }; as "foo"
-            if (cparser.acceptIdentifier("struct")) {
-                auto pair = cparserHelper.parseStructType?;
-                if (!pair.type) { cparser.eatline; continue; }
-                add(pair.name, pair.type);
-                continue;
-            }
-            if (cparser.acceptIdentifier("union")) {
-                auto pair = cparserHelper.parseStructType(union_=true)?;
-                if (!pair.type) { cparser.eatline; continue; }
-                add(pair.name, pair.type);
-                continue;
-            }
-            if (cparser.acceptIdentifier("enum")) {
-                auto type = cparserHelper.parseEnumType?;
-                if (!type) { cparser.eatline; continue; }
-                continue;
-            }
-            cparser.acceptIdentifier("extern");
-            eatAttribute?;
-            cparser.acceptIdentifier("extern");
-            {
-                (bool | fail Error) closeFunction() {
-                    if (!cparser.acceptToken(TokenType.rparen)) return false;
-                    eatAttribute?;
-                    return cparser.acceptToken(TokenType.semicolon);
+                num.case {
+                    (:failure): { cparser.revert; cparser.eatline; continue; }
+                    (:success, long l):
+                        add(identifier, compiler.astNumberLiteral(l, start));
                 }
-                auto start = cparser.loc;
-                cparser.begin;
-                if (auto retBase = cparserHelper.parseType?) {
-                    auto retDecl = cparserHelper.parseTypedDecl(retBase)?;
-                    if (retDecl.type && retDecl.name.length > 0
-                        && cparser.acceptToken(TokenType.lparen)
-                    ) {
-                        mut ASTParameter[] params;
-                        mut bool success;
-                        while (true) {
-                            if (closeFunction?) {
-                                cparser.commit;
-                                if (params.length == 1) {
-                                    auto first = compiler.destructAstIdentifier(params[0].type).case(:none: "");
-                                    if (first == "void") {
-                                        params = [];
-                                    }
-                                }
-                                add(retDecl.name, compiler.astExternFunction(
-                                    retDecl.name, notNull!ASTSymbol(retDecl.type), params, variadic=false, start));
-                                success = true;
-                                break;
-                            }
-                            if (params.length && !cparser.acceptToken(TokenType.comma)) break;
-                            auto argloc = cparser.loc;
-                            if (auto argBasetype = cparserHelper.parseType?) {
-                                auto argDecl = cparserHelper.parseTypedDecl(argBasetype)?;
-                                if (!argDecl.type) break;
-                                params ~= ASTParameter(
-                                    argDecl.name, false,
-                                    type=notNull!ASTSymbol(argDecl.type),
-                                    defaultValue=null,
-                                    argloc);
-                            } else break;
-                        }
-                        if (success) continue;
-                        // print("fail " ~ retDecl.name ~ ": " ~ cparser.text[0 .. 100]);
-                    }
-                }
-                // cparser.assert_(false, "here 2?")?;
-                cparser.revert;
+                cparser.commit;
+                // cparser.assert_(cparser.loc.from.column == 0, "unknown text")?;
+                // cparser.expect("\n");
+                continue;
             }
-            // cparser.assert_(false, "here?")?;
             cparser.eatline;
+            continue;
         }
-
-        return cparserHelper.mod;
+        if (cparser.acceptIdentifier("typedef")) {
+            auto type = cparserHelper.parseType?;
+            if (!type) { cparser.eatline; continue; }
+            auto type = notNull!ASTSymbol(type);
+            auto decl = cparserHelper.parseTypedDecl(type)?;
+            if (!decl.type) { cparser.eatline; continue; }
+            eatAttribute?;
+            if (!cparser.acceptToken(TokenType.semicolon)) { cparser.eatline; continue; }
+            add(decl.name, notNull!ASTSymbol(decl.type));
+            continue;
+        }
+        // match struct foo { }; as "foo"
+        if (cparser.acceptIdentifier("struct")) {
+            auto pair = cparserHelper.parseStructType?;
+            if (!pair.type) { cparser.eatline; continue; }
+            add(pair.name, pair.type);
+            continue;
+        }
+        if (cparser.acceptIdentifier("union")) {
+            auto pair = cparserHelper.parseStructType(union_=true)?;
+            if (!pair.type) { cparser.eatline; continue; }
+            add(pair.name, pair.type);
+            continue;
+        }
+        if (cparser.acceptIdentifier("enum")) {
+            auto type = cparserHelper.parseEnumType?;
+            if (!type) { cparser.eatline; continue; }
+            continue;
+        }
+        cparser.acceptIdentifier("extern");
+        eatAttribute?;
+        cparser.acceptIdentifier("extern");
+        {
+            (bool | fail Error) closeFunction() {
+                if (!cparser.acceptToken(TokenType.rparen)) return false;
+                eatAttribute?;
+                return cparser.acceptToken(TokenType.semicolon);
+            }
+            auto start = cparser.loc;
+            cparser.begin;
+            if (auto retBase = cparserHelper.parseType?) {
+                auto retDecl = cparserHelper.parseTypedDecl(retBase)?;
+                if (retDecl.type && retDecl.name.length > 0
+                    && cparser.acceptToken(TokenType.lparen)
+                ) {
+                    mut ASTParameter[] params;
+                    mut bool success;
+                    while (true) {
+                        if (closeFunction?) {
+                            cparser.commit;
+                            if (params.length == 1) {
+                                auto first = compiler.destructAstIdentifier(params[0].type).case(:none: "");
+                                if (first == "void") {
+                                    params = [];
+                                }
+                            }
+                            add(retDecl.name, compiler.astExternFunction(
+                                retDecl.name, notNull!ASTSymbol(retDecl.type), params, variadic=false, start));
+                            success = true;
+                            break;
+                        }
+                        if (params.length && !cparser.acceptToken(TokenType.comma)) break;
+                        auto argloc = cparser.loc;
+                        if (auto argBasetype = cparserHelper.parseType?) {
+                            auto argDecl = cparserHelper.parseTypedDecl(argBasetype)?;
+                            if (!argDecl.type) break;
+                            params ~= ASTParameter(
+                                argDecl.name, false,
+                                type=notNull!ASTSymbol(argDecl.type),
+                                defaultValue=null,
+                                argloc);
+                        } else break;
+                    }
+                    if (success) continue;
+                    // print("fail " ~ retDecl.name ~ ": " ~ cparser.text[0 .. 100]);
+                }
+            }
+            // cparser.assert_(false, "here 2?")?;
+            cparser.revert;
+        }
+        // cparser.assert_(false, "here?")?;
+        cparser.eatline;
     }
+
+    return cparserHelper.mod;
 }
 
 void eatline(Parser parser) {

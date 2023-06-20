@@ -4712,6 +4712,8 @@ class ASTImport : ASTDeclaration
                     return name;
                 (:macro_, ASTModuleBase module_):
                     assert(false);
+                (:macroTask, ImportModuleBaseTask task):
+                    assert(false);
             }
         }
         string pak() {
@@ -4732,7 +4734,7 @@ class ASTImport : ASTDeclaration
     }
 }
 
-class ImportTask : ITask
+class ImportTask : ImportModuleBaseTask
 {
     string id_;
 
@@ -4751,7 +4753,7 @@ class ImportTask : ITask
     override string id() => id_;
     override bool fresh() => true;
 
-    (ASTModule | fail Error) module_() {
+    override (ASTModule | fail Error) module_() {
         result.case {
             ASTModule mod: return mod;
             Error err: return err;
@@ -4778,13 +4780,19 @@ class ImportTask : ITask
         return :none;
     }
 
-    mut uninitialized (:normal, string name, string pak | :macro_, ASTModuleBase module_) target;
+    mut uninitialized (
+        :normal, string name, string pak |
+        :macro_, ASTModuleBase module_ |
+        :macroTask, ImportModuleBaseTask task) target;
     parser.commit;
 
     auto macroArgs = new ParseImportArgs(parser, lexicalContext);
     lexicalContext.macroState.applyMacro(macroArgs);
-    if (macroArgs.done) target = (:macro_, macroArgs.module_?.notNull);
-    else {
+    if (macroArgs.done) {
+        target = macroArgs.getModule(lexicalContext.compiler)?.case(
+            ASTModuleBase module_: (:macro_, module_),
+            ImportModuleBaseTask task: (:macroTask, task));
+    } else {
         mut string pak;
         if (parser.acceptIdentifier("package"))
         {
@@ -5095,7 +5103,11 @@ class LexicalContextImpl : LexicalContext
 {
     (string name, string pak) target = import_.target.case(
         (:normal, string name, string pak): (name, pak),
-        (:macro_, ASTModuleBase module_): return module_.instanceOf(ASTModule).notNull);
+        (:macro_, ASTModuleBase module_): return module_.instanceOf(ASTModule).notNull,
+        (:macroTask, ImportModuleBaseTask task): return compiler.workPool
+            .wait(task.id)
+            .instanceOf(ImportModuleBaseTask)
+            .module_?.instanceOf(ASTModule).notNull);
     mut Package pak = selectPackage(config.packages, pak, import_.locRange)?;
     // TODO enum SearchMode { Transitive, Direct, Commandline }
     mut bool transitive = true;

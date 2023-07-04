@@ -11,10 +11,6 @@ import neat.runtime;
 
 final class FileIdTableImpl : FileIdTable
 {
-    int[string] fileIds;
-
-    string[int] fileNames;
-
     bool[int] pinnedFileIds;
 
     FileIdCache fileIdCache;
@@ -24,35 +20,20 @@ final class FileIdTableImpl : FileIdTable
     this() { this.fileIdCache = new FileIdCache; this.mutex = new Mutex; }
 
     override int toFileId(string filename) with (this.mutex.locked) {
-        bool check(int id) {
-            if (fileNames.has(id)) return false;
-            fileNames[id] = filename;
-            fileIds[filename] = id;
-            return true;
-        }
-        for (id in fileIdCache.getCachedIdsFor(filename)) {
-            if (check(id)) return id;
-        }
-        mut int i = 0;
-        while (true) {
-            if (check(i)) {
-                fileIdCache.addCachedIdFor(filename, i);
-                return i;
-            }
-            i++;
-        }
+        fileIdCache.getCachedIdFor(filename).case(int i: return i);
+        return fileIdCache.setNextFreeIdFor(filename);
     }
 
     override void setInheritedFileId(int id, string filename) with (this.mutex.locked) {
-        assert(!fileNames.has(id));
-        assert(!fileIds.has(filename));
-        fileIds[filename] = id;
-        fileNames[id] = filename;
+        if (fileIdCache.getCachedIdFor(filename).case(int i: i != id, :none: false)) {
+            // TODO clear the file cache if this happens
+            assert(false);
+        }
+        fileIdCache.setCachedIdFor(filename, id);
     }
 
     override string toFileName(int fileId) with (this.mutex.locked) {
-        if (!fileNames.has(fileId)) return "[UNKNOWN]";
-        return fileNames[fileId];
+        return fileIdCache.getCachedFilenameFor(fileId).case(:none: "[UNKNOWN]");
     }
 
     /**
@@ -75,21 +56,41 @@ class FileIdCache
 
     alias file = (".obj/file_id_cache.json");
 
-    int[][string] cached;
+    int[string] fileId;
+
+    string[int] fileName;
 
     this() {
         this.mutex = new Mutex;
-
         load;
     }
 
-    int[] getCachedIdsFor(string name) with (this.mutex.locked) {
-        return this.cached.get(name, null);
+    (int | :none) getCachedIdFor(string name) with (this.mutex.locked) {
+        if (this.fileId.has(name)) return this.fileId[name];
+        return :none;
     }
 
-    void addCachedIdFor(string name, int id) with (this.mutex.locked) {
-        this.cached[name] = this.cached.get(name, null) ~ id;
+    (string | :none) getCachedFilenameFor(int id) with (this.mutex.locked) {
+        if (this.fileName.has(id)) return this.fileName[id];
+        return :none;
+    }
+
+    int setNextFreeIdFor(string name) with (this.mutex.locked) {
+        mut int i = 0;
+        while (fileName.has(i)) i++;
+        set(name, i);
         save;
+        return i;
+    }
+
+    void setCachedIdFor(string name, int id) with (this.mutex.locked) {
+        set(name, id);
+        save;
+    }
+
+    private void set(string name, int id) {
+        this.fileId[name] = id;
+        this.fileName[id] = name;
     }
 
     private void load() {
@@ -97,14 +98,17 @@ class FileIdCache
         JSONValue cache = JSONValue.loadFile(file);
         auto obj = cache.expect!((string key, JSONValue value)[])?;
         for (kv in obj) {
-            this.cached[kv.key] = [a.expect!int? for a in kv.value.expect!(JSONValue[])?];
+            auto name = kv.key;
+            auto id = kv.value.expect!int?;
+            this.fileId[name] = id;
+            this.fileName[id] = name;
         }
     }
 
     private void save() {
         mut (string key, JSONValue value)[] entries;
-        for (key in cached.keys) {
-            entries ~= (key, JSONValue([JSONValue(i) for i in cached[key]]));
+        for (key in fileId.keys) {
+            entries ~= (key, JSONValue(fileId[key]));
         }
         auto cache = JSONValue(entries);
         file.writeText(cache.toString);

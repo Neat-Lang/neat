@@ -4834,17 +4834,7 @@ class ImportTask : ImportModuleBaseTask
     return ret;
 }
 
-class ModuleParserConfig
-{
-    Package[] packages;
-
-    ASTModule[] defaultImports;
-
-    this(this.packages, this.defaultImports) { }
-}
-
-(nullable ASTModule | fail Error) parseMacroContinuation(CompilerBase compiler, ParserImpl parser, ParserHelper helper, ASTModule astModule,
-    ModuleParserConfig config)
+(nullable ASTModule | fail Error) parseMacroContinuation(CompilerBase compiler, ParserImpl parser, ParserHelper helper, ASTModule astModule)
 {
     parser.begin;
     auto from = parser.from;
@@ -4866,7 +4856,7 @@ class ModuleParserConfig
         astModule.name, astModule.pak, astModule.moduleParseTaskId,
         newMacroState, astModule.locRange, astModule);
 
-    return parseModuleBody(compiler, parser, helper, subModule, config);
+    return parseModuleBody(compiler, parser, helper, subModule);
 }
 
 (Package | fail Error) selectPackage(Package[] packages, string name, LocRange locRange)
@@ -4880,15 +4870,13 @@ class LexicalContextImpl : LexicalContext
 {
     ParserHelper helper;
 
-    ModuleParserConfig config;
-
-    this(this.compiler, this.pak, this.moduleParseTaskId, this.macroState, this.helper, this.config) { }
+    this(this.compiler, this.pak, this.moduleParseTaskId, this.macroState, this.helper) { }
 
     override (ASTModuleBase | fail Error) resolveImport(ASTImportStatementBase importStmt) {
         return .resolveImport(
             compiler, pak.name,
             importStmt.instanceOf(ASTImportStatement).notNull,
-            helper, config);
+            helper);
     }
 }
 
@@ -5017,12 +5005,11 @@ class LexicalContextImpl : LexicalContext
     return parser.fail("couldn't parse function or struct");
 }
 
-(ASTModule | fail Error) parseModuleBody(CompilerBase compiler, ParserImpl parser, ParserHelper helper, ASTModule module_,
-    ModuleParserConfig config)
+(ASTModule | fail Error) parseModuleBody(CompilerBase compiler, ParserImpl parser, ParserHelper helper, ASTModule module_)
 {
     mut LexicalContext lexicalContext = new LexicalContextImpl(
         compiler, module_.pak, moduleParseTaskId=module_.moduleParseTaskId,
-        module_.macroState, helper, config);
+        module_.macroState, helper);
 
     /*
      * Why is there a group of import statements?
@@ -5049,7 +5036,7 @@ class LexicalContextImpl : LexicalContext
             module_.macroState = module_.macroState.dup;
             lexicalContext = new LexicalContextImpl(
                 compiler, module_.pak, moduleParseTaskId=module_.moduleParseTaskId,
-                module_.macroState, helper, config);
+                module_.macroState, helper);
 
             lexicalContext.compiler.workPool.dependency(provider=id, consumer=:current);
             lexicalContext.macroState.addImport(
@@ -5061,7 +5048,7 @@ class LexicalContextImpl : LexicalContext
 
     while (!parser.eof)
     {
-        if (ASTModule submod = parseMacroContinuation(compiler, parser, helper, module_, config)?)
+        if (ASTModule submod = parseMacroContinuation(compiler, parser, helper, module_)?)
             return submod;
 
         auto loc = parser.loc;
@@ -5098,8 +5085,7 @@ class LexicalContextImpl : LexicalContext
     return module_;
 }
 
-(ASTModule | fail Error) resolveImport(CompilerBase compiler, string pak, ASTImportStatement import_, ParserHelper helper,
-    ModuleParserConfig config)
+(ASTModule | fail Error) resolveImport(CompilerBase compiler, string pak, ASTImportStatement import_, ParserHelper helper)
 {
     (string name, string pak) target = import_.target.case(
         (:normal, string name, string pak): (name, pak),
@@ -5108,15 +5094,15 @@ class LexicalContextImpl : LexicalContext
             .wait(task.id)
             .instanceOf(ImportModuleBaseTask)
             .module_?.instanceOf(ASTModule).notNull);
-    mut Package pak = selectPackage(config.packages, pak, import_.locRange)?;
+    mut Package pak = selectPackage(compiler.allPackages, pak, import_.locRange)?;
     // TODO enum SearchMode { Transitive, Direct, Commandline }
     mut bool transitive = true;
     if (target.pak.length) {
-        pak = selectPackage(config.packages, target.pak, import_.locRange)?;
+        pak = selectPackage(compiler.allPackages, target.pak, import_.locRange)?;
         transitive = false;
     }
     return getModule(
-        compiler, moduleToFile(target.name), pak, true, helper, config, import_.locRange);
+        compiler, moduleToFile(target.name), pak, true, helper, import_.locRange);
 }
 
 (Module | fail Error) compileModule(ASTModule astModule, ImmutableContext icontext, bool addDefaultImports)
@@ -5216,7 +5202,7 @@ class LexicalContextImpl : LexicalContext
 }
 
 (ASTModule | fail Error) getModule(CompilerBase compiler, mut string filename, mut nullable Package pak, bool search,
-    ParserHelper helper, ModuleParserConfig config, LocRange locRange)
+    ParserHelper helper, LocRange locRange)
 {
     mut string path = filename;
     if (search) {
@@ -5227,14 +5213,14 @@ class LexicalContextImpl : LexicalContext
         pak = pair[1];
     } else {
         assert2s(!pak, "no search, but package");
-        auto pair = findResidualFilename(filename, config.packages);
+        auto pair = findResidualFilename(filename, compiler.allPackages);
         filename = pair[0];
         pak = pair[1];
     }
     assert(!!pak);
     auto pak = pak.notNull;
     // FIXME the workpool queueing here is 100% redundant with the ImportTask queueing, p sure
-    auto task = new ParseAstModuleTask(compiler, filename, path, pak, helper, config, locRange);
+    auto task = new ParseAstModuleTask(compiler, filename, path, pak, helper, locRange);
     compiler.workPool.queue(task);
     compiler.workPool.dependency(provider=task.id, consumer=:current);
     return compiler.workPool.wait(task.id).instanceOf(ParseAstModuleTask).module_;
@@ -5248,12 +5234,11 @@ class ParseAstModuleTask : ITask
     ReadFileTask readSource;
     Package pak;
     ParserHelper helper;
-    ModuleParserConfig config;
     LocRange locRange;
     (ASTModule | :none | Error) result;
     this(
         this.compiler, this.filename, this.path,
-        this.pak, this.helper, this.config, this.locRange,
+        this.pak, this.helper, this.locRange,
     ) {
         this.result = :none;
         this.readSource = new ReadFileTask(path);
@@ -5293,6 +5278,6 @@ class ParseAstModuleTask : ITask
 
         ASTModule baseModule = new ASTModule(
             modname, pak, moduleParseTaskId=this.id, new MacroState, parser.to(fromAtModule), null);
-        return parseModuleBody(compiler, parser, helper, baseModule, config);
+        return parseModuleBody(compiler, parser, helper, baseModule);
     }
 }

@@ -873,14 +873,6 @@ class ASTCall : ASTSymbol
         return call(context, target, this.args, this.locRange, false)?;
     }
 
-    override ASTSymbol quote(Quoter quoter) {
-        auto args = [arg.sym.quote(quoter) for arg in this.args];
-        return quoter.compilerCall("astCall", [
-            this.target.quote(quoter),
-            quoter.compiler.astArrayLiteral(args, this.locRange)
-        ], this.locRange);
-    }
-
     override string repr() {
         return this.target.repr ~ "(" ~ [join with ", " a.sym.repr for a in this.args] ~ ")";
     }
@@ -1001,10 +993,6 @@ class ASTIndexAccess : ASTSymbol
                 context, allowRefReturn=!saveIndexValue, base, &do_)
             ?.notNull;
     }
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astIndex", [base.quote(quoter), index.quote(quoter)], locRange);
-    }
 }
 
 class ASTArraySlice : ASTSymbol
@@ -1037,13 +1025,6 @@ class ASTArraySlice : ASTSymbol
                 sizeT, this.locRange)?,
             this.locRange, context.platform);
         return new StatementExpression(initTemp, slice, array.info);
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astArraySlice", [
-            this.array.quote(quoter),
-            this.lower.quote(quoter),
-            this.upper.quote(quoter)], locRange);
     }
 }
 
@@ -1169,27 +1150,6 @@ class ASTMember : ASTMemberBase
         }
         return this.locRange.fail("Member '$(name)' not found");
     }
-
-    override ASTSymbol quote(Quoter quoter)
-    {
-        /**
-         * quote rewriting
-         * foo.$bar
-         * => astMember(foo, bar)
-         */
-        if (auto quote = this.member.instanceOf(ASTQuotedSymbol)) {
-            return quoter.compilerCall("astMember", [
-                this.base.quote(quoter),
-                quoter.compiler.astIdentifier(quote.name, locRange)
-            ], locRange);
-        }
-        if (auto ident = this.member.instanceOf(ASTIdentifier)) {
-            return quoter.compilerCall("astMember", [
-                this.base.quote(quoter),
-                quoter.compiler.astStringLiteral(ident.name, locRange)], locRange);
-        }
-        assert(false);
-    }
 }
 
 (nullable ASTMember | fail Error) parseMember(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
@@ -1276,11 +1236,6 @@ class ASTParenPropertyExpression : ASTSymbol
         return context.compiler.consume(context, baseExpr, &do1);
     }
 
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall(
-            "astParenPropertyExpression", [base.quote(quoter), prop.quote(quoter)], locRange);
-    }
-
     override string repr() {
         return "$(this.base.repr).($(this.prop.repr))";
     }
@@ -1347,8 +1302,6 @@ class ASTPropagateFailureExpr : ASTSymbol
         context.popErrorLoc;
         return ret;
     }
-
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTPropagateFailureExpr'!"); assert(false); }
 
     override string repr() { return this.base.repr ~ "?"; }
 }
@@ -1454,11 +1407,6 @@ class ASTDereference : ASTSymbol
     {
         return new Dereference(this.base.compile(context)?.beExpression(this.locRange)?);
     }
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall(
-            "astDereference", [this.base.quote(quoter)], locRange);
-    }
 }
 
 class ASTReference : ASTSymbol
@@ -1485,11 +1433,6 @@ class ASTReference : ASTSymbol
         locRange.assert(!!baseExpression.instanceOf(Reference), "&expr: expr not a reference")?;
 
         return new ReferenceExpression(baseExpression.instanceOf(Reference).notNull);
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall(
-            "astReference", [this.base.quote(quoter)], locRange);
     }
 }
 
@@ -1787,7 +1730,6 @@ class ASTPrePostIncDec : ASTSymbol
         return context.compiler.exprWithTemporaryExpr(context.getUniqueId, refptr, &do_)?.notNull;
     }
 
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTPreOp'!"); assert(false); }
     override string repr() {
         auto opText = op.what.case((:inc): "++", (:dec): "--");
         return op.when.case((:pre): opText ~ target.repr, (:post): target.repr ~ opText);
@@ -2096,12 +2038,6 @@ class ASTIota : ASTSymbol
 
         return iotaValue.compile(context)?.beExpression(__RANGE__)?;
     }
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astIota", [
-            from.quote(quoter),
-            to.quote(quoter)], locRange);
-    }
 }
 
 (ASTSymbol | fail Error) parseIota(ParserImpl parser, LexicalContext lexicalContext, ASTSymbol left, int myLevel)
@@ -2203,8 +2139,6 @@ class ASTTernaryIf : ASTSymbol
         return impl.compile(context);
     }
 
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTTernaryIf'!"); assert(false); }
-
     override string repr() { return "$(left.repr) if $(cond.repr) else $(right.repr)"; }
 }
 
@@ -2286,12 +2220,6 @@ class ASTReturn : ASTSymbol
         return new StatementExpression(returnStmt, new UnreachableExpr, gifted=false);
     }
 
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astReturn", [
-            value.quote(quoter),
-        ], locRange);
-    }
-
     override string repr() { return "return $(value.repr)"; }
 }
 
@@ -2301,11 +2229,6 @@ class ASTVoidExpression : ASTSymbol
     this(this.locRange) { }
 
     override (Expression | fail Error) compile(Context context) { return once new VoidExpression; }
-
-    override ASTSymbol quote(Quoter quoter) {
-        ASTSymbol[] args;
-        return quoter.compilerCall("astVoidLiteral", args, locRange);
-    }
 }
 
 (nullable ASTReturn | fail Error) parseReturn(ParserImpl parser, LexicalContext lexicalContext)
@@ -2537,25 +2460,6 @@ class ASTIfStatement : ASTStatement
 
         return StatementCompileResult(sequence2(prelude, ifStmt), context.namespace);
     }
-
-    override ASTSymbol quote(Quoter quoter) {
-        if (!else_) {
-            return quoter.compilerCall("astIf", [
-                test.case(
-                    ASTSymbol symbol: symbol.quote(quoter),
-                    ASTVarDeclStatement stmt: stmt.quote(quoter),
-                    ASTVarExtractDeclStatement stmt: stmt.quote(quoter)),
-                then.quote(quoter),
-                quoter.compiler.astIdentifier("null", locRange)], locRange);
-        }
-        return quoter.compilerCall("astIf", [
-            test.case(
-                ASTSymbol symbol: symbol.quote(quoter),
-                ASTVarDeclStatement stmt: stmt.quote(quoter),
-                ASTVarExtractDeclStatement stmt: stmt.quote(quoter)),
-            then.quote(quoter),
-            else_.quote(quoter)], locRange);
-    }
 }
 
 (nullable ASTIfStatement | fail Error) parseIf(ParserImpl parser, LexicalContext lexicalContext, LocRange from)
@@ -2622,13 +2526,6 @@ class ASTScopeStatement : ASTStatement
             unwindScope(subContext, context.namespace, new SequenceStatement(statements))?,
             context.namespace); // scope ends here
     }
-
-    override ASTSymbol quote(Quoter quoter) {
-        auto statements = [statement.quote(quoter) for statement in this.statements];
-        return quoter.compilerCall(
-            "astScope", [
-                quoter.compiler.astArrayLiteral(statements, this.locRange)], this.locRange);
-    }
 }
 
 // just a bunch of statements after each other
@@ -2651,12 +2548,6 @@ class ASTSequenceStatement : ASTStatement
         }
         // not a scope!
         return StatementCompileResult(new SequenceStatement(statements), subContext.namespace);
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        auto statements = [arg.quote(quoter) for arg in this.statements];
-        return quoter.compilerCall(
-            "astSequence", [quoter.compiler.astArrayLiteral(statements, this.locRange)], this.locRange);
     }
 }
 
@@ -2763,13 +2654,6 @@ class ASTOpAssignStatement : ASTStatement
         }
         return fallback.compile(context);
     }
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astOpAssign", [
-            left.quote(quoter),
-            quoter.compiler.astStringLiteral(op, __RANGE__),
-            right.quote(quoter)], locRange);
-    }
 }
 
 class ASTAssignStatement : ASTStatement
@@ -2857,9 +2741,6 @@ class ASTAssignStatement : ASTStatement
             context.namespace);
     }
 
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astAssign", [target.quote(quoter), value.quote(quoter)], locRange);
-    }
     override string repr() { return "$(target.repr) = $(value.repr); "; }
 }
 
@@ -2952,40 +2833,6 @@ class ASTVarDeclStatement : ASTStatement
                 new AssignStatement(decl.accessDecl(context), new NullExpr(type), this.locRange),
                 decl);
         }
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        mut uninitialized ASTSymbol varName;
-        // auto $foo = 5;
-        // -> compiler.astDeclareVar(foo, compiler.astNumberLiteral(5))
-        if (auto quote = this.name.instanceOf(ASTQuotedSymbol)) {
-            varName = quoter.compiler.astIdentifier(quote.name, this.locRange);
-        } else if (auto ident = this.name.instanceOf(ASTIdentifier)) {
-            varName = quoter.compiler.astStringLiteral(ident.name, this.locRange);
-        } else {
-            assert(false);
-        }
-        if (this.infer) {
-            return quoter.compilerCall("astDeclareVar", [
-                varName,
-                quoter.compiler.astBoolLiteral(this.mutable, this.locRange),
-                quoter.compiler.astBoolLiteral(this.uninitialized, this.locRange),
-                this.initial.quote(quoter)], this.locRange);
-        }
-        if (this.initial) {
-            return quoter.compilerCall("astDeclareTypedVar", [
-                varName,
-                quoter.compiler.astBoolLiteral(this.mutable, this.locRange),
-                quoter.compiler.astBoolLiteral(this.uninitialized, this.locRange),
-                this.type.quote(quoter),
-                this.initial.quote(quoter)], this.locRange);
-        }
-        return quoter.compilerCall("astDeclareTypedVar", [
-            varName,
-            quoter.compiler.astBoolLiteral(this.mutable, this.locRange),
-            quoter.compiler.astBoolLiteral(this.uninitialized, this.locRange),
-            this.type.quote(quoter),
-            quoter.compiler.astIdentifier("null", this.locRange)], this.locRange);
     }
 
     override string repr() {
@@ -3236,30 +3083,6 @@ class ASTVarExtractDeclStatement : ASTStatement
         return ret;
     }
 
-    override ASTSymbol quote(Quoter quoter) {
-        mut uninitialized ASTSymbol varName;
-        // auto $foo <- expr;
-        // -> compiler.astDeclareVarExtract(foo, ...)
-        if (auto quote = this.name.instanceOf(ASTQuotedSymbol)) {
-            varName = quoter.compiler.astIdentifier(quote.name, this.locRange);
-        } else if (auto ident = this.name.instanceOf(ASTIdentifier)) {
-            varName = quoter.compiler.astStringLiteral(ident.name, this.locRange);
-        } else {
-            assert(false);
-        }
-        ASTSymbol quoteNullable(nullable ASTSymbol sym)
-        {
-            if (auto sym = sym) return sym.quote(quoter);
-            return quoter.compiler.astIdentifier("null", __RANGE__);
-        }
-        return quoter.compilerCall("astDeclareVarExtract", [
-            varName,
-            quoter.compiler.astBoolLiteral(this.mutable, this.locRange),
-            quoter.compiler.astBoolLiteral(this.infer, this.locRange),
-            quoteNullable(this.type),
-            this.source.quote(quoter)], this.locRange);
-    }
-
     /*
     FIXME: static in class
     static ASTVarExtractDeclStatement fromVarDecl(ASTVarDeclStatement decl)
@@ -3334,11 +3157,6 @@ class ASTNestedFunctionDeclStatement : ASTStatement
         }
         return StatementCompileResult(new NoopStatement, allFunsNamespace);
     }
-
-    override ASTSymbol quote(Quoter quoter) {
-        print("cannot quote 'ASTNestedFunctionDeclStatement'");
-        assert(false);
-    }
 }
 
 (nullable ASTNestedFunctionDeclStatement | fail Error) parseNestedFunctionDecls(
@@ -3378,8 +3196,6 @@ class ASTNestedFunctionDeclExpr : ASTSymbol
         auto astRef = new ASTReference(astSym, this.locRange);
         return astRef.compile(context);
     }
-
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTNestedFunctionDeclExpr'!"); assert(false); }
 
     override string repr() { return "ASTNestedFunctionDeclExpr((...) $(stmt.repr)).repr"; }
 }
@@ -3441,8 +3257,6 @@ class ASTWhile : ASTStatement
             new Loop(label, null, condExpr, bodyStmt, null, this.locRange),
             context.namespace);
     }
-
-    override ASTSymbol quote(Quoter quoter) { print("cannot quote 'ASTWhileStatement'"); assert(false); }
 }
 
 (nullable ASTWhile | fail Error) parseWhile(ParserImpl parser, LexicalContext lexicalContext, LocRange from)
@@ -3493,17 +3307,6 @@ class ASTStatementExpression : ASTSymbol
         auto stmtExpr = unwindScope(context, baseNamespace, sequence)?;
 
         return new StatementExpression(stmtExpr, temp, true);
-    }
-
-    // TODO on CompilerBase?
-    override ASTSymbol quote(Quoter quoter) {
-        auto quotedStatements = new ASTSymbol[](this.statements.length);
-        for (i, statement in this.statements)
-            quotedStatements[i] = statement.quote(quoter);
-        return quoter.compilerCall("astStatementExpression", [
-            quoter.compiler.astArrayLiteral(quotedStatements, locRange),
-            this.expr.quote(quoter)
-        ], locRange);
     }
 }
 
@@ -3561,14 +3364,6 @@ class ASTForLoop : ASTStatement
             new Loop(label, declPair.statement, condition, bodyPair.statement, stepPair.statement, this.locRange),
             context.namespace);
     }
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astForLoop", [
-            declareLoopVar.quote(quoter),
-            condition.quote(quoter),
-            step.quote(quoter),
-            body_.quote(quoter)], locRange);
-    }
 }
 
 (nullable ASTForLoop | fail Error) parseFor(ParserImpl parser, LexicalContext lexicalContext, LocRange from)
@@ -3588,10 +3383,6 @@ class ASTForLoop : ASTStatement
     return new ASTForLoop(varDecl.notNull, condition.notNull, step.notNull, body_, parser.to(from));
 }
 
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compiler.astIdentifier(variable, locRange);
-    }
 /**
  * Parse a statement that indicates to the quoter that an ASTStatement variable should be inserted.
  */
@@ -3809,18 +3600,6 @@ class ASTExtForLoop : ASTStatement
         context.popErrorLoc;
         return ret;
     }
-
-    override ASTSymbol quote(Quoter quoter) {
-        mut ASTSymbol[] args;
-        args ~= source.quote(quoter);
-        args ~= var1.quoteExtForVarDecl(quoter);
-        args ~= var2.case(
-            ExtForVarDecl decl: decl.quoteExtForVarDecl(quoter),
-            (:none): new ASTSymbolIdentifier("none", __RANGE__));
-        args ~= body_.quote(quoter);
-
-        return quoter.compilerCall("astExtForLoop", args, locRange);
-    }
 }
 
 // This is a placeholder for proper range semantics.
@@ -3889,10 +3668,6 @@ class ASTDestroy : ASTSymbol
         if (!stmt) return once new VoidExpression;
         return new StatementExpression(stmt, once new VoidExpression, false);
     }
-
-    override ASTSymbol quote(Quoter quoter) {
-        return quoter.compilerCall("astDestroy", [target.quote(quoter)], locRange);
-    }
 }
 
 // manually end lifetime of a value
@@ -3933,10 +3708,6 @@ class ASTStaticIfStatement : ASTStatement
             }
             Error err: return err;
         }
-        assert(false);
-    }
-    override ASTSymbol quote(Quoter quoter) {
-        print("TODO quote ASTStaticIfStatement");
         assert(false);
     }
 }
@@ -4786,34 +4557,6 @@ class ASTImport : ASTDeclaration
         contextModule.addModuleDependency(module_);
 
         return namespace;
-    }
-
-    override ASTSymbol quote(Quoter quoter) {
-        string name() {
-            this.statement.target.case {
-                (:normal, string name, string pak):
-                    return name;
-                (:macro_, ASTModuleBase module_):
-                    assert(false);
-                (:macroTask, ImportModuleBaseTask task):
-                    assert(false);
-            }
-        }
-        string pak() {
-            this.module_.case {
-                ASTModule mod: return mod.pak.name;
-                Error error: assert(false);
-            }
-        }
-        mut ASTSymbol[] symbols;
-        for (sym in this.statement.symbols)
-            symbols ~= quoter.compiler.astStringLiteral(sym, __RANGE__);
-        auto symbolArray = quoter.compiler.astArrayLiteral(symbols, __RANGE__);
-
-        return quoter.compilerCall("astImport", [
-            quoter.compiler.astStringLiteral(name, __RANGE__),
-            quoter.compiler.astStringLiteral(pak, __RANGE__),
-            symbolArray], this.statement.locRange);
     }
 }
 

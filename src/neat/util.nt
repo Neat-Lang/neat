@@ -98,19 +98,20 @@ abstract class ASTMemberBase : ASTSymbol
 {
     ASTSymbol base;
 
-    string member;
+    ASTIdentifierSymbol member;
 
     this(this.base, this.member, this.locRange) { }
 
     (nullable ASTSymbol | fail Error) checkUfcs(Context context, Symbol base) {
         if (auto base = base.isExpressionImplCall(context, this.locRange)?) {
+            auto name = this.member.name(context.warmContext);
             auto member = context.compiler.accessMember(
-                context, base, this.member, this.locRange, allowUndefined=true)?;
+                context, base, name, this.locRange, allowUndefined=true)?;
             if (!member) {
                 // property not found in base, attempt UFCS resolution
                 // whether the global is null or not, will decide if UFCS is done.
                 if (auto callable = context.namespace.lookup(
-                    this.member, context, LookupReason.ufcs, this.locRange)?)
+                    name, context, LookupReason.ufcs, this.locRange)?)
                 {
                     return new ASTSymbolHelper(callable, this.locRange);
                 }
@@ -381,10 +382,17 @@ ASTSymbol quoteExtForVarDecl(ExtForVarDecl decl, Quoter quoter) {
             ASTSymbol sym: sym.quote(quoter));
     tupleArgs ~= quoter.quoteLocRange(decl.locRange);
     // auto $foo => (..., foo)
-    if (decl.name.length > 0 && decl.name[0 .. 1] == "\$") {
-        tupleArgs ~= quoter.compiler.astIdentifier(decl.name[1 .. $], __RANGE__);
-    } else {
-        tupleArgs ~= quoter.compiler.astStringLiteral(decl.name, __RANGE__);
+    decl.name.case {
+        string s:
+            tupleArgs ~= quoter.compiler.astIdentifier(s, __RANGE__);
+        ASTSymbol sym:
+            if (auto astQuote = sym.instanceOf(ASTQuotedSymbol)) {
+                tupleArgs ~= quoter.compiler.astIdentifier(astQuote.name, __RANGE__);
+            } else if (auto astIdent = sym.instanceOf(ASTIdentifier)) {
+                tupleArgs ~= quoter.compiler.astStringLiteral(astIdent.name, __RANGE__);
+            } else {
+                assert(false);
+            }
     }
 
     return quoter.compiler.astTupleLiteral(tupleArgs, __RANGE__);
@@ -435,7 +443,7 @@ ColdContext makeColdContext(
 WarmContext makeWarmContext(
     CompilerBase compiler, nullable Expression framePointer, nullable ModuleBase compilingModule)
 {
-    return new WarmContext(framePointer, compilingModule, new LabelCounter, compiler.uniqCounter, null);
+    return new WarmContext(framePointer, compilingModule, new LabelCounter, compiler.uniqCounter, null, null);
 }
 
 // Glue between ASTDeclaration and ASTStatement.
@@ -457,34 +465,40 @@ class ASTDeclarationStatement : ASTStatement
     }
 }
 
-class ASTIdentifier : ASTSymbol
+class ASTIdentifier : ASTIdentifierSymbol
 {
-    string name;
+    string name_;
 
-    bool moduleLevel; // .name
+    bool moduleLevel; // .name_
 
-    this(this.name, this.moduleLevel, this.locRange) { }
+    this(this.name_, this.moduleLevel, this.locRange) {}
 
     override (Symbol | fail Error) compile(Context context)
     {
-        return context.compiler.identifier(context, name, moduleLevel, locRange);
+        return context.compiler.identifier(context, name_, moduleLevel, locRange);
     }
+
+    override string name(WarmContext) => name_;
 
     override ASTSymbol quote(Quoter quoter) {
         assert(!moduleLevel);
         // $foo is quoted as 'foo'
-        if (name[0 .. 1] == "\$") {
-            return quoter.compiler.astIdentifier(name[1 .. $], locRange);
+        if (name_[0 .. 1] == "\$") {
+            return quoter.compiler.astIdentifier(name_[1 .. $], locRange);
         }
         return quoter.compilerCall("astIdentifier", [
-            quoter.compiler.astStringLiteral(this.name, locRange)
+            quoter.compiler.astStringLiteral(this.name_, locRange)
         ], locRange);
     }
 
     override string repr() {
         if (this.moduleLevel)
-            return ".$(this.name)";
-        return this.name;
+            return ".$(name_)";
+        return name_;
+    }
+    override ASTSymbol quote(Quoter quoter) {
+        // fallback
+        return quoter.compiler.astIdentifier(name, locRange);
     }
 }
 

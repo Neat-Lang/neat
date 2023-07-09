@@ -1,7 +1,8 @@
-// TODO: $var escaping
 module std.macro.quasiquoting;
 
 import package(compiler).neat.base;
+import package(compiler).neat.quasiquoting;
+import package(compiler).neat.runtime;
 
 class QuasiQuoterImpl : Quoter
 {
@@ -16,7 +17,7 @@ class QuasiQuoterImpl : Quoter
 
     override ASTSymbol quoteLocRange(LocRange locRange) {
         return compiler.astCall(
-            compiler.astMember(compilerExpr, "makeLocRange", __RANGE__), [
+            compiler.astMember(compilerExpr, compiler.astIdentifier("makeLocRange", __RANGE__), __RANGE__), [
                 compiler.astNumberLiteral(locRange.fileId, __RANGE__),
                 compiler.astNumberLiteral(locRange.from.row, __RANGE__),
                 compiler.astNumberLiteral(locRange.from.column, __RANGE__),
@@ -42,31 +43,55 @@ class QuasiQuoting : Macro
 
         parser.pinned = true;
         parser.begin;
-        if (!parser.acceptToken(TokenType.dot)) {
+        // .$expr
+        if (!parser.acceptToken(TokenType.dot) || !parser.acceptToken(TokenType.dollar)) {
             parser.revert;
             return null;
         }
         auto ident = parser.parseIdentifier;
-        if (ident == "\$stmt") {
-            parser.commit;
-            auto stmt = compiler.parseStatement(parser, lexicalContext)?;
+        if (ident != "stmt" && ident != "expr" && ident != "type") {
+            parser.revert;
+            return null;
+        }
+        parser.commit;
+        auto from = parser.from;
+        auto remainingText = parser.remainingText;
+        // deadbeef scopeId, because we should not be doing anything with these results!
+        // If you see this value, somehow a parsed quote from this block leaked.
+        // Remember, the point of parsing here is just to determine the text fragment to
+        // be parsed at runtime.
+        auto quoteLexicalContext = new QuoteLexicalContext(scopeId=0xdeadbeef, compiler, lexicalContext.pak);
+        mut string methodName;
+        if (ident == "stmt") {
+            auto stmt = compiler.parseStatement(parser, quoteLexicalContext)?;
             parser.assert_(!!stmt, "statement expected")?;
-            return stmt.quote(quoter);
-        }
-        if (ident == "\$expr") {
-            parser.commit;
-            auto expr = compiler.parseExpression(parser, lexicalContext)?;
+            methodName = "astQuotedStatement";
+        } else if (ident == "expr" ) {
+            auto expr = compiler.parseExpression(parser, quoteLexicalContext)?;
             parser.assert_(!!expr, "expression expected")?;
-            return expr.quote(quoter);
-        }
-        if (ident == "\$type") {
-            parser.commit;
-            auto type = compiler.parseType(parser, lexicalContext)?;
+            methodName = "astQuotedExpression";
+        } else if (ident == "type") {
+            auto type = compiler.parseType(parser, quoteLexicalContext)?;
             parser.assert_(!!type, "type expected")?;
-            return type.quote(quoter);
+            methodName = "astQuotedType";
+        } else assert(false);
+        auto locRange = parser.to(from);
+        auto text = remainingText[0 .. $ - parser.remainingText.length];
+        with (compiler) {
+            // `compiler.$stmt { $stmt a; }`
+            // compiles to `compiler.astQuotedStatement(id, "{ $stmt a; }", pak, [], [a], [], (LocRange at '{'))`
+            return astCall(
+                astMember(compilerExpr, astIdentifier(methodName, __RANGE__), __RANGE__),
+                [
+                    astStringLiteral(text, __RANGE__),
+                    lexicalContext.pak.quote(quoter),
+                    astArrayLiteral(quoteLexicalContext.macroSymbols, __RANGE__),
+                    astArrayLiteral(quoteLexicalContext.macroStatements, __RANGE__),
+                    astArrayLiteral(quoteLexicalContext.macroIdentifiers, __RANGE__),
+                    quoter.quoteLocRange(locRange),
+                ],
+                locRange);
         }
-        parser.revert();
-        return null;
     }
 }
 

@@ -346,7 +346,17 @@ abstract class ASTSymbol
     string toString() => repr;
 }
 
-// TODO Statement, Context multi-return
+/**
+ * `foo` or `$bar`, pretty much.
+ * A symbol that can appear in a declaration like `A B = C`, or `A.B = C`, in position `B`.
+ * Can be resolved to a string without compiling.
+ */
+abstract class ASTIdentifierSymbol : ASTSymbol
+{
+    abstract string name(WarmContext warmContext);
+}
+
+// TODO Statement, Context multi-return with destructuring
 struct StatementCompileResult
 {
     Statement statement;
@@ -403,7 +413,12 @@ abstract class ASTSymbolDeclaration : ASTDeclaration
     }
 }
 
-alias ExtForVarDecl = ((:auto_ | ASTSymbol | :none) type, LocRange locRange, string name);
+// 'name' is ASTIdentifier or ASTQuotedSymbol
+version (firstpass) {
+    alias ExtForVarDecl = ((:auto_ | ASTSymbol | :none) type, LocRange locRange, (ASTIdentifierSymbol | string) name);
+} else {
+    alias ExtForVarDecl = ((:auto_ | ASTSymbol | :none) type, LocRange locRange, ASTIdentifierSymbol name);
+}
 
 enum LookupReason
 {
@@ -481,6 +496,22 @@ abstract class DeclarationHolder : Namespace
     abstract Reference accessDecl(Context context);
 }
 
+final class QuoteScope
+{
+    // used to match lookups to scopes
+    int scopeId;
+
+    nullable QuoteScope parent;
+
+    ASTSymbol[] symbols;
+
+    ASTStatement[] statements;
+
+    ASTIdentifierSymbol[] identifiers;
+
+    this(this.scopeId, this.parent, this.symbols, this.statements, this.identifiers) {}
+}
+
 /**
  * This contains the parts of Context that are never modified at all.
  */
@@ -527,20 +558,25 @@ final class WarmContext
 
     IUniqCounter uniqCounter;
 
+    nullable QuoteScope quoteScope;
+
     LocRange[] errorStack;
 
-    this(this.framePointer, this.compilingModule, this.labelCounter, this.uniqCounter, this.errorStack) { }
+    this(
+        this.framePointer, this.compilingModule, this.labelCounter,
+        this.uniqCounter, this.quoteScope, this.errorStack)
+    { }
 
     WarmContext withFramePointer(nullable Expression framePointer) {
         return new WarmContext(
             framePointer, this.compilingModule, this.labelCounter,
-            this.uniqCounter, this.errorStack);
+            this.uniqCounter, this.quoteScope, this.errorStack);
     }
 
     WarmContext withCompilingModule(ModuleBase compilingModule) {
         return new WarmContext(
             this.framePointer, compilingModule, this.labelCounter,
-            this.uniqCounter, this.errorStack);
+            this.uniqCounter, this.quoteScope, this.errorStack);
     }
 
     WarmContext withLabelPrefix(string prefix) {
@@ -549,7 +585,43 @@ final class WarmContext
 
         return new WarmContext(
             this.framePointer, this.compilingModule, labelCounter,
-            uniqCounter, this.errorStack);
+            uniqCounter, this.quoteScope, this.errorStack);
+    }
+
+    WarmContext withQuoteScope(QuoteScope quoteScope) {
+        return new WarmContext(
+            this.framePointer, this.compilingModule, this.labelCounter,
+            this.uniqCounter, quoteScope, this.errorStack);
+    }
+
+    ASTSymbol getQuoteSymbol(int scopeId, int index) {
+        mut auto current = this.quoteScope;
+        while (current) {
+            if (current.scopeId == scopeId) return current.symbols[index];
+            current = current.parent;
+        }
+        print("cannot get quote symbol @$index with scope id $scopeId");
+        assert(false);
+    }
+
+    ASTStatement getQuoteStatement(int scopeId, int index) {
+        mut auto current = this.quoteScope;
+        while (current) {
+            if (current.scopeId == scopeId) return current.statements[index];
+            current = current.parent;
+        }
+        print("cannot get quote statement @$index with scope id $scopeId");
+        assert(false);
+    }
+
+    ASTIdentifierSymbol getQuoteIdentifier(int scopeId, int index) {
+        mut auto current = this.quoteScope;
+        while (current) {
+            if (current.scopeId == scopeId) return current.identifiers[index];
+            current = current.parent;
+        }
+        print("cannot get quote identifier @$index with scope id $scopeId");
+        assert(false);
     }
 }
 
@@ -623,6 +695,19 @@ struct Context
         return Context(this.namespace, this.warmContext.withLabelPrefix(prefix), this.coldContext);
     }
 
+    Context withQuoteScope(QuoteScope quoteScope) {
+        return Context(this.namespace, this.warmContext.withQuoteScope(quoteScope), this.coldContext);
+    }
+
+    ASTSymbol getQuoteSymbol(int scopeId, int index) =>
+        this.warmContext.getQuoteSymbol(scopeId, index);
+
+    ASTStatement getQuoteStatement(int scopeId, int index) =>
+        this.warmContext.getQuoteStatement(scopeId, index);
+
+    ASTIdentifierSymbol getQuoteIdentifier(int scopeId, int index) =>
+        this.warmContext.getQuoteIdentifier(scopeId, index);
+
     alias compiler = (coldContext.compiler);
     alias platform = (coldContext.platform);
     alias macroState = (coldContext.macroState);
@@ -635,6 +720,7 @@ struct Context
     alias compilingModule = (warmContext.compilingModule);
     alias labelCounter = (warmContext.labelCounter);
     alias uniqCounter = (warmContext.uniqCounter);
+    alias quoteScope = (warmContext.quoteScope);
     alias errorStack = (warmContext.errorStack);
 
     void pushErrorLoc(LocRange locRange) {
@@ -782,11 +868,13 @@ abstract class CompilerBase
     // parser
     abstract (Parser | fail Error) createParser(string filename, string fulltext);
 
-    // all packages for the current build
-    abstract Package[] allPackages();
+    abstract (Parser | fail Error) createFragmentParser(string fragment, LocRange start);
 
     // must be called or LocRange IDs may be wrong.
     abstract void disposeParser(Parser parser);
+
+    // all packages for the current build
+    abstract Package[] allPackages();
 
     abstract (nullable ASTSymbol | fail Error) parseExpression(
         Parser parser, LexicalContext lexicalContext);
@@ -839,15 +927,27 @@ abstract class CompilerBase
     // a += 2
     abstract ASTStatement astOpAssign(ASTSymbol left, string op, ASTSymbol right, LocRange locRange);
 
-    abstract ASTStatement astDeclareVar(
-        string name, bool mutable, bool uninitialized, nullable ASTSymbol initial, LocRange locRange);
+    version (firstpass) {
+        abstract ASTStatement astDeclareVar((string | ASTIdentifierSymbol) name, bool mutable, bool uninitialized,
+            nullable ASTSymbol initial, LocRange locRange);
 
-    abstract ASTStatement astDeclareVarExtract(
-        string name, bool mutable, bool infer, nullable ASTSymbol type, ASTSymbol source, LocRange locRange);
+        abstract ASTStatement astDeclareVarExtract((string | ASTIdentifierSymbol) name, bool mutable, bool infer,
+            nullable ASTSymbol type, ASTSymbol source, LocRange locRange);
 
-    // initial is optional
-    abstract ASTStatement astDeclareTypedVar(
-        string name, bool mutable, bool uninitialized, ASTSymbol type, nullable ASTSymbol initial, LocRange locRange);
+        // initial is optional
+        abstract ASTStatement astDeclareTypedVar((string | ASTIdentifierSymbol) name, bool mutable, bool uninitialized,
+            ASTSymbol type, nullable ASTSymbol initial, LocRange locRange);
+    } else {
+        abstract ASTStatement astDeclareVar(ASTIdentifierSymbol name, bool mutable, bool uninitialized,
+            nullable ASTSymbol initial, LocRange locRange);
+
+        abstract ASTStatement astDeclareVarExtract(ASTIdentifierSymbol name, bool mutable, bool infer,
+            nullable ASTSymbol type, ASTSymbol source, LocRange locRange);
+
+        // initial is optional
+        abstract ASTStatement astDeclareTypedVar(ASTIdentifierSymbol name, bool mutable, bool uninitialized,
+            ASTSymbol type, nullable ASTSymbol initial, LocRange locRange);
+    }
 
     abstract ASTSymbol astReturn(ASTSymbol value, LocRange locRange);
 
@@ -866,6 +966,18 @@ abstract class CompilerBase
 
     abstract ASTStatement astDeclarationStatement(ASTDeclaration target, LocRange locRange);
 
+    // compiler.$stmt
+    abstract ASTStatement astQuotedStatement(string fragment, Package pak,
+        ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange);
+
+    // compiler.$expr
+    abstract ASTSymbol astQuotedExpression(string fragment, Package pak,
+        ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange);
+
+    // compiler.$type
+    abstract ASTSymbol astQuotedType(string fragment, Package pak,
+        ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange);
+
     abstract ASTSymbol astBinaryOp(string op, ASTSymbol left, ASTSymbol right, LocRange locRange);
 
     abstract (ASTSymbol left, string op, ASTSymbol right | :none) destructAstBinaryOp(ASTSymbol sym);
@@ -876,9 +988,13 @@ abstract class CompilerBase
 
     abstract ASTSymbol astIndex(ASTSymbol base, ASTSymbol index, LocRange locRange);
 
-    abstract ASTSymbol astMember(ASTSymbol base, string name, LocRange locRange);
+    version (firstpass) {
+        abstract ASTSymbol astMember(ASTSymbol base, (string | ASTIdentifierSymbol) name, LocRange locRange);
+    } else {
+        abstract ASTSymbol astMember(ASTSymbol base, ASTIdentifierSymbol name, LocRange locRange);
+    }
 
-    abstract (ASTSymbol base, string member | :none) destructAstMember(ASTSymbol astMember);
+    abstract (ASTSymbol base, ASTIdentifierSymbol member | :none) destructAstMember(ASTSymbol astMember);
 
     abstract ASTSymbol astReference(ASTSymbol value, LocRange locRange);
 
@@ -916,7 +1032,7 @@ abstract class CompilerBase
 
     abstract ASTSymbol astVoidLiteral(LocRange locRange);
 
-    abstract ASTSymbol astIdentifier(string name, LocRange locRange);
+    abstract ASTIdentifierSymbol astIdentifier(string name, LocRange locRange);
 
     abstract (string | :none) destructAstIdentifier(ASTSymbol sym);
 
@@ -1419,7 +1535,7 @@ abstract class Parser
     abstract LocRange to(LocRange from);
     abstract void strip();
     abstract string parseLastComment();
-    abstract string text();
+    abstract string remainingText();
     abstract bool acceptToken(TokenType type);
     abstract bool acceptToken2(TokenType first, TokenType second);
     abstract bool acceptToken3(TokenType first, TokenType second, TokenType third);
@@ -1519,8 +1635,28 @@ abstract class LexicalContext
 
     MacroState macroState;
 
+    /**
+     * Quoting logic: "$a" will pass `new ASTIdentifier("a")` to `allocQuoteToken`,
+     * save the resulting offset, and later use `Context.getQuote*` to resolve.
+     * Except actually it just errors because you can't use macro tokens outside
+     * QuotedLexicalContext.
+     */
+    (int | fail Error) allocQuoteToken(ASTSymbol symbol, QuoteTokenCategory category) {
+        return symbol.locRange.fail("Quasiquote outside of quoted environment");
+    }
+
+    int quoteScope() {
+        assert(false);
+    }
+
     // break an annoying dependency cycle
     abstract (ASTModuleBase | fail Error) resolveImport(ASTImportStatementBase importStmt);
+}
+
+enum QuoteTokenCategory {
+    symbol,
+    statement,
+    identifier,
 }
 
 class Package

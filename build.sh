@@ -74,7 +74,8 @@ cp -R src build/
 
 echo "Building stage 2..."
 FLAGS="$FLAGS -file-id-output build/fileIdPins"
-$NEAT $FLAGS $OPTFLAG -backend=llvm -macro-backend=c -Pcompiler:src -j src/main.nt -o build/neat_stage2
+$NEAT $FLAGS $OPTFLAG -backend=llvm -macro-backend=c -Pcompiler:src -j src/main.nt \
+    -macro-version=firstpass -o build/neat_stage2
 NEAT=build/neat_stage2
 
 cp -f $NEAT build/neat

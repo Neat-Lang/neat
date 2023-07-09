@@ -27,6 +27,7 @@ import neat.lambda;
 import neat.lexer;
 import neat.parser;
 import neat.pragmas;
+import neat.quasiquoting;
 import neat.runtime : die;
 import neat.statements;
 import neat.struct_;
@@ -328,12 +329,23 @@ with (parser.transaction)
         }
     }
     with (parser.transaction) {
+        bool quoted = parser.acceptToken(TokenType.dollar);
         string identifier = parser.parseIdentifier;
 
         if (identifier == "" || parser.isKeyword(identifier)) {
             return null;
         }
         commit;
+
+        if (quoted) {
+            if (identifier == "stmt") {
+                // avoid `$stmt var;` colliding with var declaration syntax.
+                return null;
+            }
+            auto subIdentifier = new ASTIdentifier(identifier, false, parser.to(from));
+            auto token = lexicalContext.allocQuoteToken(subIdentifier, QuoteTokenCategory.symbol)?;
+            return new ASTSymbolQuote(lexicalContext.quoteScope, token, parser.to(from));
+        }
 
         auto loc = __RANGE__;
         if (identifier == "long")
@@ -497,7 +509,7 @@ class WrapReference : Reference
     ASTArgument[] astArgs, LocRange locRange, bool autoCall)
 {
     if (auto astIdentifier = astTarget.instanceOf(ASTIdentifier)) {
-        auto targetName = astIdentifier.name;
+        auto targetName = astIdentifier.name_;
         // built-ins
         // TODO __borrow, __leak, __take too
         if (targetName == "__hash") {
@@ -516,15 +528,16 @@ class WrapReference : Reference
         /// Reduces need for `LateSymbol`.
         if (auto memberAccess = astTarget.instanceOf(ASTMemberBase)) {
             auto base = memberAccess.base.compile(context)?;
+            auto name = memberAccess.member.name(context.warmContext);
             if (auto type = base.instanceOf(Type)) {
                 auto protection = type.protectionAt(context.namespace);
                 if (auto ret = type.callMember(
-                        context, null, memberAccess.member, astArgs, protection, memberAccess.locRange)?)
+                        context, null, name, astArgs, protection, memberAccess.locRange)?)
                     return ret;
             } else if (auto baseExpr = base.isExpressionImplCall(context, locRange)?) {
                 auto protection = baseExpr.type.protectionAt(context.namespace);
                 if (auto ret = baseExpr.type.callMember(
-                        context, baseExpr, memberAccess.member, astArgs, protection, memberAccess.locRange)?)
+                        context, baseExpr, name, astArgs, protection, memberAccess.locRange)?)
                     return ret;
             }
         }
@@ -759,8 +772,8 @@ bool previewCanCallImplicit(Symbol target) {
     (void | fail Error) tryInfer(ASTSymbol sym, Type type) {
         // print("tryInfer($(sym.repr), $(type.repr))");
         if (auto ident = sym.instanceOf(ASTIdentifier)) if (!ident.moduleLevel) {
-            if (!assignments.has(ident.name)) return;
-            assignments[ident.name] = assignments[ident.name].case(
+            if (!assignments.has(ident.name_)) return;
+            assignments[ident.name_] = assignments[ident.name_].case(
                 :unknown: type,
                 Type existing: existing.mergeTypes(type).case(:failure: return new Error(
                     errorStack ~ sym.locRange, "incompatible types '$(existing.repr)' and '$(type.repr)'")));
@@ -1148,12 +1161,13 @@ class ASTMember : ASTMemberBase
             return (new ASTCall(target, args, this.locRange)).compile(context);
         }
 
+        auto name = this.member.name(context.warmContext);
         if (auto ret = accessMemberWithLifetime(
-            context, base, this.member, this.locRange, false)?)
+            context, base, name, this.locRange, false)?)
         {
             return ret;
         }
-        return this.locRange.fail("Member '$(this.member)' not found");
+        return this.locRange.fail("Member '$(name)' not found");
     }
 
     override ASTSymbol quote(Quoter quoter)
@@ -1163,19 +1177,22 @@ class ASTMember : ASTMemberBase
          * foo.$bar
          * => astMember(foo, bar)
          */
-        if (member.length && member[0 .. 1] == "\$") {
+        if (auto quote = this.member.instanceOf(ASTQuotedSymbol)) {
             return quoter.compilerCall("astMember", [
                 this.base.quote(quoter),
-                quoter.compiler.astIdentifier(member[1 .. $], locRange)
+                quoter.compiler.astIdentifier(quote.name, locRange)
             ], locRange);
         }
-        return quoter.compilerCall("astMember", [
-            this.base.quote(quoter),
-            quoter.compiler.astStringLiteral(this.member, locRange)], locRange);
+        if (auto ident = this.member.instanceOf(ASTIdentifier)) {
+            return quoter.compilerCall("astMember", [
+                this.base.quote(quoter),
+                quoter.compiler.astStringLiteral(ident.name, locRange)], locRange);
+        }
+        assert(false);
     }
 }
 
-(nullable ASTMember | fail Error) parseMember(Parser parser, ASTSymbol base)
+(nullable ASTMember | fail Error) parseMember(Parser parser, LexicalContext lexicalContext, ASTSymbol base)
 {
     parser.begin;
     // don't accept '..' or '.(': conflicting syntax
@@ -1187,10 +1204,10 @@ class ASTMember : ASTMemberBase
         return null;
     }
     auto from = parser.from;
-    string name = parser.parseIdentifier;
-    parser.assert_(name.length > 0, "member expected")?;
+    auto name = parser.parseIdentifierSymbol(lexicalContext)?;
+    parser.assert_(!!name, "member expected")?;
     parser.commit;
-    return new ASTMember(base, name, parser.to(from));
+    return new ASTMember(base, name.notNull, parser.to(from));
 }
 
 class ParenPropertyNamespace : Namespace
@@ -1371,6 +1388,7 @@ class ASTPropagateFailureExpr : ASTSymbol
 
         (void | fail Error) doMacro() {
             lexicalContext.macroState.applyMacro(macroArgs);
+            macroArgs.result?;
         }
         parser.verifyTransactions("macro parse rule imbalance", &doMacro)?;
 
@@ -1395,7 +1413,7 @@ class ASTPropagateFailureExpr : ASTSymbol
             current = prop;
             continue;
         }
-        if (ASTSymbol memberAccess = parser.parseMember(current)?) {
+        if (ASTSymbol memberAccess = parser.parseMember(lexicalContext, current)?) {
             current = memberAccess;
             continue;
         }
@@ -1817,10 +1835,14 @@ ASTSymbol locRangeExpr(LocRange locRange, Parser parser, LexicalContext lexicalC
     string name = parser.parseIdentifier;
     if (name.length) {
         if (name == "__RANGE__") return locRangeExpr(parser.to(from), parser, lexicalContext);
-        if (name == "\$") return new ASTArrayLength(parser.to(from));
         if (name == "super") return new ASTSuper(parser.to(from));
         return new ASTIdentifier(name, false, parser.to(from));
     }
+    // $foo, foo
+    if (auto sym = parser.parseLeafIdentifierSymbol(lexicalContext)?)
+        return sym;
+    if (parser.acceptToken(TokenType.dollar))
+        return new ASTArrayLength(parser.to(from));
     {
         parser.begin;
         if (parser.acceptToken(TokenType.colon)) {
@@ -2444,11 +2466,12 @@ class ASTIfStatement : ASTStatement
                     epilog = pair.statement;
                     testSucceedsNamespace = pair.namespace;
                 } else {
+                    auto name = vardecl.name.notNull.name(context.warmContext);
                     auto pair = vardecl.compile(context)?;
                     prelude = pair.statement;
                     testSucceedsNamespace = pair.namespace;
                     auto var = testSucceedsNamespace.lookup(
-                            vardecl.name, context, LookupReason.identifier, this.locRange)?
+                            name, context, LookupReason.identifier, this.locRange)?
                         .notNull
                         .beExpression(this.locRange)?;
                     // TODO lookup() that handles the stackframe thing
@@ -2775,9 +2798,10 @@ class ASTAssignStatement : ASTStatement
         if (auto astMemberAccess = target.instanceOf(ASTMemberBase)) {
             auto base = astMemberAccess.base.compile(context)?.beExpressionImplCall(context, astMemberAccess.locRange)?;
             auto protection = base.type.protectionAt(context.namespace);
+            auto memberName = astMemberAccess.member.name(context.warmContext);
             checkAssignmentQuarantine(context, this.locRange, base.type, value.type)?;
             if (auto ret = base.type.assignMember(
-                    context, base, astMemberAccess.member, value, protection, astMemberAccess.locRange)?)
+                    context, base, memberName, value, protection, astMemberAccess.locRange)?)
                 return StatementCompileResult(ret, context.namespace);
         }
 
@@ -2841,7 +2865,7 @@ class ASTAssignStatement : ASTStatement
 
 class ASTVarDeclStatement : ASTStatement
 {
-    string name;
+    nullable ASTIdentifierSymbol name;
 
     bool mutable;
 
@@ -2866,6 +2890,7 @@ class ASTVarDeclStatement : ASTStatement
     {
         mut nullable Type type;
         if (this.type) type = this.type.compile(context)?.beType(this.locRange)?;
+        auto name = this.name.case(null: "", ASTIdentifierSymbol sym: sym.name(context.warmContext));
         if (this.initial)
         {
             mut auto initial = this.initial.compile(context)?.beExpressionImplCall(context, this.locRange)?;
@@ -2887,7 +2912,7 @@ class ASTVarDeclStatement : ASTStatement
                 // don't double-own the value, it's covered by its own ownership
                 // we aren't mutable, so we can safely borrow the initializer.
                 auto decl = new VariableDeclaration(
-                    context.namespace, this.name, context.platform, type, mut=false, borrowed=true, hidden=false);
+                    context.namespace, name, context.platform, type, mut=false, borrowed=true, hidden=false);
                 auto assign = context.compiler.assignStatement(decl.accessDecl(context), initial);
 
                 return StatementCompileResult(assign, decl);
@@ -2896,7 +2921,7 @@ class ASTVarDeclStatement : ASTStatement
             // print("$(this.locRange.repr):$(initial.info.repr): moving $(initial.repr) for $(this.name)");
             // otherwise we'll hold a reference ourselves.
             auto decl = new VariableDeclaration(
-                context.namespace, this.name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
+                context.namespace, name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
 
             return StatementCompileResult(
                 move(context, decl.accessDecl(context), initial, this.initial.locRange)?,
@@ -2906,7 +2931,7 @@ class ASTVarDeclStatement : ASTStatement
         {
             auto type = type.notNull;
             auto decl = new VariableDeclaration(
-                context.namespace, this.name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
+                context.namespace, name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
 
             // Still zero-init.
             return StatementCompileResult(
@@ -2918,10 +2943,10 @@ class ASTVarDeclStatement : ASTStatement
             auto type = type.notNull;
             if (!type.zeroInitializable) {
                 return this.locRange.fail(
-                    "Cannot declare $(this.name) without initializer: $(type.repr) is not zero-initializable");
+                    "Cannot declare $(name) without initializer: $(type.repr) is not zero-initializable");
             }
             auto decl = new VariableDeclaration(
-                context.namespace, this.name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
+                context.namespace, name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
 
             return StatementCompileResult(
                 new AssignStatement(decl.accessDecl(context), new NullExpr(type), this.locRange),
@@ -2933,10 +2958,12 @@ class ASTVarDeclStatement : ASTStatement
         mut uninitialized ASTSymbol varName;
         // auto $foo = 5;
         // -> compiler.astDeclareVar(foo, compiler.astNumberLiteral(5))
-        if (this.name[0 .. 1] == "\$") {
-            varName = quoter.compiler.astIdentifier(this.name[1 .. $], this.locRange);
+        if (auto quote = this.name.instanceOf(ASTQuotedSymbol)) {
+            varName = quoter.compiler.astIdentifier(quote.name, this.locRange);
+        } else if (auto ident = this.name.instanceOf(ASTIdentifier)) {
+            varName = quoter.compiler.astStringLiteral(ident.name, this.locRange);
         } else {
-            varName = quoter.compiler.astStringLiteral(this.name, this.locRange);
+            assert(false);
         }
         if (this.infer) {
             return quoter.compilerCall("astDeclareVar", [
@@ -2978,7 +3005,7 @@ class ASTVarDeclStatement : ASTStatement
     parser.begin;
     mut nullable ASTSymbol initial;
     auto from = parser.from;
-    mut string name;
+    mut nullable ASTIdentifierSymbol name;
     bool accept() {
         if (operator == "=") return parser.acceptToken(TokenType.equal);
         if (operator == "<-") return parser.acceptToken2(TokenType.smaller, TokenType.minus);
@@ -2992,8 +3019,9 @@ class ASTVarDeclStatement : ASTStatement
     }
     else
     {
-        name = parser.parseIdentifier;
-        if (!name.length) {
+        if (auto ident = parser.parseIdentifierSymbol(lexicalContext)?) {
+            name = ident;
+        } else {
             parser.revert;
             return null;
         }
@@ -3110,7 +3138,7 @@ class ASTVarDeclStatement : ASTStatement
  */
 class ASTVarExtractDeclStatement : ASTStatement
 {
-    string name;
+    nullable ASTIdentifierSymbol name;
 
     bool mutable;
 
@@ -3152,8 +3180,9 @@ class ASTVarExtractDeclStatement : ASTStatement
             return type.same(source);
         }
 
+        auto name = this.name.case(null: "", ASTIdentifierSymbol sym: sym.name(context.warmContext));
         auto decl = new VariableDeclaration(
-            context.namespace, this.name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
+            context.namespace, name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
         auto astType = new ASTSymbolHelper(type);
 
         mut ASTEitherCaseExprCase[] cases;
@@ -3194,8 +3223,9 @@ class ASTVarExtractDeclStatement : ASTStatement
             else return null;
             result;
         });
+        auto name = this.name.case(null: "", ASTIdentifierSymbol sym: sym.name(context.warmContext));
         auto decl = new VariableDeclaration(
-            context.namespace, this.name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
+            context.namespace, name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
 
         context.pushErrorLoc(this.locRange);
         auto ret = StatementCompileResult(
@@ -3210,10 +3240,12 @@ class ASTVarExtractDeclStatement : ASTStatement
         mut uninitialized ASTSymbol varName;
         // auto $foo <- expr;
         // -> compiler.astDeclareVarExtract(foo, ...)
-        if (this.name[0 .. 1] == "\$") {
-            varName = quoter.compiler.astIdentifier(this.name[1 .. $], this.locRange);
+        if (auto quote = this.name.instanceOf(ASTQuotedSymbol)) {
+            varName = quoter.compiler.astIdentifier(quote.name, this.locRange);
+        } else if (auto ident = this.name.instanceOf(ASTIdentifier)) {
+            varName = quoter.compiler.astStringLiteral(ident.name, this.locRange);
         } else {
-            varName = quoter.compiler.astStringLiteral(this.name, this.locRange);
+            assert(false);
         }
         ASTSymbol quoteNullable(nullable ASTSymbol sym)
         {
@@ -3556,25 +3588,14 @@ class ASTForLoop : ASTStatement
     return new ASTForLoop(varDecl.notNull, condition.notNull, step.notNull, body_, parser.to(from));
 }
 
-class ASTStatementStatement : ASTStatement
-{
-    string variable;
-
-    this(this.variable, this.locRange) { }
-
-    override (StatementCompileResult | fail Error) compile(Context context) {
-        return this.locRange.fail("\$stmt used outside quasiquote");
-    }
 
     override ASTSymbol quote(Quoter quoter) {
         return quoter.compiler.astIdentifier(variable, locRange);
     }
-}
-
 /**
  * Parse a statement that indicates to the quoter that an ASTStatement variable should be inserted.
  */
-(nullable ASTStatementStatement | fail Error) parseStatementStatement(Parser parser, LexicalContext lexicalContext)
+(nullable ASTStatementQuote | fail Error) parseStatementQuote(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto from = parser.from;
@@ -3585,8 +3606,55 @@ class ASTStatementStatement : ASTStatement
     parser.commit;
     auto variable = parser.parseIdentifier;
     if (!variable.length) return parser.fail("ASTStatement variable expected");
+    auto variableSym = new ASTIdentifier(variable, false, __RANGE__);
     parser.expectToken(TokenType.semicolon)?;
-    return new ASTStatementStatement(variable, parser.to(from));
+    auto token = lexicalContext.allocQuoteToken(variableSym, QuoteTokenCategory.statement)?;
+    return new ASTStatementQuote(lexicalContext.quoteScope, token, parser.to(from));
+}
+
+/**
+ * Parse 'word' (ASTIdentifier) or '$word' (ASTIdentifierQuote).
+ */
+(nullable ASTIdentifierSymbol | fail Error) parseIdentifierSymbol(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin;
+    auto from = parser.from;
+    bool quoted = parser.acceptToken(TokenType.dollar);
+    auto fromIdent = parser.from;
+    auto ident = parser.parseIdentifier;
+    if (ident.empty) {
+        parser.revert;
+        return null;
+    }
+    parser.commit;
+    auto locIdent = parser.to(fromIdent);
+    auto astIdent = new ASTIdentifier(ident, moduleLevel=false, locIdent);
+    if (!quoted) return astIdent;
+    auto token = lexicalContext.allocQuoteToken(astIdent, QuoteTokenCategory.identifier)?;
+    return new ASTIdentifierQuote(lexicalContext.quoteScope, token, parser.to(from));
+}
+
+/**
+ * As above, but this time the quote is allowed to resolve to any ASTSymbol.
+ * TODO: Better name?
+ */
+(nullable ASTSymbol | fail Error) parseLeafIdentifierSymbol(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin;
+    auto from = parser.from;
+    bool quoted = parser.acceptToken(TokenType.dollar);
+    auto fromIdent = parser.from;
+    auto ident = parser.parseIdentifier;
+    if (ident.empty) {
+        parser.revert;
+        return null;
+    }
+    parser.commit;
+    auto locIdent = parser.to(fromIdent);
+    auto astIdent = new ASTIdentifier(ident, moduleLevel=false, locIdent);
+    if (!quoted) return astIdent;
+    auto token = lexicalContext.allocQuoteToken(astIdent, QuoteTokenCategory.symbol)?;
+    return new ASTSymbolQuote(lexicalContext.quoteScope, token, parser.to(from));
 }
 
 (ExtForVarDecl | fail :fail | fail Error) parseExtForVarDecl(Parser parser, LexicalContext lexicalContext)
@@ -3594,17 +3662,22 @@ class ASTStatementStatement : ASTStatement
     parser.begin;
     auto from = parser.from;
     if (parser.acceptIdentifier("auto")) {
-        auto identifier = parser.parseIdentifier;
-        if (!identifier.length) {
+        auto ident = parser.parseIdentifierSymbol(lexicalContext)?;
+        if (!ident) {
             parser.revert;
             return :fail;
         }
         parser.commit;
         // (auto i in 0..10)
-        return (:auto_, parser.to(from), identifier);
+        return (:auto_, parser.to(from), ident.notNull);
     }
     {
-        auto ident = parser.parseIdentifier;
+        auto ident = parseIdentifierSymbol(parser, lexicalContext)?;
+        if (!ident) {
+            parser.revert;
+            return :fail;
+        }
+        auto ident = ident.notNull;
         parser.begin;
         // peek ahead
         if (parser.acceptToken(TokenType.comma)
@@ -3627,11 +3700,12 @@ class ASTStatementStatement : ASTStatement
         return :fail;
     }
     auto type = type.notNull;
-    auto ident = parser.parseIdentifier;
-    if (!ident.length) {
+    auto ident = parseIdentifierSymbol(parser, lexicalContext)?;
+    if (!ident) {
         parser.revert;
         return :fail;
     }
+    auto ident = ident.notNull;
     parser.commit;
     return (type, parser.to(from), ident);
 }
@@ -3654,10 +3728,23 @@ class ASTExtForLoop : ASTStatement
         auto compiler = context.compiler;
         auto astSource = new ASTSymbolHelper(source);
 
+        version (firstpass) {
+            ASTIdentifierSymbol fix((ASTIdentifierSymbol | string) name)
+                => name.case(string s: compiler.astIdentifier(s, __RANGE__));
+        } else {
+            ASTIdentifierSymbol fix(ASTIdentifierSymbol name) => name;
+        }
+
         if (source.type.instanceOf(Array)) {
             auto valueMatch = var2.case(ExtForVarDecl a: a, (:none): var1);
-            string keyName = var2.case(ExtForVarDecl a: var1.name, (:none): "__loopvar");
-            ASTSymbol keyIdent = compiler.astIdentifier(keyName, __RANGE__);
+            version (firstpass) {
+                (string | ASTIdentifierSymbol) var1name = var1.name;
+            } else {
+                ASTIdentifierSymbol var1name = var1.name;
+            }
+            auto keyIdent = var2.case(
+                ExtForVarDecl a: var1.name.fix,
+                (:none): compiler.astIdentifier("__loopvar", __RANGE__));
             ASTSymbol loopType = var2.case(
                 ExtForVarDecl a: var1.type.case(
                     (:auto_): compiler.astIdentifier("size_t", __RANGE__),
@@ -3665,15 +3752,14 @@ class ASTExtForLoop : ASTStatement
                     ASTSymbol type: type),
                 (:none): compiler.astIdentifier("size_t", __RANGE__));
 
-            string valueName = valueMatch.name;
+            auto valueIdent = valueMatch.name.fix;
             ASTStatement declIdentifier = valueMatch.type.case(
-                (:auto_): compiler.$stmt auto $valueName = __borrow(__source[$keyIdent]); ,
-                (:none): compiler.$stmt auto $valueName = __borrow(__source[$keyIdent]); ,
-                ASTSymbol type: compiler.$stmt $type $valueName = __borrow(__source[$keyIdent]); );
-
+                (:auto_): compiler.$stmt auto $valueIdent = __borrow(__source[$keyIdent]); ,
+                (:none): compiler.$stmt auto $valueIdent = __borrow(__source[$keyIdent]); ,
+                ASTSymbol type: compiler.$stmt $type $valueIdent = __borrow(__source[$keyIdent]); );
             ASTStatement loop = compiler.$stmt {
                 auto __source = $astSource;
-                for (mut $loopType $keyName = 0; $keyIdent < __source.length; $keyIdent += 1) {
+                for (mut $loopType $keyIdent = 0; $keyIdent < __source.length; $keyIdent += 1) {
                     $stmt declIdentifier;
                     $stmt body_;
                 }
@@ -3682,22 +3768,22 @@ class ASTExtForLoop : ASTStatement
         }
         if (var2 != :none) {
             // for (var1, var2 in
-            string indexName = var1.name;
-            auto index = compiler.astIdentifier(indexName, __RANGE__);
+            ASTIdentifierSymbol index = var1.name.fix;
             ExtForVarDecl value() {
                 var2.case {
                     ExtForVarDecl a: return a;
                     (:none): assert(false);
                 }
             }
-            auto valueName = value.name, valueType = value.type;
+            auto valueSym = value.name.fix;
+            auto valueType = value.type;
 
             ASTStatement declIdentifier = valueType.case(
-                (:auto_): compiler.$stmt auto $valueName = __source.front; ,
-                (:none): compiler.$stmt auto $valueName = __source.front; ,
-                ASTSymbol type: compiler.$stmt $type $valueName = __source.front; );
+                (:auto_): compiler.$stmt auto $valueSym = __source.front; ,
+                (:none): compiler.$stmt auto $valueSym = __source.front; ,
+                ASTSymbol type: compiler.$stmt $type $valueSym = __source.front; );
             ASTStatement rangeLoop = compiler.$stmt {
-                mut size_t $indexName = 0;
+                mut size_t $index = 0;
                 for (mut auto __source = $astSource; !__source.empty; __source = __source.next) {
                     $stmt declIdentifier;
                     $stmt body_;
@@ -3706,12 +3792,12 @@ class ASTExtForLoop : ASTStatement
             };
             return rangeLoop.compile(context);
         }
-        string valueName = var1.name;
+        auto valueSym = var1.name.fix;
 
         ASTStatement declIdentifier = var1.type.case(
-            (:auto_): compiler.$stmt auto $valueName = __source.front; ,
-            (:none): compiler.$stmt auto $valueName = __source.front; ,
-            ASTSymbol type: compiler.$stmt $type $valueName = __source.front; );
+            (:auto_): compiler.$stmt auto $valueSym = __source.front; ,
+            (:none): compiler.$stmt auto $valueSym = __source.front; ,
+            ASTSymbol type: compiler.$stmt $type $valueSym = __source.front; );
         ASTStatement rangeLoop = compiler.$stmt {
             for (mut auto __source = $astSource; !__source.empty; __source = __source.next) {
                 $stmt declIdentifier;
@@ -3987,7 +4073,7 @@ class ASTStaticIfStatement : ASTStatement
         return new ASTDeclarationStatement(decl);
     if (ASTStatement stmt = parseNestedFunctionDecls(parser, lexicalContext)?)
         return stmt;
-    if (ASTStatement stmt = parseStatementStatement(parser, lexicalContext)?)
+    if (ASTStatement stmt = parseStatementQuote(parser, lexicalContext)?)
         return stmt;
     if (ASTStatement stmt = parseMultiVarDecl(parser, lexicalContext)?)
         return stmt;
@@ -4463,10 +4549,7 @@ class Module : ModuleBase
 abstract class ParserHelper
 {
     abstract (void | fail Error) proxyCall(ASTModule astModule, string function_, MacroState macroState,
-        LocRange locRange)
-    {
-        assert(false);
-    }
+        LocRange locRange);
 }
 
 class ASTExternVariable

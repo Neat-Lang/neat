@@ -17,6 +17,7 @@ import neat.function_;
 import neat.lexer;
 import neat.parser;
 import neat.pragmas;
+import neat.quasiquoting;
 import neat.statements;
 import neat.struct_;
 import neat.stuff;
@@ -59,7 +60,12 @@ class CompilerImpl : CompilerBase
     // parser
     override (Parser | fail Error) createParser(string filename, string text) {
         auto fileId = this.fileIdTable.toFileId(filename);
-        return new ParserImpl(filename, fileId, text, tokenize(text, filename)?);
+        return new ParserImpl(filename, fileId, text, tokenize(text)?);
+    }
+
+    override (Parser | fail Error) createFragmentParser(string fragment, LocRange locRange) {
+        auto tokens = tokenize(fragment, locRange.from.row, locRange.from.column)?;
+        return new ParserImpl("TODO??", locRange.fileId, fragment, tokens);
     }
 
     override void disposeParser(Parser parser) {
@@ -137,12 +143,20 @@ class CompilerImpl : CompilerBase
         return new ASTIndexAccess(base, index, locRange);
     }
 
-    override ASTSymbol astMember(ASTSymbol base, string member, LocRange locRange)
-    {
-        return new ASTMember(base, member, locRange);
+    version (firstpass) {
+        override ASTSymbol astMember(ASTSymbol base, (string | ASTIdentifierSymbol) member, LocRange locRange)
+        {
+            auto ident = member.case(string s: astIdentifier(s, locRange), ASTIdentifierSymbol sym: sym);
+            return new ASTMember(base, ident, locRange);
+        }
+    } else {
+        override ASTSymbol astMember(ASTSymbol base, ASTIdentifierSymbol member, LocRange locRange)
+        {
+            return new ASTMember(base, member, locRange);
+        }
     }
 
-    override (ASTSymbol base, string member | :none) destructAstMember(ASTSymbol sym) {
+    override (ASTSymbol base, ASTIdentifierSymbol member | :none) destructAstMember(ASTSymbol sym) {
         if (auto astMember = sym.instanceOf(ASTMemberBase)) {
             return (astMember.base, astMember.member);
         }
@@ -229,14 +243,14 @@ class CompilerImpl : CompilerBase
         return new ASTVoidExpression(locRange);
     }
 
-    override ASTSymbol astIdentifier(string name, LocRange locRange)
+    override ASTIdentifierSymbol astIdentifier(string name, LocRange locRange)
     {
         return new ASTIdentifier(name, false, locRange);
     }
 
     override (string | :none) destructAstIdentifier(ASTSymbol sym) {
         if (auto ident = sym.instanceOf(ASTIdentifier)) {
-            return ident.name;
+            return ident.name_;
         }
         return :none;
     }
@@ -341,22 +355,45 @@ class CompilerImpl : CompilerBase
         return new ASTOpAssignStatement(left, op, right, locRange);
     }
 
-    override ASTStatement astDeclareVar(
-        string name, bool mutable, bool uninitialized, nullable ASTSymbol initial, LocRange locRange)
-    {
-        return new ASTVarDeclStatement(name, mutable, true, uninitialized=uninitialized, null, initial, locRange);
-    }
+    version (firstpass) {
+        override ASTStatement astDeclareVar((string | ASTIdentifierSymbol) name, bool mutable, bool uninitialized,
+            nullable ASTSymbol initial, LocRange locRange)
+        {
+            auto name = name.case(string s: this.astIdentifier(s, __RANGE__));
+            return new ASTVarDeclStatement(name, mutable, true, uninitialized=uninitialized, null, initial, locRange);
+        }
 
-    override ASTStatement astDeclareTypedVar(
-        string name, bool mutable, bool uninitialized, ASTSymbol type, nullable ASTSymbol initial, LocRange locRange)
-    {
-        return new ASTVarDeclStatement(name, mutable, false, uninitialized=uninitialized, type, initial, locRange);
-    }
+        override ASTStatement astDeclareTypedVar(
+            (string | ASTIdentifierSymbol) name, bool mutable, bool uninitialized, ASTSymbol type, nullable ASTSymbol initial, LocRange locRange)
+        {
+            auto name = name.case(string s: this.astIdentifier(s, __RANGE__));
+            return new ASTVarDeclStatement(name, mutable, false, uninitialized=uninitialized, type, initial, locRange);
+        }
 
-    override ASTStatement astDeclareVarExtract(
-        string name, bool mutable, bool infer, nullable ASTSymbol type, ASTSymbol source, LocRange locRange)
-    {
-        return new ASTVarExtractDeclStatement(name, mutable, infer, type, source, locRange);
+        override ASTStatement astDeclareVarExtract(
+            (string | ASTIdentifierSymbol) name, bool mutable, bool infer, nullable ASTSymbol type, ASTSymbol source, LocRange locRange)
+        {
+            auto name = name.case(string s: this.astIdentifier(s, __RANGE__));
+            return new ASTVarExtractDeclStatement(name, mutable, infer, type, source, locRange);
+        }
+    } else {
+        override ASTStatement astDeclareVar(
+            ASTIdentifierSymbol name, bool mutable, bool uninitialized, nullable ASTSymbol initial, LocRange locRange)
+        {
+            return new ASTVarDeclStatement(name, mutable, true, uninitialized=uninitialized, null, initial, locRange);
+        }
+
+        override ASTStatement astDeclareTypedVar(
+            ASTIdentifierSymbol name, bool mutable, bool uninitialized, ASTSymbol type, nullable ASTSymbol initial, LocRange locRange)
+        {
+            return new ASTVarDeclStatement(name, mutable, false, uninitialized=uninitialized, type, initial, locRange);
+        }
+
+        override ASTStatement astDeclareVarExtract(
+            ASTIdentifierSymbol name, bool mutable, bool infer, nullable ASTSymbol type, ASTSymbol source, LocRange locRange)
+        {
+            return new ASTVarExtractDeclStatement(name, mutable, infer, type, source, locRange);
+        }
     }
 
     override ASTSymbol astReturn(ASTSymbol value, LocRange locRange)
@@ -393,6 +430,27 @@ class CompilerImpl : CompilerBase
     override ASTStatement astDeclarationStatement(ASTDeclaration target, LocRange locRange)
     {
         return new ASTDeclarationStatement(target);
+    }
+
+    override ASTStatement astQuotedStatement(string fragment, Package pak,
+        ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange)
+    {
+        auto state = ASTQuoteState(fragment, pak, symbols, statements, identifiers);
+        return new ASTQuotedStatement(state, locRange);
+    }
+
+    override ASTSymbol astQuotedExpression(string fragment, Package pak,
+        ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange)
+    {
+        auto state = ASTQuoteState(fragment, pak, symbols, statements, identifiers);
+        return new ASTQuotedExpression(state, locRange);
+    }
+
+    override ASTSymbol astQuotedType(string fragment, Package pak,
+        ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange)
+    {
+        auto state = ASTQuoteState(fragment, pak, symbols, statements, identifiers);
+        return new ASTQuotedType(state, locRange);
     }
 
     override ASTSymbol astArray(ASTSymbol elementType, LocRange locRange)

@@ -1,0 +1,187 @@
+// Library support for std.macro.quasiquoting.
+module neat.quasiquoting;
+
+import neat.base;
+import neat.runtime;
+
+// helper to reduce duplication in the classes below
+struct ASTQuoteState
+{
+    string fragment;
+
+    Package pak;
+
+    // Note: these are *resolved* symbols.
+    // For $a, they're not ASTIdentifier, they're the value of the variable.
+    // This is because they got stuffed into an array literal above.
+    // That's why we can feed them directly into the compile call.
+    ASTSymbol[] symbols;
+
+    ASTStatement[] statements;
+
+    ASTIdentifierSymbol[] identifiers;
+}
+
+class ASTQuotedStatement : ASTStatement
+{
+    ASTQuoteState state;
+
+    this(this.state, this.locRange) {}
+
+    override (StatementCompileResult | fail Error) compile(Context context) {
+        auto parser = context.compiler.createFragmentParser(fragment=state.fragment, start=locRange)?;
+        auto uniqueId = context.getUniqueId;
+        auto quoteLexicalContext = new QuoteLexicalContext(uniqueId, context.compiler, state.pak);
+        auto astStatement = context.compiler.parseStatement(parser, quoteLexicalContext)?;
+        auto quoteScope = new QuoteScope(uniqueId, context.quoteScope,
+            state.symbols, state.statements, state.identifiers);
+        auto context = context.withQuoteScope(quoteScope);
+        return astStatement.compile(context);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        assert(false);
+    }
+
+    override string repr() { return "compiler.\$stmt $(state.fragment)"; }
+}
+
+    override ASTSymbol quote(Quoter quoter) {
+        assert(false);
+    }
+
+class ASTQuotedExpression : ASTSymbol
+{
+    ASTQuoteState state;
+
+    this(this.state, this.locRange) {}
+
+    override (Symbol | fail Error) compile(Context context) {
+        auto parser = context.compiler.createFragmentParser(fragment=state.fragment, start=locRange)?;
+        auto uniqueId = context.getUniqueId;
+        auto quoteLexicalContext = new QuoteLexicalContext(uniqueId, context.compiler, state.pak);
+        auto astSymbol = context.compiler.parseExpression(parser, quoteLexicalContext)?;
+        auto quoteScope = new QuoteScope(uniqueId, context.quoteScope,
+            state.symbols, state.statements, state.identifiers);
+        auto context = context.withQuoteScope(quoteScope);
+        return astSymbol.compile(context);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        assert(false);
+    }
+
+    override string repr() { return "compiler.\$expr $(state.fragment)"; }
+}
+
+class ASTQuotedType : ASTSymbol
+{
+    ASTQuoteState state;
+
+    this(this.state, this.locRange) {}
+
+    override (Symbol | fail Error) compile(Context context) {
+        auto parser = context.compiler.createFragmentParser(fragment=state.fragment, start=locRange)?;
+        auto uniqueId = context.getUniqueId;
+        auto quoteLexicalContext = new QuoteLexicalContext(uniqueId, context.compiler, state.pak);
+        auto astSymbol = context.compiler.parseType(parser, quoteLexicalContext)?;
+        auto quoteScope = new QuoteScope(uniqueId, context.quoteScope,
+            state.symbols, state.statements, state.identifiers);
+        auto context = context.withQuoteScope(quoteScope);
+        return astSymbol.compile(context);
+    }
+
+    override ASTSymbol quote(Quoter quoter) {
+        assert(false);
+    }
+
+    override string repr() { return "compiler.\$type $(state.fragment)"; }
+}
+
+// $a during quasiquote parsing for a symbol
+class ASTSymbolQuote : ASTSymbol
+{
+    int scopeId;
+
+    int token;
+
+    this(this.scopeId, this.token, this.locRange) { }
+
+    override (Symbol | fail Error) compile(Context context) {
+        return context.getQuoteSymbol(this.scopeId, this.token).compile(context);
+    }
+
+    override string repr() { return "{quote $token@$scopeId}"; }
+}
+
+// $stmt a for a statement
+class ASTStatementQuote : ASTStatement
+{
+    int scopeId;
+
+    int token;
+
+    this(this.scopeId, this.token, this.locRange) { }
+
+    override (StatementCompileResult | fail Error) compile(Context context) {
+        return context.getQuoteStatement(this.scopeId, this.token).compile(context);
+    }
+}
+
+// $a during quasiquote parsing for a name
+class ASTIdentifierQuote : ASTIdentifierSymbol
+{
+    int scopeId;
+
+    int token;
+
+    this(this.scopeId, this.token, this.locRange) { }
+
+    override (Symbol | fail Error) compile(Context context) {
+        return context.getQuoteIdentifier(this.scopeId, this.token).compile(context);
+    }
+
+    override string name(WarmContext warmContext) {
+        return warmContext.getQuoteIdentifier(this.scopeId, this.token).name(warmContext);
+    }
+
+    override string repr() { return "{quote $token@$scopeId}"; }
+}
+
+class QuoteLexicalContext : LexicalContext
+{
+    int scopeId;
+
+    ASTSymbol[] macroSymbols;
+
+    ASTSymbol[] macroStatements;
+
+    ASTSymbol[] macroIdentifiers;
+
+    this(this.scopeId, this.compiler, this.pak) {
+        // TODO quote macro state?
+        this.macroState = new MacroState;
+        // TODO think this through
+        this.moduleParseTaskId = "";
+    }
+
+    override (int | fail Error) allocQuoteToken(ASTSymbol symbol, QuoteTokenCategory category) {
+        if (category == QuoteTokenCategory.symbol) {
+            macroSymbols ~= symbol;
+            return cast(int) (macroSymbols.length - 1);
+        } else if (category == QuoteTokenCategory.statement) {
+            macroStatements ~= symbol;
+            return cast(int) (macroStatements.length - 1);
+        } else if (category == QuoteTokenCategory.identifier) {
+            macroIdentifiers ~= symbol;
+            return cast(int) (macroIdentifiers.length - 1);
+        } else assert(false);
+    }
+
+    override int quoteScope() { return this.scopeId; }
+
+    override (ASTModuleBase | fail Error) resolveImport(ASTImportStatementBase importStmt) {
+        // TODO use range of import?
+        return this.compiler.resolveImport(this.pak.name, importStmt, __RANGE__);
+    }
+}

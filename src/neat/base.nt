@@ -482,10 +482,9 @@ abstract class DeclarationHolder : Namespace
 }
 
 /**
- * This contains the parts of Context that are rarely modified,
- * and should thus be hidden behind a pointer.
+ * This contains the parts of Context that are never modified at all.
  */
-final class ImmutableContext
+final class ColdContext
 {
     CompilerBase compiler;
 
@@ -497,6 +496,28 @@ final class ImmutableContext
     // TODO replace with once
     Type nativeWordType;
 
+    int loopPass;
+
+    ModulePreProcessor modulePreProcessor;
+
+    ModulePostProcessor modulePostProcessor;
+
+    this(this.compiler, this.platform, this.macroState, this.nativeWordType, this.loopPass,
+         this.modulePreProcessor, this.modulePostProcessor) { }
+
+    ColdContext withMacroState(MacroState macroState) {
+        return new ColdContext(this.compiler, this.platform, macroState,
+            this.nativeWordType, this.loopPass, this.modulePreProcessor,
+            this.modulePostProcessor);
+    }
+}
+
+/**
+ * This contains the parts of Context that are modified occasionally,
+ * but not too often.
+ */
+final class WarmContext
+{
     // the reference by which free variables are resolved.
     nullable Expression framePointer;
 
@@ -506,43 +527,29 @@ final class ImmutableContext
 
     IUniqCounter uniqCounter;
 
-    int loopPass;
-
     LocRange[] errorStack;
 
-    ModulePreProcessor modulePreProcessor;
+    this(this.framePointer, this.compilingModule, this.labelCounter, this.uniqCounter, this.errorStack) { }
 
-    ModulePostProcessor modulePostProcessor;
-
-    this(this.compiler, this.platform, this.macroState, this.nativeWordType,
-        this.framePointer, this.compilingModule, this.labelCounter, this.uniqCounter,
-        this.loopPass, this.errorStack, this.modulePreProcessor, this.modulePostProcessor) { }
-
-    ImmutableContext withFramePointer(nullable Expression framePointer) {
-        return new ImmutableContext(
-            this.compiler, this.platform, this.macroState, this.nativeWordType,
+    WarmContext withFramePointer(nullable Expression framePointer) {
+        return new WarmContext(
             framePointer, this.compilingModule, this.labelCounter,
-            this.uniqCounter, this.loopPass, this.errorStack,
-            this.modulePreProcessor, this.modulePostProcessor);
+            this.uniqCounter, this.errorStack);
     }
 
-    ImmutableContext withCompilingModule(ModuleBase compilingModule) {
-        return new ImmutableContext(
-            this.compiler, this.platform, this.macroState, this.nativeWordType,
+    WarmContext withCompilingModule(ModuleBase compilingModule) {
+        return new WarmContext(
             this.framePointer, compilingModule, this.labelCounter,
-            this.uniqCounter, this.loopPass, this.errorStack,
-            this.modulePreProcessor, this.modulePostProcessor);
+            this.uniqCounter, this.errorStack);
     }
 
-    ImmutableContext withLabelPrefix(string prefix) {
+    WarmContext withLabelPrefix(string prefix) {
         auto labelCounter = new LabelCounter(prefix);
         auto uniqCounter = this.uniqCounter.dup;
 
-        return new ImmutableContext(
-            this.compiler, this.platform, this.macroState, this.nativeWordType,
+        return new WarmContext(
             this.framePointer, this.compilingModule, labelCounter,
-            uniqCounter, this.loopPass, this.errorStack,
-            this.modulePreProcessor, this.modulePostProcessor);
+            uniqCounter, this.errorStack);
     }
 }
 
@@ -596,52 +603,56 @@ struct Context
 {
     Namespace namespace;
 
-    ImmutableContext data;
+    WarmContext warmContext;
+
+    ColdContext coldContext;
 
     Context withNamespace(Namespace namespace) {
-        return Context(namespace, this.data);
+        return Context(namespace, this.warmContext, this.coldContext);
     }
 
     Context withFramePointer(nullable Expression framePointer) {
-        return Context(this.namespace, this.data.withFramePointer(framePointer));
+        return Context(this.namespace, this.warmContext.withFramePointer(framePointer), this.coldContext);
     }
 
     Context withCompilingModule(ModuleBase compilingModule) {
-        return Context(this.namespace, this.data.withCompilingModule(compilingModule));
+        return Context(this.namespace, this.warmContext.withCompilingModule(compilingModule), this.coldContext);
     }
 
     Context withLabelPrefix(string prefix) {
-        return Context(this.namespace, this.data.withLabelPrefix(prefix));
+        return Context(this.namespace, this.warmContext.withLabelPrefix(prefix), this.coldContext);
     }
 
-    alias compiler = (data.compiler);
-    alias platform = (data.platform);
-    alias macroState = (data.macroState);
-    alias nativeWordType = (data.nativeWordType);
-    alias modulePreProcessor = (data.modulePreProcessor);
-    alias modulePostProcessor = (data.modulePostProcessor);
-    alias framePointer = (data.framePointer);
-    alias compilingModule = (data.compilingModule);
-    alias labelCounter = (data.labelCounter);
-    alias uniqCounter = (data.uniqCounter);
-    alias loopPass = (data.loopPass);
+    alias compiler = (coldContext.compiler);
+    alias platform = (coldContext.platform);
+    alias macroState = (coldContext.macroState);
+    alias nativeWordType = (coldContext.nativeWordType);
+    alias modulePreProcessor = (coldContext.modulePreProcessor);
+    alias modulePostProcessor = (coldContext.modulePostProcessor);
+    alias loopPass = (coldContext.loopPass);
+
+    alias framePointer = (warmContext.framePointer);
+    alias compilingModule = (warmContext.compilingModule);
+    alias labelCounter = (warmContext.labelCounter);
+    alias uniqCounter = (warmContext.uniqCounter);
+    alias errorStack = (warmContext.errorStack);
 
     void pushErrorLoc(LocRange locRange) {
-        this.data.errorStack ~= locRange;
+        this.warmContext.errorStack ~= locRange;
     }
 
     void popErrorLoc() {
-        this.data.errorStack = this.data.errorStack[0 .. $ - 1];
+        this.warmContext.errorStack = this.warmContext.errorStack[0 .. $ - 1];
     }
 
     (void | fail Error) assert2(bool test, LocRange locRange, string msg) {
         if (test) return;
-        return new Error(data.errorStack ~ locRange, msg);
+        return new Error(warmContext.errorStack ~ locRange, msg);
     }
 
-    string getLabel() { return this.data.labelCounter.next; }
+    string getLabel() { return this.warmContext.labelCounter.next; }
 
-    int getUniqueId() { return this.data.uniqCounter.next; }
+    int getUniqueId() { return this.warmContext.uniqCounter.next; }
 }
 
 // bleh cycle

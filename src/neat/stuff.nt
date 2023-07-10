@@ -610,7 +610,7 @@ class WrapReference : Reference
         if (auto astFun = templateDecl.eponymousFun) {
             context.pushErrorLoc(locRange);
             auto inferTemplateArgs = .inferTemplateArgs(
-                templateDecl, stubArgs, astFun.params, argTypes, context.data.errorStack);
+                templateDecl, stubArgs, astFun.params, argTypes, context.errorStack);
             context.popErrorLoc;
             Type[] inferredTypes = inferTemplateArgs.case((:resolveError, Error err): return (:mismatch, err));
             // Some types, like Lambda, generate different types every time they're compiled.
@@ -4641,9 +4641,9 @@ class AstCompileTask : ITask
     ASTModule astModule;
     (:none | Module | Error) result;
 
-    ImmutableContext icontext;
+    ColdContext coldContext;
 
-    this(this.id_, this.astModule, this.icontext) {
+    this(this.id_, this.astModule, this.coldContext) {
         this.result = :none;
     }
 
@@ -4659,10 +4659,10 @@ class AstCompileTask : ITask
     }
 
     override void run() {
-        this.icontext.modulePreProcessor.process(astModule);
+        this.coldContext.modulePreProcessor.process(astModule);
 
         this.result = compileModule(
-            astModule, this.icontext, true);
+            astModule, this.coldContext, true);
         this.result.case {
             Module m: m.mangledName;
             Error error: {}
@@ -5105,26 +5105,25 @@ class LexicalContextImpl : LexicalContext
         compiler, moduleToFile(target.name), pak, true, helper, import_.locRange);
 }
 
-(Module | fail Error) compileModule(ASTModule astModule, ImmutableContext icontext, bool addDefaultImports)
+(Module | fail Error) compileModule(ASTModule astModule, ColdContext coldContext, bool addDefaultImports)
 {
     mut nullable Module parent = null;
     if (auto astParent = astModule.parent)
     {
-        parent = compileModule(astParent, icontext, addDefaultImports)?;
+        parent = compileModule(astParent, coldContext, addDefaultImports)?;
     }
 
     string loop() {
-        if (icontext.loopPass == 0) return "";
-        return "_loop$(icontext.loopPass)";
+        if (coldContext.loopPass == 0) return "";
+        return "_loop$(coldContext.loopPass)";
     }
 
     Module module_ = new Module(
         astModule.name, astModule.mangledName ~ loop, astModule.locRange, parent,
         moduleParseTaskId=astModule.moduleParseTaskId);
-    auto icontext = makeIContext(
-        icontext.compiler, icontext.platform, astModule.macroState,
-        module_, icontext.loopPass, icontext.modulePreProcessor, icontext.modulePostProcessor);
-    auto context = makeContext(icontext, module_);
+    auto coldContext = coldContext.withMacroState(astModule.macroState);
+    auto warmContext = makeWarmContext(coldContext.compiler, framePointer=null, compilingModule=module_);
+    auto context = Context(namespace=module_, warmContext, coldContext);
 
     if (addDefaultImports) {
         context.compiler.addDefaultImports(context, module_)?;

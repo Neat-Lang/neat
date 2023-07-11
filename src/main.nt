@@ -67,21 +67,11 @@ private string getEnv(string key, string default_ = "") {
 
 BackgroundCompilation emitModule(
     Module module_, CompilationVisitor[] visitors, BuildSettings settings, FileIdTable fileIdTable,
-    Mutex visitorLock, string earlyId)
+    Mutex visitorLock, Hash prehash)
 {
     auto hash = new Hash;
 
-    hash.apply(compiler_hash_add, compiler_hash_mult);
-    settings.backend.hash(hash);
-
-    hash.adds("compiler($(hash.text))");
-    if (settings.x86_32) hash.adds("m32");
-    if (settings.optimize) hash.adds("opt");
-    // Macros and binaries must not share objects!
-    // Macros have special magic to avoid dlopen issues.
-    if (settings.forMacro) hash.adds("macro");
-    for (ver in settings.versions) hash.adds("version=$(ver)");
-    hash.adds(earlyId);
+    hash.applyHash(prehash);
 
     auto symbols = module_.finishedSymbols;
     [symbol.hash(hash) for symbol in symbols];
@@ -241,6 +231,8 @@ class CompilationTask : ITask
     string id_;
     bool done;
 
+    Hash prehash;
+
     BackgroundCompilation compilation() {
         result.case {
             BackgroundCompilation c: return c;
@@ -248,17 +240,20 @@ class CompilationTask : ITask
         }
     }
 
-    this(this.module_, this.visitors, this.settings, this.fileIdTable, this.visitorLock) {
+    this(this.module_, this.visitors, this.settings, this.fileIdTable, this.visitorLock, Hash prehash) {
         this.result = :none;
         if (settings.forMacro) this.id_ = "emit $(module_.mangle) macro";
         else this.id_ = "emit $(module_.mangle)";
+        this.prehash = new Hash;
+        this.prehash.applyHash(prehash);
+        this.prehash.adds(this.id_);
     }
 
     override string id() => id_;
     override bool fresh() => true;
     override void run() {
         this.result = emitModule(
-            this.module_, this.visitors, this.settings, this.fileIdTable, this.visitorLock, this.id);
+            this.module_, this.visitors, this.settings, this.fileIdTable, this.visitorLock, this.prehash);
     }
 
     void waitDone() {
@@ -306,10 +301,23 @@ class ModulePostProcessorImpl : ModulePostProcessor
 
     string[] taskIds;
 
+    Hash prehash;
+
     this(this.visitors, this.settings, this.fileIdTable) {
         this.visitorLock = new Mutex;
         this.mutex = new Mutex;
         this.allModules = new ModuleSet;
+
+        this.prehash = new Hash;
+        prehash.apply(compiler_hash_add, compiler_hash_mult);
+        settings.backend.hash(prehash);
+
+        if (settings.x86_32) prehash.adds("m32");
+        if (settings.optimize) prehash.adds("opt");
+        // Macros and binaries must not share objects!
+        // Macros have special magic to avoid dlopen issues.
+        if (settings.forMacro) prehash.adds("macro");
+        for (ver in settings.versions) prehash.adds("version=$(ver)");
     }
 
     override void process(ModuleBase module_)
@@ -325,7 +333,7 @@ class ModulePostProcessorImpl : ModulePostProcessor
                 if (!this.allModules.add(module_)) return false;
 
                 auto task = new CompilationTask(
-                    module_, this.visitors, this.settings, this.fileIdTable, this.visitorLock);
+                    module_, this.visitors, this.settings, this.fileIdTable, this.visitorLock, this.prehash);
 
                 this.settings.pool.queue(task);
                 if (module_.moduleParseTaskId != "")

@@ -332,15 +332,12 @@ class FunctionScope : Namespace, Returnable, Declarable
         // This is not safe in conjunction with mut (cleanup on reassign).
         assert(!borrowed || !mut);
 
-        // TODO dedicated stackframe type so we don't need to keep recreating struct type instances
-        mut auto vars = [new StructMemberDeclaration(name, Protection.public_, type) for type in frame];
-        auto structType = this.compiler.struct_("", vars, this.locRange, this.mangle_);
-        auto backendType = structType.emit(platform);
+        auto backendType = new BackendStructType([type.emit(platform) for type in frame]);
 
         int max(int a, int b) => a if a > b else b;
         this.maxSize = max(this.maxSize, backendType.size(platform));
         this.maxAlignment = max(this.maxAlignment, backendType.alignment(platform));
-        return new LatentVariableImpl(name, type_=frame[$ - 1], structType, cast(int) vars.length - 1,
+        return new LatentVariableImpl(name, type_=frame[$ - 1], backendType, cast(int) frame.length - 1,
                                   mut=mut, borrowed=borrowed);
     }
 
@@ -434,7 +431,7 @@ class LatentVariableImpl : LatentVariable
 
     Type type_;
 
-    Type stackFrameType;
+    BackendType stackFrameType;
 
     int offset;
 
@@ -458,11 +455,37 @@ class LatentVariableImpl : LatentVariable
 
     override Reference access(Context context)
     {
-        auto frame = new PointerCast(new Pointer(stackFrameType), context.framePointer.notNull);
-        auto reference = context.compiler.structMemberReference(
-            context.compiler.dereference(frame), offset);
-        return new InfoReference(reference, mut, info);
+        return new FieldRef(type_, stackFrameType, context.framePointer.notNull, offset, mut, info);
     }
+}
+
+// Simple reference expression that just accesses a field on a pointer.
+// Used for accessing variables in a stackframe.
+class FieldRef : Reference
+{
+    Expression pointer;
+
+    BackendType structType;
+
+    int offset;
+
+    this(this.type, this.structType, this.pointer, this.offset, this.mutable, this.info) {}
+
+    override int emit(Generator output) {
+        int locReg = emitLocation(output);
+        return output.fun.load(this.type.emit(output.platform), locReg);
+    }
+
+    override int emitLocation(Generator output) {
+        int structPtrReg = pointer.emit(output);
+        int fieldReg = output.fun.fieldOffset(structType, structPtrReg, this.offset);
+        // immutable, meaning the value will never be muted.
+        if (!mutable) output.fun.markPointerInvariant(fieldReg);
+        return fieldReg;
+    }
+
+    override void hash(Hash hash) { hash.adds("FieldRef"); pointer.hash(hash); hash.addl(offset); }
+    override string repr() { return "FieldRef($(structType.repr) @offset) on $(pointer.repr)"; }
 }
 
 class VariableDeclaration : DeclarationHolder
@@ -553,28 +576,6 @@ class StackFrame : Reference
     override void hash(Hash hash) { hash.adds("StackFrame"); targetType.hash(hash); }
 
     override string repr() { return "__frame"; }
-}
-
-class InfoReference : Reference
-{
-    Reference base;
-
-    this(this.base, this.mutable, this.info) { this.type = base.type; }
-
-    override int emit(Generator output) {
-        int loc = emitLocation(output);
-        return output.fun.load(this.type.emit(output.platform), loc);
-    }
-
-    override int emitLocation(Generator output) {
-        int reg = base.emitLocation(output);
-        // immutable, meaning the value will never be muted.
-        if (!mutable) output.fun.markPointerInvariant(reg);
-        return reg;
-    }
-    // TODO hash ExprInfo
-    override void hash(Hash hash) { hash.adds("InfoReference"); base.hash(hash); }
-    override string repr() { return "InfoReference($(base.repr): $(info.repr))"; }
 }
 
 class ArgExpr : Expression

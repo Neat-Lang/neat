@@ -18,6 +18,7 @@ import neat.lexer;
 import neat.parser;
 import neat.pragmas;
 import neat.quasiquoting;
+import neat.runtime;
 import neat.statements;
 import neat.struct_;
 import neat.stuff;
@@ -51,10 +52,18 @@ class CompilerImpl : CompilerBase
 
     CachedRuntimeFunction[] cachedRuntimeFunctions;
 
+    // TODO: LocRange key falls over and dies.
+    // Figure out why.
+    (int uniqueId, (ASTSymbol | ASTStatement))[string] cachedFragments;
+
+    // TODO hashmap.length
+    int numCachedFragments;
+
     // break reference cycles to avoid leaks
     void clear() {
         this.cachedRuntimeFunctions = [];
         this.defaultImports = [];
+        this.cachedFragments.clear;
     }
 
     // parser
@@ -435,22 +444,90 @@ class CompilerImpl : CompilerBase
     override ASTStatement astQuotedStatement(string fragment, Package pak,
         ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange)
     {
-        auto state = ASTQuoteState(fragment, pak, symbols, statements, identifiers);
-        return new ASTQuotedStatement(state, locRange);
+        auto key = locRange.toString;
+        (int uniqueId, ASTStatement astStatement) get() with (this.mutex.locked) {
+            if (this.cachedFragments.has(key)) {
+                (int uniqueId, (ASTSymbol | ASTStatement) sym) hit = this.cachedFragments[key];
+                hit.sym.case {
+                    ASTStatement stmt: return (hit.uniqueId, stmt);
+                    ASTSymbol sym: assert(false);
+                }
+            }
+            int uniqueId = this.numCachedFragments++;
+            mut uninitialized ASTStatement astStatement;
+            with (this.mutex.unlocked) {
+                auto parser = createFragmentParser(fragment=fragment, locRange=locRange)
+                    .case(Error err: dieFragment(fragment, err));
+                auto quoteLexicalContext = new QuoteLexicalContext(uniqueId, this, pak);
+                astStatement = parseStatement(parser, quoteLexicalContext)
+                    .case(Error err: dieFragment(fragment, err));
+            }
+            this.cachedFragments[key] = (uniqueId, astStatement);
+            return (uniqueId, astStatement);
+        }
+        auto get = get;
+        auto scope_ = QuoteScopeValue(get.uniqueId, symbols, statements, identifiers);
+        return new ASTQuotedStatement(get.astStatement, scope_, locRange);
     }
 
     override ASTSymbol astQuotedExpression(string fragment, Package pak,
         ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange)
     {
-        auto state = ASTQuoteState(fragment, pak, symbols, statements, identifiers);
-        return new ASTQuotedExpression(state, locRange);
+        auto key = locRange.toString;
+        (int uniqueId, ASTSymbol astSymbol) get() with (this.mutex.locked) {
+            if (this.cachedFragments.has(key)) {
+                (int uniqueId, (ASTSymbol | ASTStatement) value) hit = this.cachedFragments[key];
+                hit.value.case {
+                    ASTStatement stmt: assert(false);
+                    ASTSymbol sym: return (hit.uniqueId, sym);
+                }
+            }
+            int uniqueId = this.numCachedFragments++;
+            mut uninitialized ASTSymbol astSymbol;
+            with (this.mutex.unlocked) {
+                auto parser = createFragmentParser(fragment=fragment, locRange=locRange)
+                    .case(Error err: dieFragment(fragment, err));
+                auto quoteLexicalContext = new QuoteLexicalContext(uniqueId, this, pak);
+                astSymbol = parseExpression(parser, quoteLexicalContext)
+                    .case(Error err: dieFragment(fragment, err))
+                    .notNull;
+            }
+            this.cachedFragments[key] = (uniqueId, astSymbol);
+            return (uniqueId, astSymbol);
+        }
+        auto get = get;
+        auto scope_ = QuoteScopeValue(get.uniqueId, symbols, statements, identifiers);
+        return new ASTQuotedExpression(get.astSymbol, scope_, locRange);
     }
 
     override ASTSymbol astQuotedType(string fragment, Package pak,
         ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange)
     {
-        auto state = ASTQuoteState(fragment, pak, symbols, statements, identifiers);
-        return new ASTQuotedType(state, locRange);
+        auto key = locRange.toString;
+        (int uniqueId, ASTSymbol astType) get() with (this.mutex.locked) {
+            if (this.cachedFragments.has(key)) {
+                (int uniqueId, (ASTSymbol | ASTStatement) value) hit = this.cachedFragments[key];
+                hit.value.case {
+                    ASTStatement stmt: assert(false);
+                    ASTSymbol sym: return (hit.uniqueId, sym);
+                }
+            }
+            int uniqueId = this.numCachedFragments++;
+            mut uninitialized ASTSymbol astType;
+            with (this.mutex.unlocked) {
+                auto parser = createFragmentParser(fragment=fragment, locRange=locRange)
+                    .case(Error err: dieFragment(fragment, err));
+                auto quoteLexicalContext = new QuoteLexicalContext(uniqueId, this, pak);
+                astType = parseType(parser, quoteLexicalContext)
+                    .case(Error err: dieFragment(fragment, err))
+                    .notNull;
+            }
+            this.cachedFragments[key] = (uniqueId, astType);
+            return (uniqueId, astType);
+        }
+        auto get = get;
+        auto scope_ = QuoteScopeValue(get.uniqueId, symbols, statements, identifiers);
+        return new ASTQuotedType(get.astType, scope_, locRange);
     }
 
     override ASTSymbol astArray(ASTSymbol elementType, LocRange locRange)
@@ -1074,6 +1151,12 @@ class CompilerImpl : CompilerBase
     }
 
     override IUniqCounter uniqCounter() => new UniqCounter(this.glob);
+}
+
+private bottom dieFragment(string fragment, Error err) {
+    print("while parsing quote fragment '$fragment', an error happened " ~
+        "during evaltime that didn't happen during compiletime: $(err.msg)");
+    assert(false);
 }
 
 struct CachedRuntimeFunction

@@ -73,10 +73,17 @@ rm -rf build/src
 cp -R src build/
 
 echo "Building stage 2..."
-FLAGS="$FLAGS -file-id-output build/fileIdPins"
-$NEAT $FLAGS $OPTFLAG -backend=llvm -macro-backend=c -Pcompiler:src -j src/main.nt \
-    -macro-version=firstpass -o build/neat_stage2
+FLAGS="$FLAGS -version=LLVMBackend"
+# see generation.md
+$NEAT $FLAGS -backend=llvm -macro-backend=c -Pcompiler:src -j src/main.nt \
+    -macro-version=firstpass -version=secondpass -o build/neat_stage2
 NEAT=build/neat_stage2
+
+echo "Building stage 3..."
+FLAGS="$FLAGS -file-id-output build/fileIdPins"
+$NEAT $FLAGS $OPTFLAG -backend=llvm -macro-backend=llvm -Pcompiler:src -j src/main.nt \
+    -macro-version=secondpass -o build/neat_stage3
+NEAT=build/neat_stage3
 
 cp -f $NEAT build/neat
 rm build/neat_stage*

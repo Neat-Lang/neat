@@ -29,6 +29,7 @@ class ClassMethod : Function
     {
         this.hasThisArg = true;
         this.contextType = classType;
+        this.superMagic = :none;
         resetMangleCache;
     }
 
@@ -1277,12 +1278,12 @@ class ClassMethodSymbol : LateSymbol
     }
 
     override string repr() {
-            this.class_.vtable[this.methodOffset].case {
-                ClassMethod method: return "$(method.name)()";
-                // unimplemented interface method (should have errored before here)
-                IntfMethod method: assert(false);
-                (:baseOffset, size_t offset): assert(false);
-            }
+        this.class_.vtable[this.methodOffset].case {
+            ClassMethod method: return "$(method.name)()";
+            // unimplemented interface method (should have errored before here)
+            IntfMethod method: assert(false);
+            (:baseOffset, size_t offset): assert(false);
+        }
     }
 }
 
@@ -1470,6 +1471,7 @@ class ASTClassDecl : ASTSymbolDeclaration
 
         target.methods = new ClassMethod[](lateMemberMethods.length);
         target.initDataStruct(context);
+        mut (:none | int) superMagic = :none;
         for (i, entry in lateMemberMethods) {
             ASTClassDeclMethod method = entry.method;
             auto methodContext = entry.context;
@@ -1477,7 +1479,7 @@ class ASTClassDecl : ASTSymbolDeclaration
             auto paramContext = methodContext.withLabelPrefix(
                 "$(context.namespace.mangle)_$(target.name)_$(method.name)");
 
-            auto methodParams = new Parameter[](method.params.length);
+            mut Parameter[] methodParams;
             for (k, param in method.params) {
                 param.case {
                     ASTThisAssignment param:
@@ -1490,9 +1492,19 @@ class ASTClassDecl : ASTSymbolDeclaration
                         auto type = findType(target);
                         param.locRange.assert2(!!type, "no such member: ", param.name)?;
                         auto type = type.notNull;
-                        methodParams[k] = .compile(param, type, paramContext)?;
+                        methodParams ~= .compile(param, type, paramContext)?;
                     ASTParameter param:
-                        methodParams[k] = .compile(param, paramContext)?;
+                        if (param.(name == "" && !mutable && !defaultValue
+                                && type
+                                    .instanceOf(ASTIdentifier)
+                                    .case(ASTIdentifier a: a.name(context.warmContext) == "super", null: false)
+                        )) {
+                            auto magicParams = createSuperCallArgs(target.superClass.notNull);
+                            methodParams ~= magicParams;
+                            superMagic = cast(int) magicParams.length;
+                        } else {
+                            methodParams ~= .compile(param, paramContext)?;
+                        }
                 }
             }
 
@@ -1510,9 +1522,16 @@ class ASTClassDecl : ASTSymbolDeclaration
                 method.body_,
                 this.macroState,
                 methodNamespace);
+            target.methods[i].superMagic = superMagic;
         }
         target.genVtable(currentContext)?;
     }
+}
+
+Parameter[] createSuperCallArgs(Class class_) {
+    auto firstCtor = [first m for m in class_.methods where m.name == "__ctor"];
+    return [Parameter(isThisAssignment=false, "__super$i", a.mutable, a.type, a.defaultValue, a.locRange)
+        for i, a in firstCtor.params];
 }
 
 struct ASTIntfDeclMethod
@@ -2151,7 +2170,15 @@ class Super : Symbol
 }
 
 /**
- * The 'super' keyword. Only supports the syntax `super.foo` to select a superclass method statically.
+ * The 'super' keyword.
+ *
+ * - `super.foo` to select a superclass method statically
+ * - `super()` to call a superclass constructor
+ *
+ * Note that `, super` in constructor parameter lists is handled by
+ * interpreting it as a type identifier, not an ASTSuper!
+ * But then in the generated function header, the super call goes
+ * via ASTSuper again.
  */
 class ASTSuper : ASTSymbol
 {

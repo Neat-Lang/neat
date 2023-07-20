@@ -35,12 +35,18 @@ class Function : FunctionDeclaration
 
     string mangleCache;
 
+    // This is a method that has a 'super' parameter, meaning a bunch
+    // of our parameters (int, __super0 to __super(n-1)), are destined
+    // for a super ctor call.
+    (:none | int) superMagic;
+
     this(this.name, this.retWIP, this.params, this.statement, this.macroState, this.hasThisArg,
          this.locRange)
     {
         this.contextType = null;
         this.parent = null;
         this.uniqId = null;
+        this.superMagic = :none;
     }
 
     void resetMangleCache()
@@ -133,11 +139,10 @@ class Function : FunctionDeclaration
         auto context = Context(stackframe, warmContext, coldContext);
 
         mut Namespace scope_ = stackframe;
-        mut int extra = 0;
-        if (this.contextType)
-            extra = 1;
+        mut int extraArgs = 1 if this.contextType else 0;
 
-        auto argAssignments = new Statement[](this.params.length + extra);
+        auto argAssignments = new Statement[](this.params.length + extraArgs + superMagic.case(:none: 0, int: 1));
+        mut int assignmentId = 0;
 
         mut nullable VariableDeclaration thisDecl;
         if (auto contextType = this.contextType) {
@@ -162,7 +167,7 @@ class Function : FunctionDeclaration
                 offset = 0;
             }
             auto correctedFramePointer = compiler.pointerOffset(firstArg, compiler.intLiteral(offset));
-            argAssignments[0] = compiler.assignStatement(
+            argAssignments[assignmentId++] = compiler.assignStatement(
                 thisDecl.accessDecl(context),
                 new PointerCast(contextType, correctedFramePointer));
         }
@@ -170,7 +175,7 @@ class Function : FunctionDeclaration
         mut auto context = context.withNamespace(scope_);
 
         for (int i, param in this.params) {
-            auto argExpr = new ArgExpr(extra + i, param.type);
+            auto argExpr = new ArgExpr(extraArgs + i, param.type);
 
             if (param.isThisAssignment) {
                 this.locRange.assert(!!thisDecl, "no this. args outside class")?;
@@ -181,7 +186,7 @@ class Function : FunctionDeclaration
                 this.locRange.assert2(!!target, "not a reference: ", param.name)?;
                 auto target = target.notNull;
                 checkAssignmentQuarantine(context, param.locRange, decl.type, argExpr.type)?;
-                argAssignments[extra + i] = compiler.assignStatement(
+                argAssignments[assignmentId++] = compiler.assignStatement(
                     target, argExpr.copy(context, param.locRange)?);
             } else {
                 if (param.mutable) {
@@ -193,20 +198,36 @@ class Function : FunctionDeclaration
                         mut=param.mutable, borrowed=false, hidden=false);
                     auto target = argDecl.accessDecl(context);
 
-                    argAssignments[extra + i] = compiler.assignStatement(
+                    argAssignments[assignmentId++] = compiler.assignStatement(
                         target, argExpr.copy(context, param.locRange)?);
                     scope_ = argDecl;
                 } else {
                     auto argDecl = new VariableDeclaration(
                         scope_, param.name, context.platform, param.type, mut=false, borrowed=true, hidden=false);
 
-                    argAssignments[extra + i] = compiler.assignStatement(argDecl.accessDecl(context), argExpr);
+                    argAssignments[assignmentId++] = compiler.assignStatement(argDecl.accessDecl(context), argExpr);
                     scope_ = argDecl;
                 }
             }
         }
 
         context = context.withNamespace(scope_);
+
+        // TODO if (int i <- superMagic) {
+        superMagic.case {
+            :none: {}
+            int numParams:
+                // TODO propagate loc from "super"
+                auto astSuper = compiler.astSuper(__RANGE__);
+                auto astArgs = [
+                    compiler.astIdentifier("__super$i", __RANGE__).instanceOf(ASTSymbol).notNull
+                    for i in 0 .. numParams];
+                auto astCall = compiler.astCall(astSuper, astArgs, __RANGE__);
+                auto astCallStmt = compiler.astExpressionStmt(astCall, __RANGE__);
+                argAssignments[assignmentId++] = astCallStmt.compile(context)?.statement;
+        }
+
+        assert(assignmentId == argAssignments.length);
 
         /**
          * This handles the case of a function with "optional void return", such as `(void | fail Error)`.

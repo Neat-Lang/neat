@@ -423,6 +423,11 @@ fields with names only convert to other fields with the same name.
 
 For example, `(2, 3)` implicitly converts to `(int from, int to)`, but `(min=2, max=3)` does not.
 
+Pointers
+^^^^^^^^
+
+Don't use pointers.
+
 Sum type
 ^^^^^^^^
 
@@ -448,6 +453,18 @@ Members of a sumtype can be marked as "fail", enabling error return::
     int i = foo()?;
 
 If foo returns a `FileNotFound`, it will be automatically returned at the `?`.
+
+Symbol Identifier
+^^^^^^^^^^^^^^^^^
+
+A symbol identifier takes the form `:name`.
+
+It is both a type and an expression. The type `:name` has one value, which is also `:name`.
+
+This feature can be used to "type-tag" entries in sumtypes, to differentiate identically
+typed entries, such as `(:centimeters, int | :meters, int)`.
+
+It is also used to construct "value-less" sumtype entries, such as `(int | :none)`.
 
 Struct
 ^^^^^^
@@ -489,7 +506,8 @@ to hold a class by value.
 `this` is a special method without return value that designates the constructor of the class. When instantiating
 a class with `new Class(args)`, `this(args)` is called.
 
-The parameter `this.a` indicates that the argument is directly assigned to the member `a`, rather than passed to the method as a parameter.
+The parameter `this.a` indicates that the argument is directly assigned to the member `a`,
+rather than passed to the method as a parameter.
 
 Classes can be inherited with a subclass. An instance of the subclass can be implicitly converted to
 the parent class. When a method is called on an instance, the function that runs is that of the
@@ -526,6 +544,16 @@ In exchange, arbitrarily many interfaces can be inherited from::
     Foo foo = new Bar;
     assert(foo.get == 5);
 
+In a subclass constructor, you can use the syntax `super()` to call the constructor of the parent class.
+
+You can also use the keyword `super` in the parameter list to insert an implicit super constructor call::
+
+    class Bar : Foo
+    {
+        int c;
+        this(super, this.c) { }
+    }
+
 The type of an object can be tested with the `instanceOf` property::
 
     nullable Bar bar = foo.instanceOf(Bar);
@@ -548,17 +576,26 @@ of a non-nullable class and `null`::
     nullable Foo foo;
     Foo bar = foo.case(null: return false);
 
-Symbol Identifier
-^^^^^^^^^^^^^^^^^
+Function and Delegate
+^^^^^^^^^^^^^^^^^^^^^
 
-A symbol identifier takes the form `:name`.
+You can take the address of a function using the `&` operator. The type of
+the expression is `R function(T)`.
 
-It is both a type and an expression. The type `:name` has one value, which is also `:name`.
+When you take the address of a class method, the type will be `R delegate(T)`.
+A `delegate` is a "fat function pointer" that carries a pointer to the context,
+ie. the object.
 
-This feature can be used to "type-tag" entries in sumtypes, to differentiate identically
-typed entries, such as `(:centimeters, int | :meters, int)`.
+You can also take the address of a nested function with `&`, but then the type
+will be `R delegate!(T)`, a "noncopyable delegate". It cannot be used anywhere
+where a reference would have to be taken. As the delegate carries a pointer to
+the stackframe, this is necessary to protect the developer from use-after-return
+bugs.
 
-It is also used to construct "value-less" sumtype entries, such as `(int | :none)`.
+A nested function can be heap-allocated using the syntax `new &fun`. `new` will
+make a copy of the surrounding stackframe for the function. In that case,
+the type will be `R delegate(T)` and the allocated stackframe will be reference
+counted.
 
 `typeof`
 ^^^^^^^^
@@ -636,6 +673,10 @@ Their primary purpose is being passed to templated functions::
     auto a = (0 .. 10).filter(a => a & 1 == 0).map(a => a / 2).array;
 
     assert(a == [0, 1, 2, 3, 4]);
+
+The compiler will try to prevent you from returning a lambda from the function where it was defined.
+To enable this, lambdas cannot be assigned to class fields, or in general put in any location where
+the compiler could lose track of where the lambda is.
 
 Macros
 ------

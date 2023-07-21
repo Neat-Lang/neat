@@ -9,6 +9,12 @@ import package(compiler).std.thread;
 import neat.base;
 import neat.runtime;
 
+extern(C) int open(char*, int flags, int mode);
+extern(C) int close(int);
+extern(C) int flock(int fd, int operation);
+alias O_CREAT = (64);
+alias LOCK_EX = (2);
+
 final class FileIdTableImpl : FileIdTable
 {
     bool[int] pinnedFileIds;
@@ -17,23 +23,26 @@ final class FileIdTableImpl : FileIdTable
 
     Mutex mutex;
 
+    string[int] fileName;
+
     this() { this.fileIdCache = new FileIdCache; this.mutex = new Mutex; }
 
     override int toFileId(string filename) with (this.mutex.locked) {
-        fileIdCache.getCachedIdFor(filename).case(int i: return i);
-        return fileIdCache.setNextFreeIdFor(filename);
+        int id = fileIdCache.getIdFor(filename);
+        fileName[id] = filename;
+        return id;
     }
 
     override void setInheritedFileId(int id, string filename) with (this.mutex.locked) {
-        if (fileIdCache.getCachedIdFor(filename).case(int i: i != id, :none: false)) {
+        if (fileIdCache.getIdFor(filename, id) != id) {
             // TODO clear the file cache if this happens
             assert(false);
         }
-        fileIdCache.setCachedIdFor(filename, id);
     }
 
     override string toFileName(int fileId) with (this.mutex.locked) {
-        return fileIdCache.getCachedFilenameFor(fileId).case(:none: "[UNKNOWN]");
+        if (fileName.has(fileId)) return fileName[fileId];
+        return "[UNKNOWN]";
     }
 
     /**
@@ -56,52 +65,59 @@ class FileIdCache
 
     alias file = (".obj/file_id_cache.json");
 
+    // used to avoid write corruption
+    int serialCounter;
+
     int[string] fileId;
 
-    string[int] fileName;
+    bool[int] used;
 
     this() {
         this.mutex = new Mutex;
-        load;
+        this.serialCounter = 0;
     }
 
-    (int | :none) getCachedIdFor(string name) with (this.mutex.locked) {
-        if (this.fileId.has(name)) return this.fileId[name];
-        return :none;
+    int getIdFor(string name, int defaultId = -1) with (this.mutex.locked) {
+        while (true) {
+            if (this.fileId.has(name)) return this.fileId[name];
+            mut int setId = defaultId if defaultId != -1 else nextFreeId;
+            if (set(name, setId)) return setId;
+        }
     }
 
-    (string | :none) getCachedFilenameFor(int id) with (this.mutex.locked) {
-        if (this.fileName.has(id)) return this.fileName[id];
-        return :none;
-    }
-
-    int setNextFreeIdFor(string name) with (this.mutex.locked) {
+    private int nextFreeId() {
         mut int i = 0;
-        while (fileName.has(i)) i++;
-        set(name, i);
-        save;
+        while (used.has(i)) i++;
         return i;
     }
 
-    void setCachedIdFor(string name, int id) with (this.mutex.locked) {
-        set(name, id);
-        save;
-    }
-
-    private void set(string name, int id) {
+    private bool set(string name, int id) {
+        auto lockFd = open(file, O_CREAT, 0x1A4 /* 0644 */);
+        flock(lockFd, LOCK_EX);
+        // we can still open the file with other FDs.
+        int oldSerialCounter = this.serialCounter;
+        load;
+        if (oldSerialCounter != this.serialCounter)
+            return false;
         this.fileId[name] = id;
-        this.fileName[id] = name;
+        this.used[id] = true;
+        save;
+        close(lockFd);
     }
 
     private void load() {
-        if (!file.exists) return;
+        if (!file.exists || file.readText.empty) return;
         JSONValue cache = JSONValue.loadFile(file);
         auto obj = cache.expect!((string key, JSONValue value)[])?;
         for (kv in obj) {
             auto name = kv.key;
             auto id = kv.value.expect!int?;
-            this.fileId[name] = id;
-            this.fileName[id] = name;
+            if (name == "serialCounter") {
+                this.serialCounter = serialCounter;
+            } else {
+                this.fileId[name] = id;
+                this.used[id] = true;
+            }
         }
     }
 
@@ -110,6 +126,7 @@ class FileIdCache
         for (key in fileId.keys) {
             entries ~= (key, JSONValue(fileId[key]));
         }
+        entries ~= ("serialCounter", JSONValue(++this.serialCounter));
         auto cache = JSONValue(entries);
         file.writeText(cache.toString);
     }

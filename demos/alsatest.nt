@@ -1,0 +1,94 @@
+module alsatest;
+
+macro import std.macro.cimport;
+
+import c_header("alsa/asoundlib.h");
+import std.math;
+import std.stdio;
+import std.string;
+
+pragma(lib, "asound");
+
+void main() {
+    snd_pcm_t* pcm_handle;
+    snd_pcm_stream_t stream = SND_PCM_STREAM_PLAYBACK;
+    snd_pcm_hw_params_t* hwparams;
+    string pcm_name = "default";
+
+    snd_pcm_hw_params_malloc(&hwparams);
+    if (snd_pcm_open(&pcm_handle, pcm_name.toStringz, stream, 0) < 0) {
+        print("Error opening PCM device $pcm_name");
+        return;
+    }
+    if (snd_pcm_hw_params_any(pcm_handle, hwparams) < 0) {
+        print("Can not configure this PCM device.");
+        return;
+    }
+    int rate = 44100;
+    int periods = 2;
+    snd_pcm_uframes_t periodsize = 8192;
+    if (snd_pcm_hw_params_set_access(pcm_handle, hwparams, SND_PCM_ACCESS_RW_INTERLEAVED) < 0) {
+        print("Error setting access.");
+        return;
+    }
+    if (snd_pcm_hw_params_set_format(pcm_handle, hwparams, SND_PCM_FORMAT_S16_LE) < 0) {
+        print("Error setting format.");
+        return;
+    }
+    int exact_rate = rate;
+    if (snd_pcm_hw_params_set_rate_near(pcm_handle, hwparams, &exact_rate, null) < 0) {
+        print("Error setting rate.");
+        return;
+    }
+    if (rate != exact_rate) {
+        print("The rate $rate hz is not supported by your hardware. Closest: $exact_rate");
+        return;
+    }
+    if (snd_pcm_hw_params_set_channels(pcm_handle, hwparams, 2) < 0) {
+        print("Error setting channels.");
+        return;
+    }
+    if (snd_pcm_hw_params_set_periods(pcm_handle, hwparams, periods, 0) < 0) {
+        print("Error setting periods.");
+        return;
+    }
+    // latency = periodsize * periods / (rate * bytes_per_frame);
+    if (snd_pcm_hw_params_set_buffer_size(pcm_handle, hwparams, (periodsize * periods) >> 2) < 0) {
+        print("Error setting buffersize.");
+        return;
+    }
+    if (snd_pcm_hw_params(pcm_handle, hwparams) < 0) {
+        print("Error setting hw params.");
+        return;
+    }
+    int frames = cast(int) (periodsize >> 2);
+    mut ubyte[] data = new ubyte[](periodsize);
+    float tri(float f) {
+        return f - cast(int) f;
+    }
+    for (l1 in 0 .. 1000) {
+        for (l2 in 0 .. frames) {
+            int l1 = cast(int) l1, l2 = cast(int) l2;
+            int t = l1 * frames + l2;
+            // int s = ;
+            // int s = ((t/2*(15&(0x234568a0>>((t>>8)&28))))|((t/2)>>(t>>11)^((t/16)&t&24)));
+            float n = l1/10%4-50-(l1/80%2*5)+(l1/320%5*6);
+            int a = cast(int) (sin(t*pow(2.0f, n/12)) * 1000);
+            int b = cast(int) (sin(t*pow(2.0, (n+7)/12)) * 1000);
+            short s1 = cast(short) (a+b);
+            short s2 = cast(short) (a+b);
+            data[4 * l2 + 0] = (cast(ubyte*) &s1)[0];
+            data[4 * l2 + 1] = (cast(ubyte*) &s1)[1];
+            data[4 * l2 + 2] = (cast(ubyte*) &s2)[0];
+            data[4 * l2 + 3] = (cast(ubyte*) &s2)[1];
+        }
+        while (true) {
+            long pcmreturn = snd_pcm_writei(pcm_handle, data.ptr, frames);
+            if (pcmreturn >= 0) break;
+            snd_pcm_prepare(pcm_handle);
+            print("BUFFER UNDERRUN!");
+        }
+    }
+    snd_pcm_drop(pcm_handle);
+    snd_pcm_drain(pcm_handle);
+}

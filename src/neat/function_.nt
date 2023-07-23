@@ -147,17 +147,16 @@ class Function : FunctionDeclaration
         mut nullable VariableDeclaration thisDecl;
         if (auto contextType = this.contextType) {
             // unnamed variable because of "first field in stackframe is 'this'" logic
-            mut string framePtrName;
-            if (this.hasThisArg) framePtrName = "this";
             // FIXME if heap allocated, copy, don't borrow! as below!
             // Make sure the type is the right one! No void*!
             thisDecl = new VariableDeclaration(
-                scope_, framePtrName, context.platform, contextType,
-                mut=false, borrowed=true, hidden=framePtrName == "");
+                scope_, "", context.platform, contextType,
+                mut=false, borrowed=true, hidden=true);
+
+            if (this.hasThisArg) stackframe.thisDecl = thisDecl;
+            scope_ = thisDecl;
 
             Type voidpp = once new Pointer(new Pointer(new Void));
-
-            scope_ = thisDecl;
 
             auto firstArg = new ArgExpr(0, voidpp);
             // munge frame pointer for nested functions (TODO represent this by an enum or something)
@@ -333,6 +332,8 @@ class FunctionScope : Namespace, Returnable, Declarable
 
     int maxAlignment;
 
+    nullable VariableDeclaration thisDecl;
+
     this(this.compiler, this.ret, this.extra, this.parent, this.mangle_, this.repr_, this.locRange) {
         this.isContextScope = true;
         this.maxSize = 0;
@@ -379,6 +380,15 @@ class FunctionScope : Namespace, Returnable, Declarable
         string name, Context context, LookupReason reason, LocRange locRange)
     {
         assert(!!this.parent);
+
+        if (name == "this" && thisDecl) {
+            auto thisExpr = thisDecl.accessDecl(context);
+            if (thisExpr.type.instanceOf(Pointer)) {
+                return context.compiler.dereference(thisExpr);
+            } else {
+                return thisExpr;
+            }
+        }
 
         mut nullable Expression nextFramePointer = null;
         if (this.extra && context.framePointer) {

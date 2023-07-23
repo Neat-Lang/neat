@@ -60,7 +60,7 @@ FLAGS="$FLAGS -version=LLVMBackend"
 # see generation.md
 NEXT=compiler$(($($NEAT -print-generation) + 1))
 $NEAT $FLAGS -backend=c -macro-backend=c -next-generation -P$NEXT:src -j src/main.nt \
-    -version=firstpass -macro-version=firstpassmacro -o build/neat_stage1
+    -version=firstpass -version=firstpass2 -macro-version=firstpassmacro -o build/neat_stage1
 # TODO move -file-id-output up here
 cat <<EOF > build/neat.ini
 -syspackage compiler:src

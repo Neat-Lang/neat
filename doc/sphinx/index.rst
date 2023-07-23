@@ -48,3 +48,4 @@ Contents
    intro
    manual
    std
+   Neat on Github 🔗 <https://github.com/neat-lang/neat/>

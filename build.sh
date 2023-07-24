@@ -34,7 +34,7 @@ fi
 
 FLAGS="$JFLAG -I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir)"
 
-TAG=v0.2.4
+TAG=v0.2.5
 NEAT=.cache/bootstrap/"$TAG"/neat-"$TAG"-gcc/neat
 
 if [ ! -f "$NEAT" ]
@@ -57,15 +57,16 @@ mkdir -p build
 
 echo "Building stage 1..."
 FLAGS="$FLAGS -version=LLVMBackend"
+FLAGS="$FLAGS -file-id-output build/fileIdPins"
 # see generation.md
 NEXT=compiler$(($($NEAT -print-generation) + 1))
 $NEAT $FLAGS -backend=c -macro-backend=c -next-generation -P$NEXT:src -j src/main.nt \
-    -version=firstpass -version=firstpass2 -macro-version=firstpassmacro -o build/neat_stage1
-# TODO move -file-id-output up here
-cat <<EOF > build/neat.ini
+    -o build/neat_stage1
+cat build/fileIdPins -<<EOF > build/neat.ini
 -syspackage compiler:src
 -running-compiler-version=$TAG
 EOF
+rm build/fileIdPins
 NEAT=build/neat_stage1
 
 # store compiler source next to compiler
@@ -76,18 +77,19 @@ echo "Building stage 2..."
 FLAGS="$FLAGS -version=LLVMBackend"
 # see generation.md
 $NEAT $FLAGS -backend=llvm -macro-backend=c -Pcompiler:src -j src/main.nt \
-    -macro-version=firstpass -version=secondpass -o build/neat_stage2
+    -o build/neat_stage2
 NEAT=build/neat_stage2
 
 echo "Building stage 3..."
-FLAGS="$FLAGS -file-id-output build/fileIdPins"
 $NEAT $FLAGS $OPTFLAG -backend=llvm -macro-backend=llvm -Pcompiler:src -j src/main.nt \
-    -macro-version=secondpass -o build/neat_stage3
+    -o build/neat_stage3
 NEAT=build/neat_stage3
 
 cp -f $NEAT build/neat
 rm build/neat_stage*
 
-# TODO regenerate neat.ini here
-cat build/fileIdPins >> build/neat.ini
+cat build/fileIdPins -<<EOF > build/neat.ini
+-syspackage compiler:src
+-running-compiler-version=$TAG
+EOF
 rm build/fileIdPins

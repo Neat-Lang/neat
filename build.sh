@@ -61,7 +61,7 @@ FLAGS="$FLAGS -file-id-output build/fileIdPins"
 # see generation.md
 NEXT=compiler$(($($NEAT -print-generation) + 1))
 $NEAT $FLAGS -backend=c -macro-backend=c -next-generation -P$NEXT:src -j src/main.nt \
-    -o build/neat_stage1
+    -version=firstpass3 -o build/neat_stage1
 cat build/fileIdPins -<<EOF > build/neat.ini
 -syspackage compiler:src
 -running-compiler-version=$TAG

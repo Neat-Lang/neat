@@ -874,7 +874,7 @@ class InitializeTemporaryStatement : Statement
 
 /**
  * Different from PairedTemporary in that it just uses a reg, not an alloca.
- * Must be initialized once with a InitializePairedTemporaryExprStatement
+ * Must be initialized once with a InitializeTemporaryExprStatement
  * Cleaned up by the allocator.
  */
 class PairedTemporaryExpr : Expression
@@ -1099,4 +1099,18 @@ class ASTSizeOf : ASTSymbol
             return new SizeOf(type);
         assert(false);
     }
+}
+
+(Expression | fail Error) wrapWithCleanup(C)(Context context, Expression base, LocRange locRange, C callback) {
+    assert(base.info.lifetime == Lifetime.gifted);
+
+    auto baseTemp = new PairedTemporaryExpr(base.type, Lifetime.none, context.getUniqueId);
+    auto fillBase = new InitializeTemporaryExprStatement(baseTemp, base);
+    auto memberExpr = callback(baseTemp);
+    auto memberTemp = new PairedTemporary(memberExpr.type, Lifetime.gifted, context.getUniqueId);
+    auto setupMember = new UninitializeTemporaryStatement(memberTemp);
+    auto copyTemp = context.compiler.assignStatement(memberTemp, memberExpr.copy(context, locRange)?);
+    auto endBase = base.type.endLifetime(context, baseTemp);
+    return context.compiler.wrap(
+        context.compiler.(fillBase.sequence(setupMember).sequence(copyTemp)), memberTemp, endBase);
 }

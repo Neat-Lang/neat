@@ -1050,62 +1050,6 @@ with (parser.transaction)
     return new ASTIndexAccess(base, index, parser.to(from));
 }
 
-(nullable Symbol | fail Error) accessMemberWithLifetime(
-    Context context, Symbol base, string member, LocRange locRange, bool allowUndefined)
-{
-    if (base.instanceOf(Type))
-    {
-        return accessMember(context, base, member, locRange, allowUndefined);
-    }
-    if (auto super_ = base.instanceOf(Super))
-    {
-        return super_.lookup(context, member, locRange);
-    }
-    Expression baseExpr = base.beExpressionImplCall(context, locRange)?;
-    Type baseType = baseExpr.type;
-
-    if (baseType.instanceOf(Pointer)) {
-        // cannot trace lifetimes through pointers (TODO?)
-        return accessMember(context, base, member, locRange, allowUndefined);
-    }
-
-    // speculative lookup :-(
-    // TODO exprWithTemporary that handles symbol returns
-    auto ret = accessMember(context, baseExpr, member, locRange, allowUndefined)?;
-    if (!ret || !ret.instanceOf(Expression)) return ret;
-    /**
-     * - temporize lhs
-     * - copy member
-     * - destroy lhs
-     */
-    (nullable Expression | fail Error) do_(Expression baseExpr) {
-        auto ret = accessMember(
-                context, baseExpr, member, locRange, allowUndefined)?
-            .instanceOf(Expression)
-            .notNull;
-        auto tempRet = new PairedTemporary(ret.type, Lifetime.gifted, context.getUniqueId); // temporary since we copy
-        auto initTemp = new UninitializeTemporaryStatement(tempRet);
-        auto copyTemp = new AssignStatement(tempRet, ret.copy(context, locRange)?, locRange);
-
-        nullable Statement endLifetime = baseType.endLifetime(context, baseExpr);
-
-        return new WrapExpression(sequence(initTemp, copyTemp), tempRet, endLifetime);
-    }
-    // SHIT
-    // we need a reference on the lhs for assignments
-    // that's fine if it's a struct, but for a class? always force nontemporary, because it's contained in the
-    // class lifetime?
-    // TODO handle member access of temporaries
-    // for instance with an ExprReturnType analogous to StatementReturnType, that gathers temp destructors
-
-    // if lhs is nontemp, just use StructReference
-    if (baseExpr.info.lifetime != Lifetime.gifted) {
-        return accessMember(context, baseExpr, member, locRange, allowUndefined)?
-            .instanceOf(Expression);
-    }
-    return context.compiler.exprWithTemporaryExpr(context.getUniqueId, baseExpr, copyLifetime=false, &do_);
-}
-
 (nullable Symbol | fail Error) accessMember(
     Context context, Symbol base, string member, LocRange locRange, bool allowUndefined)
 {
@@ -1116,9 +1060,11 @@ with (parser.transaction)
         return type.accessMember(context, null, member, protection, locRange);
     }
 
-    locRange.assert(!!base.instanceOf(Expression), "expected expression for member access")?;
-    mut Expression baseExpr = base.beExpressionImplCall(context, locRange)?;
+    if (auto super_ = base.instanceOf(Super)) {
+        return super_.lookup(context, member, locRange);
+    }
 
+    mut Expression baseExpr = base.beExpressionImplCall(context, locRange)?;
     while (baseExpr.type.instanceOf(Pointer)) {
         baseExpr = new Dereference(baseExpr);
     }
@@ -1148,9 +1094,7 @@ class ASTMember : ASTMemberBase
         }
 
         auto name = this.member.name(context.warmContext);
-        if (auto ret = accessMemberWithLifetime(
-            context, base, name, this.locRange, false)?)
-        {
+        if (auto ret = accessMember(context, base, name, this.locRange, false)?) {
             return ret;
         }
         return this.locRange.fail("Member '$(name)' not found");
@@ -1202,7 +1146,7 @@ class ParenPropertyNamespace : Namespace
             }
             return result;
         }
-        if (auto ret = accessMemberWithLifetime(
+        if (auto ret = accessMember(
             context.withFramePointer(this.frame), value, name, locRange, allowUndefined=true)?)
         {
             return ret;

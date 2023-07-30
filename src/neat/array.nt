@@ -34,17 +34,19 @@ class Array : Type
 {
     (Type | PendingSymbol) pendingElementType;
 
+    bool mutableElements;
+
     BackendType backendType;
 
-    this(this.pendingElementType, Platform platform) {
+    this(this.pendingElementType, Platform platform, this.mutableElements=false) {
         this.zeroInitializable = true;
         this.hasElaborateCopyConstructor = true;
-        BackendType[] types = new BackendType[](3);
+        BackendType mut[] types = new BackendType mut[](3);
         types[0] = platform.nativeWordType;
         // No Element type here; there would be an infinite recursion with self-referential types like JSONValue.
         types[1] = platform.voidp;
         types[2] = platform.voidp;
-        this.backendType = new BackendStructType(types);
+        this.backendType = new BackendStructType(types.freeze);
     }
 
     Type elementType() {
@@ -76,17 +78,27 @@ class Array : Type
     override bool same(Type other)
     {
         if (auto otherArray = other.instanceOf(Array)) {
-            return otherArray.elementType.same(this.elementType);
+            return otherArray.elementType.same(this.elementType)
+                && otherArray.mutableElements == this.mutableElements;
         }
         return false;
     }
 
-    override string repr() { return this.elementType.repr ~ "[]"; }
+    override string repr() {
+        if (this.mutableElements)
+            return this.elementType.repr ~ " mut[]";
+        return this.elementType.repr ~ "[]";
+    }
 
-    override string mangle() { return "array_" ~ this.elementType.mangle; }
+    override string mangle() {
+        if (this.mutableElements)
+            return "mut_array_" ~ this.elementType.mangle;
+        return "array_" ~ this.elementType.mangle;
+    }
 
     override void hash(Hash hash) {
         hash.adds("array");
+        hash.addl(this.mutableElements);
         this.pendingElementType.case {
             Type t: t.hash(hash);
             PendingSymbol s: s.hash(hash);
@@ -123,32 +135,36 @@ class Array : Type
     override (nullable Symbol | fail Error) accessMember(
         Context context, nullable Expression base, string field, Protection _, LocRange locRange)
     {
-        if (auto base = base) {
-            if (field == "length")
-                return new ArrayLength(base, context.nativeWordType);
-            if (field == "ptr")
-                return new ArrayPointer(this.elementType, base);
-            if (field == "base")
-                return new ArrayBase(base);
-            if (field == "front") {
-                return context.compiler.dereference(
-                    new ArrayPointer(this.elementType, base));
-            }
-            if (field == "empty") {
-                auto length = new ArrayLength(base, context.nativeWordType);
+        auto base = base.case(null: return null);
+        if (field == "length")
+            return new ArrayLength(base, context.nativeWordType);
+        if (field == "ptr")
+            return new ArrayPointer(this.elementType, base);
+        if (field == "base")
+            return new ArrayBase(base);
+        if (field == "front")
+            return context.compiler.dereference(
+                new ArrayPointer(this.elementType, base));
+        if (field == "dup")
+            return arrayDup(context, base);
+        /**
+         * Dangerous op: turn a T mut[] into a T[].
+         * Use only to indicate that you no longer intend to mutate the array.
+         * This is useful when a value has a separate creation and use phase.
+         */
+        if (field == "freeze")
+            return new ArrayFreeze(base, context.platform);
+        if (field == "empty") {
+            auto length = new ArrayLength(base, context.nativeWordType);
 
-                return context.compiler.binaryOp(
-                    "==", context, length, context.compiler.wordLiteral(context.platform, 0), locRange);
-            }
-            if (field == "next") {
-                auto length = new ArrayLength(base, context.nativeWordType);
+            return context.compiler.binaryOp(
+                "==", context, length, context.compiler.wordLiteral(context.platform, 0), locRange);
+        }
+        if (field == "next") {
+            auto length = new ArrayLength(base, context.nativeWordType);
 
-                return new ArraySlice(
-                    base, context.compiler.wordLiteral(context.platform, 1), length, locRange, context.platform);
-            }
-            if (field == "dup") {
-                return arrayDup(context, base);
-            }
+            return new ArraySlice(
+                base, context.compiler.wordLiteral(context.platform, 1), length, locRange, context.platform);
         }
         return null;
     }
@@ -181,6 +197,8 @@ class Array : Type
         Context context, Expression source, Type target, LocRange locRange)
     {
         if (auto targetArray = target.instanceOf(Array)) {
+            if (mutableElements != targetArray.mutableElements)
+                return null;
             // trivial array conversion
             if (elementType.triviallyConvertsTo(targetArray.elementType)) {
                 return context.compiler.trivialCastTo(target, source);
@@ -216,7 +234,9 @@ class ASTArray : ASTSymbol
 {
     ASTSymbol elementType;
 
-    this(this.elementType, this.locRange) { }
+    bool mutableElements;
+
+    this(this.elementType, this.mutableElements, this.locRange) { }
 
     override (Type | fail Error) compile(Context context)
     {
@@ -226,7 +246,7 @@ class ASTArray : ASTSymbol
             return new Array(pending, context.platform);
         }
         auto symtype = sym.beType(this.locRange)?;
-        return new Array(symtype, context.platform);
+        return new Array(symtype, context.platform, mutableElements);
     }
 
     override string repr() {
@@ -264,15 +284,34 @@ int getArrayPtr(Generator output, Array arrayType, int arrayReg)
         new BackendPointerType(arrayType.elementType.emit(output.platform)));
 }
 
-(Symbol | fail Error) arrayDup(Context context, Expression base)
-{
+(Symbol | fail Error) arrayDup(Context context, Expression base) {
     auto base = new ASTSymbolHelper(base);
     return (context.compiler.$expr ({
         auto base = $base;
-        auto result = new typeof(base)(base.length);
+        auto result = new typeof(*base.ptr) mut[](base.length);
         for (i, var in base) result[i] = var; // TODO __emplace
         result;
     })).compile(context);
+}
+
+// turn a T mut[] into a T[].
+class ArrayFreeze : Expression
+{
+    Expression value;
+
+    this(this.value, Platform platform) {
+        auto arrayType = this.value.type.instanceOf(Array).notNull;
+        this.type = new Array(arrayType.pendingElementType, platform, mutableElements=false);
+        this.info = value.info;
+    }
+
+    override int emit(Generator output) {
+        return this.value.emit(output);
+   }
+
+    override void hash(Hash hash) { hash.adds("freeze"); value.hash(hash); }
+
+    override string repr() { return "($(value.repr)).freeze"; }
 }
 
 class ArrayPointer : Expression
@@ -343,8 +382,8 @@ class ArrayAllocation : Expression
 
     (Expression | size_t) length;
 
-    this(this.elementType, this.length, Platform platform) {
-        this.type = new Array(this.elementType, platform);
+    this(this.elementType, bool mutableElements, this.length, Platform platform) {
+        this.type = new Array(this.elementType, platform, mutableElements);
         this.info = ExprInfo(Lifetime.gifted);
     }
 
@@ -629,6 +668,8 @@ Expression releaseArray(Context context, Expression value) {
     }
 
     ASTStatement body_() {
+        // TODO below
+        auto astNewLeft = (compiler.$expr newLeft) if leftArray.mutableElements else (compiler.$expr newLeft.freeze);
         if (appendElementType) {
             return compiler.$stmt {
                 if (leftp.base) {
@@ -643,23 +684,28 @@ Expression releaseArray(Context context, Expression value) {
                         return;
                     }
                     if (prevRefs == 1) {
-                        auto result = new typeof(*leftp)(leftp.length * 2 + 1);
+                        auto result = new typeof(*leftp.ptr) mut[](leftp.length * 2 + 1);
                         for (i, src in *leftp) result[i] = __take(src);
                         result[leftp.length] = __take(right);
                         // used
                         (cast(size_t*) result.base)[2] = leftp.length + 1;
                         free(leftp.base);
                         (cast(void**) leftp)[2] = null;
-                        *leftp = result[0 .. leftp.length + 1];
+                        auto newLeft = result[0 .. leftp.length + 1];
+                        // TODO
+                        // *leftp = $($expr(newLeft) if leftArray.mutableElements else $expr(newLeft.freeze));
+                        *leftp = $astNewLeft;
                         return;
                     }
                 }
-                auto result = new typeof(*leftp)(leftp.length * 2 + 1);
+                auto result = new typeof(*leftp.ptr) mut[](leftp.length * 2 + 1);
                 for (i, src in *leftp) result[i] = src;
                 result[leftp.length] = __take(right);
                 // used
                 (cast(size_t*) result.base)[2] = leftp.length + 1;
-                *leftp = result[0 .. leftp.length + 1];
+                auto newLeft = result[0 .. leftp.length + 1];
+                // TODO
+                *leftp = $astNewLeft;
             };
         } else if (appendArrays) {
             return compiler.$stmt {
@@ -676,11 +722,13 @@ Expression releaseArray(Context context, Expression value) {
                         return;
                     }
                 }
-                auto result = new typeof(*leftp)(leftp.length * 2 + right.length);
+                auto result = new typeof(*leftp.ptr) mut[](leftp.length * 2 + right.length);
                 for (i, value in *leftp) result[i] = value;
                 for (i, value in right) result[leftp.length + i] = value;
                 (cast(size_t*) result.base)[2] = newLength;
-                *leftp = result[0 .. newLength];
+                // TODO
+                auto newLeft = result[0 .. newLength];
+                *leftp = $astNewLeft;
             };
         } else assert(false);
     }
@@ -805,7 +853,7 @@ class ASTArrayLiteral : ASTSymbol
     override (Expression | fail Error) compile(Context context) {
         if (!this.elements.length)
             return new EmptyArrayLiteral(null);
-        mut Expression[] values;
+        mut Expression mut[] values;
         for (element in this.elements)
             values ~= element.value.compile(context)?.beExpressionImplCall(context, element.locRange)?;
         auto merger = new TypeMerger(context);
@@ -824,7 +872,7 @@ class ASTArrayLiteral : ASTSymbol
             else
                 return this.elements[i].locRange.fail("cannot convert to shared type $(mergeType.repr)");
         }
-        return new ArrayLiteral(mergeType, values, context.platform);
+        return new ArrayLiteral(mergeType, values.freeze, context.platform);
     }
 }
 

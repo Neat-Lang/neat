@@ -144,7 +144,7 @@ class DefineClassIntf : FinishedSymbol
                 if (parser.acceptToken(TokenType.rsquarebracket)) {
                     commit;
 
-                    current = new ASTArray(current, parser.to(from));
+                    current = new ASTArray(current, arrayIsMutable, parser.to(from));
                     continue;
                 }
                 // hashmap? might be assignment intro
@@ -410,13 +410,12 @@ class FuncPtrCall : Expression
             assert(false);
         }
 
-        int[] regs = new int[](this.args.length);
-        for (i, arg in this.args)
-        {
+        auto regs = new int mut[](this.args.length);
+        for (i, arg in this.args) {
             regs[i] = arg.emit(output);
         }
         return output.fun.callFuncPtr(
-            type.emit(output.platform), this.funcPtr.emit(output), regs);
+            type.emit(output.platform), this.funcPtr.emit(output), regs.freeze);
     }
 
     override void hash(Hash hash) {
@@ -660,7 +659,7 @@ class WrapReference : Reference
 
     mut nullable Statement pre, post;
     (Expression[] | fail Error) addLifetime(Expression[] args) {
-        Expression[] result = new Expression[](args.length);
+        auto result = new Expression mut[](args.length);
         for (i in 0 .. args.length) {
             mut Expression arg = args[i];
             if (arg.info.lifetime == Lifetime.gifted) {
@@ -687,7 +686,7 @@ class WrapReference : Reference
             }
             result[i] = arg;
         }
-        return result;
+        return result.freeze;
     }
     WrapExpression wrap(Expression call) {
         return new WrapExpression(pre, call, post);
@@ -933,6 +932,8 @@ class ASTIndexAccess : ASTSymbol
         auto base = this.base.compile(context)?.beExpressionImplCall(context, this.locRange)?;
         auto type = base.type;
         bool saveIndexValue = base.info.lifetime == Lifetime.gifted;
+        bool allowRefReturn = !saveIndexValue
+            && type.instanceOf(Array).case(null: true, Array a: a.mutableElements);
 
         (nullable Expression | fail Error) do_(Expression base) {
             mut uninitialized Expression indexExpr;
@@ -995,7 +996,7 @@ class ASTIndexAccess : ASTSymbol
             return deref;
         }
         return context.compiler.consumeTemporary(
-                context, allowRefReturn=!saveIndexValue, base, &do_)
+                context, allowRefReturn, base, &do_)
             ?.notNull;
     }
 }
@@ -2473,7 +2474,7 @@ class ASTScopeStatement : ASTStatement
 
     override (StatementCompileResult | fail Error) compile(Context context)
     {
-        auto statements = new Statement[](this.statements.length);
+        auto statements = new Statement mut[](this.statements.length);
         mut auto subContext = context;
         for (i, statement in this.statements) {
             auto pair = statement.compile(subContext)?;
@@ -2482,7 +2483,7 @@ class ASTScopeStatement : ASTStatement
             statements[i] = pair.statement;
         }
         return StatementCompileResult(
-            unwindScope(subContext, context.namespace, new SequenceStatement(statements))?,
+            unwindScope(subContext, context.namespace, new SequenceStatement(statements.freeze))?,
             context.namespace); // scope ends here
     }
 }
@@ -2497,7 +2498,7 @@ class ASTSequenceStatement : ASTStatement
 
     override (StatementCompileResult | fail Error) compile(Context context)
     {
-        auto statements = new Statement[](this.statements.length);
+        auto statements = new Statement mut[](this.statements.length);
         mut auto subContext = context;
         for (i, statement in this.statements) {
             auto pair = statement.compile(subContext)?;
@@ -2506,7 +2507,7 @@ class ASTSequenceStatement : ASTStatement
             statements[i] = pair.statement;
         }
         // not a scope!
-        return StatementCompileResult(new SequenceStatement(statements), subContext.namespace);
+        return StatementCompileResult(new SequenceStatement(statements.freeze), subContext.namespace);
     }
 }
 
@@ -3243,7 +3244,7 @@ class ASTStatementExpression : ASTSymbol
     override (Expression | fail Error) compile(Context context) {
         mut Context context = context;
         auto baseNamespace = context.namespace;
-        auto statements = new Statement[](this.statements.length);
+        auto statements = new Statement mut[](this.statements.length);
         for (i, statement in this.statements) {
             auto result = statement.compile(context)?;
 
@@ -3261,7 +3262,7 @@ class ASTStatementExpression : ASTSymbol
             return new InitializeTemporaryExprStatement(temp, resultValue.copy(context, this.locRange)?);
         }
 
-        auto sequence = new SequenceStatement(statements ~ initEscapeValue?);
+        auto sequence = new SequenceStatement(statements.freeze ~ initEscapeValue?);
         // unwind variables declared in the ({ })
         auto stmtExpr = unwindScope(context, baseNamespace, sequence)?;
 
@@ -3983,7 +3984,7 @@ struct ResolvingModuleEntry
 
 class Resolver
 {
-    ResolvingModuleEntry[] entries;
+    ResolvingModuleEntry mut[] entries;
 
     size_t[][string] index;
 

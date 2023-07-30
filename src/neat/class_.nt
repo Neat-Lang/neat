@@ -272,7 +272,7 @@ class Class
             this.genInstanceofMethod(context),
             this.genReleaseMethod(context)] ~ this.methods;
 
-        mut (ClassMethod | IntfMethod | (:baseOffset, size_t offset))[] vtable;
+        mut (ClassMethod | IntfMethod | (:baseOffset, size_t offset)) mut[] vtable;
         if (this.superClass) {
             for (a in this.superClass.vtable)
                 vtable ~= a;
@@ -297,7 +297,7 @@ class Class
             }
         }
 
-        auto supervtable = vtable.dup;
+        auto supervtable = vtable.dup.freeze;
         mut typeof(vtable) addedMethods;
         for (ClassMethod method in this.methods) {
             // TODO match types
@@ -923,7 +923,7 @@ class Intf
             this.vtable ~= :baseOffset;
         } else {
             for (superIntf in this.superIntfs) {
-                this.vtable ~= [a for a in superIntf.vtable]; // dup
+                this.vtable ~= superIntf.vtable;
             }
         }
         for (method in this.methods)
@@ -1268,8 +1268,10 @@ class ClassMethodSymbol : LateSymbol
             Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
             auto funcPtrType = funcPtrValue.type.instanceOf(FunctionPointer);
 
-            auto funcPtrWithVoidpThis = new FunctionPointer(funcPtrType.ret, [param for param in funcPtrType.params]);
-            funcPtrWithVoidpThis.params[0] = Parameter.fromType(once new Pointer(new Void));
+            Parameter mut[] voidpThisParams = funcPtrType.params.dup;
+            voidpThisParams[0] = Parameter.fromType(once new Pointer(new Void));
+
+            auto funcPtrWithVoidpThis = new FunctionPointer(funcPtrType.ret, voidpThisParams.freeze);
             funcPtr = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
         }
 
@@ -1308,8 +1310,9 @@ class IntfMethodSymbol : LateSymbol
         Expression funcPtrValue = new StructMemberReference(classInfo, methodOffset);
         auto funcPtr = funcPtrValue.type.instanceOf(FunctionPointer);
 
-        auto funcPtrWithVoidpThis = new FunctionPointer(funcPtr.ret, [param for param in funcPtr.params]);
-        funcPtrWithVoidpThis.params[0] = Parameter.fromType(once new Pointer(new Void));
+        Parameter mut[] voidpThisParams = funcPtr.params.dup;
+        voidpThisParams[0] = Parameter.fromType(once new Pointer(new Void));
+        auto funcPtrWithVoidpThis = new FunctionPointer(funcPtr.ret, voidpThisParams.freeze);
         auto funcPtrValue = new PointerCast(funcPtrWithVoidpThis, funcPtrValue);
 
         auto astBaseExpr = new ASTSymbolHelper(tmpBaseExpr);
@@ -1467,9 +1470,9 @@ class ASTClassDecl : ASTSymbolDeclaration
 
         target.staticDecls = staticDecls;
         target.members = memberFields;
-
-        target.methods = new ClassMethod[](lateMemberMethods.length);
         target.initDataStruct(context);
+
+        auto targetMethods = new ClassMethod mut[](lateMemberMethods.length);
         for (i, entry in lateMemberMethods) {
             mut (:none | int) superMagic = :none;
             ASTClassDeclMethod method = entry.method;
@@ -1509,7 +1512,7 @@ class ASTClassDecl : ASTSymbolDeclaration
 
             auto classType = new ClassType(target, zeroInitializable=false);
             auto methodNamespace = new ClassNamespace(currentContext.namespace, classType);
-            target.methods[i] = new ClassMethod(
+            targetMethods[i] = new ClassMethod(
                 classType,
                 method.locRange,
                 method.protection,
@@ -1521,8 +1524,9 @@ class ASTClassDecl : ASTSymbolDeclaration
                 method.body_,
                 this.macroState,
                 methodNamespace);
-            target.methods[i].superMagic = superMagic;
+            targetMethods[i].superMagic = superMagic;
         }
+        target.methods = targetMethods.freeze;
         target.genVtable(currentContext)?;
     }
 }
@@ -1581,7 +1585,7 @@ class ASTIntfDecl : ASTSymbolDeclaration
         for (member in this.members) {
             member.case {
                 ASTIntfDeclMethod method: {
-                    auto methodParams = new Parameter[](method.params.length);
+                    auto methodParams = new Parameter mut[](method.params.length);
                     for (k, param in method.params) {
                         methodParams[k] = Parameter(
                             false,
@@ -1596,7 +1600,7 @@ class ASTIntfDecl : ASTSymbolDeclaration
                         intfType,
                         method.name,
                         method.ret.compile(currentContext)?.beType(method.locRange)?,
-                        methodParams);
+                        methodParams.freeze);
                 }
                 ASTDeclaration astDecl: {
                     currentContext = currentContext.withNamespace(
@@ -2112,7 +2116,7 @@ class ASTNewExpression : ASTSymbol
                 this.astArgs[0].sym.compile(context)?.beExpressionImplCall(context, this.locRange)?,
                 sizeT,
                 this.locRange)?;
-            return new ArrayAllocation(arrayType.elementType, length, context.platform);
+            return new ArrayAllocation(arrayType.elementType, arrayType.mutableElements, length, context.platform);
         }
         this.locRange.assert2(false, "don't know how to allocate ", type.repr)?;
     }

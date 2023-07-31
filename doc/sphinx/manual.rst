@@ -394,18 +394,39 @@ double 64-bit IEEE floating point number
 Array
 ^^^^^
 
-`T[]` is an "array of T", what some languages call a slice.
+The type `T[]` is an "array of T", which some languages call a slice.
 It consists of a pointer, a length and a reference to the array object.
-
-`T.length` is the length of the array.
 
 `[2]` is an array of ints (`int[]`), allocated on the heap.
 
 `array ~ array` is the concatenation of two arrays.
 
+Concatenation is the only way to add elements to the array. The values in an array
+cannot be directly modified! In other words, arrays are immutable by default.
+
+`array.length` is the length of the array.
+
 Appending to an array in a loop will follow a doubling strategy. It should be reasonably efficient.
 
 `array[2]` is the third element (base-0) of the array.
+
+`array.dup` creates a copy of the array. The copy will be mutable.
+
+Mutable Array
+^^^^^^^^^^^^^
+
+The type `T mut[]` is a "mutable array of T". It differs from normal arrays in that elements
+can be freely reassigned.
+
+`array.freeze` converts `array` to an immutable array. Unless `array` has exactly one
+reference, this operation is forbidden; using the `array` variable after this expression
+has been evaluated is forbidden. (The compiler does not at present enforce this, but it
+will in the future.)
+
+`T[]` and `T mut[]` are separated because in my experience these types occupy fundamentally
+different roles in a program. If you pass an array to a function, you get the
+assurance that it won't be modified. Likewise if you are a class, and somebody gives you an
+array that you store in a class member, the value of that array will not change on you.
 
 Tuple
 ^^^^^
@@ -633,7 +654,7 @@ The syntax is::
         }
     }
 
-Here, `T` is the "template parameter".
+Here, `T` is the "template parameter". Multiple template parameters can be used.
 
 The symbol in the template must be *eponymous*, ie. have the same name as the template. To call it,
 instantiate the template: `max!int(2, 3)` or `max!float(2.5, 3)`. Here, `max!int` is "the function `max`
@@ -641,8 +662,9 @@ in the version of the template `max` where `T` is `int`."
 
 Multiple parameters are passed in parentheses: `templ!(int, float)`.
 
-If the template is called directly, the types of the parameters will be used as template
-parameters. This behavior is a placeholder.
+If the template is called directly, without explicitly instantiating it, the compiler will
+try to unify the arguments passed with the template arguments available in order to infer their types.
+If only some template arguments are given in the instantiation, the compiler will try to infer the rest.
 
 Ranges
 ------

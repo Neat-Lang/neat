@@ -34,7 +34,7 @@ fi
 
 FLAGS="$JFLAG -I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir)"
 
-TAG=v0.2.5
+TAG=v0.3.0
 NEAT=.cache/bootstrap/"$TAG"/neat-"$TAG"-gcc/neat
 
 if [ ! -f "$NEAT" ]
@@ -61,7 +61,7 @@ FLAGS="$FLAGS -file-id-output build/fileIdPins"
 # see generation.md
 NEXT=compiler$(($($NEAT -print-generation) + 1))
 $NEAT $FLAGS -backend=c -macro-backend=c -next-generation -P$NEXT:src -j src/main.nt \
-    -version=firstpass3 -o build/neat_stage1
+    -o build/neat_stage1
 cat build/fileIdPins -<<EOF > build/neat.ini
 -syspackage compiler:src
 -running-compiler-version=$TAG

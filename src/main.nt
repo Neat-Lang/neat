@@ -450,49 +450,16 @@ class ParserHelperImpl : ParserHelper
         // ignore pragma(lib) in macro (what are you doing)
         auto dummyOptions = new Options;
         auto result = buildAstModule(astModule, this.settings, [], [], this.fileIdTable, dummyOptions)?;
-        string objFiles = [join " " ~ a for a in result.objFiles];
-
-        string baseCmd() {
-            version (LLVMBackend) {
-                if (settings.backend.instanceOf(LLVMBackend))
-                    // FIXME configurable linker driver
-                    return "clang-15 -opaque-pointers -Wno-unused-command-line-argument -fpic";
-            }
-            if (settings.backend.instanceOf(CBackend)) return getEnv("CC", "gcc") ~ " -fpic -fno-strict-aliasing";
-            assert(false);
-        }
-        mut string baseCmd = baseCmd;
-        if (settings.extraCFlags) baseCmd ~= " $(settings.extraCFlags)";
-
         string name = result.module_.extractFunction(function_, settings, locRange)?.mangle;
-        (string soname, string cmd) soCmd() {
-            // write into unique tmp to avoid collision between processes
-            int pid = getpid;
-            string soname = ".obj/macro_$(name)_$(result.hash.text).so";
-            string tmpname = ".obj/macro_$(name)_$(result.hash.text).$pid.so";
-            version (LLVMBackend) {
-                if (settings.backend.instanceOf(LLVMBackend)) {
-                    return (
-                        soname,
-                        "$baseCmd -shared $objFiles -o $tmpname && mv $tmpname $soname");
-                }
-            }
-            if (settings.backend.instanceOf(CBackend)) {
-                mut string flags = " -shared -g";
-                if (settings.extraCFlags) flags ~= " $(settings.extraCFlags)";
-                return (
-                    soname,
-                    "$baseCmd$flags$objFiles -o $tmpname && mv $tmpname $soname");
-            }
-            assert(false);
-        }
-        auto = soCmd;
+        // write into unique tmp to avoid collision between processes
+        int pid = getpid;
+        string soname = ".obj/macro_$(name)_$(result.hash.text).so";
+        auto tmpname = ".obj/macro_$(name)_$(result.hash.text).$pid.so";
+        bool verbose = settings.platform.platformFlags.verbose;
 
         if (!settings.caching || !exists(soname)) {
-            if (settings.platform.platformFlags.verbose) {
-                print("\$ $cmd");
-            }
-            neat_runtime_system(cmd);
+            settings.backend.linkSharedLib(soname=tmpname, flags=settings.extraCFlags, verbose=verbose, result.objFiles);
+            neat_runtime_system("mv $tmpname $soname");
         }
         neat_runtime_dlcall(soname, name, macroState);
     }
@@ -1051,8 +1018,6 @@ long long int compiler_hash_mult() { return $(mult)LL; }
             baseFlags ~= " -flto";
     }
 
-    // int pid = getpid;
-    // neat_runtime_system("cat /proc/" ~ itoa(pid) ~ "/status");
     mut string flags = baseFlags ~ " -rdynamic";
     mut string linkerFlags = " -ldl";
     for (linkerArg in options.linkerArgs) linkerFlags ~= " " ~ linkerArg;

@@ -190,18 +190,14 @@ Pointers are in the language for one thing and one thing only: interacting with 
 reference counting. If you absolutely have to use pointers, make sure that the reference you are passing a pointer to
 outlives the pointer value.
 
-How do you modify state from a called function? Pass a "natural" reference type, ie. classes or arrays. Or just
+How do you modify state from a called function? Pass a "natural" reference type, ie. an object. Or just
 return the new value.
 
-Closures are dynamic
-^^^^^^^^^^^^^^^^^^^^
+Closures are a bit fishy
+^^^^^^^^^^^^^^^^^^^^^^^^
 
-There is zero escape analysis. There is no closure allocation. Also, delegates don't participate in reference counting.
-As with pointers, if you pass a closure to a function, whether as a delegate or as a lambda, ensure that the function's
-use of that closure does not outlive the calling stack frame.
-
-If you want to implement something like a timer task, keep in mind that subclasses can be declared inside a function,
-and just subclass `TimerTask` locally.
+I've tried to allow closures to mostly avoid refcounting. The result is its own special little corner of the language.
+If a closure does a weird thing, try heap-allocating it or raise a bug.
 
 `neat.base` is the key to macros
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -43,3 +43,11 @@ To run a sample:
    ./longestline demos/longestline.nt
 
 Check the other files in `demos/` as well, but note that they may need various `-dev` packages installed.
+
+Help, things stopped working!
+-----------------------------
+
+If compiles are randomly failing with linker errors or weird problems, delete the `.obj/` folder,
+which caches compilation artifacts.
+
+This should not happen, and yet...

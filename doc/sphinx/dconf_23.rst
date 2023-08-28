@@ -14,6 +14,8 @@ Links
 
 `Github <https://github.com/neat-lang/neat>`_
 
+`IRC: #neat on libera.chat <https://web.libera.chat/#neat>`_
+
 Installation
 ------------
 

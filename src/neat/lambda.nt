@@ -10,6 +10,7 @@ import neat.function_;
 import neat.hash;
 import neat.heap_closures;
 import neat.parser;
+import neat.runtime;
 import neat.statements;
 import neat.templ;
 import neat.types;
@@ -23,7 +24,7 @@ class Lambda : Type
 
     string repr_;
 
-    Returnable containingReturnable;
+    nullable Returnable containingReturnable;
 
     bool copyable;
 
@@ -119,8 +120,10 @@ class Lambda : Type
     }
 
     override (void | fail Error) checkQuarantine(Context context, LocRange locRange, QuarantineReason reason) {
-        context.assert2(reason.returnable != this.containingReturnable || copyable, locRange
-            "cannot return scoped lambda from function where it was declared")?;
+        if (auto containingReturnable = this.containingReturnable) {
+            context.assert2(reason.returnable != containingReturnable || copyable, locRange
+                "cannot return scoped lambda from function where it was declared")?;
+        }
     }
 
     override string mangle() => mangle_;
@@ -143,7 +146,11 @@ class LambdaExpr : Expression
 
     string repr_;
 
-    this(this.templ, string mangle, this.repr_, Returnable returnable, this.heapAlloc) {
+    this(this.templ, string mangle, this.repr_, nullable Returnable returnable, this.heapAlloc) {
+        if (templ.frame) {
+            // FIXME nullable interface null comparison
+            assert(cast(void*) returnable !is null);
+        }
         this.type = new Lambda(this.templ.latent, mangle_=mangle, this.repr_, returnable, copyable=heapAlloc);
         if (heapAlloc)
             // allocated with one ref
@@ -215,11 +222,11 @@ class ASTLambdaExpr : ASTSymbol
         auto astTemplateDecl = new ASTTemplateDecl(
             lambdaName, ["T$i" for i, _ in paramNames], lambdaFun, comment="",
             moduleParseTaskId=this.moduleParseTaskId);
-        (Expression | fail Error) framePointer() {
+        (nullable Expression | fail Error) framePointer() {
             if (heapAlloc)
                 return heapAllocateStackframe(context, lambdaName, this.locRange)?;
             else
-                return context.framePointer.notNull;
+                return context.framePointer;
         }
         auto templateDecl = new ScopeBoundTemplateDecl(
             new TemplateDecl(context.namespace, astTemplateDecl),
@@ -230,7 +237,7 @@ class ASTLambdaExpr : ASTSymbol
             return "($paramList) $(this.stmt.repr)";
         }
 
-        Returnable returnable = context.namespace.findParent!Returnable.notNull;
+        nullable Returnable returnable = context.namespace.findParent!Returnable;
 
         return new LambdaExpr(templateDecl, mangle=lambdaTypeMangle, repr, returnable=returnable, heapAlloc=heapAlloc);
     }

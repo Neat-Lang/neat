@@ -98,7 +98,8 @@ class CBackendModule : BackendModule {
             retstr = typeFmt(this, ret);
         }
         this.output.print(retstr ~ " " ~ name ~ argstr ~ ";");
-        this.globals.add(Global(name, typeFmt(this, new BackendFunctionPointerType(ret, args, variadic))));
+        auto fpType = new BackendFunctionPointerType(ret, args, variadic, this.platform);
+        this.globals.add(Global(name, typeFmt(this, fpType)));
     }
 
     void defineVar(string name, BackendType type, bool threadlocal)
@@ -120,7 +121,8 @@ class CBackendModule : BackendModule {
     override BackendFunction define(
         string name, string decoration, BackendType ret, BackendType[] args, BackendLocation loc)
     {
-        this.globals.add(Global(name, typeFmt(this, new BackendFunctionPointerType(ret, args, variadic=false))));
+        auto fpType = new BackendFunctionPointerType(ret, args, variadic=false, this.platform);
+        this.globals.add(Global(name, typeFmt(this, fpType)));
         return new CBackendFunction(this, name, ret, args);
     }
     override void declareSymbolList(string name, size_t length)
@@ -156,7 +158,7 @@ string typeMangle(BackendType type) {
     if (type.instanceOf(BackendDoubleType)) return "d";
     if (type.instanceOf(BackendVoidType)) return "v";
     if (auto backendSpacerType = type.instanceOf(BackendSpacerType)) {
-        return "U" ~ ltoa(backendSpacerType.size_) ~ "a" ~ ltoa(backendSpacerType.alignment_);
+        return "U" ~ ltoa(backendSpacerType.size) ~ "a" ~ ltoa(backendSpacerType.alignment);
     }
     if (auto backendPointerType = type.instanceOf(BackendPointerType)) {
         return "P" ~ typeMangle(backendPointerType.target);
@@ -205,8 +207,8 @@ string typeFmtInternal(CBackendModule mod, BackendType type, bool indirect) {
         string mangle = typeMangle(type);
         string typestr = "arr_" ~ mangle;
         if (mod.declared(typestr)) return typestr;
-        string def = "typedef struct { char value[" ~ ltoa(backendSpacerType.size_) ~ "]; } " ~ typestr ~ " " ~
-            "__attribute__ ((aligned (" ~ itoa(backendSpacerType.alignment_) ~ ")));";
+        string def = "typedef struct { char value[" ~ ltoa(backendSpacerType.size) ~ "]; } " ~ typestr ~ " " ~
+            "__attribute__ ((aligned (" ~ itoa(backendSpacerType.alignment) ~ ")));";
         mod.output.print(def);
         mod.globals.add(Global(typestr, ""));
         return typestr;
@@ -220,7 +222,7 @@ string typeFmtInternal(CBackendModule mod, BackendType type, bool indirect) {
         if (mod.declared(typestr)) return typestr;
         mut string def = "typedef struct { ";
         for (int i, member in backendStructType.members) {
-            if (member.size(mod.platform) > 0) {
+            if (member.size > 0) {
                 def ~= typeFmtInternal(mod, member, false) ~ " _" ~ itoa(i) ~ ";";
             } else {
                 string fieldmangle = typeMangle(member);
@@ -240,7 +242,7 @@ string typeFmtInternal(CBackendModule mod, BackendType type, bool indirect) {
         def ~= typeFmtInternal(mod, backendFpType.ret, true) ~ "(*" ~ typestr ~ ")(";
         mut bool comma = false;
         for (i, param in backendFpType.params) {
-            if (param.size(mod.platform) > 0) {
+            if (param.size > 0) {
                 if (comma) def ~= ", ";
                 comma = true;
                 def ~= typeFmtInternal(mod, param, false);
@@ -628,7 +630,7 @@ class CBackendFunction : BackendFunction {
                     ret = Value("char*", "\"" ~ escapedText ~ "\"", exactType=true);
                 }
                 (:zeroLiteral, BackendType type): {
-                    if (type.size(mod.platform) > 0) {
+                    if (type.size > 0) {
                         string typestr = typeFmt(mod, type);
                         mut string init = "0";
                         if (type.instanceOf(BackendStructType) || type.instanceOf(BackendSpacerType))
@@ -642,7 +644,7 @@ class CBackendFunction : BackendFunction {
 
                     mut string res;
                     for (int i, member in struct_.members) {
-                        if (member.size(mod.platform) == 0)
+                        if (member.size == 0)
                             continue;
                         if (!res.empty) res ~= ", ";
                         res ~= reg(regs[i]);
@@ -655,7 +657,7 @@ class CBackendFunction : BackendFunction {
                 (:globalVar, string name, BackendType type, bool define, bool threadlocal): {
                     if (define) mod.defineVar(name, type, threadlocal);
                     else mod.declareVar(name, type, threadlocal);
-                    ret = Value(typeFmt(mod, new BackendPointerType(type)), "&$name", exactType=true);
+                    ret = Value(typeFmt(mod, new BackendPointerType(type, mod.platform)), "&$name", exactType=true);
                 }
                 (:binOp, string op, BackendType type, int left, int right): {
                     mut string typestr = typeFmt(mod, type);
@@ -709,7 +711,7 @@ class CBackendFunction : BackendFunction {
                         for value in [regExt(a) for a in args]
                         where !value.fake
                     ];
-                    if (retType.size(mod.platform) > 0) {
+                    if (retType.size > 0) {
                         string type = typeFmt(mod, retType);
                         ret = Value(type, name ~ "(" ~ argstr ~ ")", exactType=true);
                     } else {
@@ -730,7 +732,7 @@ class CBackendFunction : BackendFunction {
                         where !value.fake
                     ];
                     string target = reg(regId);
-                    if (retType.size(mod.platform) > 0) {
+                    if (retType.size > 0) {
                         string typestr = typeFmt(mod, retType);
                         ret = Value(typestr, "(" ~ target ~ ")(" ~ argstr ~ ")", exactType=true);
                     } else {
@@ -740,7 +742,7 @@ class CBackendFunction : BackendFunction {
                 }
                 (:load, BackendType type, int regId): {
                     import package(compiler).std.string : startsWith;
-                    if (type.size(mod.platform) > 0) {
+                    if (type.size > 0) {
                         string type = typeFmt(mod, type);
                         string value = reg(regId);
                         if (value.startsWith("&")) {
@@ -753,7 +755,7 @@ class CBackendFunction : BackendFunction {
                 (:staticAlloca, BackendType type): {
                     flushRegs; // TODO is this right?
                     string typefmt = typeFmt(mod, type);
-                    if (type.size(mod.platform) > 0) {
+                    if (type.size > 0) {
                         mut string init = "0";
                         if (type.instanceOf(BackendStructType) || type.instanceOf(BackendSpacerType))
                             init = "{0}";
@@ -767,7 +769,7 @@ class CBackendFunction : BackendFunction {
                     auto backendStructType = type.instanceOf(BackendStructType);
                     assert(!!backendStructType);
 
-                    if (backendStructType.members[index].size(mod.platform) > 0) {
+                    if (backendStructType.members[index].size > 0) {
                         string typefmt = typeFmt(mod, backendStructType.members[index]);
                         ret = Value(typefmt, "(" ~ reg(regId) ~ ")._" ~ ltoa(index), exactType=true);
                     } else {
@@ -778,7 +780,7 @@ class CBackendFunction : BackendFunction {
                     auto backendStructType = type.instanceOf(BackendStructType);
                     assert(!!backendStructType);
 
-                    if (backendStructType.members[index].size(mod.platform) > 0) {
+                    if (backendStructType.members[index].size > 0) {
                         string typefmt = typeFmt(mod, backendStructType) ~ "*";
                         string memberfmt = typeFmt(mod, backendStructType.members[index]);
                         ret = Value(memberfmt ~ "*", "&(" ~ reg2(regId, typefmt) ~ ")->_" ~ ltoa(index), exactType=true);
@@ -797,7 +799,7 @@ class CBackendFunction : BackendFunction {
                         exactType=true);
                 }
                 (:store, BackendType type, int targetReg, int valueReg): {
-                    if (type.size(mod.platform) > 0) {
+                    if (type.size > 0) {
                         auto targetRegExt = regExt(targetReg);
                         auto valueRegStr = reg(valueReg);
                         if (valueRegStr == "") {
@@ -816,7 +818,7 @@ class CBackendFunction : BackendFunction {
                     ret = Value.none;
                 }
                 (:return_, int regId): {
-                    if (this.ret_.size(mod.platform) > 0) {
+                    if (this.ret_.size > 0) {
                         auto val = reg(regId);
                         if (val == "") {
                             .print("Backend error: $(this.name): nonzero return with fake register.");
@@ -923,7 +925,7 @@ class CBackendFunction : BackendFunction {
         }
         argstr ~= ")";
         mut string retstr;
-        if (this.ret_.size(mod.platform) > 0) {
+        if (this.ret_.size > 0) {
             retstr = typeFmt(mod, this.ret_);
         } else {
             retstr = "void";

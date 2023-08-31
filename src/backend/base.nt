@@ -170,7 +170,7 @@ class Platform
 
     this(this.nativeWordType, this.platformFlags, this.versions, bool isMacro) {
         this.void_ = new BackendVoidType;
-        this.voidp = new BackendPointerType(this.void_);
+        this.voidp = new BackendPointerType(this.void_, this);
         // because versions may only be set "for the build" and "for the macros", we
         // can just differentiate between all of them with [macro].
         string macroIdent = " [macro]" if isMacro else "";
@@ -187,73 +187,80 @@ class Platform
 
 abstract class BackendType
 {
+    int size;
+    int alignment;
     abstract string repr();
-    abstract int size(Platform platform);
-    abstract int alignment(Platform platform);
     abstract bool same(BackendType other);
     string toString() => repr;
 }
 
 class BackendLongType : BackendType
 {
-    this() { }
+    this() {
+        this.size = 8;
+        this.alignment = 8;
+    }
     override string repr() { return "long"; }
-    override int size(Platform platform) { return 8; }
-    override int alignment(Platform platform) { return 8; }
     override bool same(BackendType other) { return !!other.instanceOf(BackendLongType); }
 }
 
 class BackendIntType : BackendType
 {
-    this() { }
+    this() {
+        this.size = 4;
+        this.alignment = 4;
+    }
     override string repr() { return "int"; }
-    override int size(Platform platform) { return 4; }
-    override int alignment(Platform platform) { return 4; }
     override bool same(BackendType other) { return !!other.instanceOf(BackendIntType); }
 }
 
 class BackendShortType : BackendType
 {
-    this() { }
+    this() {
+        this.size = 2;
+        this.alignment = 2;
+    }
     override string repr() { return "short"; }
-    override int size(Platform platform) { return 2; }
-    override int alignment(Platform platform) { return 2; }
     override bool same(BackendType other) { return !!other.instanceOf(BackendShortType); }
 }
 
 class BackendCharType : BackendType
 {
-    this() { }
+    this() {
+        this.size = 1;
+        this.alignment = 1;
+    }
     override string repr() { return "char"; }
-    override int size(Platform platform) { return 1; }
-    override int alignment(Platform platform) { return 1; }
     override bool same(BackendType other) { return !!other.instanceOf(BackendCharType); }
 }
 
 class BackendVoidType : BackendType
 {
-    this() { }
+    this() {
+        this.size = 0;
+        this.alignment = 1;
+    }
     override string repr() { return "void"; }
-    override int size(Platform platform) { return 0; }
-    override int alignment(Platform platform) { return 1; }
     override bool same(BackendType other) { return !!other.instanceOf(BackendVoidType); }
 }
 
 class BackendFloatType : BackendType
 {
-    this() { }
+    this() {
+        this.size = 4;
+        this.alignment = 4;
+    }
     override string repr() { return "float"; }
-    override int size(Platform platform) { return 4; }
-    override int alignment(Platform platform) { return 4; }
     override bool same(BackendType other) { return !!other.instanceOf(BackendFloatType); }
 }
 
 class BackendDoubleType : BackendType
 {
-    this() { }
+    this() {
+        this.size = 8;
+        this.alignment = 8;
+    }
     override string repr() { return "double"; }
-    override int size(Platform platform) { return 8; }
-    override int alignment(Platform platform) { return 8; }
     override bool same(BackendType other) { return !!other.instanceOf(BackendDoubleType); }
 }
 
@@ -261,11 +268,13 @@ class BackendPointerType : BackendType
 {
     BackendType target;
 
-    this(BackendType target) { this.target = target; }
+    this(BackendType target, Platform platform) {
+        this.target = target;
+        this.size = platform.nativeWordType.size;
+        this.alignment = platform.nativeWordType.alignment;
+    }
 
     override string repr() { return this.target.repr ~ "*"; }
-    override int size(Platform platform) { return platform.nativeWordType.size(platform); }
-    override int alignment(Platform platform) { return platform.nativeWordType.size(platform); }
     override bool same(BackendType other) {
         auto otherPtr = other.instanceOf(BackendPointerType);
         return otherPtr && this.target.same(otherPtr.target);
@@ -278,10 +287,11 @@ class BackendFunctionPointerType : BackendType
     BackendType[] params;
     bool variadic;
 
-    this(this.ret, this.params, this.variadic) { }
+    this(this.ret, this.params, this.variadic, Platform platform) {
+        this.size = platform.nativeWordType.size;
+        this.alignment = platform.nativeWordType.alignment;
+    }
 
-    override int size(Platform platform) { return platform.nativeWordType.size(platform); }
-    override int alignment(Platform platform) { return platform.nativeWordType.size(platform); }
     override bool same(BackendType other) {
         auto otherFp = other.instanceOf(BackendFunctionPointerType);
         if (!otherFp || !this.ret.same(otherFp.ret) || this.params.length != otherFp.params.length)
@@ -305,7 +315,13 @@ class BackendStructType : BackendType
 {
     BackendType[] members;
 
-    this(BackendType[] members) { this.members = members; }
+    this(BackendType[] members) {
+        this.members = members;
+        (int size, int alignment) pair = calcPrefix(this.members);
+
+        this.size = roundToNext(pair.size, pair.alignment);
+        this.alignment = pair.alignment;
+    }
 
     override string repr() {
         if (!members.length) return "{ }";
@@ -317,23 +333,10 @@ class BackendStructType : BackendType
         return ret ~ " }";
     }
 
-    int memberOffset(int index, Platform platform) {
-        (int size, int alignment) prefix = calcPrefix(platform, this.members[0 .. index]);
-        int memberAlignment = this.members[index].alignment(platform);
+    int memberOffset(int index) {
+        (int size, int alignment) prefix = calcPrefix(this.members[0 .. index]);
+        int memberAlignment = this.members[index].alignment;
         return roundToNext(prefix.size, memberAlignment);
-    }
-
-    override int size(Platform platform) {
-        // TODO destructuring by unnamed variable
-        (int size, int alignment) pair = calcPrefix(platform, this.members);
-
-        return roundToNext(pair.size, pair.alignment);
-    }
-
-    override int alignment(Platform platform) {
-        (int size, int alignment) pair = calcPrefix(platform, this.members);
-
-        return pair.alignment;
     }
 
     override bool same(BackendType other) {
@@ -348,17 +351,12 @@ class BackendStructType : BackendType
 
 class BackendSpacerType : BackendType
 {
-    int size_;
-    int alignment_;
-
-    this(int size, int alignment) { this.size_ = size; this.alignment_ = alignment; }
+    this(this.size, this.alignment) {}
 
     override string repr() { return "TODO spacer"; }
-    override int size(Platform platform) { return this.size_; }
-    override int alignment(Platform platform) { return this.alignment_; }
     override bool same(BackendType other) {
         auto otherSpacer = other.instanceOf(BackendSpacerType);
-        return otherSpacer && this.size_ == otherSpacer.size_ && this.alignment_ == otherSpacer.alignment_;
+        return otherSpacer && this.size == otherSpacer.size && this.alignment == otherSpacer.alignment;
     }
 }
 
@@ -367,28 +365,29 @@ class BackendStaticArrayType : BackendType
     BackendType element;
     int length;
 
-    this(BackendType element, int length) { this.element = element; this.length = length; }
+    this(BackendType element, int length) {
+        this.element = element;
+        this.length = length;
+        this.size = element.size * length;
+        this.alignment = element.alignment;
+    }
 
     override string repr() { return element.repr ~ "[" ~ itoa(length) ~ "]"; }
-    override int size(Platform platform) { return element.size(platform) * length; }
-    override int alignment(Platform platform) { return this.element.alignment(platform); }
     override bool same(BackendType other) {
         auto otherSA = other.instanceOf(BackendStaticArrayType);
         return otherSA && this.length == otherSA.length && this.element.same(otherSA.element);
     }
 }
 
-(int size, int alignment) calcPrefix(Platform platform, BackendType[] members)
+(int size, int alignment) calcPrefix(BackendType[] members)
 {
     mut int structSize = 0;
     mut int structAlign = 1;
     for (mut int i = 0; i < members.length; i += 1) {
         auto member = members[i];
-        int alignment = member.alignment(platform);
-        int size = member.size(platform);
         // round to next <alignment>
-        structSize = roundToNext(structSize, alignment) + size;
-        if (alignment > structAlign) structAlign = alignment;
+        structSize = roundToNext(structSize, member.alignment) + member.size;
+        if (member.alignment > structAlign) structAlign = member.alignment;
     }
     return (structSize, structAlign);
 }

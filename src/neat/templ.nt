@@ -151,6 +151,82 @@ class ScopeBoundTemplateDecl : Symbol
     override bool mayCallImplicit() => false;
 }
 
+extern(C) long pthread_self();
+
+/**
+ * Why all this Waitable complexity?
+ * In a threaded program, somebody trying to instantiate the template may show up at
+ * the same time as somebody is already instantiating the template with the same types.
+ * In that case, the second thread has to wait for the first to finish.
+ */
+class TemplateInstantiations
+{
+    alias Instantiated = (Symbol symbol, ModuleBase mod);
+    alias Instantiating = (:instantiating, Waitable!bool done, long thread);
+
+    (Type[] types, (Instantiated | Instantiating) value) mut[] instantiations;
+
+    Mutex mutex;
+
+    this() { this.mutex = new Mutex; }
+
+    (size_t | Symbol | fail Error) instantiate(Context context, LocRange locRange, Type[] parameters)
+    with (this.mutex.locked)
+    {
+        bool areSame(Type[] left, Type[] right) {
+            if (left.length != right.length) return false;
+            return [all left[i].same(right[i]) for i in 0 .. left.length];
+        }
+
+        Symbol finish(Symbol symbol, ModuleBase mod) {
+            context.compilingModule.addModuleDependency(mod);
+            if (auto latent = symbol.instanceOf(LatentSymbol)) {
+                return latent.resolve(context, locRange);
+            }
+            return symbol;
+        }
+
+        for (i, entry in this.instantiations) {
+            if (!entry.types.areSame(parameters))
+                continue;
+            entry.value.case {
+                (:instantiating, Waitable!bool done, long thread):
+                    if (thread == pthread_self) {
+                        return locRange.fail("template instantiation loop");
+                    }
+
+                    mut Waitable!bool done2 = done;
+                    with (this.mutex.unlocked)
+                        done2.waitFor(a => a == true);
+                    this.instantiations[i].value.case {
+                        (:instantiating, Waitable!bool done, long thread):
+                            return locRange.fail("internal error");
+                        (Symbol symbol, ModuleBase mod):
+                            return finish(symbol, mod);
+                    }
+                (Symbol symbol, ModuleBase mod):
+                    return finish(symbol, mod);
+            }
+        }
+        auto done = new Waitable!bool(false);
+        this.instantiations ~= (parameters, (:instantiating, done, pthread_self));
+        return this.instantiations.length - 1;
+    }
+
+    void set(size_t offset, Symbol value, ModuleBase mod)
+    with (this.mutex.locked)
+    {
+        this.instantiations[offset].value.case {
+            (:instantiating, Waitable!bool done, long thread):
+                done.set(true);
+            (Symbol symbol, ModuleBase mod):
+                print("Internal logic error: template value was stored while we were computing it!");
+                assert(false);
+        }
+        this.instantiations[offset].value = (value, mod);
+    }
+}
+
 // very similar to ASTTemplateDecl
 // they'll differentiate themselves later, when constraints are added.
 class TemplateDecl : LatentSymbol
@@ -159,12 +235,10 @@ class TemplateDecl : LatentSymbol
 
     ASTTemplateDecl decl;
 
-    (Type[] types, (Symbol symbol, ModuleBase mod | :instantiating) value) mut[] instantiations;
-
-    Mutex mutex;
+    TemplateInstantiations instantiations;
 
     this(this.parent, this.decl) {
-        this.mutex = new Mutex;
+        this.instantiations = new TemplateInstantiations;
     }
 
     override Symbol resolve(Context context, LocRange locRange) {
@@ -187,31 +261,12 @@ class TemplateDecl : LatentSymbol
                 "Unexpected number of parameters to template: " ~
                 "expected $(this.decl.typeParameterNames.length), but got $(parameters.length)");
         }
-        bool areSame(Type[] left, Type[] right) {
-            if (left.length != right.length) return false;
-            return [all left[i].same(right[i]) for i in 0 .. left.length];
-        }
         string mangle(Type[] types) {
             return "$(types.length)" ~ [join "_$(type.mangle)" for type in types];
         }
 
-        with (this.mutex.locked) {
-            // TODO account for false "loops" from threads somehow
-            for (entry in this.instantiations) {
-                if (entry.types.areSame(parameters)) {
-                    entry.value.case {
-                        :instantiating:
-                            return locRange.fail("Template instantiation loop");
-                        (Symbol symbol, ModuleBase mod):
-                            context.compilingModule.addModuleDependency(mod);
-                            if (auto latent = symbol.instanceOf(LatentSymbol)) {
-                                return latent.resolve(context, locRange);
-                            }
-                            return symbol;
-                    }
-                }
-            }
-        }
+        auto offset = this.instantiations.instantiate(context, locRange, parameters)?
+            .case(Symbol sym: return sym);
 
         /*
          * Emit instance into new module.
@@ -221,12 +276,6 @@ class TemplateDecl : LatentSymbol
         string moduleMangle = this.mangle ~ "_instance_" ~ parameters.mangle;
         ModuleBase module_ = context.compiler.createModule(
             this.decl.name, moduleMangle, moduleParseTaskId=this.decl.moduleParseTaskId, locRange, null);
-
-        mut size_t offset;
-        with (this.mutex.locked) {
-            this.instantiations ~= (parameters, :instantiating);
-            offset = this.instantiations.length - 1;
-        }
 
         auto instanceNamespace = new TemplateInstantiationNamespace(
                 this.parent, this.decl.typeParameterNames, parameters);
@@ -240,9 +289,7 @@ class TemplateDecl : LatentSymbol
         instanceNamespace.memberName = this.decl.content.name;
         instanceNamespace.memberValue = value;
 
-        with (this.mutex.locked) {
-            this.instantiations[offset].value = (value, module_);
-        }
+        this.instantiations.set(offset, value, module_);
 
         Symbol resolvedValue() {
             if (auto latent = value.instanceOf(LatentSymbol)) {

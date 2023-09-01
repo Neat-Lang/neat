@@ -7,7 +7,7 @@ Getting Started
 The Neat compiler is at the moment only tested on 64-bit x86 Linux. However, it *should* work on other 64-bit platforms,
 and be able to be ported to 32-bit platforms with little effort.
 
-There are two available versions, depending on backend: LLVM 14 or GCC based. Note that both versions will require gcc
+There are two available versions, depending on backend: LLVM 15 or GCC based. Note that both versions will require gcc
 to be installed for certain macros to work. Also, while the LLVM backend release may use the gcc backend, the gcc backend
 release cannot use LLVM, because it will not be built against it.
 
@@ -21,7 +21,9 @@ Install with LLVM
 
 1. Install required packages::
 
-    apt-get install xz-utils wget gcc llvm-14-dev clang-14
+    apt-get install -y --no-install-recommends \
+      ca-certificates clang-15 curl file gcc git \
+      llvm-15 llvm-15-dev xz-utils unzip
 
 2. Download the latest release from https://github.com/neat-lang/neat/releases
 

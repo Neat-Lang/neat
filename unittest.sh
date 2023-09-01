@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 PACKAGES="-Pbuild:build:src -Psrc:src:compiler"
-FLAGS="-lm -lpthread"
+FLAGS="-lm -lpthread -j8"
 mkdir -p build
 (
     echo "module unittest;"

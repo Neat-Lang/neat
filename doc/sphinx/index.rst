@@ -34,9 +34,10 @@ Have some example code! Here's a program that prints the longest line in a file:
 Community
 =========
 
+- `Neat Language on Discord <https://discord.gg/QkUecKgUvS>`_
 - `#neat on libera.chat <https://web.libera.chat/#neat>`_ (formerly Freenode).
-    If you're trying out the language, drop by and say hi!
-- TODO: I should probably make a forum or something.
+- If you're trying out the language, drop by and say hi!
+- `Github Discussions <https://github.com/Neat-Lang/neat/discussions>`_
 
 Contents
 ========

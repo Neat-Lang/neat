@@ -126,7 +126,12 @@ class Class
 
     ClassMethod[] methods;
 
-    (Symbol symbol, Protection protection)[string] staticDecls;
+    /**
+     * Things with a name that don't appear in the vtable, such as template functions
+     * or type declarations.
+     * May be static or not.
+     */
+    (Symbol symbol, Protection protection)[string] classDecls;
 
     /*
      * Methods appearing in the classinfo struct.
@@ -629,10 +634,14 @@ class ClassType : Type, CanTreatAsEither
             }
             return rank(symbol) <= rank(protection);
         }
-        if (!baseExpr) {
-            if (this.class_.staticDecls.has(member)) {
-                auto entry = this.class_.staticDecls[member];
-                if (allowed(entry.protection)) return entry.symbol;
+        if (this.class_.classDecls.has(member)) {
+            auto entry = this.class_.classDecls[member];
+            if (allowed(entry.protection)) {
+                if (auto latent = entry.symbol.instanceOf(LatentSymbol)) {
+                    return latent.resolve(baseExpr, locRange);
+                } else {
+                    if (!baseExpr) return entry.symbol;
+                }
             }
         }
         bool test(typeof(this.class_.vtable[0]) entry, bool mustInThisClass) {
@@ -1433,7 +1442,7 @@ class ASTClassDecl : ASTSymbolDeclaration
         mut (string name, Protection protection, Type type)[] memberFields;
         // Do those later; they need fields resolved for this.field assignments.
         mut (ASTClassDeclMethod method, Context context)[] lateMemberMethods;
-        mut (Symbol symbol, Protection protection)[string] staticDecls;
+        mut (Symbol symbol, Protection protection)[string] classDecls;
 
         (void | fail Error) walk(ASTClassEntry entry) {
             entry.case {
@@ -1451,7 +1460,7 @@ class ASTClassDecl : ASTSymbolDeclaration
                 (ASTDeclaration astDecl, Protection protection):
                     if (auto astSymDecl = astDecl.instanceOf(ASTSymbolDeclaration)) {
                         auto sym = astSymDecl.compileSymbol(currentContext)?;
-                        staticDecls[astSymDecl.name] = (sym, protection);
+                        classDecls[astSymDecl.name] = (sym, protection);
                         currentContext = currentContext.withNamespace(
                             context.compiler.exprAlias(currentContext.namespace, astSymDecl.name, sym));
                     } else {
@@ -1468,7 +1477,7 @@ class ASTClassDecl : ASTSymbolDeclaration
         }
         [walk(a)? for a in this.members];
 
-        target.staticDecls = staticDecls;
+        target.classDecls = classDecls;
         target.members = memberFields;
         target.initDataStruct(context);
 
@@ -1584,7 +1593,7 @@ class ASTIntfDecl : ASTSymbolDeclaration
 
         for (member in this.members) {
             member.case {
-                ASTIntfDeclMethod method: {
+                ASTIntfDeclMethod method:
                     auto methodParams = new Parameter mut[](method.params.length);
                     for (k, param in method.params) {
                         methodParams[k] = Parameter(
@@ -1601,11 +1610,9 @@ class ASTIntfDecl : ASTSymbolDeclaration
                         method.name,
                         method.ret.compile(currentContext)?.beType(method.locRange)?,
                         methodParams.freeze);
-                }
-                ASTDeclaration astDecl: {
+                ASTDeclaration astDecl:
                     currentContext = currentContext.withNamespace(
                         astDecl.compile(currentContext)?);
-                }
             }
         }
 
@@ -1730,9 +1737,7 @@ class ASTIntfDecl : ASTSymbolDeclaration
     }
 
     if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)?) {
-        // TODO return [ASTClassEntry: decl];
-        ASTClassEntry entry = (decl, protection);
-        return [entry];
+        return [(decl, protection)];
     }
 
     if (parser.acceptIdentifier("this"))
@@ -1750,8 +1755,34 @@ class ASTIntfDecl : ASTSymbolDeclaration
         parser.assert_(memberName.length > 0, "expected member name")?;
     }
     auto locRange = parser.to(from);
-    if (parser.acceptToken(TokenType.lparen)) // method
-    {
+    // Bleh! This is a totally different path from the method parse block below.
+    // It's only here so we can parse template stub, which creates a nested function
+    // but not a class function.
+    (nullable ASTSymbolDeclaration | fail Error) parseFunctionRest() {
+        if (!parser.acceptToken(TokenType.lparen))
+            return null;
+        auto params = parseParameterList(parser, lexicalContext, variadic=false, thisAssignment=false)?;
+        assert(!params.variadic);
+        ASTParameter pick((ASTParameter | ASTThisAssignment) value) {
+            value.case {
+                ASTParameter p: return p;
+                ASTThisAssignment a: assert(false);
+            }
+        }
+        auto params = [pick(entry) for entry in params.params];
+        ASTStatement stmt = lexicalContext.compiler.parseFunctionBody(parser, lexicalContext)?;
+        return new ASTFunction(
+            memberName, retType.notNull, params, isDeclaration=false, locRange, stmt,
+            lexicalContext.macroState, comment);
+    }
+    if (auto ret = lexicalContext.compiler.parseTemplateStub(
+        parser, lexicalContext, memberName, comment, &parseFunctionRest)?
+    ) {
+        return [(ret, protection)];
+    }
+
+    // Okay it's not a short template method, parse as a class method instead.
+    if (parser.acceptToken(TokenType.lparen)) { // method
         auto params = parseParameterList(parser, lexicalContext, variadic=false, thisAssignment=true)?;
         assert(!params.variadic);
         mut nullable ASTStatement stmt = null;

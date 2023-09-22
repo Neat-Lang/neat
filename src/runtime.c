@@ -147,6 +147,8 @@ int main(int argc, char **argv) {
     _run_unittests();
 #ifndef NEAT_NO_MAIN
     MAIN(args);
+#else
+    printf("Unittests run.\n");
 #endif
     free(args.ptr);
     return 0;

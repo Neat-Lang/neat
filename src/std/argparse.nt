@@ -1,0 +1,391 @@
+module std.argparse;
+
+macro import std.macro.assert;
+macro import std.macro.listcomprehension;
+
+alias ArgKind = (
+    :noArg |
+    :intArg |
+    :stringArg
+);
+
+struct ArgInfo
+{
+    string shortname;
+
+    string longname;
+
+    ArgKind kind;
+
+    string longOrShort() => longname if !longname.empty else shortname;
+
+    (string | :hidden) description;
+}
+
+abstract class ArgParser
+{
+    // TODO public_mut?
+    public ArgInfo[string] longArgs;
+
+    public ArgInfo[string] shortArgs;
+
+    public ArgInfo[] args;
+
+    int delegate(string, string[], ArgResult)[] specialRules;
+
+    void add(string shortname, string longname, ArgKind kind, (string | :hidden) description) {
+        auto argInfo = ArgInfo(shortname, longname, kind, description);
+        longArgs[longname] = argInfo;
+        shortArgs[shortname] = argInfo;
+        args ~= argInfo;
+    }
+
+    void add(string name, ArgKind kind, (string | :hidden) description) {
+        if (name.length == 1) {
+            auto argInfo = ArgInfo(shortname=name, "", kind, description);
+            shortArgs[name] = argInfo;
+            args ~= argInfo;
+        } else {
+            auto argInfo = ArgInfo("", longname=name, kind, description);
+            longArgs[name] = argInfo;
+            args ~= argInfo;
+        }
+    }
+
+    void add(int delegate(string, string[], ArgResult) dg) {
+        specialRules ~= dg;
+    }
+
+    abstract (ArgResult | fail string) parse(mut string[] args);
+}
+
+/**
+ * UNIX style:
+ * --foo bar
+ * -fx is -f, -x
+ */
+class UnixArgParser : ArgParser
+{
+    public this() { }
+
+    override (ArgResult | fail string) parse(mut string[] args) {
+        import std.string : startsWith, atoi;
+        auto result = new ArgResult(this);
+        (void | fail string) parseFlagImpl(ArgInfo argInfo, string flagInfo) {
+            if (argInfo.kind == :noArg) {
+                result.foundArgs[argInfo.longOrShort] = null;
+                return;
+            }
+            if (args.empty) {
+                return "Flag $flagInfo missing parameter";
+            }
+            auto parameter = args[0];
+            args = args[1 .. $];
+            if (parameter.startsWith("-")) {
+                return "Flag $flagInfo missing parameter";
+            }
+            if (argInfo.kind == :stringArg) {
+                result.foundArgs[argInfo.longOrShort] = parameter;
+            } else if (argInfo.kind == :intArg) {
+                int asInt = atoi(parameter);
+                if ("$asInt" != parameter) {
+                    return "Flag $flagInfo expected integer parameter";
+                }
+                result.foundArgs[argInfo.longOrShort] = parameter;
+            } else assert(false);
+        }
+        (void | fail string) parseShortFlag(string flag, bool lastFlag) {
+            auto flagInfo = "'-$flag'";
+            if (!this.shortArgs.has(flag))
+                return "Unknown flag $flagInfo";
+            auto argInfo = this.shortArgs[flag];
+            if (argInfo.kind != :noArg && !lastFlag) {
+                return "Flag $flagInfo with parameter must come last";
+            }
+            return parseFlagImpl(argInfo, flagInfo);
+        }
+        (void | fail string) parseLongFlag(string flag) {
+            auto flagInfo = "'--$flag'";
+            if (!this.longArgs.has(flag))
+                return "Unknown flag $flagInfo";
+            return parseFlagImpl(this.longArgs[flag], flagInfo);
+        }
+        while (!args.empty) {
+            auto arg = args[0];
+            args = args[1 .. $];
+            // TODO named break/continue
+            mut bool continue_outer = false;
+            for (rule in specialRules) {
+                int argsConsumed = rule(arg, args, result);
+                if (argsConsumed == 0) continue;
+                args = args[argsConsumed - 1 .. $];
+                continue_outer = true;
+                break;
+            }
+            if (continue_outer) continue;
+
+            if (arg == "--") {
+                result.extra = args;
+                break;
+            } else if (arg.startsWith("--")) {
+                parseLongFlag(arg[2 .. $])?;
+            } else if (arg.startsWith("-") && arg != "-") {
+                for (i in 1 .. arg.length) {
+                    parseShortFlag(arg[i .. i + 1], lastFlag=(i == arg.length - 1))?;
+                }
+            } else {
+                result.remaining ~= arg;
+            }
+        }
+        return result;
+    }
+}
+
+/**
+ * GCC style:
+ * --foo bar, --foo=bar, -foo=bar
+ * -fx is --foo=x
+ */
+class GccArgParser : ArgParser
+{
+    public this() { }
+
+    override (ArgResult | fail string) parse(mut string[] args) {
+        import std.string : startsWith, atoi;
+        auto result = new ArgResult(this);
+        (void | fail string) parseArgParameter(ArgInfo argInfo, string parameter, string flagInfo) {
+           if (argInfo.kind == :stringArg) {
+                result.foundArgs[argInfo.longOrShort] = parameter;
+            } else if (argInfo.kind == :intArg) {
+                int asInt = atoi(parameter);
+                if ("$asInt" != parameter) {
+                    return "Flag $flagInfo expected integer parameter";
+                }
+                result.foundArgs[argInfo.longOrShort] = parameter;
+            } else assert(false);
+        }
+        (void | fail string) parseArg(ArgInfo argInfo, string flagInfo) {
+            if (argInfo.kind == :noArg) {
+                result.foundArgs[argInfo.longOrShort] = null;
+                return;
+            }
+            if (args.empty) {
+                return "Flag $flagInfo missing parameter";
+            }
+            auto parameter = args[0];
+            args = args[1 .. $];
+            if (parameter.startsWith("-")) {
+                return "Flag $flagInfo missing parameter";
+            }
+            return parseArgParameter(argInfo, parameter, flagInfo);
+        }
+        (void | fail string) parseShortFlag(string flag, bool lastFlag) {
+            auto flagInfo = "'-$flag'";
+            if (!this.shortArgs.has(flag))
+                return "Unknown flag $flagInfo";
+            auto argInfo = this.shortArgs[flag];
+            if (argInfo.kind != :noArg && !lastFlag) {
+                return "Flag $flagInfo with parameter must come last";
+            }
+            return parseArg(argInfo, flagInfo);
+        }
+        // --foo
+        (void | fail string) parseLongFlag(string flag) {
+            auto flagInfo = "'--$flag'";
+            if (!this.longArgs.has(flag))
+                return "Unknown flag $flagInfo";
+            return parseArg(this.longArgs[flag], flagInfo);
+        }
+        // -foo=bar, --foo=bar
+        (void | fail string) parseAssignedFlag(string flag, string value, string flagInfo) {
+            if (!this.longArgs.has(flag))
+                return "Unknown flag $flagInfo";
+            if (this.longArgs[flag].kind == :noArg) {
+                return "Flag $flagInfo expected no parameter";
+            }
+            return parseArgParameter(this.longArgs[flag], value, flagInfo);
+        }
+        // -fbar
+        (void | fail string) parseFlag(string arg) {
+            if (this.longArgs.has(arg)) {
+                auto flagInfo = "'-$arg'";
+                return parseArg(this.longArgs[arg], flagInfo);
+            }
+            auto prefix = arg[0 .. 1];
+            if (this.shortArgs.has(prefix)) {
+                auto flagInfo = "'-$prefix'";
+                if (arg.length > 1) {
+                    // -j32
+                    if (this.shortArgs[prefix].kind == :noArg) {
+                        return "Flag $flagInfo expected no parameter";
+                    }
+                    return parseArgParameter(this.shortArgs[prefix], arg[1 .. $], flagInfo);
+                }
+                // -j
+                return parseArg(this.shortArgs[prefix], flagInfo);
+            }
+        }
+        while (!args.empty) {
+            auto arg = args[0];
+            args = args[1 .. $];
+            // TODO named break/continue
+            mut bool continue_outer = false;
+            for (rule in specialRules) {
+                int argsConsumed = rule(arg, args, result);
+                if (argsConsumed == 0) continue;
+                args = args[argsConsumed - 1 .. $];
+                continue_outer = true;
+                break;
+            }
+            if (continue_outer) continue;
+
+            if (arg == "--") {
+                result.extra = args;
+                break;
+            } else if (arg.startsWith("--")) {
+                int pos = [first cast(int) i for i, c in arg where c == '=' else -1];
+                if (pos != -1) {
+                    // --foo=bar
+                    auto flag = arg[2 .. pos];
+                    parseAssignedFlag(flag, arg[pos + 1 .. $], "'--$flag'")?;
+                } else {
+                    // --foo bar
+                    parseLongFlag(arg[2 .. $])?;
+                }
+            } else if (arg.startsWith("-") && arg != "-") {
+                int pos = [first cast(int) i for i, c in arg where c == '=' else -1];
+                if (pos != -1) {
+                    // -foo=bar
+                    auto flag = arg[1 .. pos];
+                    parseAssignedFlag(flag, arg[pos + 1 .. $], "'-$flag'")?;
+                } else {
+                    // -j8
+                    parseFlag(arg[1 .. $])?;
+                }
+            } else {
+                result.remaining ~= arg;
+            }
+        }
+        return result;
+    }
+}
+
+class ArgResult
+{
+    private ArgParser parser;
+
+    public string[string] foundArgs;
+
+    // non-flag arguments in the commandline
+    public string[] remaining;
+
+    // arguments after the --
+    public string[] extra;
+
+    this(this.parser) {}
+
+    bool has(string arg) => this.foundArgs.has(arg);
+
+    string get(string arg) {
+        if (!has(arg)) {
+            print("wrong result key '$arg'");
+            assert(false);
+        }
+        return this.foundArgs[arg];
+    }
+
+
+    void set(string arg, string value) { this.foundArgs[arg] = value; }
+}
+
+unittest
+{
+    auto parser = new UnixArgParser;
+    parser.add("h", "help", :noArg, "Print this help page");
+    with (parser.parse(null).case(string: assert(false))) {
+        assert(foundArgs.keys.empty);
+        assert(remaining.empty);
+    }
+}
+
+unittest
+{
+    auto parser = new UnixArgParser;
+    parser.add("h", "help", :noArg, "Print this help page");
+    with (parser.parse(["foo"]).case(string: assert(false))) {
+        assert(foundArgs.keys.empty);
+        assert(remaining == ["foo"]);
+    }
+}
+
+unittest
+{
+    auto parser = new UnixArgParser;
+    parser.add("f", "foo", :intArg, "Foo arg");
+    assert(parser.parse(["-f"]).case(ArgResult: assert(false)) == "Flag '-f' missing parameter");
+    assert(parser.parse(["--foo"]).case(ArgResult: assert(false)) == "Flag '--foo' missing parameter");
+    assert(parser.parse(["-f", "x"]).case(ArgResult: assert(false)) == "Flag '-f' expected integer parameter");
+    with (parser.parse(["-f", "5"]).case(string: assert(false))) {
+        assert(foundArgs["foo"] == "5");
+        assert(remaining.empty);
+    }
+}
+
+unittest
+{
+    auto parser = new UnixArgParser;
+    parser.add("f", "foo", :noArg, :hidden);
+    parser.add("b", "bar", :noArg, :hidden);
+    with (parser.parse(["-fb"]).case(string s: assert(false))) {
+        assert(foundArgs["foo"] == "");
+        assert(foundArgs["bar"] == "");
+        assert(remaining.empty);
+    }
+}
+
+unittest
+{
+    auto parser = new GccArgParser;
+    parser.add("f", "foo", :noArg, :hidden);
+    parser.add("b", "bar", :noArg, :hidden);
+    assert(parser.parse(["-fb"]).case(ArgResult: assert(false)) == "Flag '-f' expected no parameter");
+}
+
+unittest
+{
+    auto parser = new UnixArgParser;
+    with (parser.parse(["foo", "--", "bar"]).case(string s: assert(false))) {
+        assert(foundArgs.keys.empty);
+        assert(remaining == ["foo"]);
+        assert(extra == ["bar"]);
+    }
+}
+
+unittest
+{
+    auto parser = new GccArgParser;
+    parser.add("L", :stringArg, :hidden);
+    with (parser.parse(["-L-lpthreads"]).case(string s: assert(false))) {
+        assert(foundArgs["L"] == "-lpthreads");
+    }
+}
+
+unittest
+{
+    auto parser = new UnixArgParser;
+    int blaAction(string arg, string[] args, ArgResult result) {
+        if (arg == "bla") {
+            result.foundArgs["bla"] = "";
+            // arg consumed
+            return 1;
+        }
+        // no match
+        return 0;
+    }
+    parser.add(new &blaAction);
+    with (parser.parse(["bla"]).case(string: assert(false))) {
+        assert(foundArgs["bla"] == "");
+        assert(remaining.empty);
+    }
+}
+

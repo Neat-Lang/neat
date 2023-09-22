@@ -30,6 +30,7 @@ import package(compiler).std.file;
 import package(compiler).std.json;
 import package(compiler).std.string;
 import package(compiler).std.thread;
+import std.argparse;
 import c_header("sys/inotify.h");
 
 extern(C) int getpid();
@@ -612,39 +613,24 @@ string alignTabs(string text) {
     return res;
 }
 
-void help(string executable) {
-    print("Usage: $executable [options] FILE.nt
+void help(ArgParser parser, string executable) {
+    mut string msg = "Usage: $executable [options] FILE.nt
+
+Or: $executable build\t Builds the project in the current folder.
 
 Options:
 
-\t-h\tOutput this help page.
-\t-help
-\t-Pname:path:dep[,dep]*\tDefine a package. Every source file must be in a package.
-\t-package name:path:dep[,dep]*
-\t-Sname:path:dep[,dep]*\tDefine a system package. Paths are relative to the compiler binary.
-\t-syspackage name:path:dep[,dep]*
-\t-Lflag\tAdd a command that will be passed through to the linker.
-\t-llibrary
-\t-Iinclude\tInclude a folder when invoking the C binding macro.
-\t-o FILE\tCreate the output binary FILE.
-\t-O\tCreate an optimized binary.
-\t-c\tDon't create a binary.
-\t-uml FILE.uml\tOutput an UML diagram of every compiled class to FILE.uml.
-\t-unittest\tRun unittests before entering main.
-\t-no-main\tDon't require or call a main function in the source file. Unittests are still run.
-\t-backend=c\tUse the C backend to generate a binary.
-\t-macro-backend=c\tUse the C backend to generate macros.
-\t-m32\tTarget a 32-bit system.
-\t-macro-m32\tGenerate macros for a 32-bit system.
-\t-x\tBypass the object cache.
-\t-j[num]\tUse threads to build in parallel. WARNING: known bugs!
+";
+    for (arg in parser.args) {
+        string description = arg.description.case(:hidden: continue);
 
-Instead of specifying a file, the compiler can be called like:
-
-\t$executable build
-
-In this mode, package.json in the current folder is used to specify paths, output files and dependencies.
-".alignTabs);
+        if (arg.shortname != "") {
+            msg ~= "\t-$(arg.shortname), -$(arg.longname)\t$(description)\n";
+        } else {
+            msg ~= "\t-$(arg.longname)\t$(description)\n";
+        }
+    }
+    print(msg.alignTabs);
 }
 
 class Options
@@ -686,144 +672,141 @@ class Options
         this.fileIdTable = new FileIdTableImpl;
     }
 
-    string[] parseArgs(string executable, string[] args) {
-        string startsWith(string haystack, string needle) {
-            if (needle.length <= haystack.length && haystack[0 .. needle.length] == needle) {
-                return haystack[needle.length .. $];
-            }
-            return null;
-        }
-        mut string[] remArgs;
-        for (mut size_t i = 0; i < args.length; i += 1) {
-            string arg = args[i];
-            mut string flag;
-            if (arg.length >= 2) flag = arg[0 .. 2];
+    ArgParser argParser() {
+        auto parser = new GccArgParser;
 
-            // package: like includes, but scoped
-            // -Pname:path[:dep1[,dep2]*]?
-            if (flag == "-h" || flag == "-help") {
-                help(executable);
-                exit(0);
-            } else if (flag == "-P") {
-                addPackage(arg[2 .. $], false);
-            } else if (arg == "-package") {
-                assert(i + 1 < args.length);
-                addPackage(args[i + 1], false);
-                i += 1;
-            } else if (flag == "-S") {
-                addPackage(arg[2 .. $], true);
-            } else if (arg == "-syspackage") {
-                assert(i + 1 < args.length);
-                addPackage(args[i + 1], true);
-                i += 1;
-            } else if (arg == "-run") {
-                this.run = true;
-            } else if (arg == "--") {
-                this.runArgs = args[i + 1 .. $];
-                break;
-            } else if (string ver = arg.startsWith("-running-compiler-version=")) {
-                // Should only be passed via neat.ini!
-                this.runningCompilerVersion = ver;
-            } else if (string ver = arg.startsWith("-compiler-version=")) {
-                this.requestedCompilerVersion = ver;
-            } else if (flag == "-I") {
-                cFlags ~= arg;
-            } else if (arg == "-loop") {
-                this.loop = true;
-            } else if (arg == "-watch") {
-                this.watch = true;
-            } else if (flag == "-l") {
-                this.linkerArgs ~= arg;
-            } else if (flag == "-L") {
-                this.linkerArgs ~= arg[2 .. $];
-            } else if (arg == "-o") {
-                assert(i + 1 < args.length);
-                this.output = args[i + 1];
-                i += 1;
-            } else if (arg == "-O") {
-                this.optimize = true;
-            } else if (arg == "-release") {
-                this.platformFlags.releaseMode = true;
-            } else if (arg == "-v" || arg == "-verbose") {
-                this.platformFlags.verbose = true;
-                this.macroPlatformFlags.verbose = true;
-            } else if (arg == "-c") {
-                this.dontLink = true;
-            } else if (arg == "-x") {
-                this.caching = false;
-            } else if (arg == "-backend=c") {
-                this.backend = new CBackend;
-            } else if (arg == "-macro-backend=c") {
-                this.macroBackend = new CBackend;
-            } else if (arg == "-backend=llvm") {
-                version (LLVMBackend) {
-                    this.backend = new LLVMBackend;
-                } else {
-                    print("LLVM backend not compiled in!");
-                    exit(1);
-                }
-            } else if (arg == "-macro-backend=llvm") {
-                version (LLVMBackend) {
-                    this.macroBackend = new LLVMBackend;
-                } else {
-                    print("LLVM backend not compiled in!");
-                    exit(1);
-                }
-            } else if (string ver = arg.startsWith("-version=")) {
-                this.versions ~= ver;
-            } else if (string ver = arg.startsWith("-macro-version=")) {
-                this.macroVersions ~= ver;
-            } else if (arg == "-m32") {
-                this.x86_32 = true;
-            } else if (arg == "-macro-m32") {
-                this.macro_x86_32 = true;
-            } else if (arg == "-print-generation") {
-                print(itoa(__GENERATION__));
-                exit(0); // TODO return :exit
-            } else if (arg == "-next-generation") {
-                // build the next generation of the compiler (used by rebuild.sh)
-                this.generation = __GENERATION__ + 1;
-            } else if (arg == "-uml") {
-                assert(i + 1 < args.length);
-                this.umlFile = args[i + 1];
-                i += 1;
-            } else if (arg == "-docgen") {
-                assert(i + 1 < args.length);
-                this.docGenFolder = args[i + 1];
-                i += 1;
-            } else if (arg == "-unittest") {
-                this.unittest_ = true;
-            } else if (arg == "-no-main") {
-                this.noMain = true;
-            } else if (arg == "-cpr") {
-                this.cpr = true;
-            } else if (arg == "-dump-intermediates") {
-                // Dump list of intermediate sources into a file.
-                // Used for C release generation.
-                assert(i + 1 < args.length);
-                this.intermediateListFile = args[i + 1];
-                i += 1;
-            } else if (string num = arg.startsWith("-j")) {
-                if (num.length == 0) this.threads = 4;
-                else this.threads = num.atoi;
-            } else if (string rest = arg.startsWith("-extra-cflags=")) {
-                this.extraCFlags = rest;
-            } else if (string rest = arg.startsWith("-macro-extra-cflags=")) {
-                this.macroExtraCFlags = rest;
-            } else if (arg == "-file-id-pin") {
-                assert(i + 2 < args.length);
-                auto id = args[i + 1].atoi;
-                auto path = args[i + 2];
-                this.fileIdTable.setInheritedFileId(id, path);
-                i += 2;
-            } else if (arg == "-file-id-output") {
-                assert(i + 1 < args.length);
-                this.fileIdOutput = args[i + 1];
-                i += 1;
-            } else {
-                remArgs ~= arg;
+        // bleh, no way to say "integer with default value" in argparser yet
+        int jobsFlag(string flag, string[] args, ArgResult result) {
+            if (flag == "-j") {
+                result.set("jobs", "");
+                return 1;
             }
+            return 0;
         }
+
+        int fileIdPinFlag(string flag, string[] args, ArgResult result) {
+            if (flag != "--file-id-pin") return 0;
+            assert(args.length >= 2);
+            auto id = args[0].atoi, path = args[1];
+            this.fileIdTable.setInheritedFileId(id, path);
+            return 2;
+        }
+
+        int versionFlag(string flag, string[] args, ArgResult result) {
+            if (!flag.startsWith("-version=")) return 0;
+            this.versions ~= flag["-version=".length .. $];
+            return 1;
+        }
+
+        int macroVersionFlag(string flag, string[] args, ArgResult result) {
+            if (!flag.startsWith("-macro-version=")) return 0;
+            this.macroVersions ~= flag["-macro-version=".length .. $];
+            return 1;
+        }
+
+        parser.add("h", "help", :noArg, "print this help page");
+        parser.add("P", "package", :stringArg, "define a package");
+        parser.add("S", "syspackage", :stringArg, "define a system package");
+        parser.add("r", "run", :noArg, "run the executable after compiling");
+        parser.add("running-compiler-version", :stringArg, :hidden);
+        parser.add("compiler-version", :stringArg, :hidden);
+        parser.add("I", "include", :stringArg, :hidden);
+        parser.add("loop", :noArg, "loop the compilation");
+        parser.add("w", "watch", :noArg, "watch source files for changes before looping");
+        parser.add("l", :stringArg, :hidden);
+        parser.add("L", :stringArg, :hidden);
+        parser.add("o", "output", :stringArg, "filename of the output binary");
+        parser.add("O", "optimize", :noArg, "optimize the output");
+        parser.add("release", :noArg, "disable bounds checking");
+        parser.add("v", "verbose", :noArg, "print info about compiler steps");
+        parser.add("c", "no-link", :noArg, "don't link the output");
+        parser.add("x", "no-caching", :noArg, "disable the compiler cache");
+        parser.add("j", "jobs", :intArg, "the number of threads to use");
+        parser.add("backend", :stringArg, "the output backend");
+        parser.add("macro-backend", :stringArg, "the output backend for macros");
+        parser.add("version", :stringArg, "define a version for the output platform");
+        parser.add("macro-version", :stringArg, "define a version for the macro platform");
+        parser.add("m32", :noArg, "32-bit target for the output platform");
+        parser.add("macro-m32", :noArg, "32-bit target for the macro platform");
+        parser.add("print-generation", :noArg, "print the compiler generation");
+        parser.add("next-generation", :noArg, "increment the emitted compiler generation");
+        parser.add("uml", :stringArg, "generate class UML diagrams");
+        parser.add("docgen", :stringArg, "generate comments-based documentation");
+        parser.add("unittest", :noArg, "run unittests");
+        parser.add("no-main", :noArg, "don't call the main function");
+        parser.add("cpr", :noArg, "print the critical-path report");
+        parser.add("dump-intermediates", :noArg, :hidden);
+        parser.add("extra-cflags", :stringArg, :hidden);
+        parser.add("macro-extra-cflags", :stringArg, :hidden);
+        parser.add("file-id-output", :stringArg, :hidden);
+        parser.add(new &jobsFlag);
+        parser.add(new &fileIdPinFlag);
+        parser.add(new &versionFlag);
+        parser.add(new &macroVersionFlag);
+        return parser;
+    }
+
+    string[] parseArgs(string executable, string[] args) {
+        auto parser = argParser;
+
+        bottom die(string s) {
+            print("error: $s");
+            exit(1);
+        }
+
+        auto result = parser.parse(args).case(string s: die(s));
+
+        if (result.has("help")) { help(parser, executable); exit(0); }
+        // TODO if variable assignment/truthy split overloading
+        if (result.has("package") { addPackage(result.get("package"), false); }
+        if (result.has("syspackage")) { addPackage(result.get("syspackage"), true); }
+        if (result.has("run")) { this.run = true; }
+        if (result.has("running-compiler-version")) {
+            this.runningCompilerVersion = result.get("running-compiler-version");
+        }
+        if (result.has("compiler-version")) {
+            this.requestedCompilerVersion = result.get("compiler-version");
+        }
+        if (result.has("include")) { cFlags ~= "-I" ~ result.get("include"); }
+        if (result.has("l")) { this.linkerArgs ~= "-l" ~ result.get("l"); }
+        if (result.has("L")) { this.linkerArgs ~= result.get("L"); }
+        if (result.has("output")) { this.output = result.get("output"); }
+        if (result.has("optimize")) { this.optimize = true; }
+        if (result.has("release")) { this.platformFlags.releaseMode = true; }
+        if (result.has("verbose")) {
+            this.platformFlags.verbose = true;
+            this.macroPlatformFlags.verbose = true;
+        }
+        if (result.has("no-caching")) { this.caching = false; }
+        if (result.has("no-link")) { this.dontLink = true; }
+        if (result.has("no-main")) { this.noMain = true; }
+        if (result.has("backend")) { this.backend = parseBackend(result.get("backend")); }
+        if (result.has("macro-backend")) { this.macroBackend = parseBackend(result.get("macro-backend")); }
+        if (result.has("m32")) { this.x86_32 = true; }
+        if (result.has("macro-m32")) { this.macro_x86_32 = true; }
+        if (result.has("print-generation")) {
+            print(itoa(__GENERATION__));
+            exit(0); // TODO return :exit
+        }
+        if (result.has("next-generation")) {
+            // build the next generation of the compiler
+            this.generation = __GENERATION__ + 1;
+        }
+        if (result.has("uml")) { this.umlFile = result.get("uml"); }
+        if (result.has("docgen")) { this.docGenFolder = result.get("docgen"); }
+        if (result.has("unittest")) { this.unittest_ = true; }
+        if (result.has("cpr")) { this.cpr = true; }
+        if (result.has("dump-intermediates")) { this.intermediateListFile = result.get("dump-intermediates"); }
+        if (result.has("jobs")) {
+            auto jobs = result.get("jobs");
+            if (jobs == "") this.threads = 4;
+            else this.threads = jobs.atoi;
+        }
+        if (result.has("extra-cflags")) { this.extraCFlags = result.get("extra-cflags"); }
+        if (result.has("macro-extra-cflags")) { this.macroExtraCFlags = result.get("macro-extra-cflags"); }
+        if (result.has("file-id-output")) { this.fileIdOutput = result.get("file-id-output"); }
+        this.runArgs = result.extra;
+
         if (watch && !loop) {
             print("error: -watch makes no sense without -loop");
             exit(1);
@@ -832,7 +815,21 @@ class Options
             print("error: -run not specified but extra args were given");
             exit(1);
         }
-        return remArgs;
+        return result.remaining;
+    }
+
+    Backend parseBackend(string backend) {
+        if (backend == "c") return new CBackend;
+        else if (backend == "llvm") {
+            version (LLVMBackend) return new LLVMBackend;
+            else {
+                print("LLVM backend not compiled in!");
+                exit(1);
+            }
+        } else {
+            print("Unknown backend '$backend'!");
+            exit(1);
+        }
     }
 
     void addDefaults() {
@@ -878,7 +875,7 @@ class Options
             auto words = line.split(" ");
             args ~= words[0];
             mut int used = 1;
-            if (words[0] == "-file-id-pin") {
+            if (words[0] == "--file-id-pin") {
                 args ~= words[1];
                 used = 2;
             }
@@ -1039,7 +1036,7 @@ long long int compiler_hash_mult() { return $(mult)LL; }
         auto pinnedFileIds = compiler.fileIdTable.instanceOf(FileIdTableImpl).notNull.pinnedFileIds;
         for (id in pinnedFileIds.keys) {
             auto name = compiler.fileIdTable.toFileName(id);
-            content ~= "-file-id-pin $id $name\n";
+            content ~= "--file-id-pin $id $name\n";
         }
         options.fileIdOutput.write(content);
     }
@@ -1076,7 +1073,7 @@ void main(mut string[] args)
 
     if (args.length != 1)
     {
-        help(executable);
+        help(options.argParser, executable);
         return;
     }
     auto pool = new ThreadPool(options.threads);

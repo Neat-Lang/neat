@@ -6,7 +6,8 @@ macro import std.macro.listcomprehension;
 alias ArgKind = (
     :noArg |
     :intArg |
-    :stringArg
+    :stringArg |
+    :multiArgs
 );
 
 struct ArgInfo
@@ -84,15 +85,21 @@ class UnixArgParser : ArgParser
             if (parameter.startsWith("-")) {
                 return "Flag $flagInfo missing parameter";
             }
-            if (argInfo.kind == :stringArg) {
-                result.foundArgs[argInfo.longOrShort] = parameter;
-            } else if (argInfo.kind == :intArg) {
-                int asInt = atoi(parameter);
-                if ("$asInt" != parameter) {
-                    return "Flag $flagInfo expected integer parameter";
-                }
-                result.foundArgs[argInfo.longOrShort] = parameter;
-            } else assert(false);
+            argInfo.kind.case {
+                :stringArg:
+                    result.foundArgs[argInfo.longOrShort] = parameter;
+                :intArg:
+                    int asInt = atoi(parameter);
+                    if ("$asInt" != parameter) {
+                        return "Flag $flagInfo expected integer parameter";
+                    }
+                    result.foundArgs[argInfo.longOrShort] = parameter;
+                :multiArgs:
+                    result.multiArgs.require(argInfo.longOrShort, null);
+                    result.multiArgs[argInfo.longOrShort] ~= parameter;
+                :noArg:
+                    assert(false);
+            }
         }
         (void | fail string) parseShortFlag(string flag, bool lastFlag) {
             auto flagInfo = "'-$flag'";
@@ -154,15 +161,21 @@ class GccArgParser : ArgParser
         import std.string : startsWith, atoi;
         auto result = new ArgResult(this);
         (void | fail string) parseArgParameter(ArgInfo argInfo, string parameter, string flagInfo) {
-           if (argInfo.kind == :stringArg) {
-                result.foundArgs[argInfo.longOrShort] = parameter;
-            } else if (argInfo.kind == :intArg) {
-                int asInt = atoi(parameter);
-                if ("$asInt" != parameter) {
-                    return "Flag $flagInfo expected integer parameter";
-                }
-                result.foundArgs[argInfo.longOrShort] = parameter;
-            } else assert(false);
+            argInfo.kind.case {
+                :stringArg:
+                    result.foundArgs[argInfo.longOrShort] = parameter;
+                :intArg:
+                    int asInt = atoi(parameter);
+                    if ("$asInt" != parameter) {
+                        return "Flag $flagInfo expected integer parameter";
+                    }
+                    result.foundArgs[argInfo.longOrShort] = parameter;
+                :multiArgs:
+                    result.multiArgs.require(argInfo.longOrShort, null);
+                    result.multiArgs[argInfo.longOrShort] ~= parameter;
+                :noArg:
+                    assert(false);
+            }
         }
         (void | fail string) parseArg(ArgInfo argInfo, string flagInfo) {
             if (argInfo.kind == :noArg) {
@@ -274,7 +287,10 @@ class ArgResult
 {
     private ArgParser parser;
 
+    // TODO package
     public string[string] foundArgs;
+
+    public string[][string] multiArgs;
 
     // non-flag arguments in the commandline
     public string[] remaining;
@@ -284,16 +300,23 @@ class ArgResult
 
     this(this.parser) {}
 
-    bool has(string arg) => this.foundArgs.has(arg);
+    bool has(string arg) => this.foundArgs.has(arg) || this.multiArgs.has(arg);
 
     string get(string arg) {
-        if (!has(arg)) {
+        if (!this.foundArgs.has(arg)) {
             print("wrong result key '$arg'");
             assert(false);
         }
         return this.foundArgs[arg];
     }
 
+    string[] getMultiple(string arg) {
+        if (!this.multiArgs.has(arg)) {
+            print("wrong result key '$arg'");
+            assert(false);
+        }
+        return this.multiArgs[arg];
+    }
 
     void set(string arg, string value) { this.foundArgs[arg] = value; }
 }
@@ -303,7 +326,6 @@ unittest
     auto parser = new UnixArgParser;
     parser.add("h", "help", :noArg, "Print this help page");
     with (parser.parse(null).case(string: assert(false))) {
-        assert(foundArgs.keys.empty);
         assert(remaining.empty);
     }
 }
@@ -313,7 +335,6 @@ unittest
     auto parser = new UnixArgParser;
     parser.add("h", "help", :noArg, "Print this help page");
     with (parser.parse(["foo"]).case(string: assert(false))) {
-        assert(foundArgs.keys.empty);
         assert(remaining == ["foo"]);
     }
 }
@@ -326,7 +347,7 @@ unittest
     assert(parser.parse(["--foo"]).case(ArgResult: assert(false)) == "Flag '--foo' missing parameter");
     assert(parser.parse(["-f", "x"]).case(ArgResult: assert(false)) == "Flag '-f' expected integer parameter");
     with (parser.parse(["-f", "5"]).case(string: assert(false))) {
-        assert(foundArgs["foo"] == "5");
+        assert(has("foo"));
         assert(remaining.empty);
     }
 }
@@ -337,8 +358,8 @@ unittest
     parser.add("f", "foo", :noArg, :hidden);
     parser.add("b", "bar", :noArg, :hidden);
     with (parser.parse(["-fb"]).case(string s: assert(false))) {
-        assert(foundArgs["foo"] == "");
-        assert(foundArgs["bar"] == "");
+        assert(get("foo") == "");
+        assert(get("bar") == "");
         assert(remaining.empty);
     }
 }
@@ -355,7 +376,6 @@ unittest
 {
     auto parser = new UnixArgParser;
     with (parser.parse(["foo", "--", "bar"]).case(string s: assert(false))) {
-        assert(foundArgs.keys.empty);
         assert(remaining == ["foo"]);
         assert(extra == ["bar"]);
     }
@@ -364,9 +384,9 @@ unittest
 unittest
 {
     auto parser = new GccArgParser;
-    parser.add("L", :stringArg, :hidden);
+    parser.add("L", :multiArgs, :hidden);
     with (parser.parse(["-L-lpthreads"]).case(string s: assert(false))) {
-        assert(foundArgs["L"] == "-lpthreads");
+        assert(getMultiple("L") == ["-lpthreads"]);
     }
 }
 
@@ -384,7 +404,7 @@ unittest
     }
     parser.add(new &blaAction);
     with (parser.parse(["bla"]).case(string: assert(false))) {
-        assert(foundArgs["bla"] == "");
+        assert(get("bla") == "");
         assert(remaining.empty);
     }
 }

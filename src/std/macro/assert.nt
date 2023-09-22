@@ -4,7 +4,7 @@ macro import std.macro.quasiquoting;
 
 import package(compiler).neat.base;
 
-class ASTAssertion : ASTStatement
+class ASTAssertion : ASTSymbol
 {
     ASTSymbol test;
 
@@ -173,9 +173,15 @@ class ASTAssertion : ASTStatement
         return null;
     }
 
-    override (StatementCompileResult | fail Error) compile(Context context)
-    {
+    override (Symbol | fail Error) compile(Context context) {
         mut Context context = context;
+        mut ASTSymbol returnType = context.compiler.$type void;
+        if (context.compiler.destructAstIdentifier(test)
+            .case(:none: false, string ident: ident == "false"))
+        {
+            // special case: assert(false) is type bottom
+            returnType = context.compiler.$type bottom;
+        }
 
         auto ifFailed = dispatch(context, test)?;
         if (auto ifFailed = ifFailed) {
@@ -187,15 +193,16 @@ class ASTAssertion : ASTStatement
                     context.namespace,
                     "failedMsg",
                     context.compiler.stringLiteral(context.platform, failedMsg)));
-            auto assertTest = context.compiler.$stmt {
+            auto assertTest = context.compiler.$expr ({
                 import neat.runtime : assert, print;
                 if (!$test) {
                     print(failedMsg ~ ifFailed);
                     assert(false);
                 }
-            };
-            auto assertTestStmt = assertTest.compile(context)?;
-            return StatementCompileResult(assertTestStmt.statement, context.namespace);
+                $returnType ret;
+                ret;
+            });
+            return assertTest.compile(context);
         }
         string failedMsg = locRange.repr(context.compiler.fileIdTable) ~
             ": assertion failed: '" ~ exprText ~ "' was false";
@@ -203,15 +210,16 @@ class ASTAssertion : ASTStatement
                 context.namespace,
                 "failedMsg",
                 context.compiler.stringLiteral(context.platform, failedMsg)));
-        auto assertTest = context.compiler.$stmt {
+        auto assertTest = context.compiler.$expr ({
             import neat.runtime : assert, print;
             if (!$test) {
                 print(failedMsg);
                 assert(false);
             }
-        };
-        auto assertTestStmt = assertTest.compile(context)?;
-        return StatementCompileResult(assertTestStmt.statement, context.namespace);
+            $returnType ret;
+            ret;
+        });
+        return assertTest.compile(context);
     }
 }
 
@@ -270,21 +278,18 @@ class ParseAssert : Macro
 {
     this() { }
     override void apply(MacroArgs args) {
-        if (auto args = args.instanceOf(ParseStatementArgs)) {
-            args.statement = this.parse(args.parser, args.lexicalContext);
+        if (auto args = args.instanceOf(ParseExpressionBaseArgs)) {
+            args.symbol = this.parse(args.parser, args.lexicalContext);
         }
     }
 
-    (nullable ASTStatement | fail Error) parse(Parser parser, LexicalContext context) {
+    (nullable ASTSymbol | fail Error) parse(Parser parser, LexicalContext context) {
         parser.begin;
-        parser.strip;
-        if (!parser.acceptIdentifier("assert"))
-        {
+        if (!parser.acceptIdentifier("assert")) {
             parser.revert;
             return null;
         }
-        if (!parser.acceptToken(TokenType.lparen))
-        {
+        if (!parser.acceptToken(TokenType.lparen)) {
             parser.revert;
             return null;
         }
@@ -296,7 +301,6 @@ class ParseAssert : Macro
 
         auto exprRange = parser.to(exprStartFrom);
         parser.expectToken(TokenType.rparen)?;
-        parser.expectToken(TokenType.semicolon)?;
 
         return new ASTAssertion(expression, exprText, exprRange);
     }

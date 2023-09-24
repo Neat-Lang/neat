@@ -3,6 +3,186 @@ module std.argparse;
 macro import std.macro.assert;
 macro import std.macro.listcomprehension;
 
+/**
+ * Parse command-line arguments and return matched arguments or errors.
+ */
+abstract class ArgParser
+{
+    // TODO public_mut?
+    public ArgInfo[string] longArgs;
+
+    public ArgInfo[string] shortArgs;
+
+    public ArgInfo[] args;
+
+    int delegate(string, string[], ArgResult)[] specialRules;
+
+    /**
+     * Add a command-line argument.
+     * Typical usage: `add("h", "help", :noArg, "Print this help page.");
+     */
+    void add(string shortname, string longname, ArgKind kind, (string | :hidden) description) {
+        auto argInfo = ArgInfo(shortname, longname, kind, description);
+        longArgs[longname] = argInfo;
+        shortArgs[shortname] = argInfo;
+        args ~= argInfo;
+    }
+
+    /**
+     * Add a command-line argument without a short form.
+     * Typical usage: `add("help", :noArg, "Print this help page.");
+     */
+    void add(string name, ArgKind kind, (string | :hidden) description) {
+        if (name.length == 1) {
+            auto argInfo = ArgInfo(shortname=name, "", kind, description);
+            shortArgs[name] = argInfo;
+            args ~= argInfo;
+        } else {
+            auto argInfo = ArgInfo("", longname=name, kind, description);
+            longArgs[name] = argInfo;
+            args ~= argInfo;
+        }
+    }
+
+    /**
+     * Add a special rule. The callback will be invoked with the current
+     * argument, the remaining arguments, and the result object to fill out.
+     * It is expected to return the number of arguments consumed, including
+     * the current argument.
+     */
+    void add(int delegate(string, string[], ArgResult) dg) {
+        specialRules ~= dg;
+    }
+
+    /**
+     * Parse a list of command-line arguments. If a string is returned,
+     * the command-line arguments did not match the defined arguments.
+     */
+    abstract (ArgResult | fail string) parse(mut string[] args);
+}
+
+unittest
+{
+    auto parser = new UnixArgParser;
+    parser.add("h", "help", :noArg, "Print this help page");
+
+    with (parser.parse(null)
+        .case(string: assert(false)))
+    {
+        assert(remaining.empty);
+    }
+}
+
+unittest
+{
+    auto parser = new UnixArgParser;
+    parser.add("h", "help", :noArg, "Print this help page");
+
+    with (parser.parse(["foo"])
+        .case(string: assert(false)))
+    {
+        assert(remaining == ["foo"]);
+    }
+}
+
+unittest
+{
+    auto parser = new UnixArgParser;
+    parser.add("f", "foo", :intArg, "Foo arg");
+
+    parser.parse(["-f"])
+        .case(ArgResult: assert(false))
+        .assertEqual("Flag '-f' missing parameter");
+
+    parser.parse(["--foo"])
+        .case(ArgResult: assert(false))
+        .assertEqual("Flag '--foo' missing parameter");
+
+    parser.parse(["-f", "x"])
+        .case(ArgResult: assert(false))
+        .assertEqual("Flag '-f' expected integer parameter");
+
+    with (parser.parse(["-f", "5"])
+        .case(string: assert(false)))
+    {
+        assert(has("foo"));
+        assert(remaining.empty);
+    }
+}
+
+unittest
+{
+    auto parser = new UnixArgParser;
+    parser.add("f", "foo", :noArg, :hidden);
+    parser.add("b", "bar", :noArg, :hidden);
+
+    with (parser.parse(["-fb"]).case(string s: assert(false))) {
+        assert(get("foo") == "");
+        assert(get("bar") == "");
+        assert(remaining.empty);
+    }
+}
+
+unittest
+{
+    auto parser = new GccArgParser;
+    parser.add("f", "foo", :noArg, :hidden);
+    parser.add("b", "bar", :noArg, :hidden);
+
+    parser.parse(["-fb"])
+        .case(ArgResult: assert(false))
+        .assertEqual("Flag '-f' expected no parameter");
+}
+
+unittest
+{
+    auto parser = new UnixArgParser;
+    with (parser.parse(["foo", "--", "bar"])
+        .case(string s: assert(false)))
+    {
+        assert(remaining == ["foo"]);
+        assert(extra == ["bar"]);
+    }
+}
+
+unittest
+{
+    auto parser = new GccArgParser;
+    parser.add("L", :multiArgs, :hidden);
+    with (parser.parse(["-L-lpthreads"])
+        .case(string s: assert(false)))
+    {
+        assert(getMultiple("L") == ["-lpthreads"]);
+    }
+}
+
+unittest
+{
+    auto parser = new UnixArgParser;
+    int blaAction(string arg, string[] args, ArgResult result) {
+        if (arg == "bla") {
+            result.foundArgs["bla"] = "";
+            // arg consumed
+            return 1;
+        }
+        // no match
+        return 0;
+    }
+    parser.add(new &blaAction);
+    with (parser.parse(["bla"])
+        .case(string: assert(false)))
+    {
+        assert(get("bla") == "");
+        assert(remaining.empty);
+    }
+}
+
+alias assertEqual = (a, b) => assert(a == b);
+
+/**
+ * The kind of a command-line argument. This determines how many further
+ * arguments it consumes.
+ */
 alias ArgKind = (
     :noArg |
     :intArg |
@@ -10,6 +190,9 @@ alias ArgKind = (
     :multiArgs
 );
 
+/**
+ * Information about a defined command-line argument.
+ */
 struct ArgInfo
 {
     string shortname;
@@ -23,47 +206,11 @@ struct ArgInfo
     (string | :hidden) description;
 }
 
-abstract class ArgParser
-{
-    // TODO public_mut?
-    public ArgInfo[string] longArgs;
-
-    public ArgInfo[string] shortArgs;
-
-    public ArgInfo[] args;
-
-    int delegate(string, string[], ArgResult)[] specialRules;
-
-    void add(string shortname, string longname, ArgKind kind, (string | :hidden) description) {
-        auto argInfo = ArgInfo(shortname, longname, kind, description);
-        longArgs[longname] = argInfo;
-        shortArgs[shortname] = argInfo;
-        args ~= argInfo;
-    }
-
-    void add(string name, ArgKind kind, (string | :hidden) description) {
-        if (name.length == 1) {
-            auto argInfo = ArgInfo(shortname=name, "", kind, description);
-            shortArgs[name] = argInfo;
-            args ~= argInfo;
-        } else {
-            auto argInfo = ArgInfo("", longname=name, kind, description);
-            longArgs[name] = argInfo;
-            args ~= argInfo;
-        }
-    }
-
-    void add(int delegate(string, string[], ArgResult) dg) {
-        specialRules ~= dg;
-    }
-
-    abstract (ArgResult | fail string) parse(mut string[] args);
-}
-
 /**
  * UNIX style:
- * --foo bar
- * -fx is -f, -x
+ *
+ * * `--foo bar`
+ * * `-fx` is `-f, -x`
  */
 class UnixArgParser : ArgParser
 {
@@ -150,8 +297,9 @@ class UnixArgParser : ArgParser
 
 /**
  * GCC style:
- * --foo bar, --foo=bar, -foo=bar
- * -fx is --foo=x
+ *
+ * * `--foo bar`, `--foo=bar`, `-foo=bar`
+ * * `-fx` is `--foo=x`
  */
 class GccArgParser : ArgParser
 {
@@ -283,6 +431,9 @@ class GccArgParser : ArgParser
     }
 }
 
+/**
+ * The result of successfully parsing command-line arguments.
+ */
 class ArgResult
 {
     private ArgParser parser;
@@ -292,16 +443,18 @@ class ArgResult
 
     public string[][string] multiArgs;
 
-    // non-flag arguments in the commandline
+    /// Non-flag arguments in the commandline
     public string[] remaining;
 
-    // arguments after the --
+    /// Arguments after the --
     public string[] extra;
 
     this(this.parser) {}
 
+    /// Returns whether an argument was matched.
     bool has(string arg) => this.foundArgs.has(arg) || this.multiArgs.has(arg);
 
+    /// Returns the parameter of a matched argument that took a parameter.
     string get(string arg) {
         if (!this.foundArgs.has(arg)) {
             print("wrong result key '$arg'");
@@ -310,6 +463,7 @@ class ArgResult
         return this.foundArgs[arg];
     }
 
+    /// Returns all parameters of an argument that could match multiple times.
     string[] getMultiple(string arg) {
         if (!this.multiArgs.has(arg)) {
             print("wrong result key '$arg'");
@@ -318,94 +472,6 @@ class ArgResult
         return this.multiArgs[arg];
     }
 
+    /// Helper to manually set an argument to a value.
     void set(string arg, string value) { this.foundArgs[arg] = value; }
 }
-
-unittest
-{
-    auto parser = new UnixArgParser;
-    parser.add("h", "help", :noArg, "Print this help page");
-    with (parser.parse(null).case(string: assert(false))) {
-        assert(remaining.empty);
-    }
-}
-
-unittest
-{
-    auto parser = new UnixArgParser;
-    parser.add("h", "help", :noArg, "Print this help page");
-    with (parser.parse(["foo"]).case(string: assert(false))) {
-        assert(remaining == ["foo"]);
-    }
-}
-
-unittest
-{
-    auto parser = new UnixArgParser;
-    parser.add("f", "foo", :intArg, "Foo arg");
-    assert(parser.parse(["-f"]).case(ArgResult: assert(false)) == "Flag '-f' missing parameter");
-    assert(parser.parse(["--foo"]).case(ArgResult: assert(false)) == "Flag '--foo' missing parameter");
-    assert(parser.parse(["-f", "x"]).case(ArgResult: assert(false)) == "Flag '-f' expected integer parameter");
-    with (parser.parse(["-f", "5"]).case(string: assert(false))) {
-        assert(has("foo"));
-        assert(remaining.empty);
-    }
-}
-
-unittest
-{
-    auto parser = new UnixArgParser;
-    parser.add("f", "foo", :noArg, :hidden);
-    parser.add("b", "bar", :noArg, :hidden);
-    with (parser.parse(["-fb"]).case(string s: assert(false))) {
-        assert(get("foo") == "");
-        assert(get("bar") == "");
-        assert(remaining.empty);
-    }
-}
-
-unittest
-{
-    auto parser = new GccArgParser;
-    parser.add("f", "foo", :noArg, :hidden);
-    parser.add("b", "bar", :noArg, :hidden);
-    assert(parser.parse(["-fb"]).case(ArgResult: assert(false)) == "Flag '-f' expected no parameter");
-}
-
-unittest
-{
-    auto parser = new UnixArgParser;
-    with (parser.parse(["foo", "--", "bar"]).case(string s: assert(false))) {
-        assert(remaining == ["foo"]);
-        assert(extra == ["bar"]);
-    }
-}
-
-unittest
-{
-    auto parser = new GccArgParser;
-    parser.add("L", :multiArgs, :hidden);
-    with (parser.parse(["-L-lpthreads"]).case(string s: assert(false))) {
-        assert(getMultiple("L") == ["-lpthreads"]);
-    }
-}
-
-unittest
-{
-    auto parser = new UnixArgParser;
-    int blaAction(string arg, string[] args, ArgResult result) {
-        if (arg == "bla") {
-            result.foundArgs["bla"] = "";
-            // arg consumed
-            return 1;
-        }
-        // no match
-        return 0;
-    }
-    parser.add(new &blaAction);
-    with (parser.parse(["bla"]).case(string: assert(false))) {
-        assert(get("bla") == "");
-        assert(remaining.empty);
-    }
-}
-

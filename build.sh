@@ -34,7 +34,7 @@ fi
 
 FLAGS="$JFLAG -I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir)"
 
-TAG=v0.3.0
+TAG=v0.3.1
 NEAT=.cache/bootstrap/"$TAG"/neat-"$TAG"-gcc/neat
 
 if [ ! -f "$NEAT" ]

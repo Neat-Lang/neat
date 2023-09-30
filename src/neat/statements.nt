@@ -69,6 +69,8 @@ class ReturnStatement : Statement
 
 class IfStatement : Statement
 {
+    (string | :none) label;
+
     Expression test;
 
     Statement then;
@@ -77,7 +79,7 @@ class IfStatement : Statement
 
     (LocRange | :none) locRange;
 
-    this(this.test, this.then, this.else_, this.locRange) { }
+    this(this.label, this.test, this.then, this.else_, this.locRange) { }
 
     override void emit(Generator output)
     {
@@ -87,7 +89,7 @@ class IfStatement : Statement
         }
         int reg = this.test.emit(output);
 
-        string label = output.fun.getLabel;
+        string label = this.label.case(:none: output.fun.getLabel);
         if (this.else_)
             output.fun.testBranch(reg, label ~ "_then", label ~ "_else");
         else
@@ -120,6 +122,23 @@ class IfStatement : Statement
     }
 }
 
+class LabelIfScope : IfScope
+{
+    string label;
+
+    bool hasElse;
+
+    this(this.label, this.hasElse, this.parent) { this.isContextScope = true; }
+
+    override (Statement | fail Error) breakElseFrom(Context context, LocRange locRange) {
+        auto branch = new Branch(this.label ~ ("_else" if hasElse else "_fin"), locRange);
+
+        return sequence2(context.compiler.unwindScope(context, this, new NoopStatement)?, branch);
+    }
+
+    override string repr() => "LabelIfScope";
+}
+
 class ASTBreak : ASTSymbol
 {
     this(this.locRange) { }
@@ -150,6 +169,22 @@ class ASTContinue : ASTSymbol
     }
 
     override string repr() { return "continue"; }
+}
+
+class ASTBreakElse : ASTSymbol
+{
+    this(this.locRange) { }
+
+    override (Symbol | fail Error) compile(Context context)
+    {
+        auto ifScope = findParent!IfScope(context.namespace);
+        locRange.assert(!!ifScope, () => "Cannot 'breakelse': not in an if statement.")?;
+        auto stmt = ifScope.breakElseFrom(context, locRange)?;
+
+        return new StatementExpression(stmt, new UnreachableExpr, gifted=false);
+    }
+
+    override string repr() { return "breakelse"; }
 }
 
 class Branch : Statement

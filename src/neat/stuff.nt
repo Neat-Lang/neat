@@ -1247,6 +1247,13 @@ class ASTPropagateFailureExpr : ASTSymbol
         for (k, v in either.types) {
             ASTSymbol expr() {
                 auto a = new ASTIdentifier("a", false, __RANGE__);
+                // Aaaaaaaugh!
+                // if (v.type.instanceOf(SymbolIdentifierType).case(null: breakelse).name == "else") {
+                if (auto asIdentifierType = v.type.instanceOf(SymbolIdentifierType)) {
+                    if (asIdentifierType.name == "else") {
+                        return new ASTBreakElse(__RANGE__);
+                    }
+                }
                 if (v.fail) return new ASTReturn(a, __RANGE__);
                 return a;
             }
@@ -1276,6 +1283,26 @@ class ASTPropagateFailureExpr : ASTSymbol
         return null;
     }
     return new ASTPropagateFailureExpr(left, parser.to(from));
+}
+
+// expr.else(expr)
+(nullable ASTSymbol | fail Error) parseElseExpr(Parser parser, LexicalContext lexicalContext, ASTSymbol current) {
+    parser.begin;
+    if (!(parser.acceptToken(TokenType.dot)
+        && parser.acceptIdentifier("else")
+        && parser.acceptToken(TokenType.lparen)))
+    {
+        parser.revert;
+        return null;
+    }
+    auto from = parser.from;
+    parser.commit;
+
+    auto elseExpr = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
+    parser.to(from).assert(!!elseExpr, () => "expression expected")?;
+    auto elseExpr = elseExpr.notNull;
+    parser.expectToken(TokenType.rparen)?;
+    return lexicalContext.compiler.$expr $current.case(:else: $elseExpr);
 }
 
 (nullable ASTSymbol | fail Error) parseProperties(ParserImpl parser, LexicalContext lexicalContext)
@@ -1323,6 +1350,10 @@ class ASTPropagateFailureExpr : ASTSymbol
         }
         if (ASTSymbol propagateExpr = parser.parsePropagate(lexicalContext, current)?) {
             current = propagateExpr;
+            continue;
+        }
+        if (ASTSymbol elseExpr = parser.parseElseExpr(lexicalContext, current)?) {
+            current = elseExpr;
             continue;
         }
         if (ASTSymbol prop = parser.parseParenPropertyExpression(lexicalContext, current)?) {
@@ -2326,6 +2357,9 @@ class ASTIfStatement : ASTStatement
         mut nullable Statement prelude; // var decl statement
         mut nullable Expression test;
         mut nullable Statement epilog; // either decl value assignment
+        auto ifLabel = context.getLabel;
+        auto ifLabelNamespace = new LabelIfScope(ifLabel, hasElse=!!this.else_, context.namespace);
+        auto context = context.withNamespace(ifLabelNamespace);
         mut auto testSucceedsNamespace = context.namespace;
         this.test.case {
             ASTSymbol symbol: {
@@ -2431,7 +2465,7 @@ class ASTIfStatement : ASTStatement
         }
 
         auto test = truthy(context, test.notNull, this.locRange)?;
-        auto ifStmt = new IfStatement(test, sequence2(epilog, then), else_, this.locRange);
+        auto ifStmt = new IfStatement(ifLabel, test, sequence2(epilog, then), else_, this.locRange);
 
         return StatementCompileResult(sequence2(prelude, ifStmt), context.namespace);
     }
@@ -2467,15 +2501,17 @@ class ASTIfStatement : ASTStatement
     parser.begin;
     auto from = parser.from;
     string identifier = parser.parseIdentifier;
-    if (identifier == "break")
-    {
+    if (identifier == "break") {
         parser.commit;
         return new ASTBreak(parser.to(from));
     }
-    if (identifier == "continue")
-    {
+    if (identifier == "continue") {
         parser.commit;
         return new ASTContinue(parser.to(from));
+    }
+    if (identifier == "breakelse") {
+        parser.commit;
+        return new ASTBreakElse(parser.to(from));
     }
     parser.revert;
     return null;

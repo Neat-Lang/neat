@@ -19,7 +19,9 @@ The installation instructions assume, and are tested with, Ubuntu 22.04. Take re
 Install with LLVM
 -----------------
 
-1. Install required packages::
+1. Install required packages:
+
+.. code-block:: bash
 
     apt-get install -y --no-install-recommends \
       ca-certificates clang-15 curl file gcc git \

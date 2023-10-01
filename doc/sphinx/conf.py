@@ -10,10 +10,9 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
-# import os
-# import sys
-# sys.path.insert(0, os.path.abspath('.'))
-
+import os
+import sys
+sys.path.insert(0, os.path.abspath('./_ext'))
 
 # -- Project information -----------------------------------------------------
 
@@ -29,7 +28,8 @@ author = '@FeepingCreature'
 # ones.
 extensions = [
     'sphinx_rtd_theme',
-    'sphinx.ext.autosectionlabel'
+    'sphinx.ext.autosectionlabel',
+    'xe_quote',
 ]
 
 autosectionlabel_prefix_document = True
@@ -61,3 +61,4 @@ html_sidebars = {
    '**': ['about.html', 'navigation.html', 'searchbox.html'],
    'dconf_23': [],
 }
+

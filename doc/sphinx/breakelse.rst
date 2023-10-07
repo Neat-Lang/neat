@@ -2,6 +2,9 @@
 `breakelse`: When Compiler Developers Get Bored
 ===============================================
 
+Tl;dr: `breakelse`  is a new keyword that jumps directly to the `else` block of an `if` statement.
+With a bit of syntax sugar, this gives a novel alternative to conditional-access operators.
+
 Good morning, internet! In programming languages, it's a common issue that we want to both *test* a value
 and *use* the value.
 

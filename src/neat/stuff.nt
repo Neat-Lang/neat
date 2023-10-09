@@ -16,6 +16,7 @@ import neat.bottom;
 import neat.class_;
 import neat.decl;
 import neat.delegate_;
+import neat.elseexpr;
 import neat.either;
 import neat.enums;
 import neat.expr;
@@ -135,8 +136,6 @@ class DefineClassIntf : FinishedSymbol
              * mut T mut[] foo;
              * foo ~= T(); // mut T[] - the array value is mutable
              * foo[0] = T(); // T mut[] - the array elements are mutable
-             *
-             * TODO: actually implement this
              */
             bool arrayIsMutable = parser.acceptIdentifier("mut");
             if (parser.acceptToken(TokenType.lsquarebracket)) {
@@ -732,9 +731,8 @@ class WrapReference : Reference
     if (autoCall) return (:mismatch, locRange.fail("cannot call"));
     nullable Expression expr = target.instanceOf(Expression);
     // TODO
-    // auto funcptr = expr?.type.instanceOf(FunctionPointer);
-    mut nullable FunctionPointer funcptr;
-    if (expr) funcptr = expr.type.instanceOf(FunctionPointer);
+    // auto funcptr = expr?.type.instanceOf(FunctionPointer).else(null);
+    auto funcptr = expr.case(Expression e: e.type.instanceOf(FunctionPointer));
     if (expr && funcptr) {
         auto result = validateCall(context, funcptr.params, astArgs, "", variadic=false, locRange)?.case(
             (:argCastError, Error err): return (:argCastError, err),
@@ -1247,18 +1245,14 @@ class ASTPropagateFailureExpr : ASTSymbol
         for (k, v in either.types) {
             ASTSymbol expr() {
                 auto a = new ASTIdentifier("a", false, __RANGE__);
-                // Aaaaaaaugh!
-                // if (v.type.instanceOf(SymbolIdentifierType).case(null: breakelse).name == "else") {
-                if (auto asIdentifierType = v.type.instanceOf(SymbolIdentifierType)) {
-                    if (asIdentifierType.name == "else") {
-                        return new ASTBreakElse(__RANGE__);
-                    }
+                if (v.type.isElseTriggerType) {
+                    return new ASTBreakElse(this.locRange);
                 }
-                if (v.fail) return new ASTReturn(a, __RANGE__);
+                if (v.fail) return new ASTReturn(a, this.locRange);
                 return a;
             }
             cases ~= ASTEitherCaseExprCase(
-                __RANGE__,
+                this.locRange,
                 new ASTSymbolHelper(v.type),
                 "a",
                 fail=v.fail,
@@ -1285,26 +1279,6 @@ class ASTPropagateFailureExpr : ASTSymbol
     return new ASTPropagateFailureExpr(left, parser.to(from));
 }
 
-// expr.else(expr)
-(nullable ASTSymbol | fail Error) parseElseExpr(Parser parser, LexicalContext lexicalContext, ASTSymbol current) {
-    parser.begin;
-    if (!(parser.acceptToken(TokenType.dot)
-        && parser.acceptIdentifier("else")
-        && parser.acceptToken(TokenType.lparen)))
-    {
-        parser.revert;
-        return null;
-    }
-    auto from = parser.from;
-    parser.commit;
-
-    auto elseExpr = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
-    parser.to(from).assert(!!elseExpr, () => "expression expected")?;
-    auto elseExpr = elseExpr.notNull;
-    parser.expectToken(TokenType.rparen)?;
-    return lexicalContext.compiler.$expr $current.case(:else: $elseExpr);
-}
-
 (nullable ASTSymbol | fail Error) parseProperties(ParserImpl parser, LexicalContext lexicalContext)
 {
     mut (:inc | :dec | :none) preincdec = :none, postincdec = :none;
@@ -1313,14 +1287,9 @@ class ASTPropagateFailureExpr : ASTSymbol
     else if (parser.acceptToken2(TokenType.plus, TokenType.plus)) preincdec = :inc;
     auto toPre = parser.to(fromPre);
 
-    /**
-     * TODO
-     * mut ASTSymbol current = parseExpressionBase(parser, lexicalContext)?.case(null: return null);
-     */
-    mut uninitialized ASTSymbol current;
-    if (auto base = parseExpressionBase(parser, lexicalContext)?)
-        current = base;
-    else return null;
+    // TODO
+    // mut ASTSymbol current = parseExpressionBase(parser, lexicalContext)??.else(return null);
+    mut ASTSymbol current = parseExpressionBase(parser, lexicalContext)?.case(null: return null);
 
     while (true) {
         if (ASTSymbol instanceOf = parser.parseInstanceOf(lexicalContext, current)?) {
@@ -2369,7 +2338,7 @@ class ASTIfStatement : ASTStatement
             ASTVarDeclStatement vardecl: {
                 auto initial = vardecl.initial.compile(context)?.beExpressionImplCall(context, vardecl.locRange)?;
                 // TODO
-                // auto declType = vardecl.type.compile(context)?.beType(vardecl.type.locRange)? if vardecl.type else null;
+                // auto declType = vardecl.type?.compile(context)?.beType(vardecl.type.locRange).else(null);
                 mut nullable Type declType;
                 if (vardecl.type)
                     declType = vardecl.type.compile(context)?.beType(vardecl.type.locRange)?;

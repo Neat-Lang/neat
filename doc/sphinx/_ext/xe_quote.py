@@ -13,7 +13,7 @@ class XeQuote(Directive):
         mood = self.arguments[1] if len(self.arguments) > 1 else None
         blockquote = nodes.block_quote()
         blockquote.set_class('xe-quote')
-        image_node = nodes.image(uri=self.image_uri(persona, mood))
+        image_node = nodes.image(**self.image_uri(persona, mood))
         nested_node = nodes.container()
 
         content = ViewList(self.content)
@@ -30,7 +30,6 @@ class XeQuote(Directive):
                 'aghast': '/_static/breakelse/shoebill_aghast.png',
                 'considering': '/_static/breakelse/shoebill_considering.png',
             }
-            return mapping[mood or 'neutral']
         elif persona == 'gurkenglas':
             mapping = {
                 'neutral': '/_static/breakelse/gurkenglas_neutral.png',
@@ -39,9 +38,13 @@ class XeQuote(Directive):
                 'idea': '/_static/breakelse/gurkenglas_idea.png',
                 'unimpressed': '/_static/breakelse/gurkenglas_unimpressed.png',
             }
-            return mapping[mood or 'neutral']
         else:
             assert False
+        mood = mood or 'neutral'
+        return {
+            'uri': mapping[mood],
+            'alt': f'{persona} is {mood}',
+        }
 
 
 def setup(app):

@@ -16,7 +16,6 @@ import neat.bottom;
 import neat.class_;
 import neat.decl;
 import neat.delegate_;
-import neat.elseexpr;
 import neat.either;
 import neat.enums;
 import neat.expr;
@@ -35,6 +34,7 @@ import neat.runtime : die;
 import neat.statements;
 import neat.struct_;
 import neat.templ;
+import neat.ternary;
 import neat.traits;
 import neat.tuples;
 import neat.types;
@@ -1244,10 +1244,13 @@ class ASTPropagateFailureExpr : ASTSymbol
         mut ASTEitherCaseExprCase[] cases;
         for (k, v in either.types) {
             ASTSymbol expr() {
-                auto a = new ASTIdentifier("a", false, __RANGE__);
-                if (v.type.isElseTriggerType) {
+                if (v.type.instanceOf(SymbolIdentifierType).case(null: breakelse).name == "else") {
                     return new ASTBreakElse(this.locRange);
                 }
+                if (v.type.instanceOf(NullPointer)) {
+                    return new ASTBreakElse(this.locRange);
+                }
+                auto a = new ASTIdentifier("a", false, __RANGE__);
                 if (v.fail) return new ASTReturn(a, this.locRange);
                 return a;
             }
@@ -1319,10 +1322,6 @@ class ASTPropagateFailureExpr : ASTSymbol
         }
         if (ASTSymbol propagateExpr = parser.parsePropagate(lexicalContext, current)?) {
             current = propagateExpr;
-            continue;
-        }
-        if (ASTSymbol elseExpr = parser.parseElseExpr(lexicalContext, current)?) {
-            current = elseExpr;
             continue;
         }
         if (ASTSymbol prop = parser.parseParenPropertyExpression(lexicalContext, current)?) {
@@ -2084,59 +2083,19 @@ class ASTIota : ASTSymbol
     return left;
 }
 
-class ASTTernaryIf : ASTSymbol
-{
-    ASTSymbol cond, left, right;
-
-    this(this.cond, this.left, this.right, this.locRange) { }
-
-    override (Symbol | fail Error) compile(Context context)
-    {
-        Expression left = this.left.compile(context)?.beExpressionImplCall(context, this.left.locRange)?;
-        Expression right = this.right.compile(context)?.beExpressionImplCall(context, this.right.locRange)?;
-        auto merge = mergePair(context, left, right, this.right.locRange)?;
-        auto left = new ASTSymbolHelper(merge.left);
-        auto right = new ASTSymbolHelper(merge.right);
-        auto impl = context.compiler.$expr ({
-            mut uninitialized typeof($left) result;
-            if ($cond) result = $left;
-            else result = $right;
-            result;
-        });
-        return impl.compile(context);
-    }
-
-    override string repr() { return "$(left.repr) if $(cond.repr) else $(right.repr)"; }
-}
-
-(ASTSymbol | fail Error) parseTernaryOp(ParserImpl parser, LexicalContext lexicalContext, mut ASTSymbol then, int myLevel) {
-    with (parser.transaction) {
-        auto from = parser.from;
-        if (!parser.acceptIdentifier("if")) return then;
-        auto cond = parseExpression(parser, lexicalContext)?;
-        if (!cond) return then;
-        if (!parser.acceptIdentifier("else"))
-            return parser.fail("'else' expected");
-        auto else_ = expectArithmetic(parser, lexicalContext, 0)?;
-        commit;
-        return new ASTTernaryIf(cond.notNull, then, else_, parser.to(from));
-    }
-}
-
 (ASTSymbol | fail Error) parseArithmetic(ParserImpl parser, LexicalContext lexicalContext, mut ASTSymbol left, int level)
 {
-    // & ^ <<>> | */ +- <> && || if
-    if (level <= 10) left = parseBitAnd(parser, lexicalContext, left, 10)?;
-    if (level <= 9) left = parseBitXor(parser, lexicalContext, left, 9)?;
-    if (level <= 8) left = parseBitShift(parser, lexicalContext, left, 8)?;
-    if (level <= 7) left = parseBitOr(parser, lexicalContext, left, 7)?;
-    if (level <= 6) left = parseMulDiv(parser, lexicalContext, left, 6)?;
-    if (level <= 5) left = parseAddSubCat(parser, lexicalContext, left, 5)?;
-    if (level <= 4) left = parseIota(parser, lexicalContext, left, 4)?;
-    if (level <= 3) left = parseComparison(parser, lexicalContext, left, 3)?;
-    if (level <= 2) left = parseBoolAnd(parser, lexicalContext, left, 2)?;
-    if (level <= 1) left = parseBoolOr(parser, lexicalContext, left, 1)?;
-    if (level <= 0) left = parseTernaryOp(parser, lexicalContext, left, 0)?;
+    // & ^ <<>> | */ +- <> && ||
+    if (level <= 9) left = parseBitAnd(parser, lexicalContext, left, 9)?;
+    if (level <= 8) left = parseBitXor(parser, lexicalContext, left, 8)?;
+    if (level <= 7) left = parseBitShift(parser, lexicalContext, left, 7)?;
+    if (level <= 6) left = parseBitOr(parser, lexicalContext, left, 6)?;
+    if (level <= 5) left = parseMulDiv(parser, lexicalContext, left, 5)?;
+    if (level <= 4) left = parseAddSubCat(parser, lexicalContext, left, 4)?;
+    if (level <= 3) left = parseIota(parser, lexicalContext, left, 3)?;
+    if (level <= 2) left = parseComparison(parser, lexicalContext, left, 2)?;
+    if (level <= 1) left = parseBoolAnd(parser, lexicalContext, left, 1)?;
+    if (level <= 0) left = parseBoolOr(parser, lexicalContext, left, 0)?;
     return left;
 }
 
@@ -2148,12 +2107,45 @@ class ASTTernaryIf : ASTSymbol
     return parseArithmetic(parser, lexicalContext, leaf.notNull, level);
 }
 
-(nullable ASTSymbol | fail Error) parseExpression(ParserImpl parser, LexicalContext lexicalContext)
-{
-    if (auto leaf = parseExpressionLeaf(parser, lexicalContext)?) {
-        return parseArithmetic(parser, lexicalContext, leaf, 0);
+(nullable ASTSymbol | fail Error) parseArithmeticExpr(ParserImpl parser, LexicalContext lexicalContext) {
+    auto leaf = parseExpressionLeaf(parser, lexicalContext)?.case(null: return null);
+    return parseArithmetic(parser, lexicalContext, leaf, 0);
+}
+
+/**
+ * Ternary expressions have two forms:
+ * - foo if bar else baz: ternary if
+ * - foo else baz: short ternary if :)
+ *   - In this case, the condition is held to be true.
+ *     So the else block can only be hit via breakelse.
+ */
+(nullable ASTSymbol | fail Error) parseTernaryOp(ParserImpl parser, LexicalContext lexicalContext) {
+    with (parser.transaction) {
+        auto from = parser.from;
+        auto base = parseArithmeticExpr(parser, lexicalContext)?.case(null: return null);
+        mut nullable ASTSymbol test = null;
+        if (parser.acceptIdentifier("if")) {
+            test = parseArithmeticExpr(parser, lexicalContext)?;
+            if (!test) {
+                commit;
+                return base;
+            }
+        }
+        if (!parser.acceptIdentifier("else")) {
+            if (test)
+                return parser.fail("'else' expected");
+            commit;
+            return base;
+        }
+        auto else_ = parseExpression(parser, lexicalContext)?
+            .case(null: return parser.fail("'else' expression expected"));
+        commit;
+        return new ASTTernaryIf(test=test, then=base, else_=else_, parser.to(from));
     }
-    return null;
+}
+
+(nullable ASTSymbol | fail Error) parseExpression(ParserImpl parser, LexicalContext lexicalContext) {
+    return parseTernaryOp(parser, lexicalContext);
 }
 
 class ASTReturn : ASTSymbol
@@ -2847,6 +2839,10 @@ class ASTVarDeclStatement : ASTStatement
     else
     {
         if (auto ident = parser.parseIdentifierSymbol(lexicalContext)?) {
+            if (reserved(ident)) {
+                parser.revert;
+                return null;
+            }
             name = ident;
         } else {
             parser.revert;
@@ -3403,6 +3399,12 @@ class ASTForLoop : ASTStatement
     if (!quoted) return astIdent;
     auto token = lexicalContext.allocQuoteToken(astIdent, QuoteTokenCategory.identifier)?;
     return new ASTIdentifierQuote(lexicalContext.quoteScope, token, parser.to(from));
+}
+
+bool reserved(ASTIdentifierSymbol symbol) {
+    ASTIdentifier ident = symbol.instanceOf(ASTIdentifier).case(null: return false);
+    // Bit short... TODO can this be used elsewhere?
+    return ident.name_ == "else";
 }
 
 /**

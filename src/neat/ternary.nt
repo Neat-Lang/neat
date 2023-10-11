@@ -1,0 +1,75 @@
+module neat.ternary;
+
+macro import package(compiler).std.macro.listcomprehension;
+macro import package(compiler).std.macro.quasiquoting;
+
+import neat.base;
+import neat.bottom;
+import neat.either;
+import neat.expr;
+import neat.statements;
+import neat.util;
+
+class ASTTernaryIf : ASTSymbol
+{
+    nullable ASTSymbol test;
+
+    ASTSymbol then;
+
+    ASTSymbol else_;
+
+    this(this.test, this.then, this.else_, super) { }
+
+    override (Symbol | fail Error) compile(Context context) {
+        /**
+         * - make label
+         * - LabelIfScope
+         * - preallocate var
+         * if (true) {
+         *   var = then.case(:else: breakelse)
+         * } else {
+         *   var = else_
+         * }
+         * - var
+         */
+        auto ifLabel = context.getLabel;
+        auto context = context.withNamespace(new LabelIfScope(ifLabel, hasElse=true, context.namespace));
+        (Expression | fail Error) test() => this.test
+            .case(null: return new BoolLiteral(true))
+            .compile(context)?
+            .beExpressionImplCall(context, this.test.locRange)?
+            .(truthy(context, that, this.test.locRange)?);
+
+        auto test = test?;
+        auto then = this.then.compile(context)?.beExpressionImplCall(context, this.then.locRange)?;
+        auto else_ = this.else_.compile(context)?.beExpressionImplCall(context, this.else_.locRange)?;
+        // won't be visible post-merge
+        bool elseIsBottom = !!else_.type.instanceOf(Bottom);
+        auto merger = new TypeMerger;
+        merger.add(then, __RANGE__, context)?;
+        merger.add(else_, __RANGE__, context)?;
+        auto mergedType = merger.type(context).notNull;
+        /**
+         * uninitialized mergedType result;
+         * if (test) { result = then; }
+         * else { result = else_; }
+         */
+        auto lifetimeThen = then if elseIsBottom else then.take(context, __RANGE__)?;
+        auto thenConvert = expectImplicitConvertTo(
+            context, lifetimeThen, mergedType, this.locRange)?;
+        auto elseConvert = expectImplicitConvertTo(context, else_, mergedType, this.locRange)?;
+        // If else is bottom, we can just use the lifetime of `then` directly.
+        auto lifetime = then.info.lifetime if elseIsBottom else Lifetime.gifted;
+        auto result = new PairedTemporary(mergedType, lifetime, context.getUniqueId);
+        auto init = new UninitializeTemporaryStatement(result);
+        auto ifTrue = new AssignStatement(result, thenConvert, __RANGE__);
+        auto ifFalse = new AssignStatement(result, elseConvert, __RANGE__);
+        auto ifStmt = new IfStatement(ifLabel, test=test, then=ifTrue, else_=ifFalse, __RANGE__);
+        return context.compiler.(wrap(sequence(init, ifStmt), result, null));
+    }
+
+    override string repr() {
+        if (test) return "$then if $test else $else_";
+        return "$then else $else_";
+    }
+}

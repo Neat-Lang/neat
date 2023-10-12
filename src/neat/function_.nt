@@ -131,7 +131,7 @@ class Function : FunctionDeclaration
         auto compiler = context.compiler;
 
         auto stackframe = new FunctionScope(
-            compiler, this.retWIP, this.contextType, this.parent.notNull, this.mangle, this.repr,
+            compiler, this.retWIP, this.contextType, this.parent? else die, this.mangle, this.repr,
             this.locRange);
         auto framePtr = compiler.reference(compiler.stackFrame(new Void));
         auto coldContext = makeColdContext(compiler, context.platform, this.macroState, context.loopPass,
@@ -178,9 +178,8 @@ class Function : FunctionDeclaration
                 auto decl = thisDecl.accessDecl(context);
                 auto target = compiler.accessMember(
                         context, decl, param.name, this.locRange, false)?
-                    .instanceOf(Reference);
-                this.locRange.assert(!!target, () => "not a reference: $(param.name)")?;
-                auto target = target.notNull;
+                    .instanceOf(Reference)?
+                    else return this.locRange.fail("not a reference: $(param.name)");
                 checkAssignmentQuarantine(context, param.locRange, decl.type, argExpr.type)?;
                 argAssignments[assignmentId++] = compiler.assignStatement(
                     target, argExpr.copy(context, param.locRange)?);
@@ -216,7 +215,7 @@ class Function : FunctionDeclaration
                 // TODO propagate loc from "super"
                 auto astSuper = compiler.astSuper(__RANGE__);
                 auto astArgs = [
-                    compiler.astIdentifier("__super$i", __RANGE__).instanceOf(ASTSymbol).notNull
+                    compiler.astIdentifier("__super$i", __RANGE__).instanceOf(ASTSymbol)? else die
                     for i in 0 .. numParams];
                 auto astCall = compiler.astCall(astSuper, astArgs, __RANGE__);
                 auto astCallStmt = compiler.astExpressionStmt(astCall, __RANGE__);
@@ -251,7 +250,7 @@ class Function : FunctionDeclaration
         }
 
         this.compiled = mkCompiledFunction(this, compiledStatement, stackframe, argAssignments.freeze);
-        return this.compiled.notNull;
+        return this.compiled? else die;
     }
 }
 
@@ -339,7 +338,7 @@ class FunctionScope : Namespace, Returnable, Declarable
 
     Type finalRet() {
         if (!ret) ret = new Void;
-        return ret.notNull;
+        return ret? else die;
     }
 
     Type spacerType() {
@@ -370,7 +369,7 @@ class FunctionScope : Namespace, Returnable, Declarable
      */
     override (Type | fail Error) mergeReturn(Context context, Expression retExpr, LocRange locRange) {
         if (!this.ret) this.ret = retExpr.type;
-        auto retType = this.ret.notNull;
+        auto retType = this.ret? else die;
         if (context.compiler.implicitConvertTo(context, retExpr, retType, locRange)?)
             return retType;
         return locRange.fail("cannot return $(retExpr.type.repr): clashes with existing type $(this.ret.repr)");
@@ -394,7 +393,7 @@ class FunctionScope : Namespace, Returnable, Declarable
         if (this.extra && context.framePointer) {
             // first field in stackframe must be parent
             // TODO better?
-            auto framePtr = new PointerCast(once new Pointer(new Pointer(new Void)), context.framePointer.notNull);
+            auto framePtr = new PointerCast(once new Pointer(new Pointer(new Void)), context.framePointer? else die);
             nextFramePointer = context.compiler.dereference(framePtr);
         }
 
@@ -482,7 +481,7 @@ class LatentVariableImpl : LatentVariable
 
     override Reference access(Context context)
     {
-        return new FieldRef(type_, stackFrameType, context.framePointer.notNull, offset, mut, info);
+        return new FieldRef(type_, stackFrameType, context.framePointer? else die, offset, mut, info);
     }
 }
 
@@ -528,16 +527,16 @@ class VariableDeclaration : DeclarationHolder
     this(this.parent, this.name, Platform platform, Type type, bool mut, this.borrowed, this.hidden)
     {
         mut Type[] reverseFrame = [type];
-        mut Namespace current = parent.notNull;
+        mut Namespace current = parent? else die;
         while (true) {
             if (current.instanceOf(Declarable)) break;
             if (auto vd = current.instanceOf(VariableDeclaration)) {
                 reverseFrame ~= vd.variable.type;
             }
-            current = current.parent.notNull;
+            current = current.parent? else die;
         }
         auto frame = [reverseFrame[$ - 1 - i] for i in 0 .. reverseFrame.length];
-        this.variable = findParent!Declarable(this).notNull.declare(
+        this.variable = findParent!Declarable(this).(that? else die).declare(
             name, frame, mut=mut, borrowed=borrowed, platform);
         this.isContextScope = true;
     }
@@ -911,8 +910,8 @@ class ASTFunction : ASTSymbolDeclaration
         }
         mut bool mutable;
         if (parser.acceptIdentifier("mut")) mutable = true;
-        nullable ASTSymbol argtype = lexicalContext.compiler.parseType(parser, lexicalContext)?;
-        parser.assert_(!!argtype, "parameter type expected")?;
+        ASTSymbol argtype = lexicalContext.compiler.parseType(parser, lexicalContext)??
+            else return parser.fail("parameter type expected");
         string paramName = parser.parseIdentifier;
         // parser.assert_(paramName.length > 0, "parameter name expected")?;
         auto defaultValue = parseDefaultValue?;
@@ -920,7 +919,7 @@ class ASTFunction : ASTSymbolDeclaration
         params ~= ASTParameter(
             name=paramName,
             mutable,
-            type=argtype.notNull,
+            type=argtype,
             defaultValue=defaultValue,
             parser.to(from));
     }

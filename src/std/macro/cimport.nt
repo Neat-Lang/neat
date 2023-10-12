@@ -187,7 +187,7 @@ class CImportTask : ImportModuleBaseTask
                     continue;
                 }
                 // print("add define $identifier = $(target.repr)");
-                add(identifier, target.notNull);
+                add(identifier, target? else die);
                 cparser.commit;
                 // cparser.assert_(cparser.loc.from.column == 0, "unknown text")?;
                 // cparser.expect("\n");
@@ -197,14 +197,15 @@ class CImportTask : ImportModuleBaseTask
             continue;
         }
         if (cparser.acceptIdentifier("typedef")) {
-            auto type = cparserHelper.parseType?;
-            if (!type) { cparser.eatline; continue; }
-            auto type = notNull!ASTSymbol(type);
+            auto type = cparserHelper.parseType?? else ({
+                cparser.eatline;
+                continue;
+            });
             auto decl = cparserHelper.parseTypedDecl(type)?;
-            if (!decl.type) { cparser.eatline; continue; }
+            auto declType = decl.type? else ({ cparser.eatline; continue; });
             eatAttribute?;
             if (!cparser.acceptToken(TokenType.semicolon)) { cparser.eatline; continue; }
-            add(decl.name, notNull!ASTSymbol(decl.type));
+            add(decl.name, declType);
             continue;
         }
         // match struct foo { }; as "foo"
@@ -253,7 +254,7 @@ class CImportTask : ImportModuleBaseTask
                                 }
                             }
                             add(retDecl.name, compiler.astExternFunction(
-                                retDecl.name, notNull!ASTSymbol(retDecl.type), params, variadic=false, start));
+                                retDecl.name, retDecl.type? else die, params, variadic=false, start));
                             success = true;
                             break;
                         }
@@ -261,10 +262,10 @@ class CImportTask : ImportModuleBaseTask
                         auto argloc = cparser.loc;
                         if (auto argBasetype = cparserHelper.parseType?) {
                             auto argDecl = cparserHelper.parseTypedDecl(argBasetype)?;
-                            if (!argDecl.type) break;
+                            auto argDeclType = argDecl.type? else break;
                             params ~= ASTParameter(
                                 argDecl.name, false,
-                                type=notNull!ASTSymbol(argDecl.type),
+                                type=argDeclType,
                                 defaultValue=null,
                                 argloc);
                         } else break;
@@ -409,17 +410,16 @@ class CParserHelper {
                 mut ASTSymbol[] params;
                 while (!parser.acceptToken(TokenType.rparen)) {
                     if (params.length) parser.expectToken(TokenType.comma)?;
-                    auto argtype = parseType?;
-                    if (!argtype) {
+                    auto argtype = parseType?? else ({
                         parser.revert;
                         return (null, "");
-                    }
-                    auto arg = parseTypedDecl(notNull!ASTSymbol(argtype))?;
-                    if (!arg.type) {
+                    });
+                    auto arg = parseTypedDecl(argtype)?;
+                    auto paramType = arg.type? else ({
                         parser.revert;
                         return (null, "");
-                    }
-                    params ~= notNull!ASTSymbol(arg.type);
+                    });
+                    params ~= paramType;
                 }
                 if (params.length == 1) {
                     if (compiler.destructAstIdentifier(params[0]).case(:none: false, string s: s == "void")) {
@@ -528,12 +528,14 @@ class CParserHelper {
             if (parser.accept("#define ")) { parser.eatline; parser.commit; continue; }
             // line number annotation
             if (parser.accept("# ")) { parser.eatline; parser.commit; continue; }
-            auto baseType = parseType?;
-            if (!baseType) { parser.revert; scanToClosingBracket; return (emptyStruct, name); }
-            auto baseType = notNull!ASTSymbol(baseType);
+            auto baseType = parseType?? else ({
+                parser.revert;
+                scanToClosingBracket;
+                return (emptyStruct, name);
+            });
             mut auto memberDecl = parseTypedDecl(baseType)?;
             void flush() {
-                members ~= (memberDecl.name, Protection.public_, notNull!ASTSymbol(memberDecl.type));
+                members ~= (memberDecl.name, Protection.public_, memberDecl.type? else die);
             }
             while (parser.acceptToken(TokenType.comma)) {
                 if (!memberDecl.type) { parser.revert; scanToClosingBracket; return (emptyStruct, name); }

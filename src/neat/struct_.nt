@@ -140,8 +140,8 @@ class Struct : Type, Hashable
                 locRange.assert(!baseExpr, () => "static method cannot be called on value")?;
                 return method;
             } else {
-                locRange.assert(!!baseExpr, () => "non-static method cannot be called on type")?;
-                return new StructMethod(method, baseExpr.notNull);
+                auto baseExpr = baseExpr? else return locRange.fail("non-static method cannot be called on type");
+                return new StructMethod(method, baseExpr);
             }
         }
         size_t declOffset = [
@@ -149,10 +149,10 @@ class Struct : Type, Hashable
             where a.name == member/* && allowed(a.protection) TODO */
             else -1];
         if (declOffset != -1) {
-            locRange.assert(!!baseExpr, () => "alias cannot be called on type (TODO)")?;
-            auto reference = baseExpr.instanceOf(Reference);
-            locRange.assert(!!reference, () => "can only access struct alias on reference")?;
-            auto refPtr = context.compiler.reference(reference.notNull);
+            auto reference = baseExpr
+                .(that? else return locRange.fail("alias cannot be called on type (TODO)"))
+                .instanceOf(Reference)? else return locRange.fail("can only access struct alias on reference");
+            auto refPtr = context.compiler.reference(reference);
             auto decl = this.decls[declOffset];
             auto context = decl.structParentContext
                 .withNamespace(new StructNamespace(decl.structParentContext.namespace.parent, this))
@@ -226,7 +226,7 @@ class Struct : Type, Hashable
             }
             return new StructLiteral(this, ExprInfo(Lifetime.gifted), exprs);
         }
-        return compiler.exprWithTemporaryExpr(context.getUniqueId, source, &do_)?.notNull;
+        return compiler.exprWithTemporaryExpr(context.getUniqueId, source, &do_)?? else die;
     }
 
     override nullable Statement endLifetime(Context context, Expression expr)
@@ -260,7 +260,7 @@ class Struct : Type, Hashable
             auto call = context.compiler.call(context, astStructCtor, args, locRange, false)?;
             auto initAndCall = context.compiler.sequence(
                 initialize,
-                context.compiler.exprStatement(call.notNull));
+                context.compiler.exprStatement(call? else die));
             return context.compiler.wrap(initAndCall, temp, null);
         }
 
@@ -304,7 +304,7 @@ class Struct : Type, Hashable
                         }
                         return context.compiler.exprWithTemporaryExpr(context.getUniqueId, right, &do4);
                     }
-                    return context.compiler.exprWithTemporaryExpr(context.getUniqueId, left, &do3)?.notNull;
+                    return context.compiler.exprWithTemporaryExpr(context.getUniqueId, left, &do3)?? else die;
                 }
                 return context.compiler.consume(context, right, &do2);
             }
@@ -376,7 +376,7 @@ class StructMember : Expression
 
     this(this.base, this.index)
     {
-        this.structType = this.base.type.instanceOf(Struct).notNull;
+        this.structType = this.base.type.instanceOf(Struct)? else die;
         this.type = this.structType.members[this.index].type;
         this.info = this.base.info;
     }
@@ -406,7 +406,7 @@ class StructMemberReference : Reference
 
     this(this.base, this.index)
     {
-        this.structType = this.base.type.instanceOf(Struct).notNull;
+        this.structType = this.base.type.instanceOf(Struct)? else die;
         this.type = this.structType.members[this.index].type;
         this.info = this.base.info;
         this.mutable = this.base.mutable;
@@ -651,9 +651,8 @@ class ASTStructDecl : ASTSymbolDeclaration
                     ASTParameter param:
                         methodParams[k] = .compile(param, paramContext)?;
                     ASTThisAssignment param:
-                        auto type = [first m.type for m in members where m.name == param.name else null];
-                        param.locRange.assert(!!type, () => "no such member: $(param.name)")?;
-                        auto type = type.notNull;
+                        auto type = [first m.type for m in members where m.name == param.name
+                            else return param.locRange.fail("no such member: $(param.name)")];
                         methodParams[k] = .compile(param, type, paramContext)?;
                 }
             }
@@ -694,7 +693,7 @@ class StructLiteral : Expression
     Expression[] members;
 
     this(this.type, this.info, this.members) {
-        auto struct_ = this.type.instanceOf(Struct).notNull;
+        auto struct_ = this.type.instanceOf(Struct)? else die;
         assert(this.members.length == struct_.members.length);
     }
 
@@ -782,10 +781,8 @@ class StructLiteral : Expression
     if (parser.acceptIdentifier("static") && parser.acceptIdentifier("if")) {
         parser.commit;
         parser.expectToken(TokenType.lparen)?;
-        auto cond = lexicalContext.compiler.parseExpression(parser, lexicalContext)?;
-        if (!cond) {
-            return parser.fail("static if condition expected");
-        }
+        auto cond = lexicalContext.compiler.parseExpression(parser, lexicalContext)??
+            else return parser.fail("static if condition expected");
         parser.expectToken(TokenType.rparen)?;
         ASTStructEntry[] then = parser.parseStructBlock(lexicalContext)?;
         mut ASTStructEntry[] else_;
@@ -793,7 +790,7 @@ class StructLiteral : Expression
             else_ = parser.parseStructBlock(lexicalContext)?;
         }
         // FIXME explicitly type hinted literal
-        ASTStructEntry result = new ASTStructStaticIf(cond.notNull, then, else_);
+        ASTStructEntry result = new ASTStructStaticIf(cond, then, else_);
         return [result];
     }
     parser.revert;
@@ -822,9 +819,9 @@ class StructLiteral : Expression
     }
     if (auto aliasDecl = parseAliasDecl(parser, lexicalContext)?) {
         parser.assert_(!static_, "TODO static alias")?;
-        auto aliasDecl = aliasDecl.instanceOf(ASTAliasDecl);
-        parser.assert_(!!aliasDecl, "TODO template alias")?;
-        entries ~= aliasDecl.notNull;
+        auto aliasDecl = aliasDecl.instanceOf(ASTAliasDecl)?
+            else return parser.fail("TODO template alias");
+        entries ~= aliasDecl;
         return entries;
     }
     if (parser.acceptIdentifier("this"))
@@ -854,7 +851,7 @@ class StructLiteral : Expression
             memberName != "__dtor" || params.params.length == 0, "destructor cannot take parameters")?;
         ASTStatement stmt = lexicalContext.compiler.parseFunctionBody(parser, lexicalContext)?;
         entries ~= ASTStructMethod(
-            static_, protection, memberName, memberType.notNull, params.params, stmt,
+            static_, protection, memberName, memberType? else die, params.params, stmt,
             locRange, comment);
     }
     else
@@ -863,7 +860,7 @@ class StructLiteral : Expression
         (void | fail Error) addMember() {
             parser.assert_(memberName != "__ctor", "constructor cannot be member")?;
             parser.assert_(memberName != "__dtor", "destructor cannot be member")?;
-            entries ~= (memberName, protection, memberType.notNull);
+            entries ~= (memberName, protection, memberType? else die);
         }
         addMember?;
         while (!parser.acceptToken(TokenType.semicolon)) {

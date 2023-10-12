@@ -124,7 +124,7 @@ class Array : Type
             auto result = stmt.compile(context)?;
             return compiler.statementExpression(result.statement, source);
         }
-        return compiler.exprWithTemporaryExpr(context.getUniqueId, source, &do_)?.notNull;
+        return compiler.exprWithTemporaryExpr(context.getUniqueId, source, &do_)?? else die;
     }
 
     override nullable Statement endLifetime(Context context, Expression value)
@@ -311,7 +311,7 @@ class ArrayFreeze : Expression
     Expression value;
 
     this(this.value, Platform platform) {
-        auto arrayType = this.value.type.instanceOf(Array).notNull;
+        auto arrayType = this.value.type.instanceOf(Array)? else die;
         this.type = new Array(arrayType.pendingElementType, platform, mutableElements=false);
         this.info = value.info;
     }
@@ -340,7 +340,7 @@ class ArrayPointer : Expression
     {
         int arrayReg = this.arrayValue.emit(output);
 
-        return getArrayPtr(output, this.arrayValue.type.instanceOf(Array).notNull, arrayReg);
+        return getArrayPtr(output, this.arrayValue.type.instanceOf(Array)? else die, arrayReg);
     }
 
     override void hash(Hash hash) { hash.adds("ArrayPointer"); this.arrayValue.hash(hash); }
@@ -513,8 +513,8 @@ class ArraySlice : Expression
 Expression arrayEqual(Context context, Expression left, Expression right) {
     auto compiler = context.compiler;
 
-    Array leftArray = left.type.instanceOf(Array).notNull;
-    Array rightArray = right.type.instanceOf(Array).notNull;
+    Array leftArray = left.type.instanceOf(Array)? else die;
+    Array rightArray = right.type.instanceOf(Array)? else die;
 
     Parameter[] params = [
         Parameter.simple("left", leftArray),
@@ -549,7 +549,7 @@ Expression arrayEqual(Context context, Expression left, Expression right) {
 Expression releaseArray(Context context, Expression value) {
     auto compiler = context.compiler;
 
-    Array array = value.type.instanceOf(Array).notNull;
+    Array array = value.type.instanceOf(Array)? else die;
     Parameter[] params = [Parameter.simple("value", array)];
 
     ASTStatement body_()
@@ -573,7 +573,7 @@ Expression releaseArray(Context context, Expression value) {
 (Expression | fail Error) arrayCat(Context context, mut Expression left, mut Expression right, LocRange locRange) {
     auto compiler = context.compiler;
 
-    Array leftArray = left.type.instanceOf(Array).notNull;
+    Array leftArray = left.type.instanceOf(Array)? else die;
 
     mut (nullable Expression | :unknown) ltr_ = :unknown;
     (nullable Expression | fail Error) ltr() {
@@ -605,7 +605,7 @@ Expression releaseArray(Context context, Expression value) {
     (Expression left, Expression right | fail Error) merge() {
         if (sameType || appendElementType) return (left, right);
         if (auto rtl = rtl?) return (left, rtl);
-        return (ltr?.notNull, right);
+        return (ltr?? else die, right);
     }
     auto = merge?;
 
@@ -662,14 +662,13 @@ Expression releaseArray(Context context, Expression value) {
     return compiler.call(
             context, astFn, [
                 ASTArgument(astLeft, "", __RANGE__), ASTArgument(astRight, "", __RANGE__)],
-            locRange, false)?
-        .notNull;
+            locRange, false)?? else die;
 }
 
 (Statement | fail Error) arrayCatAssign(Context context, Reference left, Expression right, LocRange locRange) {
     auto compiler = context.compiler;
 
-    Array leftArray = left.type.instanceOf(Array).notNull;
+    Array leftArray = left.type.instanceOf(Array)? else die;
     bool appendElementType = leftArray.elementType.same(right.type)
         || leftArray.elementType.implicitConvertFrom(context, right, locRange)?;
     bool appendArrays = leftArray.same(right.type);
@@ -761,8 +760,7 @@ Expression releaseArray(Context context, Expression value) {
             context, astFn, [
                 ASTArgument(astLeftPtr, "", __RANGE__), ASTArgument(astRight, "", __RANGE__)],
             locRange, false)?
-        .notNull
-        .(compiler.exprStatement(that));
+        .(compiler.exprStatement(that? else die));
 }
 
 (nullable ASTSymbol | fail Error) parseArrayLiteral(Parser parser, LexicalContext lexicalContext)
@@ -777,8 +775,8 @@ Expression releaseArray(Context context, Expression value) {
     while (true) {
         if (parser.acceptToken(TokenType.rsquarebracket)) break;
         auto from = parser.from;
-        ASTSymbol value = lexicalContext.compiler.parseExpression(parser, lexicalContext)?
-            .notNull;
+        ASTSymbol value = lexicalContext.compiler.parseExpression(parser, lexicalContext)??
+            else return parser.fail("array literal member expected");
         values ~= ASTArrayLiteralElement(value, parser.to(from));
         if (parser.acceptToken(TokenType.rsquarebracket)) break;
         parser.expectToken(TokenType.comma)?;
@@ -871,7 +869,7 @@ class ASTArrayLiteral : ASTSymbol
         for (i, element in this.elements) {
             merger.add(values[i], element.locRange, context)?;
         }
-        auto mergeType = merger.type(context).notNull;
+        auto mergeType = merger.type(context)? else die;
         for (i in 0 .. this.elements.length) {
             auto elemLocRange = this.elements[i].value.locRange;
             if (auto castValue = context.compiler.implicitConvertTo(context, values[i], mergeType, elemLocRange)?) {
@@ -901,7 +899,7 @@ class ArrayLiteral : ArrayAllocation
     override int emit(Generator output)
     {
         auto targetReg = super.emit(output);
-        auto ptrReg = getArrayPtr(output, this.type.instanceOf(Array).notNull, targetReg);
+        auto ptrReg = getArrayPtr(output, this.type.instanceOf(Array)? else die, targetReg);
         auto backendElementType = elementType.emit(output.platform);
         for (i, value in values) {
             int offsetReg = output.fun.wordLiteral(output.platform, i);
@@ -943,7 +941,7 @@ class ASTArrayLength : ASTSymbol
             () => "'\$' can only be used inside an array index context")?;
 
         return new ArrayLength(
-            surroundingArraySymbol.instanceOf(Expression).notNull,
+            surroundingArraySymbol.instanceOf(Expression)? else die,
             context.nativeWordType);
     }
 
@@ -960,7 +958,7 @@ class ArrayCastExpr : Expression
     this(this.source, this.target) { this.type = target; this.info = source.info; }
 
     override int emit(Generator generator) {
-        Array sourceArray = source.type.instanceOf(Array).notNull;
+        Array sourceArray = source.type.instanceOf(Array)? else die;
         auto sourceArrayElemBk = sourceArray.elementType.emit(generator.platform);
         int sourceSize = sourceArrayElemBk.size;
         auto targetArrayElemBk = target.elementType.emit(generator.platform);

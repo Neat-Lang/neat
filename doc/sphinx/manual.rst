@@ -159,7 +159,64 @@ Only the selected expression is evaluated. So if `t` is true, `b` is never evalu
 
 This operator has a lower rank than any of the binary operators.
 
+The ternary operator can be shortened to `a else b`. In that case, `a` is always taken unless
+the expression branches to `b` via `breakelse`.
+
 The ternary operator syntax diverges from C because `?` is already used for error propagation.
+
+Control flow expressions
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+`break` is an expression that, when evaluated, transfers control flow to after the current loop.
+
+`continue` is an expression that, when evaluated, transfers control flow to the next pass
+of the current loop.
+
+`return`, or `return x`, is an expression that, when evaluated, transfers control flow out of
+the current function. If a parameter `x` is given, the current function call evaluates to
+`x`; else it evaluates to `void`.
+
+`breakelse` is an expression that, when evaluated, transfers control flow to the `else` block
+of the surrounding `if` statement, or causes the `else` expression of the surrounding ternary `if`
+to be used. If the `if` statement has no `else` block, it continues after the `if` block.
+
+Since these expressions exit the local scope (they're "non-local control flow primitives"),
+they are all typed `bottom` - their *local* value is empty.
+
+Error propagation operator
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+`x?` is the error propagation operator. Its behavior depends on the type of `x`:
+
+- if `x` is a sumtype:
+    - all types marked `fail` are returned from the current function
+    - if it contains an `:else` type, it is mapped to `breakelse`
+    - if it contains a `nullptr_t` type, it is mapped to `breakelse`
+- if `x` is a `nullable T`, it is treated as a sumtype of `T | nullptr_t`.
+  The `nullptr_t` is then mapped to `breakelse`.
+
+The member types `nullptr_t` and `:else` are thus interpreted as "not error, not success":
+they are "expected failures" that exit the current `if` test but not the function.
+For instance, when reading data from a file, an I/O error would be a `fail` member,
+but reaching the end of the file would be communicated by `:else`.
+
+Since `?` maps certain types to control flow expressions, which are typed `bottom`,
+they are removed from the sumtype. As such, `?` leaves only successful types behind.
+
+Note that when a sumtype contains both `fail` types *and* a nullable class, the first application
+of `?` will only get rid of the `fail` types: you may require two `?`.
+
+Example::
+
+    string line = file.readText()?? else die;
+
+    nullable Class obj;
+    if (auto var = obj?.field?) { }
+
+    while (true) {
+        auto data = file.readBlock? else break;
+        ...
+    }
 
 Functions
 ---------

@@ -3,6 +3,7 @@ module neat.quasiquoting;
 
 import neat.base;
 import neat.runtime;
+import neat.util;
 
 // helper to reduce duplication in the classes below
 struct QuoteScopeValue
@@ -143,9 +144,9 @@ class QuoteLexicalContext : LexicalContext
 
     ASTSymbol[] macroIdentifiers;
 
-    this(this.scopeId, this.compiler, this.pak) {
+    this(this.scopeId, this.compiler, this.pak, nullable MacroState macroState = null) {
         // TODO quote macro state?
-        this.macroState = new MacroState;
+        this.macroState = macroState? else new MacroState;
         // TODO think this through
         this.moduleParseTaskId = "";
     }
@@ -163,10 +164,63 @@ class QuoteLexicalContext : LexicalContext
         } else assert(false);
     }
 
+    override void revertQuoteToken(int token, QuoteTokenCategory category) {
+        if (category == QuoteTokenCategory.symbol) {
+            assert(macroSymbols.length - 1 == token);
+            macroSymbols = macroSymbols[0 .. $ - 1];
+        } else if (category == QuoteTokenCategory.statement) {
+            assert(macroStatements.length - 1 == token);
+            macroStatements = macroStatements[0 .. $ - 1];
+        } else if (category == QuoteTokenCategory.identifier) {
+            assert(macroIdentifiers.length - 1 == token);
+            macroIdentifiers = macroIdentifiers[0 .. $ - 1];
+        } else assert(false);
+    }
+
+
     override int quoteScope() { return this.scopeId; }
 
     override (ASTModuleBase | fail Error) resolveImport(ASTImportStatementBase importStmt) {
         // TODO use range of import?
         return this.compiler.resolveImport(this.pak.name, importStmt, __RANGE__);
     }
+}
+
+ASTSymbol quote(LocRange locRange, CompilerBase compiler, ASTSymbol compilerExpr) {
+    return compiler.astCall(
+        compiler.astMember(compilerExpr, compiler.astIdentifier("makeLocRange", __RANGE__), __RANGE__), [
+            compiler.astNumberLiteral(locRange.fileId, __RANGE__),
+            compiler.astNumberLiteral(locRange.from.row, __RANGE__),
+            compiler.astNumberLiteral(locRange.from.column, __RANGE__),
+            compiler.astNumberLiteral(locRange.to.row, __RANGE__),
+            compiler.astNumberLiteral(locRange.to.column, __RANGE__),
+        ], __RANGE__);
+}
+
+/**
+ * Parse 'word' (ASTIdentifier) or '$word' (ASTIdentifierQuote).
+ */
+(nullable ASTIdentifierSymbol | fail Error) parseIdentifierSymbol(Parser parser, LexicalContext lexicalContext)
+{
+    parser.begin;
+    auto from = parser.from;
+    bool quoted = parser.acceptToken(TokenType.dollar);
+    auto fromIdent = parser.from;
+    auto ident = parser.parseIdentifier;
+    if (ident.empty) {
+        parser.revert;
+        return null;
+    }
+    parser.commit;
+    auto locIdent = parser.to(fromIdent);
+    auto astIdent = new ASTIdentifier(ident, moduleLevel=false, locIdent);
+    if (!quoted) return astIdent;
+    auto token = lexicalContext.allocQuoteToken(astIdent, QuoteTokenCategory.identifier)?;
+    return new ASTIdentifierQuote(lexicalContext.quoteScope, token, parser.to(from));
+}
+
+bool reserved(ASTIdentifierSymbol symbol) {
+    ASTIdentifier ident = symbol.instanceOf(ASTIdentifier).case(null: return false);
+    // Bit short... TODO can this be used elsewhere?
+    return ident.name_ == "else";
 }

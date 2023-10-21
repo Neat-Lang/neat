@@ -559,7 +559,7 @@ class WrapReference : Reference
     if (auto astInstance = astTarget.instanceOf(ASTTemplateInstance)) {
         auto decl = astInstance.templateDecl.compile(context)?;
         if (auto scopeDecl = decl.instanceOf(ScopeBoundTemplateDecl)) {
-            if (scopeDecl.latent.decl.eponymousFun) {
+            if (scopeDecl.latent.decl.eponymousFun(context.warmContext)) {
                 target = decl;
                 templateArgs = astInstance.types;
             }
@@ -632,7 +632,7 @@ class WrapReference : Reference
             for arg in astArgs];
         Type[] argTypes = [arg.type for arg in args];
         auto templateDecl = templ.latent.decl;
-        if (auto astFun = templateDecl.eponymousFun) {
+        if (auto astFun = templateDecl.eponymousFun(context.warmContext)) {
             context.pushErrorLoc(locRange);
             auto inferTemplateArgs = .inferTemplateArgs(
                 templateDecl, stubArgs, astFun.params, argTypes, context.errorStack);
@@ -2508,6 +2508,8 @@ class ASTSequenceStatement : ASTStatement
         // not a scope!
         return StatementCompileResult(new SequenceStatement(statements.freeze), subContext.namespace);
     }
+
+    override string repr() => "{ " ~ [join a.repr for a in this.statements] ~ "}";
 }
 
 (nullable ASTScopeStatement | fail Error) parseScope(ParserImpl parser, LexicalContext lexicalContext)
@@ -3115,6 +3117,8 @@ class ASTNestedFunctionDeclStatement : ASTStatement
         }
         return StatementCompileResult(new NoopStatement, allFunsNamespace);
     }
+
+    override string repr() => "declare [" ~ [join with ", " fun.name.repr for fun in astFuns] ~ "]";
 }
 
 (nullable ASTNestedFunctionDeclStatement | fail Error) parseNestedFunctionDecls(
@@ -3144,8 +3148,9 @@ class ASTNestedFunctionDeclExpr : ASTSymbol
 
     override (Symbol | fail Error) compile(Context context) {
         string name = "__nested_literal_$(this.locRange.from.row)_$(context.getLabel)";
+        auto nameSym = context.compiler.astIdentifier(name, __RANGE__);
         auto fun = new ASTFunction(
-            name, :auto_, this.params, isDeclaration=false,
+            nameSym, :auto_, this.params, isDeclaration=false,
             this.locRange, this.stmt, this.macroState, comment=null);
 
         auto resolvedFun = fun.compileSymbol(context)?
@@ -3362,34 +3367,6 @@ class ASTForLoop : ASTStatement
     parser.expectToken(TokenType.semicolon)?;
     auto token = lexicalContext.allocQuoteToken(variableSym, QuoteTokenCategory.statement)?;
     return new ASTStatementQuote(lexicalContext.quoteScope, token, parser.to(from));
-}
-
-/**
- * Parse 'word' (ASTIdentifier) or '$word' (ASTIdentifierQuote).
- */
-(nullable ASTIdentifierSymbol | fail Error) parseIdentifierSymbol(Parser parser, LexicalContext lexicalContext)
-{
-    parser.begin;
-    auto from = parser.from;
-    bool quoted = parser.acceptToken(TokenType.dollar);
-    auto fromIdent = parser.from;
-    auto ident = parser.parseIdentifier;
-    if (ident.empty) {
-        parser.revert;
-        return null;
-    }
-    parser.commit;
-    auto locIdent = parser.to(fromIdent);
-    auto astIdent = new ASTIdentifier(ident, moduleLevel=false, locIdent);
-    if (!quoted) return astIdent;
-    auto token = lexicalContext.allocQuoteToken(astIdent, QuoteTokenCategory.identifier)?;
-    return new ASTIdentifierQuote(lexicalContext.quoteScope, token, parser.to(from));
-}
-
-bool reserved(ASTIdentifierSymbol symbol) {
-    ASTIdentifier ident = symbol.instanceOf(ASTIdentifier).case(null: return false);
-    // Bit short... TODO can this be used elsewhere?
-    return ident.name_ == "else";
 }
 
 /**
@@ -3839,7 +3816,7 @@ struct ASTModuleEntry
 {
     Protection protection;
 
-    (ASTImport | ASTExternFunction | ASTExternVariable
+    (ASTExternFunction | ASTExternVariable
         | ASTDeclaration | ASTUnitTest
         | ASTPragma | ASTVersion
     ) symbol;
@@ -3876,7 +3853,8 @@ class ASTModule : ASTModuleBase
 
     override void addAliasDecl(string name, Protection protection, ASTSymbol target)
     {
-        auto decl = new ASTAliasDecl(name, target);
+        auto nameSym = new ASTIdentifier(name, false, __RANGE__);
+        auto decl = new ASTAliasDecl(nameSym, target);
         this.entries ~= ASTModuleEntry(protection, decl);
         if (this.symbolAliases.has(name)) {
             print("add alias decl $name: duplicate");
@@ -4275,12 +4253,6 @@ class Module : ModuleBase
     }
 }
 
-abstract class ParserHelper
-{
-    abstract (void | fail Error) proxyCall(ASTModule astModule, string function_, MacroState macroState,
-        LocRange locRange);
-}
-
 class ASTExternVariable
 {
     ASTSymbol type;
@@ -4444,7 +4416,7 @@ class ImportNamespace : Namespace
         return this.parent.lookup(name, context, reason, locRange);
     }
 
-    override string repr() => "ImportNamespace";
+    override string repr() => "ImportNamespace($(module_.name)) > $(parent.repr)";
 }
 
 class AstCompileTask : ITask
@@ -4859,8 +4831,11 @@ class LexicalContextImpl : LexicalContext
             auto entry = parseModuleEntry(parser, lexicalContext, true)?;
 
             entry.symbol.case {
-                ASTImport import_:
-                    assert(false);
+                ASTDeclaration decl:
+                    if (auto import_ = decl.instanceOf(ASTImport))
+                        assert(false);
+                    else
+                        module_.entries ~= entry;
                 default:
                     module_.entries ~= entry;
             }
@@ -4919,8 +4894,9 @@ class LexicalContextImpl : LexicalContext
     // Handle all (toplevel) imports in parallel.
     for (entry in astModule.entries) {
         entry.symbol.case {
-            ASTImport import_:
-                context.compiler.queueModuleCompilation(context, import_.module_?);
+            ASTDeclaration decl:
+                if (auto import_ = decl.instanceOf(ASTImport))
+                    context.compiler.queueModuleCompilation(context, import_.module_?);
             default: {}
         }
     }
@@ -4928,33 +4904,34 @@ class LexicalContextImpl : LexicalContext
     (void | fail Error) handleEntry(ASTModuleEntry entry)
     {
         entry.symbol.case {
-            ASTImport import_: {
-                // requeue in case it was in a version()
-                auto id = context.compiler.queueModuleCompilation(context, import_.module_?);
-                auto importedModule = context.compiler.getCompiledModule(id)?;
-
-                bool public_ = entry.protection == Protection.public_;
-
-                module_.addImport(
-                    importedModule, public_=public_, import_.statement.symbols);
-            }
             ASTDeclaration astDecl: {
                 if (auto structDecl = astDecl.instanceOf(ASTStructDecl)) {
-                    module_.add(structDecl.name, entry.protection, structDecl);
+                    module_.add(structDecl.name.name(warmContext), entry.protection, structDecl);
                 } else if (auto aliasDecl = astDecl.instanceOf(ASTAliasDecl)) {
-                    module_.add(aliasDecl.name, entry.protection, aliasDecl);
+                    module_.add(aliasDecl.name.name(warmContext), entry.protection, aliasDecl);
                 } else if (auto templateDecl = astDecl.instanceOf(ASTTemplateDecl)) {
-                    module_.register(templateDecl.name, entry.protection, templateDecl.compileSymbol(context)?);
+                    module_.register(
+                        templateDecl.name.name(warmContext), entry.protection,
+                        templateDecl.compileSymbol(context)?);
                 } else if (auto classDecl = astDecl.instanceOf(ASTClassDecl)) {
-                    module_.add(classDecl.name, entry.protection, classDecl);
+                    module_.add(classDecl.name.name(warmContext), entry.protection, classDecl);
                 } else if (auto intfDecl = astDecl.instanceOf(ASTIntfDecl)) {
-                    module_.add(intfDecl.name, entry.protection, intfDecl);
+                    module_.add(intfDecl.name.name(warmContext), entry.protection, intfDecl);
                 } else if (auto enumDecl = astDecl.instanceOf(ASTEnumDecl)) {
-                    module_.register(enumDecl.name, entry.protection, enumDecl.compileSymbol(context)?);
-                } else if (auto struct_ = astDecl.instanceOf(ASTStructDecl)) {
-                    module_.add(struct_.name, entry.protection, struct_);
+                    module_.register(
+                        enumDecl.name.name(warmContext),
+                        entry.protection, enumDecl.compileSymbol(context)?);
                 } else if (auto funDef = astDecl.instanceOf(ASTFunction)) {
-                    module_.add(funDef.name, entry.protection, funDef);
+                    module_.add(funDef.name.name(warmContext), entry.protection, funDef);
+                } else if (auto import_ = astDecl.instanceOf(ASTImport)) {
+                    // requeue in case it was in a version()
+                    auto id = context.compiler.queueModuleCompilation(context, import_.module_?);
+                    auto importedModule = context.compiler.getCompiledModule(id)?;
+
+                    bool public_ = entry.protection == Protection.public_;
+
+                    module_.addImport(
+                        importedModule, public_=public_, import_.statement.symbols);
                 } else {
                     print("declaration $(astDecl.repr)");
                     assert(false);

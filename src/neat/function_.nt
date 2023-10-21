@@ -6,6 +6,7 @@ macro import package(compiler).std.macro.once;
 import backend.base;
 import helpers;
 import neat.base;
+import neat.quasiquoting;
 import neat.types;
 import neat.util;
 import polyhash;
@@ -20,6 +21,8 @@ class Function : FunctionDeclaration
      * the resulting function is stored here.
      */
     nullable CompiledFunction compiled;
+
+    nullable QuoteScope quoteScope;
 
     MacroState macroState;
 
@@ -136,7 +139,8 @@ class Function : FunctionDeclaration
         auto framePtr = compiler.reference(compiler.stackFrame(new Void));
         auto coldContext = makeColdContext(compiler, context.platform, this.macroState, context.loopPass,
             context.modulePreProcessor, context.modulePostProcessor);
-        auto warmContext = makeWarmContext(compiler, framePtr, context.compilingModule);
+        auto warmContext = new WarmContext(framePtr, context.compilingModule, new LabelCounter, compiler.uniqCounter,
+            this.quoteScope, errorStack=null);
         auto context = Context(stackframe, warmContext, coldContext);
 
         mut Namespace scope_ = stackframe;
@@ -569,7 +573,7 @@ class VariableDeclaration : DeclarationHolder
         if (this.parent) return this.parent.lookup(name, context, reason, locRange);
         return null;
     }
-    override string repr() => "VariableDeclaration($name)";
+    override string repr() => "VariableDeclaration($name) > $(parent.repr)";
 }
 
 class StackFrame : Reference
@@ -733,6 +737,7 @@ class ASTFunction : ASTSymbolDeclaration
         // TODO: Why are these in a separate paramContext? What breaks if we remove this?
         // TODO: Why can't IdCounter be global? Why do we need more than one?
         // TODO: I think we just need a dedicated id counter for "label that is never backend emitted".
+        auto name = this.name.name(context.warmContext);
         auto paramContext = context.withLabelPrefix(
             "$(context.namespace.mangle)_$(this.name)");
         auto params = [.compile(param, paramContext)? for param in this.params];
@@ -752,7 +757,7 @@ class ASTFunction : ASTSymbolDeclaration
             }
             auto ret = ret?;
             return new FunctionDeclaration(
-                this.name, ret.compile(returnTypeContext)?.beType(ret.locRange)?, params);
+                name, ret.compile(returnTypeContext)?.beType(ret.locRange)?, params);
         }
 
         // FIXME: nullptr_t
@@ -764,12 +769,13 @@ class ASTFunction : ASTSymbolDeclaration
             }
         }
         auto fun = new Function(
-            this.name,
+            name,
             ret?,
             params,
             this.statement, this.macroState, hasThisArg=false, this.locRange);
 
         fun.comment = this.comment;
+        fun.quoteScope = context.quoteScope;
 
         (void | fail Error) inferReturnType() {
             this.ret.case {
@@ -825,12 +831,12 @@ class ASTFunction : ASTSymbolDeclaration
         parser.revert;
         return null;
     }
-    string name = parser.parseIdentifier;
+    auto name = parser.parseIdentifierSymbol(lexicalContext)?;
     // avoid 'mut typeof(expr)' from matching as a function
     // TODO reserved identifier list
     auto locRange = parser.to(from);
-    if (!name.length || name == "typeof")
-    {
+    auto name = name? else ({ parser.revert; return null; });
+    if (name.instanceOf(ASTIdentifier)?.name_ == "typeof") {
         parser.revert;
         return null;
     }
@@ -860,6 +866,9 @@ class ASTFunction : ASTSymbolDeclaration
         return ret;
     }
     parser.revert;
+    if (auto quote = name.instanceOf(ASTIdentifierQuote)) {
+        lexicalContext.revertQuoteToken(quote.token, QuoteTokenCategory.identifier);
+    }
     return null;
 }
 

@@ -38,8 +38,6 @@ class CompilerImpl : CompilerBase
 {
     ASTModule[] defaultImports;
 
-    ParserHelper helper;
-
     Package[] allPackages_;
 
     Mutex mutex;
@@ -108,6 +106,11 @@ class CompilerImpl : CompilerBase
         return .parseStatement(parser.instanceOf(ParserImpl)? else die, lexicalContext);
     }
 
+    override (nullable ASTIdentifierSymbol | fail Error) parseIdentifierSymbol(Parser parser, LexicalContext lexicalContext)
+    {
+        return .parseIdentifierSymbol(parser.instanceOf(ParserImpl)? else die, lexicalContext);
+    }
+
     override (nullable ASTDeclaration | fail Error) parseDeclaration(Parser parser, LexicalContext lexicalContext)
     {
         return .parseDeclaration(parser.instanceOf(ParserImpl)? else die, lexicalContext);
@@ -125,7 +128,7 @@ class CompilerImpl : CompilerBase
     }
 
     override (nullable ASTSymbolDeclaration | fail Error) parseTemplateStub(
-        Parser parser, LexicalContext lexicalContext, string name, string comment,
+        Parser parser, LexicalContext lexicalContext, ASTIdentifierSymbol name, string comment,
         (nullable ASTSymbolDeclaration | fail Error) delegate!() dg)
     {
         return .parseTemplateStub(parser, lexicalContext, name, comment, dg);
@@ -208,6 +211,10 @@ class CompilerImpl : CompilerBase
             return lit.text;
         }
         return :none;
+    }
+
+    override (ASTStatement[] | :else) destructAstSequence(ASTStatement stmt) {
+        return stmt.instanceOf(ASTSequenceStatement)?.statements else :else;
     }
 
     override (ASTSymbol target, ASTArgument[] args | :none) destructAstCall(ASTSymbol sym) {
@@ -407,7 +414,8 @@ class CompilerImpl : CompilerBase
     }
 
     override ASTStatement astQuotedStatement(string fragment, Package pak,
-        ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange)
+        ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange,
+        nullable MacroState macroState = null)
     {
         (int uniqueId, ASTStatement astStatement) get() with (this.mutex.locked) {
             if (this.cachedFragments.has(locRange)) {
@@ -422,7 +430,7 @@ class CompilerImpl : CompilerBase
             with (this.mutex.unlocked) {
                 auto parser = createFragmentParser(fragment=fragment, locRange=locRange)
                     .case(Error err: dieFragment(fragment, err));
-                auto quoteLexicalContext = new QuoteLexicalContext(uniqueId, this, pak);
+                auto quoteLexicalContext = new QuoteLexicalContext(uniqueId, this, pak, macroState);
                 astStatement = parseStatement(parser, quoteLexicalContext)
                     .case(Error err: dieFragment(fragment, err));
             }
@@ -524,7 +532,8 @@ class CompilerImpl : CompilerBase
     {
         mut ASTStructEntry[] entries;
         for (member in members) entries ~= member;
-        auto astStruct = new ASTStructDecl(name, entries, locRange);
+        auto nameSym = new ASTIdentifier(name, false, __RANGE__);
+        auto astStruct = new ASTStructDecl(nameSym, entries, locRange);
         astStruct.externC = externC;
         return astStruct;
     }
@@ -602,7 +611,7 @@ class CompilerImpl : CompilerBase
 
     override ASTModule resolveImport(string pak, ASTImportStatementBase import_, LocRange locRange)
     {
-        .resolveImport(this, pak, import_.instanceOf(ASTImportStatement)? else die, this.helper)
+        .resolveImport(this, pak, import_.instanceOf(ASTImportStatement)? else die, this.parserHelper)
             .case {
                 ASTModule mod: return mod;
                 Error error: exitWithError(error, this.fileIdTable);

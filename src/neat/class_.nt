@@ -157,7 +157,7 @@ class Class
      */
     Struct dataStruct;
 
-    this(this.decl, this.superClass, this.superIntfs, this.namespace)
+    this(this.name, this.decl, this.superClass, this.superIntfs, this.namespace)
     {
         if (superClass && superClass.final_) {
             print("$(decl.locRange.toString): cannot subclass a final class");
@@ -165,7 +165,6 @@ class Class
             exit(1);
         }
         assert(!!decl);
-        this.name = decl.name;
         this.final_ = decl.final_;
         this.abstract_ = decl.abstract_;
         this.mangledName = namespace.mangle ~ "_class_" ~ this.name;
@@ -868,10 +867,9 @@ class Intf
 
     PolyHash mangledHash;
 
-    this(this.decl, this.superIntfs, this.namespace)
+    this(this.name, this.decl, this.superIntfs, this.namespace)
     {
         assert(!!decl);
-        this.name = decl.name;
         this.mangledName = namespace.mangle ~ "_intf_" ~ this.name;
         this.mangledHash = new PolyHash("Intf" ~ this.mangledName);
         this.result = new Error([__RANGE__], "accessing uninitialized interface $name");
@@ -1427,7 +1425,8 @@ class ASTClassDecl : ASTSymbolDeclaration
                 superIntfs ~= superIntf.intf;
             }
         }
-        return new ClassType(new Class(this, superClass, superIntfs, context.namespace),
+        auto name = this.name.name(context.warmContext);
+        return new ClassType(new Class(name, this, superClass, superIntfs, context.namespace),
             zeroInitializable=false);
     }
 
@@ -1458,9 +1457,10 @@ class ASTClassDecl : ASTSymbolDeclaration
                 (ASTDeclaration astDecl, Protection protection):
                     if (auto astSymDecl = astDecl.instanceOf(ASTSymbolDeclaration)) {
                         auto sym = astSymDecl.compileSymbol(currentContext)?;
-                        classDecls[astSymDecl.name] = (sym, protection);
+                        auto name = astSymDecl.name.name(context.warmContext);
+                        classDecls[name] = (sym, protection);
                         currentContext = currentContext.withNamespace(
-                            context.compiler.exprAlias(currentContext.namespace, astSymDecl.name, sym));
+                            context.compiler.exprAlias(currentContext.namespace, name, sym));
                     } else {
                         currentContext = currentContext.withNamespace(
                             astDecl.compile(currentContext)?);
@@ -1576,8 +1576,9 @@ class ASTIntfDecl : ASTSymbolDeclaration
                 superIntfs ~= superIntfType.intf;
             }
         }
+        auto name = this.name.name(context.warmContext);
         return new IntfType(
-            new Intf(this, superIntfs, context.namespace),
+            new Intf(name, this, superIntfs, context.namespace),
             zeroInitializable=false);
     }
 
@@ -1642,7 +1643,7 @@ class ASTIntfDecl : ASTSymbolDeclaration
     }
     parser.commit;
 
-    string name = parser.parseIdentifier;
+    auto name = lexicalContext.compiler.parseIdentifierSymbol(parser, lexicalContext)?? else die;
     auto locRange = parser.to(from);
 
     (nullable ASTSymbolDeclaration | fail Error) parseRest() {
@@ -1674,7 +1675,8 @@ class ASTIntfDecl : ASTSymbolDeclaration
     return parseRest?;
 }
 
-(ASTClassEntry[] | fail Error) parseClassEntry(Parser parser, LexicalContext lexicalContext, string className)
+(ASTClassEntry[] | fail Error) parseClassEntry(Parser parser, LexicalContext lexicalContext,
+    ASTIdentifierSymbol className)
 {
     if (parser.acceptIdentifier("version")) {
         mut ASTClassEntry[] then, else_;
@@ -1752,6 +1754,7 @@ class ASTIntfDecl : ASTSymbolDeclaration
         parser.assert_(memberName.length > 0, "expected member name")?;
     }
     auto locRange = parser.to(from);
+    auto nameSym = new ASTIdentifier(memberName, false, __RANGE__);
     // Bleh! This is a totally different path from the method parse block below.
     // It's only here so we can parse template stub, which creates a nested function
     // but not a class function.
@@ -1769,11 +1772,12 @@ class ASTIntfDecl : ASTSymbolDeclaration
         auto params = [pick(entry) for entry in params.params];
         ASTStatement stmt = lexicalContext.compiler.parseFunctionBody(parser, lexicalContext)?;
         return new ASTFunction(
-            memberName, retType? else die, params, isDeclaration=false, locRange, stmt,
+            nameSym, retType? else die, params, isDeclaration=false, locRange, stmt,
             lexicalContext.macroState, comment);
     }
+    // FIXME
     if (auto ret = lexicalContext.compiler.parseTemplateStub(
-        parser, lexicalContext, memberName, comment, &parseFunctionRest)?
+        parser, lexicalContext, nameSym, comment, &parseFunctionRest)?
     ) {
         return [(ret, protection)];
     }
@@ -1785,7 +1789,7 @@ class ASTIntfDecl : ASTSymbolDeclaration
         mut nullable ASTStatement stmt = null;
         mut bool heapAllocated = false;
         if (abstract_ && parser.acceptToken(TokenType.semicolon)) {
-            ASTSymbol astName = new ASTStringLiteral(className ~ "." ~ memberName, __RANGE__);
+            ASTSymbol astName = new ASTStringLiteral(className.repr ~ "." ~ memberName, __RANGE__);
             stmt = lexicalContext.compiler.$stmt {
                 import package(compiler).neat.runtime.stdlib : exit;
 
@@ -1839,6 +1843,8 @@ class ASTIntfDecl : ASTSymbolDeclaration
 
     string name = parser.parseIdentifier;
     auto declLocRange = parser.to(from);
+    // FIXME
+    auto nameSym = new ASTIdentifier(name, false, __RANGE__);
 
     (nullable ASTSymbolDeclaration | fail Error) parseRest() {
         mut ASTSymbol[] superIntfs;
@@ -1879,9 +1885,9 @@ class ASTIntfDecl : ASTSymbolDeclaration
             auto astParameters = [a.case(ASTParameter p: p, ASTThisAssignment: die) for a in params];
             members ~= ASTIntfDeclMethod(memberName, retType, astParameters, locRange);
         }
-        return new ASTIntfDecl(name, superIntfs, members, lexicalContext.macroState, declLocRange);
+        return new ASTIntfDecl(nameSym, superIntfs, members, lexicalContext.macroState, declLocRange);
     }
-    if (auto ret = lexicalContext.compiler.parseTemplateStub(parser, lexicalContext, name, comment, &parseRest)?)
+    if (auto ret = lexicalContext.compiler.parseTemplateStub(parser, lexicalContext, nameSym, comment, &parseRest)?)
         return ret;
     return parseRest?;
 }

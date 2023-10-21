@@ -378,6 +378,8 @@ abstract class ASTStatement
 {
     LocRange locRange;
 
+    this(this.locRange) {}
+
     abstract (StatementCompileResult | fail Error) compile(Context context);
 
     // TODO this.classname
@@ -407,15 +409,16 @@ abstract class ASTDeclaration
 
 abstract class ASTSymbolDeclaration : ASTDeclaration
 {
-    string name;
+    ASTIdentifierSymbol name;
 
     abstract (Symbol | fail Error) compileSymbol(Context context);
 
     override (Namespace | fail Error) compile(Context context)
     {
         auto symbol = compileSymbol(context)?;
+        auto name = this.name.name(context.warmContext);
 
-        return context.compiler.exprAlias(context.namespace, this.name, symbol);
+        return context.compiler.exprAlias(context.namespace, name, symbol);
     }
 }
 
@@ -617,7 +620,13 @@ final class WarmContext
     ASTIdentifierSymbol getQuoteIdentifier(int scopeId, int index) {
         mut auto current = this.quoteScope;
         while (current) {
-            if (current.scopeId == scopeId) return current.identifiers[index];
+            if (current.scopeId == scopeId) {
+                if (index < current.identifiers.length)
+                    return current.identifiers[index];
+                print("cannot get quote identifier @$index with scope id $scopeId: "
+                    ~ "only got $(current.identifiers.length)");
+                assert(false);
+            }
             current = current.parent;
         }
         print("cannot get quote identifier @$index with scope id $scopeId");
@@ -855,6 +864,12 @@ struct Parameter
         ~ "type=$type, defaultValue=..., locRange=$locRange)";
 }
 
+abstract class ParserHelper
+{
+    abstract (void | fail Error) proxyCall(ASTModuleBase astModule, string function_, void* ptr,
+        LocRange locRange);
+}
+
 // FIXME class Object
 class ASTImportStatementBase
 {
@@ -872,10 +887,12 @@ abstract class CompilerBase
 
     FileIdTable fileIdTable;
 
+    ParserHelper parserHelper;
+
     // parser
     abstract (Parser | fail Error) createParser(string filename, string fulltext);
 
-    abstract (Parser | fail Error) createFragmentParser(string fragment, LocRange start);
+    abstract (Parser | fail Error) createFragmentParser(string fragment, LocRange locRange);
 
     // must be called or LocRange IDs may be wrong.
     abstract void disposeParser(Parser parser);
@@ -899,6 +916,9 @@ abstract class CompilerBase
     abstract (ASTStatement | fail Error) parseStatement(
         Parser parser, LexicalContext lexicalContext);
 
+    abstract (nullable ASTIdentifierSymbol | fail Error) parseIdentifierSymbol(
+        Parser parser, LexicalContext lexicalContext);
+
     abstract (nullable ASTDeclaration | fail Error) parseDeclaration(
         Parser parser, LexicalContext lexicalContext);
 
@@ -912,7 +932,7 @@ abstract class CompilerBase
     }
 
     abstract (nullable ASTSymbolDeclaration | fail Error) parseTemplateStub(
-        Parser parser, LexicalContext lexicalContext, string name, string comment,
+        Parser parser, LexicalContext lexicalContext, ASTIdentifierSymbol name, string comment,
         (nullable ASTSymbolDeclaration | fail Error) delegate!() dg);
 
     abstract (ASTStatement | fail Error) parseFunctionBody(
@@ -960,7 +980,8 @@ abstract class CompilerBase
 
     // compiler.$stmt
     abstract ASTStatement astQuotedStatement(string fragment, Package pak,
-        ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange);
+        ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange,
+        nullable MacroState macroState = null);
 
     // compiler.$expr
     abstract ASTSymbol astQuotedExpression(string fragment, Package pak,
@@ -997,6 +1018,8 @@ abstract class CompilerBase
     abstract ASTSymbol astCharLiteral(char ch, LocRange locRange);
 
     abstract (string | :none) destructAstStringLiteral(ASTSymbol sym);
+
+    abstract (ASTStatement[] | :else) destructAstSequence(ASTStatement stmt);
 
     abstract (ASTSymbol target, ASTArgument[] args | :none) destructAstCall(ASTSymbol sym);
 
@@ -1643,6 +1666,14 @@ abstract class LexicalContext
      */
     (int | fail Error) allocQuoteToken(ASTSymbol symbol, QuoteTokenCategory category) {
         return symbol.locRange.fail("Quasiquote outside of quoted environment");
+    }
+
+    /**
+     * We didn't need this quote token after all.
+     * Used when we back out a quoted identifier parse rule.
+     */
+    void revertQuoteToken(int token, QuoteTokenCategory category) {
+        die;
     }
 
     int quoteScope() {

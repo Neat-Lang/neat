@@ -1,0 +1,236 @@
+module std.macro.easymacro;
+
+macro import std.macro.quasiquoting;
+
+import neat.base;
+import neat.function_;
+import neat.quasiquoting;
+import neat.runtime;
+import neat.util;
+
+class EasyMacro : Macro
+{
+    this() { }
+    override void apply(MacroArgs args) {
+        if (auto args = args.instanceOf(ParseStatementArgs)) {
+            args.statement = this.parseStatement(args.parser, args.lexicalContext);
+        }
+    }
+
+    (nullable ASTStatement | fail Error) parseStatement(Parser parser, LexicalContext lexicalContext) {
+        parser.begin;
+        auto compiler = lexicalContext.compiler;
+        auto from = parser.from;
+        string identifier = parser.parseIdentifier;
+        if (identifier != "code" && identifier != "macro" || !parser.acceptToken(TokenType.lcurlybracket)) {
+            parser.revert;
+            return null;
+        }
+        auto locRange = parser.to(from);
+        parser.commit;
+        if (identifier == "code") {
+            // intermix code blocks and nested function definitions for nested macro blocks
+            mut ASTStatement[] codeStmts;
+            auto compilerExpr = compiler.$expr __arg.context.compiler;
+            while (!parser.acceptToken(TokenType.rcurlybracket)) {
+                // roughly as in std.macro.quasiquoting
+                auto easyMacroLexicalContext = new EasyMacroLexicalContext(
+                    scopeId=0xdeadbeef, compiler, lexicalContext.pak, lexicalContext.macroState);
+                auto remainingText = parser.remainingText;
+                auto from = parser.from;
+                auto stmt = compiler.parseStatement(parser, easyMacroLexicalContext)?;
+                parser.assert_(!!stmt, "statement expected")?;
+                auto innerRange = parser.to(from);
+                auto text = remainingText[0 .. $ - parser.remainingText.length];
+                with (compiler) {
+                    /**
+                    `code { a; macro { b; } c; }`
+                    compiles to:
+                    void nested1(Context context) { b; }
+                    ...
+                    __arg.compileQuoted(
+                        id, "{ ... }", pak, [], [new ASTCodeHelper(&nested1)], [], (LocRange at {)));
+                    The ASTCodeHelper entries are added already in the code{} parser.
+                    */
+                    auto astText = astStringLiteral(text, __RANGE__);
+                    auto astPak = lexicalContext.pak.quote(compiler);
+                    auto astSymbolLiteral = astArrayLiteral(easyMacroLexicalContext.macroSymbols, __RANGE__);
+                    auto astStatementLiteral = astArrayLiteral(easyMacroLexicalContext.macroStatements, __RANGE__);
+                    auto astIdentifierLiteral = astArrayLiteral(easyMacroLexicalContext.macroIdentifiers, __RANGE__);
+                    auto astRangeQuote = innerRange.quote(compiler, compilerExpr);
+
+                    auto quoteExpr = compiler.$expr __arg.compileQuoted(
+                        $astText, $astPak, $astSymbolLiteral, $astStatementLiteral, $astIdentifierLiteral,
+                        $astRangeQuote);
+                    for (i, body_ in easyMacroLexicalContext.nestedMacroBodies) {
+                        auto name = new ASTIdentifier("nested$(i + 1)", false, __RANGE__);
+                        codeStmts ~= compiler.$stmt
+                            (void | fail Error) $name(Context context) {
+                                $stmt body_;
+                            };
+                    }
+                    codeStmts ~= compiler.$stmt __arg.compile($quoteExpr)?;;
+                }
+            }
+            return compiler.astSequence(codeStmts, locRange);
+        } else if (identifier == "macro") {
+            mut ASTStatement[] substatements;
+            while (!parser.acceptToken(TokenType.rcurlybracket)) {
+                substatements ~= compiler.parseStatement(parser, lexicalContext)?;
+            }
+            auto innerBody = compiler.astSequence(substatements, __RANGE__);
+            if (auto easyMacroLexicalContext = lexicalContext.instanceOf(EasyMacroLexicalContext)) {
+                /**
+                 * Macro nested in code nested in macro.
+                 * Interpolate a statement that's a thin proxy for a nested function.
+                 */
+                easyMacroLexicalContext.nestedMacroBodies ~= innerBody;
+                // Nested function will be created by code block.
+                auto name = compiler.astIdentifier(
+                    "nested$(easyMacroLexicalContext.nestedMacroBodies.length)", __RANGE__);
+                auto nestedMacroExpr = compiler.$expr new ASTCodeHelper(&$name, __RANGE__);
+                auto token = lexicalContext.allocQuoteToken(nestedMacroExpr, QuoteTokenCategory.statement)?;
+                return new ASTStatementQuote(lexicalContext.quoteScope, token, locRange);
+            } else {
+                return new ASTMacroStatement(innerBody, locRange);
+            }
+        } else die;
+    }
+}
+
+class EasyMacroLexicalContext : QuoteLexicalContext
+{
+    /// Those must go into nested functions.
+    ASTStatement[] nestedMacroBodies;
+}
+
+struct EasyMacroArg
+{
+    Context context;
+
+    int uniqueId;
+
+    (:success | fail void) compile(ASTStatement stmt) {
+        // warning: stmt.compile(context) may reenter this method!
+        stmt.compile(context).case {
+            Error err:
+                this.result = this.result.case(Error err: err, StatementCompileResult: err);
+            StatementCompileResult result:
+                this.result.case {
+                    Error err: {}
+                    StatementCompileResult existingResult:
+                        this.result = StatementCompileResult(
+                            this.context.compiler.sequence(existingResult.statement, result.statement),
+                            result.namespace,
+                        );
+                        this.context = this.context.withNamespace(result.namespace);
+                }
+        }
+        return :success;
+    }
+
+    ASTStatement compileQuoted(string fragment, Package pak,
+        ASTSymbol[] symbols, ASTStatement[] statements, ASTIdentifierSymbol[] identifiers, LocRange locRange)
+    {
+        int uniqueId = this.uniqueId++;
+        auto parser = context.compiler.createFragmentParser(fragment=fragment, locRange=locRange)
+            .case(Error err: dieFragment(fragment, err));
+        auto lexicalContext = new EasyMacroLexicalContext(
+            uniqueId, context.compiler, pak, context.macroState);
+        auto astStatement = context.compiler.parseStatement(parser, lexicalContext)
+            .case(Error err: dieFragment(fragment, err));
+        auto scope_ = QuoteScopeValue(uniqueId, symbols, statements, identifiers);
+        return new ASTQuotedStatement(astStatement, scope_, locRange);
+    }
+
+    (StatementCompileResult | fail Error) result;
+}
+
+// Borrow from neat.compiler
+private bottom dieFragment(string fragment, Error err) {
+    print("while parsing quote fragment '$fragment', an error happened " ~
+        "during evaltime that didn't happen during compiletime: $(err.msg)");
+    assert(false);
+}
+
+class ASTMacroStatement : ASTStatement
+{
+    ASTStatement body_;
+
+    this(this.body_, super) {}
+
+    override (StatementCompileResult | fail Error) compile(Context context) {
+        /**
+         * 1. generate a new stub module, like templates
+         * 2. generate a 'macrohelper' function in it
+         * 3. inject our substatements into it, compile them
+         * 4. emit and call.
+         */
+        // FIXME locRange? uniqId?
+        string moduleMangle = "macrohelper";
+        // FIXME is this right??
+        string moduleParseTaskId = "";
+        auto parent = context.namespace.findParent!ModuleBase? else die;
+        auto pak = new Package("macrohelper", "", []);
+        // TODO pull in calling module as a symbol source somehow?
+        auto stubModule = context.compiler.astModule("macrohelper", pak, context.macroState, __RANGE__, parent=null);
+        auto params = [
+            ASTParameter("__arg", mutable=false, context.compiler.$type EasyMacroArg*, null, __RANGE__),
+        ];
+        auto innerBody = this.body_;
+        auto body_ = context.compiler.$stmt {
+            auto context = __arg.context;
+            with (context) {
+                $stmt innerBody;
+            }
+        };
+        auto id = str => new ASTIdentifier(str, false, __RANGE__);
+        auto fun = new ASTFunction(
+            "macrohelper".id, context.compiler.$expr void, params, isDeclaration=false,
+            this.locRange, statement=body_, macroState=context.macroState, comment=null);
+        stubModule.addEntry(Protection.private_, context.compiler.astImport(
+            "std.macro.easymacro", "compiler", symbols=["ASTCodeHelper", "EasyMacroArg"], __RANGE__));
+        stubModule.addEntry(Protection.private_, context.compiler.astImport(
+            "neat.base", "compiler", symbols=null, __RANGE__));
+        stubModule.addEntry(Protection.private_, fun);
+        mut auto arg = EasyMacroArg(context, 0, result=StatementCompileResult(new NoopStatement, context.namespace));
+        context.compiler.parserHelper.proxyCall(stubModule, "macrohelper", &arg, __RANGE__)?;
+        return arg.result;
+    }
+}
+
+/**
+ * A delegate, but with refcounting disabled.
+ * We know for a fact that ASTCodeHelper will not outscope the nested delegate.
+ * So we use the refcounting-less delegate type, but we obscure it
+ * from the compiler via pointer hacks.
+ * Sorry!
+ */
+private struct HorribleHack
+{
+    void* funcptr;
+    void* dataptr;
+}
+
+class ASTCodeHelper : ASTStatement
+{
+    HorribleHack callbackHack;
+
+    this((void | fail Error) delegate!(Context) callback, super) {
+        this.callbackHack = *cast(HorribleHack*) &callback;
+    }
+
+    override (StatementCompileResult | fail Error) compile(Context context) {
+        auto ptr = cast((void | fail Error) delegate!(Context)*) &callbackHack;
+        (*ptr)(context)?;
+        // Code helper itself can't introduce any names into its scope directly.
+        return StatementCompileResult(new NoopStatement, context.namespace);
+    }
+}
+
+void addEasyMacro(MacroState macroState)
+{
+    macroState.addMacro(new EasyMacro);
+}
+
+macro(addEasyMacro);

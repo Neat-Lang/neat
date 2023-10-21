@@ -113,8 +113,7 @@ struct EasyMacroArg
     (:success | fail void) compile(ASTStatement stmt) {
         // warning: stmt.compile(context) may reenter this method!
         stmt.compile(context).case {
-            Error err:
-                this.result = this.result.case(Error err: err, StatementCompileResult: err);
+            Error err: updateError(err);
             StatementCompileResult result:
                 this.result.case {
                     Error err: {}
@@ -127,6 +126,21 @@ struct EasyMacroArg
                 }
         }
         return :success;
+    }
+
+    void updateError(Error err) {
+        // first error takes priority
+        this.result = this.result.case(Error err: err, StatementCompileResult: err);
+    }
+
+    (nullable Symbol | fail Error) lookup(string name) {
+        return context.compiler.lookup(context, __RANGE__, LookupReason.identifier, name);
+    }
+
+    (Expression | fail Error) expr(string name) {
+        return lookup(name)?
+            .(that? else return __RANGE__.fail("identifier '$name' not found"))
+            .beExpression(__RANGE__)?;
     }
 
     ASTStatement compileQuoted(string fragment, Package pak,
@@ -179,10 +193,13 @@ class ASTMacroStatement : ASTStatement
         ];
         auto innerBody = this.body_;
         auto body_ = context.compiler.$stmt {
-            auto context = __arg.context;
-            with (context) {
-                $stmt innerBody;
+            (void | fail Error) innerBody() {
+                auto context = __arg.context;
+                with (__arg) with (context) {
+                    $stmt innerBody;
+                }
             }
+            innerBody.case(Error err: __arg.updateError(err));
         };
         auto id = str => new ASTIdentifier(str, false, __RANGE__);
         auto fun = new ASTFunction(

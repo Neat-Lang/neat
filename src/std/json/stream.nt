@@ -1,0 +1,181 @@
+module std.json.stream;
+
+macro import std.json.macro;
+macro import std.macro.assert;
+macro import std.macro.easymacro;
+
+import std.json;
+
+alias JsonToken = (
+    string |
+    nullptr_t |
+    bool |
+    int |
+    // double |
+    :arrayStart |
+    :arrayEnd |
+    :objectStart |
+    :objectEnd |
+    :objectKey, string key
+);
+
+abstract class JsonSink
+{
+    abstract void put(JsonToken token) {
+        assert(false);
+    }
+}
+
+class JsonValueSink : JsonSink
+{
+    (JSONValue | :nothing | :error, string msg) value;
+
+    (
+        :array, JSONValue[] |
+        :objectKey, (string, JSONValue)[] |
+        :objectValue, string key, (string, JSONValue)[]
+    ) mut[] stack;
+
+    this() {
+        this.value = :nothing;
+    }
+
+    override void put(JsonToken token) {
+        // bleh... better way to abort puts?
+        // TODO stdlib error type hierarchy
+        // FIXME
+        // if (token != :objectEnd) {
+        bool isObjectEnd() {
+            token.case {
+                :objectEnd: return true;
+                default: return false;
+            }
+        }
+        this.value.case {
+            (:error, string msg): return;
+            JSONValue value:
+                if (!stack.empty) {
+                    stack[$ - 1].case {
+                        (:array, JSONValue[] values):
+                            // FIXME why does $ not work here
+                            stack[stack.length - 1] = (:array, values ~ value);
+                            this.value = :nothing;
+                        (:objectKey, (string, JSONValue)[]):
+                            return error("invalid token order: got value but expected object key");
+                        (:objectValue, string key, (string, JSONValue)[] values):
+                            stack[stack.length - 1] = (:objectKey, values ~ (key, value));
+                            this.value = :nothing;
+                    }
+                } else {
+                    return error("multiple values in output stream");
+                }
+            :nothing: {}
+        }
+        token.case {
+            string s: this.value = JSONValue(s);
+            nullptr_t: this.value = JSONValue(null);
+            bool b: this.value = JSONValue(b);
+            int i: this.value = JSONValue(i);
+            // double d: this.value = JSONValue(d);
+            :arrayStart:
+                this.stack ~= (:array, null);
+            :arrayEnd:
+                this.stack[$ - 1].case {
+                    (:array, JSONValue[] values):
+                        this.value = JSONValue(values);
+                    (:objectKey, (string, JSONValue)[]):
+                        return error("invalid token order: got ']' but expected object key");
+                    (:objectValue, string key, (string, JSONValue)[]):
+                        return error("invalid token order: got ']' but expected object value");
+                }
+                this.stack = this.stack[0 .. $ - 1];
+            :objectStart:
+                this.stack ~= (:objectKey, null);
+            :objectEnd:
+                this.stack[$ - 1].case {
+                    (:array, JSONValue[]):
+                        return error("invalid token order: got '}' but expected array value");
+                    (:objectKey, (string, JSONValue)[] values):
+                        this.value = JSONValue(values);
+                    (:objectValue, string key, (string, JSONValue)[]):
+                        return error("invalid token order: got '}' but expected object value");
+                }
+                this.stack = this.stack[0 .. $ - 1];
+            (:objectKey, string key):
+                this.stack[$ - 1].case {
+                    (:array, JSONValue[] values):
+                        return error("invalid token order: got '$key:' but expected array member");
+                    (:objectKey, (string, JSONValue)[] values):
+                        // FIXME why does $ not work here
+                        stack[stack.length - 1] = (:objectValue, key, values);
+                    (:objectValue, string key, (string, JSONValue)[]):
+                        return error("invalid token order: got '$key:' but expected object value");
+                }
+        }
+    }
+
+    void error(string msg) {
+        this.value = (:error, msg);
+    }
+}
+
+void encode(T)(T value, JsonSink sink) {
+    macro {
+        import neat.array;
+        import neat.struct_;
+        import neat.types;
+
+        auto T = type("T")?;
+        if (T.instanceOf(Integer) || T.instanceOf(Long) || T.instanceOf(Short) || T.instanceOf(Boolean)) {
+            code { sink.put(value); }
+        } else if (auto array_ = T.instanceOf(Array)) {
+            if (array_.elementType.instanceOf(Character)) {
+                code { sink.put(value); }
+            } else {
+                code {
+                    sink.put(:arrayStart);
+                    for (entry in value)
+                        .encode(entry, sink);
+                    sink.put(:arrayEnd);
+                }
+            }
+        } else if (auto struct_ = T.instanceOf(Struct)) {
+            code { sink.put(:objectStart); }
+            for (member in struct_.members) {
+                auto name = compiler.astIdentifier(member.name, __RANGE__);
+                auto nameStr = compiler.astStringLiteral(member.name, __RANGE__);
+                code {
+                    sink.put((:objectKey, $nameStr));
+                    .encode(value.$name, sink);
+                }
+            }
+            code { sink.put(:objectEnd); }
+        } else {
+            return __RANGE__.fail("Don't know how to encode $(T.repr)");
+        }
+    }
+}
+
+unittest {
+    auto sink = new JsonValueSink;
+    5.encode(sink);
+    assert(sink.value == JSONValue(5));
+}
+
+unittest {
+    auto sink = new JsonValueSink;
+    [2, 3].encode(sink);
+    assert(sink.value == JSONValue([2, 3]));
+}
+
+struct S {
+    int a;
+    string[] b;
+    bool c;
+}
+
+unittest {
+    auto sink = new JsonValueSink;
+    S(2, ["foo", "bar"], false).encode(sink);
+    assert(sink.value == JSONValue({"a": 2, "b": ["foo", "bar"], "c": false}));
+}

@@ -19,11 +19,112 @@ alias JsonToken = (
     :objectKey, string key
 );
 
+abstract class JsonSource
+{
+    abstract JsonToken get() {
+        assert(false);
+    }
+
+    abstract bool empty();
+}
+
 abstract class JsonSink
 {
     abstract void put(JsonToken token) {
         assert(false);
     }
+}
+
+class JsonValueSource : JsonSource
+{
+    alias StackEntry = (
+        JSONValue |
+        JSONValue[] |
+        (string key, JSONValue value)[] |
+        JSONValue, (string key, JSONValue value)[]);
+
+    StackEntry mut[] stack;
+
+    this(JSONValue value) {
+        this.stack ~= value;
+    }
+
+    override bool empty() => this.stack.empty;
+
+    StackEntry head() => this.stack[$ - 1];
+
+    override JsonToken get() {
+        void pop() {
+            this.stack = this.stack[0 .. $ - 1];
+        }
+        JsonToken transform(JSONValue value) {
+            value.value.case {
+                :false:
+                    return false;
+                :true:
+                    return true;
+                int i:
+                    return i;
+                string s:
+                    return s;
+                JSONValue[] array:
+                    this.stack ~= array;
+                    return :arrayStart;
+                (string key, JSONValue value)[] obj:
+                    this.stack ~= obj;
+                    return :objectStart;
+            }
+        }
+        head.case {
+            JSONValue value:
+                pop;
+                return transform(value);
+            JSONValue[] array:
+                if (array.empty) {
+                    pop;
+                    return :arrayEnd;
+                } else {
+                    auto nextValue = array[0];
+                    this.stack[$ - 1] = array[1 .. $];
+                    return nextValue.transform;
+                }
+            (string key, JSONValue value)[] obj:
+                if (obj.empty) {
+                    pop;
+                    return :objectEnd;
+                } else {
+                    auto nextEntry = obj[0];
+                    this.stack[$ - 1] = (nextEntry.value, obj[1 .. $]);
+                    return (:objectKey, nextEntry.key);
+                }
+            (JSONValue nextValue, (string key, JSONValue value)[] obj):
+                this.stack[$ - 1] = obj;
+                return nextValue.transform;
+        }
+    }
+}
+
+unittest
+{
+    auto value = JSONValue({"a": 3, "b": [4, 5, 6], "c": "Hello World"});
+    auto source = new JsonValueSource(value);
+    JsonToken[] all() {
+        mut JsonToken[] result;
+        while (!source.empty) result ~= source.get;
+        return result;
+    }
+    assert(all == [
+        :objectStart,
+            (:objectKey, key="a"),
+                3,
+            (:objectKey, key="b"),
+                :arrayStart,
+                    4, 5, 6,
+                :arrayEnd,
+            (:objectKey, key="c"),
+                "Hello World",
+        :objectEnd,
+    ]);
 }
 
 class JsonValueSink : JsonSink
@@ -46,20 +147,18 @@ class JsonValueSink : JsonSink
         this.value.case {
             (:error, string msg): return;
             JSONValue value:
-                if (!stack.empty) {
-                    stack[$ - 1].case {
-                        (:array, JSONValue[] values):
-                            // FIXME why does $ not work here
-                            stack[stack.length - 1] = (:array, values ~ value);
-                            this.value = :nothing;
-                        (:objectKey, (string, JSONValue)[]):
-                            return error("invalid token order: got value but expected object key");
-                        (:objectValue, string key, (string, JSONValue)[] values):
-                            stack[stack.length - 1] = (:objectKey, values ~ (key, value));
-                            this.value = :nothing;
-                    }
-                } else {
+                if (stack.empty) {
                     return error("multiple values in output stream");
+                }
+                stack[$ - 1].case {
+                    (:array, JSONValue[] values):
+                        stack[$ - 1] = (:array, values ~ value);
+                        this.value = :nothing;
+                    (:objectKey, (string, JSONValue)[]):
+                        return error("invalid token order: got value but expected object key");
+                    (:objectValue, string key, (string, JSONValue)[] values):
+                        stack[stack.length - 1] = (:objectKey, values ~ (key, value));
+                        this.value = :nothing;
                 }
             :nothing: {}
         }
@@ -98,8 +197,7 @@ class JsonValueSink : JsonSink
                     (:array, JSONValue[] values):
                         return error("invalid token order: got '$key:' but expected array member");
                     (:objectKey, (string, JSONValue)[] values):
-                        // FIXME why does $ not work here
-                        stack[stack.length - 1] = (:objectValue, key, values);
+                        stack[$ - 1] = (:objectValue, key, values);
                     (:objectValue, string key, (string, JSONValue)[]):
                         return error("invalid token order: got '$key:' but expected object value");
                 }
@@ -148,26 +246,65 @@ void encode(T)(T value, JsonSink sink) {
     }
 }
 
+///
 unittest {
     auto sink = new JsonValueSink;
     5.encode(sink);
     assert(sink.value == JSONValue(5));
 }
 
+///
 unittest {
     auto sink = new JsonValueSink;
     [2, 3].encode(sink);
     assert(sink.value == JSONValue([2, 3]));
 }
 
-struct S {
-    int a;
-    string[] b;
-    bool c;
-}
-
+///
 unittest {
+    struct S {
+        int a;
+        string[] b;
+        bool c;
+    }
     auto sink = new JsonValueSink;
     S(2, ["foo", "bar"], false).encode(sink);
     assert(sink.value == JSONValue({"a": 2, "b": ["foo", "bar"], "c": false}));
+}
+
+T decode(T)(JsonSource source) {
+    macro {
+        import neat.array;
+        import neat.struct_;
+        import neat.types;
+
+        auto T = type("T")?;
+        if (T.instanceOf(Integer) || T.instanceOf(Long) || T.instanceOf(Short) || T.instanceOf(Boolean)) {
+            code { sink.put(value); }
+        } else if (auto array_ = T.instanceOf(Array)) {
+            if (array_.elementType.instanceOf(Character)) {
+                code { sink.put(value); }
+            } else {
+                code {
+                    sink.put(:arrayStart);
+                    for (entry in value)
+                        .encode(entry, sink);
+                    sink.put(:arrayEnd);
+                }
+            }
+        } else if (auto struct_ = T.instanceOf(Struct)) {
+            code { sink.put(:objectStart); }
+            for (member in struct_.members) {
+                auto name = compiler.astIdentifier(member.name, __RANGE__);
+                auto nameStr = compiler.astStringLiteral(member.name, __RANGE__);
+                code {
+                    sink.put((:objectKey, $nameStr));
+                    .encode(value.$name, sink);
+                }
+            }
+            code { sink.put(:objectEnd); }
+        } else {
+            return __RANGE__.fail("Don't know how to encode $(T.repr)");
+        }
+    }
 }

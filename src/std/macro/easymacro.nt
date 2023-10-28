@@ -65,8 +65,15 @@ class EasyMacro : Macro
                     for (i, body_ in easyMacroLexicalContext.nestedMacroBodies) {
                         auto name = new ASTIdentifier("nested$(i + 1)", false, __RANGE__);
                         codeStmts ~= compiler.$stmt
-                            (void | fail Error) $name(Context context) {
-                                $stmt body_;
+                            (StatementCompileResult | fail Error) $name(Context context) {
+                                import neat.util : NoopStatement;
+                                auto __arg = EasyMacroArg(
+                                    context, 0, result=StatementCompileResult(new NoopStatement, context.namespace));
+                                (void | fail Error) wrapper() {
+                                    $stmt body_;
+                                }
+                                wrapper?;
+                                return __arg.result;
                             };
                     }
                     codeStmts ~= compiler.$stmt __arg.compile($quoteExpr)?;;
@@ -186,14 +193,13 @@ class ASTMacroStatement : ASTStatement
          * 3. inject our substatements into it, compile them
          * 4. emit and call.
          */
-        // FIXME locRange? uniqId?
-        string moduleMangle = "macrohelper";
+        string name = "macrohelper_$(this.locRange.from.row)_$(context.getLabel)";
         // FIXME is this right??
         string moduleParseTaskId = "";
         auto parent = context.namespace.findParent!ModuleBase? else die;
         auto pak = new Package("macrohelper", "", []);
         // TODO pull in calling module as a symbol source somehow?
-        auto stubModule = context.compiler.astModule("macrohelper", pak, context.macroState, __RANGE__, parent=null);
+        auto stubModule = context.compiler.astModule(name, pak, context.macroState, __RANGE__, parent=null);
         auto params = [
             ASTParameter("__arg", mutable=false, context.compiler.$type EasyMacroArg*, null, __RANGE__),
         ];
@@ -235,19 +241,22 @@ private struct HorribleHack
     void* dataptr;
 }
 
+/**
+ * The AST node of a macro statement in a code block.
+ */
 class ASTCodeHelper : ASTStatement
 {
     HorribleHack callbackHack;
 
-    this((void | fail Error) delegate!(Context) callback, super) {
+    this((StatementCompileResult | fail Error) delegate!(Context) callback, super) {
         this.callbackHack = *cast(HorribleHack*) &callback;
     }
 
     override (StatementCompileResult | fail Error) compile(Context context) {
-        auto ptr = cast((void | fail Error) delegate!(Context)*) &callbackHack;
-        (*ptr)(context)?;
-        // Code helper itself can't introduce any names into its scope directly.
-        return StatementCompileResult(new NoopStatement, context.namespace);
+        // Delegate corresponds to macro block.
+        auto ptr = cast((StatementCompileResult | fail Error) delegate!(Context)*) &callbackHack;
+        // return accumulated code blocks.
+        return (*ptr)(context);
     }
 }
 

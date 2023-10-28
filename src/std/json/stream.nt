@@ -3,6 +3,7 @@ module std.json.stream;
 macro import std.json.macro;
 macro import std.macro.assert;
 macro import std.macro.easymacro;
+macro import std.macro.quasiquoting;
 
 import std.json;
 
@@ -19,11 +20,25 @@ alias JsonToken = (
     :objectKey, string key
 );
 
+string repr(JsonToken token) {
+    return token.case(
+        string s: "\"$s\"",
+        nullptr_t: "null",
+        bool b: "$b",
+        int i: "$i",
+        :arrayStart: "[",
+        :arrayEnd: "]",
+        :objectStart: "{",
+        :objectEnd: "}",
+        (:objectKey, string key): "\"$key\":",
+    );
+}
+
 abstract class JsonSource
 {
-    abstract JsonToken get() {
-        assert(false);
-    }
+    abstract JsonToken front();
+
+    abstract void popFront();
 
     abstract bool empty();
 }
@@ -45,18 +60,35 @@ class JsonValueSource : JsonSource
 
     StackEntry mut[] stack;
 
+    JsonToken front_;
+
+    bool empty_;
+
     this(JSONValue value) {
         this.stack ~= value;
+        this.empty_ = false;
+        popFront;
     }
 
-    override bool empty() => this.stack.empty;
+    override bool empty() => this.empty_;
+
+    override JsonToken front() => front_;
+
+    override void popFront() {
+        if (this.stack.empty) {
+            this.empty_ = true;
+            return;
+        }
+        this.front_ = nextToken;
+    }
 
     StackEntry head() => this.stack[$ - 1];
 
-    override JsonToken get() {
-        void pop() {
-            this.stack = this.stack[0 .. $ - 1];
-        }
+    void pop() {
+        this.stack = this.stack[0 .. $ - 1];
+    }
+
+    JsonToken nextToken() {
         JsonToken transform(JSONValue value) {
             value.value.case {
                 :false:
@@ -106,14 +138,16 @@ class JsonValueSource : JsonSource
 
 unittest
 {
+    import std.algorithm : array;
+
     auto value = JSONValue({"a": 3, "b": [4, 5, 6], "c": "Hello World"});
     auto source = new JsonValueSource(value);
-    JsonToken[] all() {
-        mut JsonToken[] result;
-        while (!source.empty) result ~= source.get;
-        return result;
+    mut JsonToken[] tokens;
+    while (!source.empty) {
+        tokens ~= source.front;
+        source.popFront;
     }
-    assert(all == [
+    assert(tokens == [
         :objectStart,
             (:objectKey, key="a"),
                 3,
@@ -272,39 +306,123 @@ unittest {
     assert(sink.value == JSONValue({"a": 2, "b": ["foo", "bar"], "c": false}));
 }
 
-T decode(T)(JsonSource source) {
+struct DecodeError
+{
+    string message;
+
+    string toString() => "DecodeError($message)";
+}
+
+(T | fail DecodeError) decode(T)(JsonSource source) {
+    if (source.empty) return DecodeError("end of input reached while decoding");
+    auto token = source.front;
+    source.popFront;
     macro {
         import neat.array;
         import neat.struct_;
         import neat.types;
+        import neat.util : ASTSymbolHelper;
 
         auto T = type("T")?;
-        if (T.instanceOf(Integer) || T.instanceOf(Long) || T.instanceOf(Short) || T.instanceOf(Boolean)) {
-            code { sink.put(value); }
+        if (T.instanceOf(Integer) || T.instanceOf(Long) || T.instanceOf(Short)) {
+            code {
+                token.case {
+                    int i: return cast(T) i;
+                    default: return DecodeError("expected integer, but got $(token.repr)");
+                }
+            }
+        } else if (T.instanceOf(Boolean)) {
+            code {
+                token.case {
+                    bool b: return b;
+                    default: return DecodeError("expected boolean, but got $(token.repr)");
+                }
+            }
         } else if (auto array_ = T.instanceOf(Array)) {
+            auto astElementType = new ASTSymbolHelper(array_.elementType);
             if (array_.elementType.instanceOf(Character)) {
-                code { sink.put(value); }
+                code {
+                    token.case {
+                        string s: return s;
+                        default: return DecodeError("expected string, but got $(token.repr)");
+                    }
+                }
             } else {
                 code {
-                    sink.put(:arrayStart);
-                    for (entry in value)
-                        .encode(entry, sink);
-                    sink.put(:arrayEnd);
+                    if (token != :arrayStart)
+                        return DecodeError("expected '[', but got $(token.repr)");
+                    mut T result;
+                    while (source.front != :arrayEnd) {
+                        result ~= .decode!($astElementType)(source)?;
+                    }
+                    source.popFront;
+                    return result;
                 }
             }
         } else if (auto struct_ = T.instanceOf(Struct)) {
-            code { sink.put(:objectStart); }
-            for (member in struct_.members) {
-                auto name = compiler.astIdentifier(member.name, __RANGE__);
-                auto nameStr = compiler.astStringLiteral(member.name, __RANGE__);
-                code {
-                    sink.put((:objectKey, $nameStr));
-                    .encode(value.$name, sink);
+            code {
+                if (token != :objectStart)
+                    return DecodeError("expected '{', but got $(token.repr)");
+            }
+            mut ASTSymbol[] args;
+            for (i, member in struct_.members) {
+                auto astName = compiler.astStringLiteral(member.name, __RANGE__);
+                auto astFieldType = new ASTSymbolHelper(member.type);
+                auto astField = compiler.astIdentifier("field$i", __RANGE__);
+                code { mut ($astFieldType | :none) $astField = :none; }
+                args ~= compiler.$expr $astField.case(:none: return DecodeError("missing field $($astName)"));
+            }
+            code {
+                while (true) {
+                    source.front.case {
+                        :objectEnd:
+                            source.popFront;
+                            break;
+                        (:objectKey, string key):
+                            source.popFront;
+                            macro {
+                                for (i, member in struct_.members) {
+                                    auto astFieldType = new ASTSymbolHelper(member.type);
+                                    auto astField = compiler.astIdentifier("field$i", __RANGE__);
+                                    auto nameStr = compiler.astStringLiteral(member.name, __RANGE__);
+                                    code {
+                                        if (key == $nameStr) {
+                                            $astField = .decode!($astFieldType)(source)?;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                            return DecodeError("expected object member, but got $(token.repr)");
+                        default:
+                            return DecodeError("expected object key, but got $(token.repr)");
+                    }
                 }
             }
-            code { sink.put(:objectEnd); }
+            auto call = compiler.(astCall(astIdentifier("T", __RANGE__), args, __RANGE__));
+            code { return $call; }
         } else {
-            return __RANGE__.fail("Don't know how to encode $(T.repr)");
+            return __RANGE__.fail("Don't know how to decode $(T.repr)");
         }
     }
+}
+
+///
+unittest
+{
+    auto source = a => new JsonValueSource(a);
+
+    assert(JSONValue(5).source.decode!int == 5);
+    assert(JSONValue(true).source.decode!bool == true);
+    assert(JSONValue("foo").source.decode!string == "foo");
+    assert(JSONValue([2, 3, 4]).source.decode!(int[]) == [2, 3, 4]);
+    assert(JSONValue(["foo", "bar"]).source.decode!(string[]) == ["foo", "bar"]);
+
+    struct S {
+        int a;
+        string[] b;
+        bool c;
+        string toString() => "S($a, $b, $c)";
+    }
+    assert(JSONValue({"a": 2, "b": ["foo", "bar"], "c": false}).source.decode!S == S(2, ["foo", "bar"], false));
 }

@@ -350,6 +350,8 @@ class JsonValueSink : Sink!JsonToken
         :objectValue, string key, (string, JSONValue)[]
     ) mut[] stack;
 
+    bool done() => value != :nothing && stack.empty;
+
     this() {
         this.value = :nothing;
     }
@@ -451,6 +453,14 @@ class JsonValueSink : Sink!JsonToken
         auto T = type("T")?;
         if (T.instanceOf(Integer) || T.instanceOf(Long) || T.instanceOf(Short) || T.instanceOf(Boolean)) {
             code { sink.put(value)?; }
+        } else if (T.same(type("JSONValue")?)) {
+            code {
+                auto source = new JsonValueSource(value);
+                while (true) {
+                    // TODO sink.put(source.get.case(:else: break)?)?;
+                    sink.put(source.get.case(:else: break, Error err: return err))?;
+                }
+            }
         } else if (auto array_ = T.instanceOf(Array)) {
             if (array_.elementType.instanceOf(Character)) {
                 code { sink.put(value)?; }
@@ -511,6 +521,13 @@ unittest {
     assert(sink.value == JSONValue({"a": 2, "b": ["foo", "bar"], "c": false}));
 }
 
+///
+unittest {
+    auto sink = new JsonValueSink;
+    JSONValue({"a": 3}).encode(sink).case(Error: assert(false));
+    assert(sink.value == JSONValue({"a": 3}));
+}
+
 /**
  * Decode a value from a JSON token stream.
  */
@@ -540,6 +557,7 @@ unittest
     assert("[]".source.decode!(int[]) == []);
     assert("[2, 3, 4]".source.decode!(int[]) == [2, 3, 4]);
     assert("[\"foo\", \"bar\"]".source.decode!(string[]) == ["foo", "bar"]);
+    assert("{\"a\": 3}".source.decode!JSONValue == JSONValue({"a": 3}));
 
     struct S {
         int a;
@@ -572,6 +590,19 @@ private (T | fail Error) decodeWithToken(T)(Source!JsonToken source, JsonToken t
                     bool b: return b;
                     default: return new DecodeError("expected boolean, but got $(token.toString)", __RANGE__);
                 }
+            }
+        } else if (T.same(type("JSONValue")?)) {
+            code {
+                auto sink = new JsonValueSink;
+                sink.put(token)?;
+                while (!sink.done) {
+                    // TODO
+                    // sink.put(source.get.case(:else: return new DecodeError(
+                    //     "ran out of content while decoding JSONValue", __RANGE__))?)?;
+                    sink.put(source.get.case(Error err: return err, :else: return new DecodeError(
+                        "ran out of content while decoding JSONValue", __RANGE__)))?;
+                }
+                return sink.value.case(:nothing: assert(false));
             }
         } else if (auto array_ = T.instanceOf(Array)) {
             auto astElementType = new ASTSymbolHelper(array_.elementType);

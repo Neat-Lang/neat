@@ -242,8 +242,9 @@ class Struct : Type, Hashable
         return callAutoDtor(context, expr);
     }
 
-    override (nullable Expression | fail Error) call(Context context, LocRange locRange, ASTArgument[] args)
-    {
+    override (nullable Expression | fail Error) call(Context context, LocRange locRange, ASTArgument[] args) {
+        import package(compiler).std.algorithm : all, array, map;
+
         auto temp = new PairedTemporary(this, Lifetime.gifted, context.getUniqueId);
         Symbol toMethod(LiftedStructMethod method) => new StructMethod(method, temp);
         nullable Symbol structCtor() {
@@ -262,6 +263,17 @@ class Struct : Type, Hashable
                 initialize,
                 context.compiler.exprStatement(call? else die));
             return context.compiler.wrap(initAndCall, temp, null);
+        }
+
+        mut ASTArgument[] args = args;
+        if (args.length < this.members.length
+            // TODO
+            // && this.members[args.length .. $].all(a => a.default_ != null))
+            && this.members[args.length .. $].all(a => a.default_?.(true) else false))
+        {
+            args ~= this.members[args.length .. $]
+                .map(a => ASTArgument(new ASTSymbolHelper(a.default_?.expr), null, a.default_?.range) else die)
+                .array;
         }
 
         locRange.assert(args.length == this.members.length,
@@ -602,7 +614,10 @@ class ASTStructDecl : ASTSymbolDeclaration
                 ASTStructMember member:
                     members ~= new StructMemberDeclaration(
                         member.name, member.protection,
-                        member.type.compile(context)?.beType(this.locRange)?);
+                        member.type.compile(context)?.beType(this.locRange)?,
+                        (
+                            member.default_?.compile(context)?.beExpressionImplCall(context, member.default_?.locRange)?,
+                            member.default_?.locRange) else null);
                 ASTStructVersionBlock ver:
                     if ([any a == ver.name for a in context.platform.versions]) {
                         [walk(entry)? for entry in ver.then];
@@ -858,11 +873,17 @@ class StructLiteral : Expression
     }
     else
     {
+        mut nullable ASTSymbol default_ = null;
         parser.to(from).assert(!static_, () => "no static fields")?;
         (void | fail Error) addMember() {
             parser.assert_(memberName != "__ctor", "constructor cannot be member")?;
             parser.assert_(memberName != "__dtor", "destructor cannot be member")?;
-            entries ~= (memberName, protection, memberType? else die);
+            entries ~= (memberName, protection, memberType? else die, default_);
+            default_ = null;
+        }
+        if (parser.acceptToken(TokenType.equal)) {
+            default_ = lexicalContext.compiler.parseExpression(parser, lexicalContext)??
+                else return parser.fail("field default value expected");
         }
         addMember?;
         while (!parser.acceptToken(TokenType.semicolon)) {
@@ -871,6 +892,10 @@ class StructLiteral : Expression
             string ident = parser.parseIdentifier;
             memberName = ident;
             if (!memberName.length) return parser.fail("expected member name");
+            if (parser.acceptToken(TokenType.equal)) {
+                default_ = lexicalContext.compiler.parseExpression(parser, lexicalContext)??
+                    else return parser.fail("field default value expected");
+            }
             addMember?;
         }
     }

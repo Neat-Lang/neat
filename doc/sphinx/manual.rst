@@ -116,6 +116,15 @@ Integer literals may be arbitrarily divided by underscores for readability: `1_0
 
 `"Hello World"` is a string literal. `string` is the same as `char[]`.
 
+You can interpolate values into a string literal with `$name` or `$(expression)`. The
+compiler will select a type-appropriate default representation. For class and struct types,
+`toString` will be called. An example::
+
+    print("$remaining bottles of beer on the wall.");
+
+:code:`\`Hello World\`` is a literal string. Unlike regular string literals,
+escape sequences and format string quotes are not processed.
+
 `1.2` is a `double` literal. `1.2f` is a `float` literal.
 
 Arithmetic

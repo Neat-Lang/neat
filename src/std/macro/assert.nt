@@ -21,7 +21,9 @@ class ASTAssertion : ASTSymbol
             .compile(context)?.instanceOf(Expression)? else die;
     }
 
-    (nullable Expression | fail Error) binopTest(mut Context context, ASTSymbol left, string op, ASTSymbol right) {
+    (nullable Expression | fail Error) binopTest(mut Context context, ASTSymbol left, string op, ASTSymbol right)
+    with (ErrorLoc(context.warmContext, locRange))
+    {
         void set(string name, Symbol value) {
             context = context.withNamespace(
                 context.compiler.exprAlias(context.namespace, name, value));
@@ -68,31 +70,15 @@ class ASTAssertion : ASTSymbol
             })).compile(context)?.instanceOf(Expression);
         }
         bool isString(Type type) {
-            context.compiler.isArrayType(type).case {
-                Type elementType:
-                    context.compiler.isBasicType(elementType).case {
-                        string type:
-                            return type == "char";
-                        (:none): return false;
-                    }
-                (:none): return false;
-            }
+            auto elementType = context.compiler.isArrayType(type)? else return false;
+            return context.compiler.isBasicType(elementType)? == "char" else false;
         }
         bool isFloat(Type type) {
-            context.compiler.isBasicType(type).case {
-                string type:
-                    return type == "float";
-                (:none):
-                    return false;
-            }
+            return context.compiler.isBasicType(type)? == "float" else false;
         }
         bool isLongCastable(Type type) {
-            context.compiler.isBasicType(type).case {
-                string type:
-                    return type == "int" || type == "long" || type == "char" || type == "short";
-                (:none):
-                    return false;
-            }
+            string type = context.compiler.isBasicType(type)? else return false;
+            return type == "int" || type == "long" || type == "char" || type == "short";
         }
         if (left.type.isLongCastable && right.type.isLongCastable) {
             context.compiler.destructAstNumberLiteral(binop.right).case {
@@ -101,7 +87,7 @@ class ASTAssertion : ASTSymbol
                         import package(compiler).neat.runtime : ltoa;
                         leftStr ~ " = " ~ ltoa(cast(long) left);
                     })).compile(context)?.instanceOf(Expression);
-                (:none): {}
+                (:else): {}
             }
             return (context.compiler.$expr ({
                 import package(compiler).neat.runtime : ltoa;
@@ -119,18 +105,13 @@ class ASTAssertion : ASTSymbol
         if (left.type.isString && right.type.isString) {
             context.compiler.destructAstStringLiteral(binop.right).case {
                 string text:
-                    return (
-                        context.compiler.$expr leftStr ~ " = \"" ~ left ~ "\""
-                    ).compile(context)?.instanceOf(Expression);
-                (:none): {}
+                    return (context.compiler.$expr "$leftStr = \"$left\"")
+                        .compile(context)?.instanceOf(Expression);
+                (:else): {}
             }
-            return (
-                context.compiler.$expr
-                    leftStr ~ " = \"" ~ left ~ "\""
-                    ~ " and " ~ rightStr ~ " = \"" ~ right ~ "\""
-            ).compile(context)?.instanceOf(Expression);
         }
-        return null;
+        return (context.compiler.$expr "$leftStr = \"$left\" and $rightStr = \"$right\"")
+            .compile(context)?.instanceOf(Expression);
     }
 
     (nullable Expression | fail Error) negTest(mut Context context, ASTSymbol next)
@@ -154,21 +135,21 @@ class ASTAssertion : ASTSymbol
     (nullable Expression | fail Error) dispatch(Context context, ASTSymbol sym) {
         context.compiler.destructAstIdentifier(sym).case {
             string ident: return symbolTest(context, sym);
-            (:none): {}
+            (:else): {}
         }
         context.compiler.destructAstMember(sym).case {
             (ASTSymbol base, ASTIdentifierSymbol member): return symbolTest(context, sym);
-            (:none): {}
+            (:else): {}
         }
         context.compiler.destructAstBinaryOp(sym).case {
             (ASTSymbol left, string op, ASTSymbol right):
                 return binopTest(context, left, op, right);
-            (:none): {}
+            (:else): {}
         }
         context.compiler.destructAstNegation(sym).case {
             ASTSymbol next:
                 return negTest(context, next);
-            (:none): {}
+            (:else): {}
         }
         return null;
     }
@@ -176,15 +157,12 @@ class ASTAssertion : ASTSymbol
     override (Symbol | fail Error) compile(Context context) {
         mut Context context = context;
         mut ASTSymbol returnType = context.compiler.$type void;
-        if (context.compiler.destructAstIdentifier(test)
-            .case(:none: false, string ident: ident == "false"))
-        {
+        if (context.compiler.destructAstIdentifier(test)? == "false") {
             // special case: assert(false) is type bottom
             returnType = context.compiler.$type bottom;
         }
 
-        auto ifFailed = dispatch(context, test)?;
-        if (auto ifFailed = ifFailed) {
+        if (auto ifFailed = dispatch(context, test)?) {
             string failedMsg = locRange.repr(context.compiler.fileIdTable) ~
                 ": assertion failed: " ~ exprText ~ ", because ";
             context = context.withNamespace(context.compiler.exprAlias(
@@ -223,42 +201,66 @@ class ASTAssertion : ASTSymbol
     }
 }
 
+struct ErrorLoc {
+    WarmContext __warmContext;
+    LocRange __locRange;
+    void onEnter() {
+        __warmContext.errorStack ~= __locRange;
+    }
+    void onExit() {
+        __warmContext.errorStack = __warmContext.errorStack[0 .. $ - 1];
+    }
+}
+
 string repr(ASTSymbol sym, Context context) {
     import neat.runtime : assert;
     assert(!!sym);
     context.compiler.destructAstIdentifier(sym).case {
         string ident: return ident;
-        (:none): {}
+        (:else): {}
     }
     context.compiler.destructAstMember(sym).case {
-        (ASTSymbol base, ASTIdentifierSymbol member): repr(base, context) ~ "." ~ member.name(context.warmContext);
-        (:none): {}
+        (ASTSymbol base, ASTIdentifierSymbol member):
+            return repr(base, context) ~ "." ~ member.name(context.warmContext);
+        (:else): {}
     }
     context.compiler.destructAstBinaryOp(sym).case {
         (ASTSymbol left, string op, ASTSymbol right):
             return "(" ~ repr(left, context) ~ " $op " ~ repr(right, context) ~ ")";
-        (:none): {}
+        (:else): {}
+    }
+    context.compiler.destructAstTemplateInstance(sym).case {
+        (ASTSymbol decl, ASTSymbol[] types):
+            mut string paramList;
+            for (i, type in types) {
+                if (i) paramList ~= ", ";
+                paramList ~= repr(type, context);
+            }
+            if (types.length == 1)
+                return repr(decl, context) ~ "!$paramList";
+            return repr(decl, context) ~ "!($paramList)";
+        (:else): {}
     }
     context.compiler.destructAstCast(sym).case {
         (ASTSymbol target, ASTSymbol value):
             return "cast(" ~ repr(target, context) ~ ") " ~ repr(value, context);
-        (:none): {}
+        (:else): {}
     }
     context.compiler.destructAstNegation(sym).case {
         ASTSymbol next: return "!" ~ repr(next, context);
-        (:none): {}
+        (:else): {}
     }
     context.compiler.destructAstNumberLiteral(sym).case {
         long value: return "$value";
-        (:none): {}
+        (:else): {}
     }
     context.compiler.destructAstStringLiteral(sym).case {
         string text: return "\"$text\"";
-        (:none): {}
+        (:else): {}
     }
     context.compiler.destructAstCall(sym).case {
         (ASTSymbol target, ASTArgument[] args): return repr(target, context) ~ "(" ~ reprArgs(args, context) ~ ")";
-        (:none): {}
+        (:else): {}
     }
 
     return "TODO";

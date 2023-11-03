@@ -566,6 +566,12 @@ unittest
     }
     assert(JSONValue({"a": 2, "b": ["foo", "bar"], "c": false}).source.decode!S == S(2, ["foo", "bar"], false));
     assert(`{"a": 2, "b": ["foo", "bar"], "c": false}`.source.decode!S == S(2, ["foo", "bar"], false));
+
+    struct T {
+        int a = 5;
+        string toString() => "T(a=$a)";
+    }
+    assert(`{"b": {"c": [5], "d": "6"}}`.source.decode!T == T(5));
 }
 
 private (T | fail Error) decodeWithToken(T)(Source!JsonToken source, JsonToken token) {
@@ -643,8 +649,14 @@ private (T | fail Error) decodeWithToken(T)(Source!JsonToken source, JsonToken t
                 auto astFieldType = new ASTSymbolHelper(member.type);
                 auto astField = compiler.astIdentifier("field$i", __RANGE__);
                 code { mut ($astFieldType | :none) $astField = :none; }
-                args ~= compiler.$expr
-                    $astField.case(:none: return new DecodeError("missing field $($astName)", __RANGE__));
+                member.default_.case {
+                    (Expression expr, LocRange range):
+                        auto astExpr = new ASTSymbolHelper(expr, range);
+                        args ~= compiler.$expr $astField.case(:none: $astExpr);
+                    default:
+                        args ~= compiler.$expr
+                            $astField.case(:none: return new DecodeError("missing field $($astName)", __RANGE__));
+                }
             }
             code {
                 // TODO single mode variable
@@ -691,7 +703,10 @@ private (T | fail Error) decodeWithToken(T)(Source!JsonToken source, JsonToken t
                                     }
                                 }
                             }
-                            return new DecodeError("expected object member, but got '$(token.toString)'", __RANGE__);
+                            // Ignore unknown keys in JSON
+                            source.skipValue?;
+                            expectSeparator = true;
+                            continue;
                         default:
                             return new DecodeError("expected object key, but got '$(token.toString)'", __RANGE__);
                     }
@@ -703,6 +718,63 @@ private (T | fail Error) decodeWithToken(T)(Source!JsonToken source, JsonToken t
             return __RANGE__.fail("Don't know how to decode $(T.toString)");
         }
     }
+}
+
+private (void | fail Error) skipValue(Source!JsonToken source) {
+    return source.skipValueWithToken(source.nextToken?);
+}
+
+private (void | fail Error) skipValueWithToken(Source!JsonToken source, JsonToken token) {
+    token.case {
+        string: return;
+        nullptr_t: return;
+        bool: return;
+        int: return;
+        // double: return;
+        :arrayStart:
+            auto token = source.nextToken?;
+            if (token == :arrayEnd) return;
+            source.skipValueWithToken(token)?;
+            while (true) {
+                auto token = source.nextToken?;
+                if (token == :arrayEnd) return;
+                if (token != :comma) return new DecodeError("expected ',' but got '$(token.toString)'", __RANGE__);
+                source.skipValue?;
+            }
+        :arrayEnd:
+            return new DecodeError("unexpected ']' in stream", __RANGE__);
+        :objectStart:
+            (void | fail Error) skipObjectMember(JsonToken token) {
+                token.case {
+                    string: {}
+                    default: return new DecodeError("expected object key, but got '$(token.toString)'", __RANGE__);
+                }
+                auto token = source.nextToken?;
+                if (token != :colon)
+                    return new DecodeError("expected ':', but got '$(token.toString)'", __RANGE__);
+                source.skipValue?;
+            }
+            auto token = source.nextToken?;
+            if (token == :objectEnd) return;
+            skipObjectMember(token)?;
+            while (true) {
+                auto token = source.nextToken?;
+                if (token == :objectEnd) return;
+                if (token != :comma) return new DecodeError("expected ',' but got '$(token.toString)'", __RANGE__);
+                skipObjectMember(source.nextToken?)?;
+            }
+        :objectEnd:
+            return new DecodeError("unexpected '}' in stream", __RANGE__);
+        :comma:
+            return new DecodeError("unexpected ',' in stream", __RANGE__);
+        :colon:
+            return new DecodeError("unexpected ':' in stream", __RANGE__);
+    }
+}
+
+private (JsonToken | fail Error) nextToken(Source!JsonToken source) {
+    return source.get
+        .case(:else: new DecodeError("end of stream reached", __RANGE__));
 }
 
 private class StringSource : Source!(ubyte[]) {

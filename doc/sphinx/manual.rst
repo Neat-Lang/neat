@@ -398,16 +398,15 @@ The variable will only be visible inside the `if` block::
 of the tested variable can be `Class`. This is the only way in which `nullable Class`
 types can be converted to `Class`.
 
-Let block
-^^^^^^^^^
+The `if let` form acts exactly like `if`, except that the variable does not have to be truthy::
 
-The `let` statement acts exactly like `if`, except that the variable does not have to be truthy::
-
-    let (auto bar = getFoo()?.bar) {
+    if let(auto bar = getFoo()?.bar) {
         // bar may be false here.
     }
 
-As with `if`, `breakelse` jumps to the `else` block or past the statement.
+The intended meaning is: "The fact that the variable was declared already indicates success."
+
+As with regular `if`, `breakelse` jumps to the `else` block or past the statement.
 
 This idiom is aimed at code that wants to use the result of a chain of `?` expressions,
 but doesn't particularly care about its truth value.

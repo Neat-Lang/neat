@@ -2307,7 +2307,9 @@ class ASTIfStatement : ASTStatement
 
     nullable ASTStatement else_;
 
-    this(this.test, this.then, this.else_, this.locRange) { }
+    bool letMode;
+
+    this(this.test, this.then, this.else_, this.letMode, this.locRange) { }
 
     override (StatementCompileResult | fail Error) compile(Context context)
     {
@@ -2320,6 +2322,7 @@ class ASTIfStatement : ASTStatement
         mut auto testSucceedsNamespace = context.namespace;
         this.test.case {
             ASTSymbol symbol: {
+                assert(!letMode);
                 // TODO pick assignment
                 test = symbol.compile(context)?.beExpressionImplCall(context, this.locRange)?;
             }
@@ -2333,7 +2336,7 @@ class ASTIfStatement : ASTStatement
 
                 // `if (Foo var = some nullable Foo)`:
                 //   - cache `some`, test for nullness, then declare Foo var.
-                if (initial.type.zeroInitializable && context.compiler.isClassType(initial.type)
+                if (!letMode && initial.type.zeroInitializable && context.compiler.isClassType(initial.type)
                     && (!declType || !declType.zeroInitializable && context.compiler.isClassType(declType? else die)))
                 {
                     Type notNullableType = initial.type.makeNotNullable;
@@ -2358,14 +2361,19 @@ class ASTIfStatement : ASTStatement
                     auto pair = vardecl.compile(context)?;
                     prelude = pair.statement;
                     testSucceedsNamespace = pair.namespace;
-                    auto var = testSucceedsNamespace.lookup(
-                            name, context, LookupReason.identifier, this.locRange)?? else die
-                        .beExpression(this.locRange)?;
-                    // TODO lookup() that handles the stackframe thing
-                    test = var.beExpressionImplCall(context, this.locRange)?;
+                    if (letMode) {
+                        test = new BoolLiteral(true);
+                    } else {
+                        auto var = testSucceedsNamespace.lookup(
+                                name, context, LookupReason.identifier, this.locRange)?? else die
+                            .beExpression(this.locRange)?;
+                        // TODO lookup() that handles the stackframe thing
+                        test = var.beExpressionImplCall(context, this.locRange)?;
+                    }
                 }
             }
             ASTVarExtractDeclStatement extractdecl: {
+                assert(!letMode);
                 return extractdecl.locRange.fail(
                     "This syntax is disabled at the moment until I figure out what to use it for.");
                 // if (auto var <- expr) where expr is (nullable T, fail)
@@ -2426,7 +2434,8 @@ class ASTIfStatement : ASTStatement
     }
 }
 
-(nullable ASTIfStatement | fail Error) parseIf(ParserImpl parser, LexicalContext lexicalContext, LocRange from)
+(nullable ASTIfStatement | fail Error) parseIf(ParserImpl parser, LexicalContext lexicalContext, LocRange from,
+    bool letMode)
 {
     mut uninitialized (ASTSymbol | ASTVarDeclStatement | ASTVarExtractDeclStatement) test;
     auto locRange = parser.to(from);
@@ -2435,6 +2444,7 @@ class ASTIfStatement : ASTStatement
     if (auto vardecl = vardecl)
         test = vardecl;
     else {
+        locRange.assert(!letMode, "let () expected a variable declaration")?;
         auto varextractdecl = parseVarExtractDecl(parser, lexicalContext)?;
         if (auto varextractdecl = varextractdecl) test = varextractdecl;
         else {
@@ -2448,7 +2458,7 @@ class ASTIfStatement : ASTStatement
     {
         elseStatement = parseStatement(parser, lexicalContext)?;
     }
-    return new ASTIfStatement(test, thenStmt, elseStatement, locRange);
+    return new ASTIfStatement(test, thenStmt, elseStatement, letMode, locRange);
 }
 
 (nullable ASTSymbol | fail Error) parseBreakCont(Parser parser, LexicalContext lexicalContext)
@@ -3753,7 +3763,11 @@ class ASTStaticIfStatement : ASTStatement
     auto keyword = parser.parseIdentifier;
     if (keyword == "if") {
         parser.commit;
-        return parseIf(parser, lexicalContext, from);
+        return parseIf(parser, lexicalContext, from, letMode=false);
+    }
+    if (keyword == "let") {
+        parser.commit;
+        return parseIf(parser, lexicalContext, from, letMode=true);
     }
     if (keyword == "while") {
         parser.commit;

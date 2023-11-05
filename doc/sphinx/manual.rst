@@ -375,8 +375,8 @@ Any reference may be assigned a new value::
 Note that only mutable (`mut`) variables or parameters can be reassigned. As this allows
 some optimizations to reference counting, non-mutable variables should be preferred.
 
-If test
-^^^^^^^
+If block
+^^^^^^^^
 
 If a condition is true, execute one statement, else the other::
 
@@ -397,6 +397,20 @@ The variable will only be visible inside the `if` block::
 `nullable Class` types are true if the class is non-null. In that case, the type
 of the tested variable can be `Class`. This is the only way in which `nullable Class`
 types can be converted to `Class`.
+
+Let block
+^^^^^^^^^
+
+The `let` statement acts exactly like `if`, except that the variable does not have to be truthy::
+
+    let (auto bar = getFoo()?.bar) {
+        // bar may be false here.
+    }
+
+As with `if`, `breakelse` jumps to the `else` block or past the statement.
+
+This idiom is aimed at code that wants to use the result of a chain of `?` expressions,
+but doesn't particularly care about its truth value.
 
 While loop
 ^^^^^^^^^^

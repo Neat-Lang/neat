@@ -81,20 +81,21 @@ class JsonLexer : Source!JsonToken
         }
         while (true) {
             if (buffer.empty) getMore?;
-            if (buffer[0] == cast(ubyte) ' ') {
+            alias front = cast(char) buffer[0];
+            if (front == ' ' || front == '\r' || front == '\n') {
                 drop;
                 continue;
             }
-            if (buffer[0] == cast(ubyte) ',') { drop; return :comma; }
-            if (buffer[0] == cast(ubyte) ':') { drop; return :colon; }
-            if (buffer[0] == cast(ubyte) '{') { drop; return :objectStart; }
-            if (buffer[0] == cast(ubyte) '}') { drop; return :objectEnd; }
-            if (buffer[0] == cast(ubyte) '[') { drop; return :arrayStart; }
-            if (buffer[0] == cast(ubyte) ']') { drop; return :arrayEnd; }
-            if (isDigit(cast(char) buffer[0])) {
+            if (front == ',') { drop; return :comma; }
+            if (front == ':') { drop; return :colon; }
+            if (front == '{') { drop; return :objectStart; }
+            if (front == '}') { drop; return :objectEnd; }
+            if (front == '[') { drop; return :arrayStart; }
+            if (front == ']') { drop; return :arrayEnd; }
+            if (isDigit(front)) {
                 mut int len = 1;
                 while (true) {
-                    if (len == buffer.length) getMore.case(:else: break)?;
+                    if (len == buffer.length) getMore.case(:else: break, Error err: return err);
                     if (isDigit(cast(char) buffer[len])) {
                         len++;
                         continue;
@@ -117,33 +118,32 @@ class JsonLexer : Source!JsonToken
                 drop(4);
                 return null;
             }
-            if (buffer[0] == cast(ubyte) '"') {
+            if (front == '"') {
                 drop;
                 mut bool escaped = false;
                 mut string result;
                 while (true) {
                     if (buffer.empty) getMore?;
                     if (escaped) {
+                        drop;
                         escaped = false;
-                        drop;
                         continue;
                     }
-                    if (buffer[0] == cast(ubyte) '\\') {
+                    if (front == '\\') {
+                        drop;
                         escaped = true;
-                        drop;
                         continue;
                     }
-                    if (buffer[0] != cast(ubyte) '"') {
-                        result ~= cast(char) buffer[0];
+                    if (front == '"') {
                         drop;
-                        continue;
+                        break;
                     }
+                    result ~= front;
                     drop;
-                    break;
                 }
                 return result;
             }
-            return new DecodeError("Invalid content in JSON text: $buffer", __RANGE__);
+            return new DecodeError("Invalid content in JSON text: $((cast(char*) buffer.ptr)[0 .. buffer.length])", __RANGE__);
         }
     }
 }
@@ -320,7 +320,8 @@ unittest
     auto value = JSONValue({"a": 3, "b": [4, 5, 6], "c": "Hello World"});
     auto source = new JsonValueSource(value);
     mut JsonToken[] tokens;
-    // while (auto token = source.get? else break) {
+    // TODO
+    // while let (auto token = source.get? else break) {
     while (true) {
         auto token = source.get.case(:else: break, Error: assert(false));
         tokens ~= token;
@@ -450,6 +451,7 @@ class JsonValueSink : Sink!JsonToken
         import neat.types;
 
         auto T = type("T")?;
+
         if (T.instanceOf(Integer) || T.instanceOf(Long) || T.instanceOf(Short) || T.instanceOf(Boolean)) {
             code { sink.put(value)?; }
         } else if (T.same(type("JSONValue")?)) {
@@ -649,13 +651,14 @@ private (T | fail Error) decodeWithToken(T)(Source!JsonToken source, JsonToken t
                 auto astFieldType = new ASTSymbolHelper(member.type);
                 auto astField = compiler.astIdentifier("field$i", __RANGE__);
                 code { mut ($astFieldType | :none) $astField = :none; }
-                member.default_.case {
-                    (Expression expr, LocRange range):
-                        auto astExpr = new ASTSymbolHelper(expr, range);
-                        args ~= compiler.$expr $astField.case(:none: $astExpr);
-                    default:
-                        args ~= compiler.$expr
-                            $astField.case(:none: return new DecodeError("missing field $($astName)", __RANGE__));
+                // TODO
+                // if let((Expression expr, LocRange range) = member.default_?) {
+                if let((Expression expr, LocRange range) pair = member.default_?) {
+                    auto astExpr = new ASTSymbolHelper(pair.expr, pair.range);
+                    args ~= compiler.$expr $astField.case(:none: $astExpr);
+                } else {
+                    args ~= compiler.$expr
+                        $astField.case(:none: return new DecodeError("missing field $($astName)", __RANGE__));
                 }
             }
             code {
@@ -673,7 +676,7 @@ private (T | fail Error) decodeWithToken(T)(Source!JsonToken source, JsonToken t
                             break;
                         :comma:
                             if (expectSeparator) expectSeparator = false;
-                            else return new DecodeError("unexpected ','", __RANGE__)
+                            else return new DecodeError("unexpected ','", __RANGE__);
                             continue;
                         string key:
                             if (expectSeparator)

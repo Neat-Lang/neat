@@ -197,23 +197,26 @@ Error propagation operator
 
 `x?` is the error propagation operator. Its behavior depends on the type of `x`:
 
+- if `x` is a subtype of `std.error.Error`, it is returned from the current function.
 - if `x` is a sumtype:
-    - all types marked `fail` are returned from the current function
-    - if it contains an `:else` type, it is mapped to `breakelse`
-    - if it contains a `nullptr_t` type, it is mapped to `breakelse`
+    - all subclasses of `std.error.Error` are returned from the current function.
+    - all types marked `fail` are returned from the current function.
+      This is a legacy feature: `Error` subclasses should be preferred.
+    - if it contains an `:else` type, it is mapped to `breakelse`.
+    - if it contains a `nullptr_t` type, it is mapped to `breakelse`.
 - if `x` is a `nullable T`, it is treated as a sumtype of `T | nullptr_t`.
   The `nullptr_t` is then mapped to `breakelse`.
 
 The member types `nullptr_t` and `:else` are thus interpreted as "not error, not success":
 they are "expected failures" that exit the current `if` test but not the function.
-For instance, when reading data from a file, an I/O error would be a `fail` member,
-but reaching the end of the file would be communicated by `:else`.
+For instance, when reading data from a file, an I/O error class would subclass `Error` and
+thus be returned, but reaching the end of the file would be communicated by `:else`.
 
 Since `?` maps certain types to control flow expressions, which are typed `bottom`,
 they are removed from the sumtype. As such, `?` leaves only successful types behind.
 
-Note that when a sumtype contains both `fail` types *and* a nullable class, the first application
-of `?` will only get rid of the `fail` types: you may require two `?`.
+Note that when a sumtype contains both `Error`/`fail` types *and* a nullable class,
+the first application of `?` will only get rid of the `Error`/`fail` types: you may require two `?`.
 
 Example::
 
@@ -553,6 +556,8 @@ Members of a sumtype can be marked as "fail", enabling error return::
     int i = foo()?;
 
 If foo returns a `FileNotFound`, it will be automatically returned at the `?`.
+
+Note that this is not required for subtypes of `std.error.Error`.
 
 Symbol Identifier
 ^^^^^^^^^^^^^^^^^

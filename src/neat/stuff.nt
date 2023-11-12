@@ -1232,6 +1232,10 @@ class ASTPropagateFailureExpr : ASTSymbol
                 if (auto eitherExpr = eitherIntf.toEitherType(context, base)?)
                     return eitherExpr;
             }
+            if (auto classType = base.type.instanceOf(ClassType)) if (classType.class_.errorclass) {
+                // hack: create a placeholder one-entry Either type so we can strip out the class so bottom remains.
+                return new EitherExpr(new Either([(false, base.type)]), base, 0);
+            }
             return base;
         }
         auto base = base?;
@@ -1243,6 +1247,11 @@ class ASTPropagateFailureExpr : ASTSymbol
             ASTSymbol expr() {
                 auto a = new ASTIdentifier("a", false, __RANGE__);
                 if (v.fail) {
+                    anyNonlocalExits = true;
+                    return new ASTReturn(a, this.locRange);
+                }
+                if (auto class_ = v.type.instanceOf(ClassType)) if (class_.class_.errorclass)
+                {
                     anyNonlocalExits = true;
                     return new ASTReturn(a, this.locRange);
                 }
@@ -3212,13 +3221,13 @@ class ASTNestedFunctionDeclExpr : ASTSymbol
         commit;
 
         assert(!params.variadic);
-        ASTParameter pick((ASTParameter | ASTThisAssignment) value) {
+        (ASTParameter | fail Error) pick((ASTParameter | ASTThisAssignment) value) {
             value.case {
                 ASTParameter p: return p;
-                ASTThisAssignment a: parser.fail("cannot have this-assignment in nested function literal");
+                ASTThisAssignment a: return parser.fail("cannot have this-assignment in nested function literal");
             }
         }
-        auto params = [pick(entry) for entry in params.params];
+        auto params = [pick(entry)? for entry in params.params];
         ASTStatement stmt = lexicalContext.compiler.parseStatement(parser, lexicalContext)?;
         auto locRange = parser.to(from);
         return new ASTNestedFunctionDeclExpr(params, stmt, lexicalContext.macroState, locRange);

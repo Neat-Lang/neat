@@ -740,7 +740,12 @@ class Options
             exit(1);
         }
 
-        auto result = parser.parse(args).case(string s: die(s));
+        version (firstpass) {
+            auto result = parser.parse(args).case(string s: die(s));
+        } else {
+            import std.error : Error;
+            auto result = parser.parse(args).case(Error err: die(err.message));
+        }
 
         // TODO if variable assignment/truthy split overloading
         if (result.has("help")) { help(parser, executable); exit(0); }
@@ -901,7 +906,7 @@ ASTModule builtinSymbols(Options options) {
     return builtins;
 }
 
-(void | :exit, int) buildBinary(
+(void | fail Error) buildBinary(
     Options options, WorkPool workPool,
     string mainFile, string execPath, Package[] packages, int loopPass,
 ) {
@@ -942,17 +947,9 @@ ASTModule builtinSymbols(Options options) {
         moduleVisitors ~= docGenVisitor;
     }
 
-    (:exit, int) printError(Error err) {
-        .printError(err, compiler.fileIdTable);
-        return (:exit, 1);
-    }
-
-    auto astModule = getModule(compiler, mainFile, null, false, parserHelper, __RANGE__)
-        .case(Error err: return printError(err));
+    auto astModule = getModule(compiler, mainFile, null, false, parserHelper, __RANGE__)?;
     BuildResult result = buildAstModule(astModule, settings, moduleVisitors,
-        compilationVisitors, compiler.fileIdTable, options,
-    )
-        .case(Error err: return printError(err));
+        compilationVisitors, compiler.fileIdTable, options)?;
     mut string fileArgs = [join " " ~ a for a in result.objFiles];
     string[] intermediateFiles = result.intermediateFiles;
     if (options.umlFile != "") {
@@ -992,8 +989,7 @@ long long int compiler_hash_mult() { return $(mult)LL; }
     fileArgs ~= " " ~ unittestFile;
     intermediates ~= unittestFile;
 
-    (string | fail :exit, int) mainName() => result.module_.extractFunction("main", settings, __RANGE__)
-        .case(Error err: return printError(err))
+    (string | fail Error) mainName() => result.module_.extractFunction("main", settings, __RANGE__)?
         .mangle;
 
     if (options.intermediateListFile != "") {
@@ -1078,12 +1074,16 @@ void main(mut string[] args)
     }
     auto pool = new ThreadPool(options.threads);
     auto workPool = new WorkPool(pool);
-    (void | :exit, int) build(int loopPass)
+    (void | Error) build(int loopPass)
         => .build(options, workPool=workPool, args=args, allArgs=allArgs, execPath=execPath, loopPass=loopPass);
     if (options.loop) {
         mut int loopPass = 0;
         while (true) {
-            build(loopPass=loopPass++);
+            build(loopPass=loopPass++).case {
+                void: {}
+                Error err:
+                    .printError(err, options.fileIdTable);
+            }
             if (options.watch) {
                 watchForChanges(workPool);
             } else {
@@ -1095,7 +1095,9 @@ void main(mut string[] args)
     } else {
         build(loopPass=0).case {
             void: return;
-            (:exit, int i): exit(i);
+            Error err:
+                .printError(err, options.fileIdTable);
+                exit(1);
         }
     }
 }
@@ -1126,7 +1128,7 @@ void watchForChanges(WorkPool workPool) {
     close(fd);
 }
 
-(void | :exit, int) build(
+(void | Error) build(
     Options options, WorkPool workPool, string[] args, string[] allArgs, string execPath, int loopPass
 ) {
     if (args[0] == "build") {
@@ -1136,7 +1138,7 @@ void watchForChanges(WorkPool workPool) {
     }
 }
 
-(void | :exit, int) buildFile(Options options, WorkPool workPool, string mainFile, string execPath, int loopPass) {
+(void | Error) buildFile(Options options, WorkPool workPool, string mainFile, string execPath, int loopPass) {
     // Add "." default package for commandline builds
     // This must be first in the list so that commandline can always override it.
     auto packages = options.astPackages.resolvePackages(execPath);
@@ -1147,7 +1149,7 @@ void watchForChanges(WorkPool workPool) {
     return buildBinary(options, workPool, mainFile, execPath=execPath, packages, loopPass=loopPass);
 }
 
-(void | :exit, int) buildPackage(Options options, WorkPool workPool, string[] allArgs, string execPath, int loopPass) {
+(void | Error) buildPackage(Options options, WorkPool workPool, string[] allArgs, string execPath, int loopPass) {
     mut Package[] packages = options.astPackages.resolvePackages(execPath);
     BinaryPackageFile pkgFile() {
         loadPkgFile(".", options.runningCompilerVersion).case {

@@ -687,7 +687,25 @@ class LatentNestedFunction : LatentSymbol
     override bool mayCallImplicit() => fun.mayCallImplicit;
 }
 
+/**
+ * When used as the default value in an argument list, will be resolved to the LocRange of the caller.
+ */
+class ASTCallerExpr : ASTSymbol
+{
+    override (Symbol | fail Error) compile(Context context) {
+        return context.fail(this.locRange, "__CALLER__ can only used as default parameter");
+    }
+    override string repr() => "__CALLER__";
+}
+
 (Parameter | fail Error) compile(ASTParameter param, Context context) {
+    auto type = param.type.compile(context)?.beType(param.locRange)?;
+
+    if (param.defaultValue?.instanceOf(ASTCallerExpr)) {
+        return Parameter(isThisAssignment=false, param.name, param.mutable, type=type, defaultValue=:callerRange,
+            param.locRange);
+    }
+
     (nullable Expression | fail Error) defaultValue(ASTParameter param, Type type) {
         if (!param.defaultValue) return null;
         auto context = context.withNamespace(findParent!ModuleBase(context.namespace));
@@ -696,13 +714,17 @@ class LatentNestedFunction : LatentSymbol
             .beExpressionImplCall(context, param.locRange)?
             .expectImplicitConvertTo(type, context, param.locRange)?;
     }
-    auto type = param.type.compile(context)?.beType(param.locRange)?;
     auto defaultValue = defaultValue(param, type)?;
     return Parameter(isThisAssignment=false, param.name, param.mutable, type=type, defaultValue=defaultValue,
         param.locRange);
 }
 
 (Parameter | fail Error) compile(ASTThisAssignment param, Type type, Context context) {
+    if (param.defaultValue?.instanceOf(ASTCallerExpr)) {
+        return Parameter(isThisAssignment=true, param.name, mutable=false, type=type, defaultValue=:callerRange,
+            param.locRange);
+    }
+
     (nullable Expression | fail Error) defaultValue() {
         if (!param.defaultValue) return null;
         return param.defaultValue.compile(context)?

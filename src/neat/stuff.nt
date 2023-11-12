@@ -1712,20 +1712,28 @@ class ASTPrePostIncDec : ASTSymbol
 }
 
 // the AST of a LocRange literal recreating the passed loc.
-ASTSymbol locRangeExpr(LocRange locRange, Parser parser, LexicalContext lexicalContext)
+class ASTLocRangeExpr : ASTSymbol
 {
-    parser.pinned = true;
-    with (lexicalContext.compiler)
-        return astCall(
-            astIdentifier("LocRange", locRange), [
-                astNumberLiteral(locRange.fileId, __RANGE__),
-                astTupleLiteral([
-                    astNumberLiteral(locRange.from.row, __RANGE__),
-                    astNumberLiteral(locRange.from.column, __RANGE__)], __RANGE__),
-                astTupleLiteral([
-                    astNumberLiteral(locRange.to.row, __RANGE__),
-                    astNumberLiteral(locRange.to.column, __RANGE__)], __RANGE__),
-            ], __RANGE__);
+    override (Symbol | fail Error) compile(Context context) {
+        with (context.compiler) {
+            auto fileId = astNumberLiteral(locRange.fileId, __RANGE__);
+            auto fromRow = astNumberLiteral(locRange.from.row, __RANGE__);
+            auto fromCol = astNumberLiteral(locRange.from.column, __RANGE__);
+            auto toRow = astNumberLiteral(locRange.to.row, __RANGE__);
+            auto toCol = astNumberLiteral(locRange.to.column, __RANGE__);
+            if (context.namespace.lookup("LocRange", context, LookupReason.identifier, this.locRange)??) {
+                // we're using __RANGE__ in neat.base: don't import it again
+                return (context.compiler.$expr LocRange($fileId, ($fromRow, $fromCol), ($toRow, $toCol)))
+                    .compile(context);
+            } else {
+                return (context.compiler.$expr ({
+                    import package(compiler).neat.base : LocRange;
+                    LocRange($fileId, ($fromRow, $fromCol), ($toRow, $toCol));
+                })).compile(context);
+            }
+        }
+    }
+    override string repr() => "__RANGE__";
 }
 
 (nullable ASTSymbol | fail Error) parseExpressionBase(ParserImpl parser, LexicalContext lexicalContext)
@@ -1751,7 +1759,10 @@ ASTSymbol locRangeExpr(LocRange locRange, Parser parser, LexicalContext lexicalC
     parser.revert;
     string name = parser.parseIdentifier;
     if (name.length) {
-        if (name == "__RANGE__") return locRangeExpr(parser.to(from), parser, lexicalContext);
+        if (name == "__RANGE__") {
+            parser.pinned = true;
+            return new ASTLocRangeExpr(parser.to(from));
+        }
         if (name == "super") return new ASTSuper(parser.to(from));
         return new ASTIdentifier(name, false, parser.to(from));
     }

@@ -57,6 +57,7 @@ html_theme = 'alabaster'
 html_static_path = ['_static']
 
 
+html_permalinks_icon = '¶'
 html_sidebars = {
    '**': ['about.html', 'navigation.html', 'searchbox.html'],
    'dconf_23': [],

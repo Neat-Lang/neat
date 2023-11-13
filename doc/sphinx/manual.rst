@@ -1,8 +1,8 @@
 .. _manual:
 .. highlight:: d
 
-The Neat Language
-=================
+Manual
+======
 
 This document goes through every Neat language feature in approximate sequence.
 The goal is that you should be able to understand the entire language by just

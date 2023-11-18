@@ -1,0 +1,454 @@
+module breakout;
+
+macro import std.macro.cimport;
+macro import std.macro.listcomprehension;
+
+import std.math;
+import std.math.vector;
+import std.stdio;
+
+import c_header("raylib.h");
+pragma(lib, "raylib");
+pragma(lib, "glfw");
+pragma(lib, "m");
+pragma(lib, "pthread");
+
+alias vec4ub = Vector(ubyte, 4);
+alias vec2i = Vector(int, 2);
+alias vec2f = Vector(float, 2);
+alias TargetSign = (:negative | :keep | :positive);
+// Our "reference screen size" is 800x600, but we're actually drawing in whatever size the window is.
+alias screenWidth = 800;
+alias screenHeight = 600;
+alias ballRadius = 12;
+alias paddleWidth = 100;
+alias paddleHeight = 20;
+alias stoneWidth = 70;
+alias stoneHeight = 30;
+
+void main() {
+  SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+  InitWindow(screenWidth, screenHeight, "Breakout Clone");
+  SetTargetFPS(60);
+
+  auto game = new Game;
+  game.run;
+}
+
+class Renderer
+{
+  /**
+   * Used to implement screenshake.
+   */
+  vec2f bump, inertia;
+
+  this() {
+    this.bump = vec2f(0);
+    this.inertia = vec2f(0);
+  }
+
+  vec2f posToReal(vec2f v) => (v + bump)  * vec2f(GetScreenWidth, GetScreenHeight) / vec2f(800, 600);
+  vec2f sizeToReal(vec2f v) => v * vec2f(GetScreenWidth, GetScreenHeight) / vec2f(800, 600);
+  vec2f posToFake(vec2f v) => v * vec2f(800, 600) / vec2f(GetScreenWidth, GetScreenHeight);
+
+  Rectangle realRect(vec2f pos, vec2f size) {
+    auto realPos = posToReal(pos), realSize = sizeToReal(size);
+    return Rectangle(realPos.x, realPos.y, realSize.x, realSize.y);
+  }
+
+  void step() {
+    bump += inertia;
+    inertia *= 0.7f;
+    bump *= 0.4f;
+  }
+
+  void bumpInto(TargetSign xSign, TargetSign ySign) {
+    this.inertia += vec2f(4.0f) * vec2f(
+      xSign.case(:negative: -1, :keep: 0, :positive: 1),
+      ySign.case(:negative: -1, :keep: 0, :positive: 1));
+  }
+
+  vec2f fakeMousePosition() {
+    return posToFake(GetMousePosition.(vec2f(x, y)));
+  }
+
+  void drawRectangle(vec2f pos, vec2f size, Color color) {
+    int i(float f) => cast(int) f;
+    realRect(pos, size).(DrawRectangle(x.i, y.i, width.i, height.i, color));
+  }
+
+  void drawRectangle(vec2f pos, vec2f size, Texture texture) {
+    realRect(pos, size).(DrawTexturePro(
+      texture,
+      Rectangle(0, 0, 64, 32),
+      realRect(pos, size),
+      Vector2(0, 0),
+      rotation=0,
+      WHITE));
+  }
+
+  void drawEllipse(vec2f pos, vec2f size, Color color) {
+    auto realPos = posToReal(pos), realSize = sizeToReal(size);
+    int i(float f) => cast(int) f;
+    DrawEllipse(realPos.x.i, realPos.y.i, realSize.x.i, realSize.y.i, color);
+  }
+
+  void drawText(string text, int x, int y, int size, Color color) {
+    auto realPos = posToReal(vec2f(x, y)), realSize = sizeToReal(vec2f(size)).(cast(int) max(x, y));
+    auto i = f => cast(int) f;
+    DrawText(text.ptr, realPos.x.i, realPos.y.i, realSize, color);
+  }
+}
+
+class Paddle
+{
+  vec2f position;
+  vec2f size;
+  Color color;
+
+  this(this.color) {
+    this.position = vec2f((screenWidth - paddleWidth) / 2, screenHeight - 50);
+    this.size = vec2f(paddleWidth, paddleHeight);
+  }
+
+  void draw(Renderer renderer) {
+    renderer.drawRectangle(position, size, color);
+  }
+
+  Rectangle bounds() => Rectangle(position.x, position.y, size.x, size.y);
+
+  vec2f center() => position + size / 2;
+
+  void step(Renderer renderer) {
+    float newX() {
+      // Update paddle position based on mouse cursor
+      float target = renderer.fakeMousePosition.x - size.x / 2;
+      if (target < 0) return 0;
+      if (target > screenWidth - size.x) return screenWidth - size.x;
+      return target;
+    }
+    // FIXME: vector field assignment
+    position = vec2f(newX, position.y);
+  }
+}
+
+class Ball
+{
+  vec2f position;
+  vec2f speed;
+  int radius;
+  Color color;
+  bool hitBottom;
+
+  this(this.color) {
+    this.position = vec2f(screenWidth / 2, screenHeight / 2);
+    this.speed = (vec2f(randf, randf) - 0.5f).(that/that.length) * 10;
+    this.radius = ballRadius;
+    this.hitBottom = false;
+  }
+
+  void draw(Renderer renderer) {
+    renderer.drawEllipse(position, vec2f(radius), color);
+  }
+
+  void step() {
+    position += speed;
+
+    TargetSign xSign() {
+      if (position.x - radius <= 0) return :positive;
+      if (position.x + radius >= screenWidth) return :negative;
+      return :keep;
+    }
+
+    TargetSign ySign() {
+      if (position.y - radius <= 0) return :positive;
+      if (position.y + radius >= screenHeight) return :negative;
+      return :keep;
+    }
+    speed = speed.(vec2f(x.applySign(xSign), y.applySign(ySign)));
+
+    if (ySign == :negative) hitBottom = true;
+  }
+}
+
+class Stone
+{
+  vec2f position;
+  vec2f size;
+  Texture texture;
+  bool alive;
+
+  this(this.position, this.size, this.texture) {
+    this.alive = true;
+  }
+
+  Rectangle bounds() => Rectangle(position.x, position.y, size.x, size.y);
+
+  void draw(Renderer renderer) {
+    if (!alive) return;
+    renderer.drawRectangle(position, size, texture);
+  }
+}
+
+extern(C) int rand();
+float randf() {
+  return (randPos % 100_000) / 100_000.0f;
+}
+int randPos() {
+  int i = rand;
+  return i if i > 0 else -i;
+}
+vec4ub randomColor() => vec4ub(
+  cast(ubyte) (randPos % 255),
+  cast(ubyte) (randPos % 255),
+  cast(ubyte) (randPos % 255),
+  255);
+
+enum GameState
+{
+  initial,
+  playing,
+  winScreen,
+  lossScreen,
+}
+
+class Game
+{
+  Paddle paddle;
+
+  Ball ball;
+
+  Stone[] stones;
+
+  GameState state;
+
+  (vec2f pos, int radius, Color color)[] background;
+
+  this() {
+    this.state = GameState.initial;
+    resetGameState;
+    for (i in 0 .. 30) {
+      int randLight() => randPos % 255;
+      background ~= (
+        vec2f(randPos % 800, randPos % 600), randPos() % 80 + 30,
+        color(randLight, randLight, randLight, 60));
+    }
+  }
+
+  void resetGameState() {
+    this.paddle = new Paddle(GREEN);
+    this.ball = new Ball(RED);
+    this.stones = null;
+    for (row in 0 .. 5) {
+      for (col in 0 .. 9) {
+        auto tex = generateStoneTexture(randomColor);
+        float x = col * (stoneWidth + 10) + 50;
+        float y = row * (stoneHeight + 10) + 50;
+        stones ~= new Stone(vec2f(x, y), vec2f(stoneWidth, stoneHeight), tex);
+      }
+    }
+  }
+
+  void run() {
+    auto renderer = new Renderer;
+
+    while (!WindowShouldClose) {
+      // Update
+      step(renderer);
+
+      // Draw
+      BeginDrawing;
+      ClearBackground(RAYWHITE);
+      drawBackground(renderer);
+
+      paddle.draw(renderer);
+      ball.draw(renderer);
+      [stone.draw(renderer) for stone in stones];
+      if (state == GameState.winScreen) drawVictoryOverlay(renderer);
+      if (state == GameState.lossScreen) drawLossOverlay(renderer);
+
+      EndDrawing;
+    }
+
+    CloseWindow;
+  }
+
+  void drawBackground(Renderer renderer) {
+    for (auto circle in background) {
+      renderer.drawEllipse(circle.pos, vec2f(circle.radius), circle.color);
+    }
+  }
+
+  void drawVictoryOverlay(Renderer renderer) {
+    renderer.drawText(
+      "You Win!", screenWidth / 2 - 50, screenHeight / 2 - 10, 20, GREEN);
+    renderer.drawText(
+      "Click anywhere to restart.", screenWidth / 2 - 120, screenHeight / 2 + 30, 20, DARKGRAY);
+  }
+
+  void drawLossOverlay(Renderer renderer) {
+    renderer.drawText(
+      "Game Over!", screenWidth / 2 - 60, screenHeight / 2 - 10, 20, RED);
+    renderer.drawText(
+      "Click anywhere to restart", screenWidth / 2 - 120, screenHeight / 2 + 30, 20, DARKGRAY);
+  }
+
+  void step(Renderer renderer) {
+    renderer.step;
+    paddle.step(renderer);
+    if (state == GameState.initial) {
+      if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        state = GameState.playing;
+    } else if (state == GameState.playing) {
+      ball.step;
+      collidePaddle(renderer);
+      collideStones(renderer);
+      if ([all a.alive == false for a in stones]) {
+        state = GameState.winScreen;
+      }
+      if (ball.hitBottom) {
+        state = GameState.lossScreen;
+      }
+    } else if (state == GameState.winScreen || state == GameState.lossScreen) {
+      if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        resetGameState;
+        state = GameState.initial;
+      }
+    }
+  }
+
+  void collidePaddle(Renderer renderer) {
+    if (CheckCollisionCircleRec(ball.position.(Vector2(x, y)), ball.radius, paddle.bounds)) {
+      // Calculate the direction of the collision
+      float collisionDirection = ball.position.x - paddle.center.x;
+
+      // Adjust the ball's speed based on the collision direction
+      ball.speed = vec2f(collisionDirection * 0.1f, -ball.speed.y)
+        .(that * ball.speed.length / that.length);
+    }
+  }
+
+  void collideStones(Renderer renderer) {
+    for (stone in stones) {
+      if (!stone.alive || !CheckCollisionCircleRec(
+        ball.position.(Vector2(x, y)), ball.radius, stone.bounds))
+      {
+        continue;
+      }
+      reflectBall(stone, renderer);
+      stone.alive = false;
+    }
+  }
+
+  void reflectBall(Stone stone, Renderer renderer) {
+    // Calculate the relative position of the ball to the center of the stone
+    auto relativePosition = ball.position - stone.position;
+    auto normalizedPosition = relativePosition / stone.size;
+
+    // Determine the target signs given the quadrant
+    (TargetSign x, TargetSign y) sign() {
+      with (normalizedPosition) {
+        bool onXAxis = abs(y) < abs(x);
+        if (onXAxis) {
+          if (x < 0) return (x=:negative, y=:keep);
+          else return (x=:positive, y=:keep);
+        } else {
+          if (y < 0) return (x=:keep, y=:negative);
+          else return (x=:keep, y=:positive);
+        }
+      }
+    }
+    auto sign = sign;
+    renderer.bumpInto(sign.x, sign.y);
+    ball.speed = ball.speed.(vec2f(x.applySign(sign.x), y.applySign(sign.y)));
+  }
+}
+
+// Function to generate a low-resolution stone texture
+Texture2D generateStoneTexture(vec4ub baseColor) {
+  auto size = vec2i(64, 32);
+  auto ch = ub => cast(char) ub;
+  Image stoneImage = GenImageColor(size.x, size.y, baseColor.(Color(x.ch, y.ch, z.ch, w.ch)));
+  ubyte bound(int i) {
+    if (i < 0) return cast(ubyte) 0;
+    if (i > 255) return cast(ubyte) 255;
+    return cast(ubyte) i;
+  }
+  float clamp(float f, float low, float high) {
+    return low if f < low else high if f > high else f;
+  }
+  float smoothstep(float edge0, float edge1, float x)
+  {
+    // Scale, bias, and saturate x to 0..1 range
+    float x = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    // Evaluate polynomial
+    return x * x * (3 - 2 * x);
+  }
+
+  float maxDist = size.x / 2.0f;
+  float maxIntensity = 30.0f;
+  float edgeThreshold = 0.9f;
+
+  for (int y in 0 .. size.y) {
+    for (int x in 0 .. size.x) {
+      int i = y * size.x + x;
+      auto ptr = &(cast(vec4ub*)stoneImage.data)[i];
+      auto pixel = *ptr;
+
+      // Calculate distance from the center
+      float dist = length(vec2f(x - size.x / 2, y - size.y / 2));
+      // Calculate intensity based on distance
+      float intensity = maxIntensity * (1.0f - dist / maxDist);
+      float edgeFactor = smoothstep(edgeThreshold, 1.0f, dist / maxDist);
+      int randVary() => randPos % 20 - 10;
+
+      // Modify pixel values
+      *ptr = vec4ub(
+        bound(pixel.r + cast(int) intensity + randVary),
+        bound(pixel.g + cast(int) intensity + randVary),
+        bound(pixel.b + cast(int) intensity + randVary),
+        cast(ubyte) cast(int) (255 - edgeFactor * 255));
+    }
+  }
+
+  auto stoneTexture = LoadTextureFromImage(stoneImage);
+
+  UnloadImage(stoneImage);
+  return stoneTexture;
+}
+
+float applySign(float f, TargetSign sign) =>
+  sign.case(:negative: -abs(f), :positive: abs(f), :keep: f);
+
+Color LIGHTGRAY() => color(200, 200, 200, 255);
+Color GRAY() => color(130, 130, 130, 255);
+Color DARKGRAY() => color(80, 80, 80, 255);
+Color YELLOW() => color(253, 249, 0, 255);
+Color GOLD() => color(255, 203, 0, 255);
+Color ORANGE() => color(255, 161, 0, 255);
+Color PINK() => color(255, 109, 194, 255);
+Color RED() => color(230, 41, 55, 255);
+Color MAROON() => color(190, 33, 55, 255);
+Color GREEN() => color(0, 228, 48, 255);
+Color LIME() => color(0, 158, 47, 255);
+Color DARKGREEN() => color(0, 117, 44, 255);
+Color SKYBLUE() => color(102, 191, 255, 255);
+Color BLUE() => color(0, 121, 241, 255);
+Color DARKBLUE() => color(0, 82, 172, 255);
+Color PURPLE() => color(200, 122, 255, 255);
+Color VIOLET() => color(135, 60, 190, 255);
+Color DARKPURPLE() => color(112, 31, 126, 255);
+Color BEIGE() => color(211, 176, 131, 255);
+Color BROWN() => color(127, 106, 79, 255);
+Color DARKBROWN() => color(76, 63, 47, 255);
+Color WHITE() => color(255, 255, 255, 255);
+Color BLACK() => color(0, 0, 0, 255);
+Color BLANK() => color(0, 0, 0, 0);
+Color MAGENTA() => color(255, 0, 255, 255);
+Color RAYWHITE() => color(245, 245, 245, 255);
+
+Color color(int r, int g, int b, int a) => Color(
+  cast(char) r,
+  cast(char) g,
+  cast(char) b,
+  cast(char) a);

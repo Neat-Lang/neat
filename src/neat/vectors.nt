@@ -30,7 +30,7 @@ class VectorMember : Expression
 {
     Expression base;
 
-    int index;
+    (int | Expression) index;
 
     VectorType vectorType;
 
@@ -45,14 +45,29 @@ class VectorMember : Expression
 
     override int emit(Generator output)
     {
-        return output.fun.field(vectorType.emit(output.platform), base.emit(output), index);
+        index.case {
+            int index:
+                return output.fun.field(vectorType.emit(output.platform), base.emit(output), index);
+            Expression index:
+                int indexReg = index.emit(output);
+                int baseReg = base.emit(output);
+                int basePtrReg = output.fun.toPtr(vectorType.emit(output.platform), baseReg);
+                auto elementType = vectorType.elementType.emit(output.platform);
+                int offsetReg = output.fun.ptrOffset(elementType, basePtrReg, indexReg);
+                return output.fun.load(elementType, offsetReg);
+        }
     }
 
     override void hash(Hash hash)
     {
         hash.adds("VectorMember");
         base.hash(hash);
-        hash.addl(index);
+        index.case {
+            int index:
+                hash.addl(index);
+            Expression index:
+                index.hash(hash);
+        }
     }
     override string repr() return "$(base.repr)[$index]";
 }
@@ -173,11 +188,23 @@ class VectorType : Type, Hashable
     override (nullable Expression | Error) index(
         Context context, Expression base, Expression index, LocRange locRange)
     {
-        if (auto intLiteral = index.instanceOf(IntLiteral))
-        {
+        if (auto intLiteral = index.instanceOf(IntLiteral)) {
+            if (intLiteral.value < 0 || intLiteral.value >= length) {
+                context.assert2(false, locRange, "vector index expression out of bounds")?;
+            }
             return new VectorMember(base, intLiteral.value);
         }
-        context.assert2(false, locRange, "vector index expression must be literal")?;
+        (nullable Expression | Error) do_(Expression index) {
+            auto astLength = context.compiler.astNumberLiteral(length);
+            auto astIndex = new ASTSymbolHelper(index);
+            auto astIndexTest = context.compiler.$stmt {
+                import package(compiler).neat.runtime.array : checkIndex;
+                checkIndex($astIndex, $astLength);
+            };
+            auto indexTest = astIndexTest.compile(context)?;
+            return context.compiler.statementExpression(indexTest.statement, new VectorMember(base, index));
+        }
+        return context.compiler.exprWithTemporaryExpr(context.getUniqueId, index, &do_);
     }
 
     override (nullable Expression | Error) binaryOp(

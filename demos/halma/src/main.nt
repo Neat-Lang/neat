@@ -1,0 +1,350 @@
+module main;
+
+macro import std.macro.assert;
+macro import std.macro.cimport;
+macro import std.macro.listcomprehension;
+
+import gtk;
+import std.math;
+import std.string;
+import std.time;
+
+import c_header("cairo/cairo.h");
+
+struct Field
+{
+  bool exists;
+  // color marker
+  int marker;
+  int occupied;
+
+  string toString() => "Field(exists=$exists, marker=$marker, occupied=$occupied)";
+}
+
+final class Board
+{
+  int size;
+
+  Field mut[] fields;
+
+  int width() => this.size * 4 - 3;
+
+  int height() => this.size * 4 - 1;
+
+  this(this.size, this.fields) {
+    assert(fields.length == width * height);
+  }
+}
+
+/**
+ This board is strategically spaced so that:
+ - every hexstep from a valid cell is at least in the array, and
+ - no hexstep from a valid cell accidentally hits another valid cell by wraparound.
+
+ x 0 1 2 3 4 5 6 7 8 y
+  |                 |0
+  |    -            |1
+  |    - -          |2
+  |- - # # # - -    |3
+  |  - # # # # -    |4
+  |    # # # # #    |5
+  |    - # # # # -  |6
+  |    - - # # # - -|7
+  |          - -    |8
+  |            -    |9
+  |                 |10
+*/
+Board createBoard(int size) {
+  int width = size * 4 - 3;
+  int height = size * 4 - 1;
+  auto fields = new Field mut[](width * height);
+  for (i in 0 .. fields.length)
+    fields[i].occupied = -1;
+  int offs(int x, int y) {
+    assert(x >= 0 && x < width);
+    assert(y >= 0 && y < height);
+    return (y + 1) * width + x;
+  }
+  // central area
+  void set(int x, int y, int marker = -1, bool goal = false) {
+    fields[offs(x, y)].exists = true;
+    fields[offs(x, y)].marker = marker;
+    fields[offs(x, y)].occupied = -1 if goal else marker;
+  }
+  for (int a in 0 .. size * 2 - 1) {
+    for (int b in 0 .. size * 2 - 1) {
+      set(a + size - 1, b + size - 1, -1);
+    }
+  }
+  for (int a in 0 .. size - 1) {
+    for (int b in 0 .. a + 1) {
+      int end = width - 1;
+      set(size - 1 + b, a, 0, false);
+      set(size * 3 - 3 - b, size * 2 - 3 - a, 1, true);
+      set(a, size - 1 + b, 2, true);
+      set(end - (size - 1 + b), end - a, 0, true);
+      set(size * 2 - 3 - a, size * 3 - 3 - b, 1, false);
+      set(end - a, end - (size - 1 + b), 2, false);
+    }
+  }
+
+  return new Board(size, fields);
+}
+
+final class AvailableMoveMap
+{
+  Board board;
+
+  int[] directions;
+
+  // -1 for unreachable
+  // NOT necessarily shortest: we're not doing A* here
+  int mut[] pathSource;
+
+  this(this.board) {
+    this.pathSource = new int mut[](board.fields.length);
+    int w = board.width;
+    // Note that we can just check fixed offsets in the table, because no offset
+    // that crosses a border hits another field, and we left space at the top and
+    // bottom to avoid the above/below check too.
+    this.directions = [-w - 1, -w, -1, 1, w, w + 1];
+  }
+
+  void reset() {
+    for (i in 0 .. board.fields.length) {
+      this.pathSource[i] = -1;
+    }
+  }
+
+  void updateReachableFrom(int pos) {
+    reset;
+    if (this.board.fields[pos].(!exists || occupied == -1)) return;
+    void recurse(int pos) {
+      for (int j in 0 .. 6) {
+        int step1 = pos + this.directions[j];
+        if (this.board.fields[step1].(!exists || occupied == -1)) continue;
+        int step2 = step1 + this.directions[j];
+        if (this.board.fields[step2].(!exists || occupied != -1)) continue;
+        // free cell after a figure in the same direction: valid
+        if (pathSource[step2] != -1) continue;
+        pathSource[step2] = pos;
+        recurse(step2);
+      }
+    }
+    for (int j in 0 .. 6) {
+      int target = pos + this.directions[j];
+      if (this.board.fields[target].(!exists || occupied != -1)) continue;
+      this.pathSource[target] = pos;
+    }
+    recurse(pos);
+  }
+}
+
+final class UserInterface
+{
+  Board board;
+
+  (int | :none) focused;
+
+  (int | :none) selected;
+
+  AvailableMoveMap moveMap;
+
+  vec2i windowSize;
+
+  vec2i mousePos;
+
+  float seconds;
+
+  this(this.board) {
+    this.focused = :none;
+    this.selected = :none;
+    this.moveMap = new AvailableMoveMap(this.board);
+  }
+
+  vec2f translateFactor;
+
+  int offs(int x, int y) => y * board.width + x;
+
+  (int x, int y) revOffs(int field) => (x = field % board.width, y = field / board.width);
+
+  vec2f realCoord(float x, float y) {
+    int squareExtent = board.size * 4 - 2;
+    float x = x - y * 0.5 + squareExtent / 4.0f + 0.5;
+    return vec2f(x, y) * translateFactor;
+  }
+
+  void update() {
+    int squareExtent = board.size * 4 - 2;
+    this.translateFactor = this.windowSize.(vec2f(x, y)) * 1.0f / squareExtent;
+
+    this.focused = :none;
+    moveMap.reset;
+
+    for (y in 1 .. board.height - 1) {
+      for (x in 0 .. board.width) {
+        auto here = offs(x, y);
+        auto real_ = realCoord(x, y);
+        auto d = (real_ - mousePos.(vec2f(x, y))) / translateFactor;
+        if (sqrt(d.x * d.x + d.y * d.y) < 0.5) {
+          this.focused = here;
+        }
+      }
+    }
+    (int | :none) activeField() => this.selected.case(:none: this.focused);
+    activeField.case {
+      :none: {}
+      int pos:
+        moveMap.updateReachableFrom(pos);
+    }
+  }
+
+  void click() {
+    this.focused.case {
+      :none: {}
+      int pos:
+        click(pos);
+      }
+  }
+
+  void click(int pos) {
+    if (this.selected == :none) {
+      this.selected = pos;
+      return;
+    } else if (this.selected == pos) {
+      this.selected = :none;
+      return;
+    } else if (moveMap.pathSource[pos] != -1) {
+      // reachable field
+      auto src = this.selected.case(:none: assert(false));
+      auto dst = pos;
+      board.fields[dst].occupied = board.fields[src].occupied;
+      board.fields[src].occupied = -1;
+      this.selected = :none;
+    }
+  }
+
+  void drawBoard(cairo_t* context) {
+    string translate(int i) => i.case(
+      -1: "#fff",
+      0: "#f00",
+      1: "#5f5",
+      2: "#00f");
+    for (y in 1 .. board.height - 1) {
+      for (x in 0 .. board.width) {
+        auto here = offs(x, y);
+        auto field = board.fields[here];
+        if (!field.exists) continue;
+        drawCircle(context, x, y, 0.55, "#000");
+        drawCircle(context, x, y, 0.5, field.marker.translate);
+      }
+    }
+    for (y in 1 .. board.height - 1) {
+      for (x in 0 .. board.width) {
+        auto here = offs(x, y);
+        auto tgt = moveMap.pathSource[here];
+        if (tgt != -1) {
+          auto rev = revOffs(tgt);
+          drawLink(context, x, y, rev.x, rev.y);
+        }
+      }
+    }
+    for (y in 1 .. board.height - 1) {
+      for (x in 0 .. board.width) {
+        auto here = offs(x, y);
+        auto field = board.fields[here];
+        if (field.exists && field.occupied != -1) {
+          mut float r = 0.4f;
+          if (focused == here || selected == here)
+            r += cast(float) sin(seconds * 10) * 0.02f;
+          drawCircle(context, x, y, r, "#000");
+          drawCircle(context, x, y, r - 0.05, field.occupied.translate);
+        }
+      }
+    }
+  }
+
+  void drawCircle(cairo_t* context, float x, float y, float radius, string color) {
+    vec2f real_ = realCoord(x, y);
+    vec2f radius = vec2f(radius) * translateFactor;
+
+    int i(float f) => cast(int) f;
+    GdkRGBA rgba;
+    assert(gdk_rgba_parse(&rgba, color.toStringz));
+
+    rgba.(cairo_set_source_rgba(context, red, green, blue, alpha));
+    cairo_set_line_width(context, 0);
+    cairo_move_to(context, real_.x, real_.y);
+    cairo_arc(context, real_.x, real_.y, radius.(min(x, y)), 0, 2 * PI);
+    cairo_fill(context);
+  }
+
+  void drawLink(cairo_t* context, float x1, float y1, float x2, float y2) {
+    vec2f real1 = realCoord(x1, y1), real2 = realCoord(x2, y2);
+
+    float w = 0.1f * min(translateFactor.x, translateFactor.y);
+    cairo_set_line_width(context, w);
+
+    cairo_move_to(context, real1.x, real1.y);
+    cairo_line_to(context, real2.x, real2.y);
+
+    cairo_set_source_rgb(context, 0, 0, 0);
+    cairo_stroke(context);
+  }
+}
+
+alias vec2f = Vector(float, 2);
+alias vec2i = Vector(int, 2);
+
+void main() {
+  auto start = Time.now;
+  gtk_init(null, null);
+  auto window = Window.new(GTK_WINDOW_TOPLEVEL);
+  window.setTitle("Halma");
+  window.setDefaultSize(width=1200, height=1000);
+  window.setEvents(GDK_POINTER_MOTION_MASK);
+
+  connectSignal(window, "destroy", new () { gtk_main_quit; });
+
+  auto board = createBoard(6);
+  auto ui = new UserInterface(board);
+  auto drawingArea = DrawingArea.new;
+
+  window.add(drawingArea);
+  window.showAll;
+
+  ui.windowSize = vec2i(1200, 1000);
+
+  void onDraw(cairo_t* context) {
+    cairo_set_source_rgb(context, 0.8, 0.8, 0.8);
+    cairo_paint(context);
+
+    ui.seconds = Time.now.secondsSince(start);
+    ui.update;
+    ui.drawBoard(context);
+    drawingArea.queueDraw;
+  }
+
+  void onConfigure(GdkEventConfigure* event) {
+    ui.windowSize = vec2i(event.width, event.height);
+  }
+
+  void onMove(GdkEventMotion* event) {
+    ui.mousePos = vec2i(cast(int) event.x, cast(int) event.y);
+  }
+
+  void onClick(GdkEventButton* event) {
+    ui.mousePos = vec2i(cast(int) event.x, cast(int) event.y);
+    ui.click;
+  }
+
+  connectSignal1!(cairo_t*)(drawingArea, "draw", new &onDraw);
+  connectSignal1!(GdkEventConfigure*)(window, "configure-event", new &onConfigure);
+  connectSignal1!(GdkEventMotion*)(window, "motion-notify-event", new &onMove);
+  connectSignal1!(GdkEventButton*)(window, "button-press-event", new &onClick);
+
+  gtk_main;
+}
+
+private alias GDK_POINTER_MOTION_MASK = 1 << 2;
+private alias GDK_POINTER_MOTION_HINT_MASK = 1 << 3;

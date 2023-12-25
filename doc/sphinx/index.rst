@@ -31,6 +31,8 @@ Have some example code! Here's a program that prints the longest line in a file:
 
 **Important notice**: Before you jump in, please read the section :ref:`getstarted:Good and Bad Neat`!
 
+For **more examples,** see the `Demos <https://github.com/Neat-Lang/neat/tree/master/demos>`_ page.
+
 Community
 =========
 

@@ -693,18 +693,28 @@ Expression releaseArray(Context context, Expression value) {
                         *leftp = (*leftp)[0 .. $ + 1];
                         return;
                     }
-                    if (prevRefs == 1) {
+                    /**
+                     * If leftp is single-owner (TODO rt function for this) we can optimize here:
+                     * we should *not* take references in `leftp` and then free them via assignment, but instead
+                     * do moves.
+                     * We can safely do this, because nobody else but us can mess with the references in leftp.
+                     * Then we can skip the leftp array-free, and instead just free(), because we're taking over
+                     * every reference.
+                     * Note that this optimization can only be applied if leftp references the entire used part
+                     * of the array object.
+                     * See also below.
+                     */
+                    if (prevRefs == 1 && *prevUsed == leftp.length) {
                         auto result = new typeof(*leftp.ptr) mut[](leftp.length * 2 + 1);
-                        for (i, src in *leftp) result[i] = __take(src);
-                        result[leftp.length] = __take(right);
+                        for (i, value in *leftp) __moveEmplace(value, result[i]);
+                        // this is fishy. but seems to work. what was I doing with this parameter...
+                        __moveEmplace(right, result[leftp.length]);
                         // used
                         (cast(size_t*) result.base)[2] = leftp.length + 1;
-                        free(leftp.base);
-                        (cast(void**) leftp)[2] = null;
                         auto newLeft = result[0 .. leftp.length + 1];
-                        // TODO
-                        // *leftp = $($expr(newLeft) if leftArray.mutableElements else $expr(newLeft.freeze));
-                        *leftp = $astNewLeft;
+                        auto newLeft = $astNewLeft;
+                        free(leftp.base);
+                        __copyEmplace(newLeft, *leftp);
                         return;
                     }
                 }
@@ -722,6 +732,9 @@ Expression releaseArray(Context context, Expression value) {
                 // TODO don't try freeing result[i] on move-into
                 auto newLength = leftp.length + right.length;
                 if (leftp.base) {
+                    // if prevRefs is 1, it must be threadsafe and can never become non-1
+                    // TODO do we need to acquire here?
+                    size_t prevRefs = (cast(size_t*) leftp.base)[0];
                     size_t prevCap = (cast(size_t*) leftp.base)[1];
                     size_t* prevUsed = &(cast(size_t*) leftp.base)[2];
                     auto prevFrontier = &(cast(typeof(leftp.ptr)) &(cast(size_t*) leftp.base)[3])[*prevUsed];
@@ -729,6 +742,19 @@ Expression releaseArray(Context context, Expression value) {
                         *prevUsed += right.length;
                         for (i, value in right) prevFrontier[i] = value;
                         *leftp = (*leftp)[0 .. newLength];
+                        return;
+                    }
+                    // explanation see above!
+                    if (prevRefs == 1 && *prevUsed == leftp.length) {
+                        auto result = new typeof(*leftp.ptr) mut[](leftp.length * 2 + right.length);
+                        for (i, value in *leftp) __moveEmplace(value, result[i]);
+                        // TODO we can theoretically do the same optimization here if right has only one owner
+                        for (i, value in right) result[leftp.length + i] = value;
+                        (cast(size_t*) result.base)[2] = newLength;
+                        auto newLeft = result[0 .. newLength];
+                        auto newLeft = $astNewLeft;
+                        free(leftp.base);
+                        __copyEmplace(newLeft, *leftp);
                         return;
                     }
                 }

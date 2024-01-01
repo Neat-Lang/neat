@@ -516,7 +516,7 @@ class ASTEitherCaseExpr : ASTSymbol
         }
 
         auto baseExprTemp = new PairedTemporaryExpr(
-            baseExpr.type, baseExpr.info.lifetime if singleUse else Lifetime.permanent, context.getUniqueId);
+            baseExpr.type, baseExpr.info.lifetime if singleUse else Lifetime.none, context.getUniqueId);
         Statement baseExprInit = new InitializeTemporaryExprStatement(baseExprTemp, baseExpr);
 
         bool mut[] handled = new bool mut[](either.types.length);
@@ -580,14 +580,14 @@ class ASTEitherCaseExpr : ASTSymbol
             auto castMember = context.compiler.trivialCastTo(type, new EitherMember(baseExprTemp, matchIndex));
 
             mut Context context = context;
-            mut uninitialized Reference variable;
+            mut uninitialized Expression variable;
             if (!singleUse) {
-                auto namespace = context.compiler.variableDeclaration(
+                import neat.function_ : VariableDeclaration;
+                auto namespace = new VariableDeclaration(
                     context.namespace, case_.identifier, context.platform, type, mut=false, borrowed=!cleanup, false);
                 context = context.withNamespace(namespace);
-                variable = namespace.accessDecl(context);
-                // Borrow the case base.
-                thenSteps ~= context.compiler.assignStatement(variable, castMember);
+                thenSteps ~= namespace.initialize(context, castMember, caseLoc)?;
+                variable = namespace.access(context);
             } else {
                 auto namespace = context.compiler.symbolAlias(
                     context.namespace, case_.identifier, castMember);
@@ -795,11 +795,11 @@ class ASTEitherCaseStmt : ASTStatement
                 handled[matched] = true;
 
                 with (context.compiler) {
-                    auto namespace = variableDeclaration(
+                    import neat.function_ : VariableDeclaration;
+                    auto namespace = new VariableDeclaration(
                         context.namespace, case_.identifier, context.platform, type, mut=false, borrowed=true, false);
-                    Reference variable = namespace.accessDecl(context);
                     auto member = trivialCastTo(type, new EitherMember(baseExpr, matched));
-                    Statement assignment = assignStatement(variable, member);
+                    Statement assignment = namespace.initialize(context, member, case_.locRange)?;
                     auto userStmtPair = case_.stmt.compile(context.withNamespace(namespace))?;
                     Statement then = sequenceStatement([assignment, userStmtPair.statement]);
                     Expression test = binaryOp(

@@ -168,9 +168,8 @@ class Function : FunctionDeclaration
             // munge frame pointer for nested functions (TODO represent this by an enum or something)
             int offset = 0 if hasThisArg else 2;
             auto correctedFramePointer = compiler.pointerOffset(firstArg, compiler.intLiteral(offset));
-            argAssignments[assignmentId++] = compiler.assignStatement(
-                thisDecl.accessDecl(context),
-                new PointerCast(contextType, correctedFramePointer));
+            argAssignments[assignmentId++] = thisDecl.initialize(
+                context, new PointerCast(contextType, correctedFramePointer), __RANGE__)?;
         }
 
         mut auto context = context.withNamespace(scope_);
@@ -180,34 +179,20 @@ class Function : FunctionDeclaration
 
             if (param.isThisAssignment) {
                 this.locRange.assert(!!thisDecl, () => "no this. args outside class")?;
-                auto decl = thisDecl.accessDecl(context);
+                auto thisVar = thisDecl.access(context);
                 auto target = compiler.accessMember(
-                        context, decl, param.name, this.locRange, false)?
+                        context, thisVar, param.name, this.locRange, false)?
                     .instanceOf(Reference)?
                     else return this.locRange.fail("not a reference: $(param.name)");
-                checkAssignmentQuarantine(context, param.locRange, decl.type, argExpr.type)?;
+                checkAssignmentQuarantine(context, param.locRange, thisVar.type, argExpr.type)?;
                 argAssignments[assignmentId++] = compiler.assignStatement(
                     target, argExpr.copy(context, param.locRange)?);
             } else {
-                if (param.mutable) {
-                    // We're mutable, but functions borrow the caller args.
-                    // So despite being lexical, we copy them.
-                    // (Also goes for heap allocated functions, as they outlive the caller.)
-                    auto argDecl = new VariableDeclaration(
-                        scope_, param.name, context.platform, param.type,
-                        mut=param.mutable, borrowed=false, hidden=false);
-                    auto target = argDecl.accessDecl(context);
-
-                    argAssignments[assignmentId++] = compiler.assignStatement(
-                        target, argExpr.copy(context, param.locRange)?);
-                    scope_ = argDecl;
-                } else {
-                    auto argDecl = new VariableDeclaration(
-                        scope_, param.name, context.platform, param.type, mut=false, borrowed=true, hidden=false);
-
-                    argAssignments[assignmentId++] = compiler.assignStatement(argDecl.accessDecl(context), argExpr);
-                    scope_ = argDecl;
-                }
+                auto argDecl = new VariableDeclaration(
+                    scope_, param.name, context.platform, param.type,
+                    mut=param.mutable, borrowed=!param.mutable, hidden=false);
+                argAssignments[assignmentId++] = argDecl.initialize(context, argExpr, param.locRange)?;
+                scope_ = argDecl;
             }
         }
 
@@ -386,7 +371,7 @@ class FunctionScope : Namespace, Returnable, Declarable
         assert(!!this.parent);
 
         if (name == "this" && thisDecl) {
-            auto thisExpr = thisDecl.accessDecl(context);
+            auto thisExpr = thisDecl.access(context);
             if (thisExpr.type.instanceOf(Pointer)) {
                 return context.compiler.dereference(thisExpr);
             } else {
@@ -561,27 +546,33 @@ class VariableDeclaration : DeclarationHolder
     }
 
     (Statement | Error) initialize(Context context, Expression initial, LocRange locRange) {
-        (Statement | Error) initializeStmt() {
-            if (this.borrowed) {
-                return context.compiler.assignStatement(accessDecl(context), initial);
-            } else {
-                return context.compiler.move(context, accessDecl(context), initial, locRange)?;
-            }
+        bool canTakeInitialRef = initial.info.lifetime.(that == Lifetime.gifted || that == Lifetime.none);
+        Expression initial = initial if (this.borrowed || canTakeInitialRef) else initial.copy(context, locRange)?;
+        {
+            auto initializeStmt = context.compiler.assignStatement(accessDecl(context), initial);
+            auto variable = this.variable.instanceOf(LatentVariableImpl)? else return initializeStmt;
+            if (variable.mut) return initializeStmt;
         }
-        auto variable = this.variable.instanceOf(LatentVariableImpl)? else return initializeStmt;
-        if (variable.mut) return initializeStmt;
 
-        // the variable won't ever change, so cache a load.
+        // the variable won't ever change, so cache the initial value and reuse it later.
         auto initialCache = new PairedTemporaryExpr(
             variable.type, Lifetime.lexical, context.getUniqueId);
-        auto initTemp = new InitializeTemporaryExprStatement(
-            initialCache, accessDecl(context));
         this.initialCache = initialCache;
-        return context.compiler.sequence(initializeStmt?, initTemp);
+        auto initTemp = new InitializeTemporaryExprStatement(initialCache, initial);
+        auto initFromTemp = context.compiler.assignStatement(accessDecl(context), initialCache);
+        return context.compiler.sequence(initTemp, initFromTemp);
     }
 
     override Reference accessDecl(Context context) {
         return this.variable.access(context);
+    }
+
+    override Expression access(Context context) {
+        auto variable = this.variable.instanceOf(LatentVariableImpl)?
+            else return accessDecl(context);
+        if (variable.mut || context.frameDepth != 0 || !this.initialCache)
+            return accessDecl(context);
+        return this.initialCache? else die;
     }
 
     override (nullable Symbol | Error) lookup(
@@ -590,11 +581,7 @@ class VariableDeclaration : DeclarationHolder
         // Frame may be null for struct nested in function.
         if (auto frame = context.framePointer) {
             if (this.name == name) {
-                auto variable = this.variable.instanceOf(LatentVariableImpl)?
-                    else return accessDecl(context);
-                if (variable.mut || context.frameDepth != 0 || !this.initialCache)
-                    return accessDecl(context);
-                return this.initialCache? else die;
+                return access(context);
             }
             // soft destructuring
             if (!hidden && this.name == "") {

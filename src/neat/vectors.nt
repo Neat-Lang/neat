@@ -76,17 +76,16 @@ class VectorMemberReference : Reference
 {
     Reference base;
 
-    int index;
+    (int | Expression) index;
 
     VectorType vectorType;
 
     this(this.base, this.index)
     {
-        if (auto vectorType = this.base.type.instanceOf(VectorType))
-            this.vectorType = vectorType;
-        else assert(false);
+        this.vectorType = this.base.type.instanceOf(VectorType)? else die;
         this.type = this.vectorType.elementType;
         this.info = this.base.info;
+        this.mutable = this.base.mutable;
     }
 
     override int emit(Generator output)
@@ -98,14 +97,26 @@ class VectorMemberReference : Reference
     {
         int reg = this.base.emitLocation(output);
 
-        return output.fun.fieldOffset(this.base.type.emit(output.platform), reg, this.index);
+        this.index.case {
+            int index:
+                return output.fun.fieldOffset(vectorType.emit(output.platform), reg, index);
+            Expression index:
+                int indexReg = index.emit(output);
+                auto elementType = vectorType.elementType.emit(output.platform);
+                return output.fun.ptrOffset(elementType, reg, indexReg);
+        }
     }
 
     override void hash(Hash hash)
     {
-        hash.adds("VectorMember");
+        hash.adds("VectorMemberReference");
         base.hash(hash);
-        hash.addl(index);
+        this.index.case {
+            int index:
+                hash.addl(index);
+            Expression index:
+                index.hash(hash);
+        }
     }
 
     override string repr() return "$(base.repr)[$index]";
@@ -192,8 +203,12 @@ class VectorType : Type, Hashable
             if (intLiteral.value < 0 || intLiteral.value >= length) {
                 context.assert2(false, locRange, "vector index expression out of bounds")?;
             }
+            if (auto refBase = base.instanceOf(Reference)) {
+                return new VectorMemberReference(refBase, intLiteral.value);
+            }
             return new VectorMember(base, intLiteral.value);
         }
+        mut bool deref = false;
         (nullable Expression | Error) do_(Expression index) {
             auto astLength = context.compiler.astNumberLiteral(length);
             auto astIndex = new ASTSymbolHelper(index);
@@ -202,9 +217,15 @@ class VectorType : Type, Hashable
                 checkIndex($astIndex, $astLength);
             };
             auto indexTest = astIndexTest.compile(context)?;
+            if (auto refBase = base.instanceOf(Reference)) {
+                deref = true;
+                return context.compiler.statementExpression(indexTest.statement, new ReferenceExpression(
+                    new VectorMemberReference(refBase, index)));
+            }
             return context.compiler.statementExpression(indexTest.statement, new VectorMember(base, index));
         }
-        return context.compiler.exprWithTemporaryExpr(context.getUniqueId, index, &do_);
+        auto expr = context.compiler.exprWithTemporaryExpr(context.getUniqueId, index, &do_)?? else die;
+        return new Dereference(expr) if deref else expr;
     }
 
     override (nullable Expression | Error) binaryOp(

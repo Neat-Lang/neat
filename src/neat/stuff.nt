@@ -1172,7 +1172,7 @@ class ParenPropertyNamespace : Namespace
         if (name == "that") {
             mut Symbol result = value;
             if (auto latent = this.value.instanceOf(LatentSymbol)) {
-                result = latent.resolve(context.framePointer, locRange)?;
+                result = latent.resolve(context.framePointer, context.frameDepth, locRange)?;
             }
             if (auto result = result.instanceOf(Expression)) {
                 assert(result.info.lifetime != Lifetime.gifted);
@@ -1186,7 +1186,7 @@ class ParenPropertyNamespace : Namespace
             return result;
         }
         if (auto ret = accessMember(
-            context.withFramePointer(this.frame), value, name, locRange, allowUndefined=true)?)
+            context.withFramePointer(this.frame, :none), value, name, locRange, allowUndefined=true)?)
         {
             return ret;
         }
@@ -2807,37 +2807,23 @@ class ASTVarDeclStatement : ASTStatement
             // If the initial value is lexical, ie. a non-mutable variable or parameter,
             // we know its lifetime will dominate ours.
             // If we too are lexical, then we can just borrow it.
-            if (initial.info.lifetime == Lifetime.lexical && !this.mutable)
-            {
-                // print("$(this.locRange.repr):$(initial.info.repr): borrowing $(initial.repr) for $(this.name)");
-                // don't double-own the value, it's covered by its own ownership
-                // we aren't mutable, so we can safely borrow the initializer.
-                auto decl = new VariableDeclaration(
-                    context.namespace, name, context.platform, type, mut=false, borrowed=true, hidden=false);
-                auto assign = context.compiler.assignStatement(decl.accessDecl(context), initial);
+            bool borrow = initial.info.lifetime == Lifetime.lexical && !this.mutable;
 
-                return StatementCompileResult(assign, decl);
-            }
-
-            // print("$(this.locRange.repr):$(initial.info.repr): moving $(initial.repr) for $(this.name)");
-            // otherwise we'll hold a reference ourselves.
             auto decl = new VariableDeclaration(
-                context.namespace, name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
+                context.namespace, name, context.platform, type, mut=this.mutable, borrowed=borrow, hidden=false);
+            auto assign = decl.initialize(context, initial, this.locRange)?;
 
-            return StatementCompileResult(
-                move(context, decl.accessDecl(context), initial, this.initial.locRange)?,
-                decl);
+            return StatementCompileResult(assign, decl);
         }
         else if (this.uninitialized)
         {
             auto type = type? else die;
             auto decl = new VariableDeclaration(
                 context.namespace, name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
+            auto assign = decl.initialize(context, new NullExpr(type), this.locRange)?;
 
             // Still zero-init.
-            return StatementCompileResult(
-                new AssignStatement(decl.accessDecl(context), new NullExpr(type), this.locRange),
-                decl);
+            return StatementCompileResult(assign, decl);
         }
         else
         {
@@ -2848,10 +2834,9 @@ class ASTVarDeclStatement : ASTStatement
             }
             auto decl = new VariableDeclaration(
                 context.namespace, name, context.platform, type, mut=this.mutable, borrowed=false, hidden=false);
+            auto assign = decl.initialize(context, new NullExpr(type), this.locRange)?;
 
-            return StatementCompileResult(
-                new AssignStatement(decl.accessDecl(context), new NullExpr(type), this.locRange),
-                decl);
+            return StatementCompileResult(assign, decl);
         }
     }
 
@@ -3219,7 +3204,7 @@ class ASTNestedFunctionDeclExpr : ASTSymbol
 
         auto resolvedFun = fun.compileSymbol(context)?
             .instanceOf(LatentNestedFunction)?
-            .resolve(context.framePointer, this.locRange)?
+            .resolve(context.framePointer, context.frameDepth, this.locRange)?
             else die;
         auto astSym = new ASTSymbolHelper(resolvedFun);
         auto astRef = new ASTReference(astSym, this.locRange);
@@ -4079,7 +4064,7 @@ class Resolver
             if (auto latent = ret.instanceOf(LatentSymbol)) {
                 // we're at global scope; no frame pointer will be applied.
                 assert(!context.framePointer);
-                ret = latent.resolve(context.framePointer, locRange)?;
+                ret = latent.resolve(null, :none, locRange)?;
             }
             return ret;
         }
@@ -4472,7 +4457,7 @@ class ImportNamespace : Namespace
     {
         if (!symbols.length || [any symbol == name for symbol in symbols]) {
             auto sym = module_.lookupPublic(
-                context.withFramePointer(null),
+                context.withFramePointer(null, :none),
                 locRange,
                 name)?;
             if (sym) return sym;
@@ -4948,7 +4933,8 @@ class LexicalContextImpl : LexicalContext
         astModule.name, astModule.mangledName ~ loop, astModule.locRange, parent,
         moduleParseTaskId=astModule.moduleParseTaskId);
     auto coldContext = coldContext.withMacroState(astModule.macroState);
-    auto warmContext = makeWarmContext(coldContext.compiler, framePointer=null, compilingModule=module_);
+    auto warmContext = makeWarmContext(coldContext.compiler,
+        framePointer=null, frameDepth=:none, compilingModule=module_);
     auto context = Context(namespace=module_, warmContext, coldContext);
 
     if (addDefaultImports) {
@@ -5085,7 +5071,7 @@ class ParseAstModuleTask : ITask
     (ASTModule | Error) parse() {
         compiler.workPool.queue(readSource);
         compiler.workPool.dependency(provider=readSource.id, consumer=this.id);
-        auto code = compiler.workPool.wait(readSource.id).instanceOf(ReadFileTask).text;
+        mut auto code = compiler.workPool.wait(readSource.id).instanceOf(ReadFileTask).text;
         // do not count references on the file source - it will end
         // up with lots of small inc/decs to fragments that we never free anyway
         (cast(size_t*) &code)[2] = 0;

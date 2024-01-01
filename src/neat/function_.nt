@@ -6,6 +6,7 @@ macro import package(compiler).std.macro.once;
 import backend.base;
 import helpers;
 import neat.base;
+import neat.expr;
 import neat.quasiquoting;
 import neat.types;
 import neat.util;
@@ -139,8 +140,8 @@ class Function : FunctionDeclaration
         auto framePtr = compiler.reference(compiler.stackFrame(new Void));
         auto coldContext = makeColdContext(compiler, context.platform, this.macroState, context.loopPass,
             context.modulePreProcessor, context.modulePostProcessor);
-        auto warmContext = new WarmContext(framePtr, context.compilingModule, new LabelCounter, compiler.uniqCounter,
-            this.quoteScope, errorStack=null);
+        auto warmContext = new WarmContext(framePtr, frameDepth=0, context.compilingModule, new LabelCounter,
+            compiler.uniqCounter, this.quoteScope, errorStack=null);
         auto context = Context(stackframe, warmContext, coldContext);
 
         mut Namespace scope_ = stackframe;
@@ -400,8 +401,9 @@ class FunctionScope : Namespace, Returnable, Declarable
             auto framePtr = new PointerCast(once new Pointer(new Pointer(new Void)), context.framePointer? else die);
             nextFramePointer = context.compiler.dereference(framePtr);
         }
+        auto nextContext = context.withFramePointer(nextFramePointer, context.frameDepth.case(int i: i + 1));
 
-        return this.parent.lookup(name, context.withFramePointer(nextFramePointer), reason, locRange);
+        return this.parent.lookup(name, nextContext, reason, locRange);
     }
 }
 
@@ -528,8 +530,15 @@ class VariableDeclaration : DeclarationHolder
 
     bool borrowed;
 
-    this(this.parent, this.name, Platform platform, Type type, bool mut, this.borrowed, this.hidden)
-    {
+    /**
+     * `mut` variables cannot be modified after the initial assignment.
+     * So while we still need to write them to the stackframe for nested function access,
+     * if we're doing a direct read in the same stackframe, we can just basically load once,
+     * and then return the same SSA reg again and again, making it a lot easier on the optimizer.
+     */
+    nullable PairedTemporaryExpr initialCache;
+
+    this(this.parent, this.name, Platform platform, Type type, bool mut, this.borrowed, this.hidden) {
         mut Type[] reverseFrame = [type];
         mut Namespace current = parent? else die;
         while (true) {
@@ -540,17 +549,38 @@ class VariableDeclaration : DeclarationHolder
             current = current.parent? else die;
         }
         auto frame = [reverseFrame[$ - 1 - i] for i in 0 .. reverseFrame.length];
-        this.variable = findParent!Declarable(this).(that? else die).declare(
-            name, frame, mut=mut, borrowed=borrowed, platform);
+        this.variable = findParent!Declarable(this)?
+            .declare(name, frame, mut=mut, borrowed=borrowed, platform)
+            else die;
         this.isContextScope = true;
+        this.initialCache = null;
     }
 
     override bool freeOnExit() {
         return !borrowed;
     }
 
-    override Reference accessDecl(Context context)
-    {
+    (Statement | Error) initialize(Context context, Expression initial, LocRange locRange) {
+        (Statement | Error) initializeStmt() {
+            if (this.borrowed) {
+                return context.compiler.assignStatement(accessDecl(context), initial);
+            } else {
+                return context.compiler.move(context, accessDecl(context), initial, locRange)?;
+            }
+        }
+        auto variable = this.variable.instanceOf(LatentVariableImpl)? else return initializeStmt;
+        if (variable.mut) return initializeStmt;
+
+        // the variable won't ever change, so cache a load.
+        auto initialCache = new PairedTemporaryExpr(
+            variable.type, Lifetime.lexical, context.getUniqueId);
+        auto initTemp = new InitializeTemporaryExprStatement(
+            initialCache, accessDecl(context));
+        this.initialCache = initialCache;
+        return context.compiler.sequence(initializeStmt?, initTemp);
+    }
+
+    override Reference accessDecl(Context context) {
         return this.variable.access(context);
     }
 
@@ -560,7 +590,11 @@ class VariableDeclaration : DeclarationHolder
         // Frame may be null for struct nested in function.
         if (auto frame = context.framePointer) {
             if (this.name == name) {
-                return this.variable.access(context);
+                auto variable = this.variable.instanceOf(LatentVariableImpl)?
+                    else return accessDecl(context);
+                if (variable.mut || context.frameDepth != 0 || !this.initialCache)
+                    return accessDecl(context);
+                return this.initialCache? else die;
             }
             // soft destructuring
             if (!hidden && this.name == "") {
@@ -676,7 +710,7 @@ class LatentNestedFunction : LatentSymbol
 
     this(this.fun) { }
 
-    override (Symbol | Error) resolve(nullable Expression framePointer, LocRange locRange) {
+    override (Symbol | Error) resolve(nullable Expression framePointer, (int | :none) frameDepth, LocRange locRange) {
         if (auto framePointer = framePointer) {
             return new NestedFunction(this.fun, framePointer);
         } else {

@@ -149,15 +149,20 @@ class Struct : Type, Hashable
             where a.name == member/* && allowed(a.protection) TODO */
             else -1];
         if (declOffset != -1) {
-            auto reference = baseExpr
-                .(that? else return locRange.fail("alias cannot be called on type (TODO)"))
-                .instanceOf(Reference)? else return locRange.fail("can only access struct alias on reference");
-            auto refPtr = context.compiler.reference(reference);
+            auto baseExpr = baseExpr? else return locRange.fail("alias cannot be called on type (TODO)");
+            locRange.assert(
+                baseExpr.info.lifetime.(that == Lifetime.lexical || that == Lifetime.ephemeral),
+                () => "alias cannot be called on temporary")?;
+            auto tempRef = new PairedTemporary(baseExpr.type, Lifetime.lexical, context.getUniqueId);
+            auto initTemp = new InitializeTemporaryStatement(tempRef, baseExpr);
+            auto tempRefPtr = context.compiler.reference(tempRef);
             auto decl = this.decls[declOffset];
             auto context = decl.structParentContext
                 .withNamespace(new StructNamespace(decl.structParentContext.namespace.parent, this))
-                .withFramePointer(refPtr);
-            return decl.target.compile(context)?;
+                .withFramePointer(tempRefPtr, :none);
+            auto target = decl.target.compile(context)?;
+            auto target = target.instanceOf(Expression)? else return target;
+            return context.compiler.statementExpression(initTemp, target);
         }
         return null;
     }
@@ -502,7 +507,7 @@ class StructNamespace : Namespace
 
         // TODO "outer"?
         if (!this.parent) return null;
-        return this.parent.lookup(name, context.withFramePointer(null), reason, locRange);
+        return this.parent.lookup(name, context.withFramePointer(null, :none), reason, locRange);
     }
 
     override string repr() => "StructNamespace($(struct_.name))";

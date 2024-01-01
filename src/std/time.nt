@@ -8,16 +8,21 @@ import neat.runtime : assert;
  */
 struct Time
 {
-    timeval val;
+    timespec spec;
     /// The number of fractional seconds from another time to this one.
     float secondsSince(Time other) {
-        return cast(int) (val.time_t - other.val.time_t)
-            + (val.suseconds_t - other.val.suseconds_t) / 1000000.0f;
+        return cast(int) (spec.time_t - other.spec.time_t)
+            + cast(int) (spec.tv_nsec - other.spec.tv_nsec) / 1_000_000_000.0f;
     }
     /// The current time in the system timezone.
     static Time now() {
+        mut timeval val;
+        gettimeofday(&val, null);
+        return Time(timespec(val.time_t, val.suseconds_t * 1000));
+    }
+    static Time monotonic() {
         Time res;
-        gettimeofday(&res.val, null);
+        clock_gettime(CLOCK_MONOTONIC_RAW, &res.spec);
         return res;
     }
     /// Four-digit year, ie. "2003"
@@ -39,14 +44,14 @@ struct Time
     int second() => _localtime.tm_sec;
 
     /// Zero-base milliseconds
-    int millisecond() => val.suseconds_t / 1000;
+    int millisecond() => cast(int) (spec.tv_nsec / 1_000_000);
 
     string toString() => "$year-$month-$day "
         ~ "$(hour.digits(2)):$(minute.digits(2)):$(second.digits(2)).$(millisecond.digits(3))";
 
     private tm _localtime() {
         mut tm result;
-        return *.localtime_r(&val.time_t, &result);
+        return *.localtime_r(&spec.time_t, &result);
     }
 }
 
@@ -94,7 +99,7 @@ class Stopwatch {
     /// Start the stopwatch.
     void start() {
         assert(stopped);
-        state = (:running, Time.now);
+        state = (:running, Time.monotonic);
     }
     /// Stop the stopwatch.
     void stop() {
@@ -102,7 +107,7 @@ class Stopwatch {
         // TODO: __undefined
         Time __undefined() { assert(false); }
         auto startTime = state.case((:running, Time t): t, :stopped: __undefined);
-        auto stopTime = Time.now;
+        auto stopTime = Time.monotonic;
         state = :stopped;
         seconds_ += stopTime.secondsSince(startTime);
     }
@@ -124,7 +129,7 @@ class Stopwatch {
                 this.seconds_ = 0;
                 return copy;
             (:running, Time start):
-                auto splitPoint = Time.now;
+                auto splitPoint = Time.monotonic;
                 auto result = new Stopwatch;
                 result.seconds_ = this.seconds_ + splitPoint.secondsSince(start);
                 this.seconds_ = 0;

@@ -172,10 +172,19 @@ void print_backtrace()
 #endif
 }
 
-void neat_runtime_refcount_violation(struct String s, ptrdiff_t *ptr)
+#define FATALERROR __attribute__((cold)) __attribute__((noinline)) __attribute__((noreturn))
+
+void FATALERROR neat_runtime_refcount_violation(struct String s, ptrdiff_t *ptr)
 {
     printf("<%.*s: refcount logic violated: %zd at %p\n", (int) s.length, s.ptr, *ptr, ptr);
     print_backtrace();
+    exit(1);
+}
+
+void FATALERROR neat_runtime_index_oob(size_t index)
+{
+    fprintf(stderr, "Array index out of bounds: %zd\n", index);
+    exit(1);
 }
 
 void neat_runtime_refcount_inc(struct String s, ptrdiff_t *ptr)

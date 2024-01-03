@@ -156,7 +156,7 @@ class Function : FunctionDeclaration
             // FIXME if heap allocated, copy, don't borrow! as below!
             // Make sure the type is the right one! No void*!
             thisDecl = new VariableDeclaration(
-                scope_, "", context.platform, contextType,
+                scope_, "", context, contextType,
                 mut=false, borrowed=true, hidden=true);
 
             if (this.hasThisArg) stackframe.thisDecl = thisDecl;
@@ -190,7 +190,7 @@ class Function : FunctionDeclaration
                     target, argExpr.copy(context, param.locRange)?);
             } else {
                 auto argDecl = new VariableDeclaration(
-                    scope_, param.name, context.platform, param.type,
+                    scope_, param.name, context, param.type,
                     mut=param.mutable, borrowed=!param.mutable, hidden=false);
                 argAssignments[assignmentId++] = argDecl.initialize(context, argExpr, param.locRange)?;
                 scope_ = argDecl;
@@ -277,7 +277,7 @@ class CompiledFunction : FinishedSymbol
             paramTypes,
             this.fun.locRange.toBackendLoc(generator.fileIdTable)
         );
-        generator.frameReg = generator.fun.staticAlloca(this.stackframe.(new BackendSpacerType(maxSize, maxAlignment)));
+        this.stackframe.framePlanner.setupStackframe(generator);
 
         [assignment.emit(generator) for assignment in this.argAssignments];
         this.compiledStatement.emit(generator);
@@ -301,6 +301,87 @@ class CompiledFunction : FinishedSymbol
     }
 }
 
+/**
+ * We want to only allocate a struct stackframe if we actually intend to
+ * treat the stackframe as a struct, ie. pass a pointer to it to a nested
+ * function. Otherwise we'd much prefer separate allocas per variable.
+ * This class captures the lexical tree of variables. `captured` is set
+ * if a language element needs a continuous stackframe at the lexical scope
+ * of the variable. Any variables that are not captured when the function
+ * is emitted will be separately allocaed.
+ */
+class StackframePlanner
+{
+    (Type[] frame, (int | :none) parentId, int uniqueId, bool captured) mut[] variables;
+
+    int maxSize;
+
+    int maxAlignment;
+
+    this() {
+        this.maxSize = 0;
+        this.maxAlignment = 1;
+    }
+
+    int add(Type type, (int | :none) parentId, int uniqueId) {
+        Type[] frame = parentId.case(int id: variables[id].frame, :none: null) ~ type;
+        variables ~= (frame, parentId=parentId, uniqueId=uniqueId, captures=false);
+        return cast(int) variables.length - 1;
+    }
+
+    Type spacerType(Platform platform, bool capture) {
+        if (capture && !this.variables.empty) {
+            this.capture(cast(int) this.variables.length - 1, platform);
+        }
+        return new StackframeSpacer(maxSize, maxAlignment);
+    }
+
+    private void capture(int id, Platform platform) {
+        int max(int a, int b) => a if a > b else b;
+        mut int id = id;
+        auto frameType = new BackendStructType([type.emit(platform) for type in variables[id].frame]);
+        this.maxSize = this.maxSize.max(frameType.size);
+        this.maxAlignment = this.maxAlignment.max(frameType.alignment);
+        while (!variables[id].captured) {
+            with (variables[id]) {
+                // FIXME this should not compile if variables[id] is not mutable!
+                captured = true;
+                id = parentId.case(:none: break);
+            }
+        }
+    }
+
+    void setupStackframe(Generator output) {
+        output.frameReg = output.fun.staticAlloca(new BackendSpacerType(maxSize, maxAlignment));
+        for (var in variables) {
+            if (var.captured) continue;
+            // uncaptured variable, generate alloca
+            auto alloca = output.fun.staticAlloca(var.frame[$ - 1].emit(output.platform));
+            output.fun.setNumberedReg(var.uniqueId, alloca);
+        }
+    }
+
+    int fieldPtr(Expression framePointer, int frameDepth, int varId, Generator output) {
+        auto var = this.variables[varId];
+        if (var.captured) {
+            auto frameType = new BackendStructType([type.emit(output.platform) for type in var.frame]);
+            int structPtrReg = framePointer.emit(output);
+            return output.fun.fieldOffset(frameType, structPtrReg, cast(int) var.frame.length - 1);
+        } else {
+            // else why isn't it captured? how are you
+            // accessing it without having captured it?
+            if (frameDepth > 0) {
+                print("we are trying to access at depth $frameDepth, an uncaptured variable");
+                print("(of type $(var.frame[$ - 1].repr), varId $varId) in planner $(this.ptrId)");
+                print("why hasn't it been pinned? btw we are $(output.fun.name)");
+                assert(false);
+            }
+            // return that variable's individual alloca
+            return output.fun.getNumberedReg(var.uniqueId);
+        }
+    }
+}
+
 class FunctionScope : Namespace, Returnable, Declarable
 {
     CompilerBase compiler;
@@ -315,16 +396,13 @@ class FunctionScope : Namespace, Returnable, Declarable
 
     LocRange locRange;
 
-    int maxSize;
-
-    int maxAlignment;
-
     nullable VariableDeclaration thisDecl;
+
+    StackframePlanner framePlanner;
 
     this(this.compiler, this.ret, this.extra, this.parent, this.mangle_, this.repr_, this.locRange=__CALLER__) {
         this.isContextScope = true;
-        this.maxSize = 0;
-        this.maxAlignment = 1;
+        this.framePlanner = new StackframePlanner;
     }
 
     Type finalRet() {
@@ -332,22 +410,16 @@ class FunctionScope : Namespace, Returnable, Declarable
         return ret? else die;
     }
 
-    Type spacerType() {
-        return new StackframeSpacer(maxSize, maxAlignment);
-    }
-
-    override LatentVariable declare(string name, Type[] frame, bool mut, bool borrowed, Platform platform) {
+    override LatentVariable declare(
+        Context context, string name, Type type, bool mut, bool borrowed, (int | :none) parentId)
+    {
         // borrowed == "no cleanup on scope exit".
         // This is not safe in conjunction with mut (cleanup on reassign).
         assert(!borrowed || !mut);
 
-        auto backendType = new BackendStructType([type.emit(platform) for type in frame]);
-
-        int max(int a, int b) => a if a > b else b;
-        this.maxSize = max(this.maxSize, backendType.size);
-        this.maxAlignment = max(this.maxAlignment, backendType.alignment);
-        return new LatentVariableImpl(name, type_=frame[$ - 1], backendType, cast(int) frame.length - 1,
-                                  mut=mut, borrowed=borrowed);
+        int varId = this.framePlanner.add(type, parentId, uniqueId=context.getUniqueId);
+        return new LatentVariableImpl(name, type_=type, this.framePlanner,
+            mut=mut, borrowed=borrowed, varId);
     }
 
     override string mangle() { return this.mangle_; }
@@ -382,10 +454,13 @@ class FunctionScope : Namespace, Returnable, Declarable
 
         mut nullable Expression nextFramePointer = null;
         if (this.extra && context.framePointer) {
-            // first field in stackframe must be parent
-            // TODO better?
-            auto framePtr = new PointerCast(once new Pointer(new Pointer(new Void)), context.framePointer? else die);
-            nextFramePointer = context.compiler.dereference(framePtr);
+            // first variable is always parent
+            auto voidpp = once new Pointer(new Void);
+            nextFramePointer = new FieldRef(
+                voidpp, this.framePlanner,
+                context.framePointer? else die,
+                context.frameDepth.case(:none: die),
+                varId=0, mutable=false, info=ExprInfo(Lifetime.lexical));
         }
         auto nextContext = context.withFramePointer(nextFramePointer, context.frameDepth.case(int i: i + 1));
 
@@ -453,9 +528,7 @@ class LatentVariableImpl : LatentVariable
 
     Type type_;
 
-    BackendType stackFrameType;
-
-    int offset;
+    StackframePlanner framePlanner;
 
     bool mut;
 
@@ -463,7 +536,7 @@ class LatentVariableImpl : LatentVariable
 
     ExprInfo info;
 
-    this(this.name, this.type_, this.stackFrameType, this.offset, this.mut, this.borrowed) {
+    this(this.name, this.type_, this.framePlanner, this.mut, this.borrowed, super) {
         assert (!mut || !borrowed);
         if (mut) this.info = ExprInfo(Lifetime.ephemeral);
         else this.info = ExprInfo(Lifetime.lexical);
@@ -473,7 +546,11 @@ class LatentVariableImpl : LatentVariable
 
     override Reference access(Context context)
     {
-        return new FieldRef(type_, stackFrameType, context.framePointer? else die, offset, mut, info);
+        return new FieldRef(
+            type_, framePlanner,
+            context.framePointer? else die,
+            context.frameDepth.case(:none: die),
+            varId=id, mut, info);
     }
 }
 
@@ -481,13 +558,15 @@ class LatentVariableImpl : LatentVariable
 // Used for accessing variables in a stackframe.
 class FieldRef : Reference
 {
-    Expression pointer;
+    Expression framePointer;
 
-    BackendType structType;
+    int frameDepth;
 
-    int offset;
+    StackframePlanner framePlanner;
 
-    this(this.type, this.structType, this.pointer, this.offset, this.mutable, this.info) {}
+    int varId;
+
+    this(this.type, this.framePlanner, this.framePointer, this.frameDepth, this.varId, this.mutable, this.info) {}
 
     override int emit(Generator output) {
         int locReg = emitLocation(output);
@@ -495,15 +574,14 @@ class FieldRef : Reference
     }
 
     override int emitLocation(Generator output) {
-        int structPtrReg = pointer.emit(output);
-        int fieldReg = output.fun.fieldOffset(structType, structPtrReg, this.offset);
+        int fieldReg = framePlanner.fieldPtr(framePointer, frameDepth, varId, output);
         // immutable, meaning the value will never be muted.
         if (!mutable) output.fun.markPointerInvariant(fieldReg);
         return fieldReg;
     }
 
-    override void hash(Hash hash) { hash.adds("FieldRef"); pointer.hash(hash); hash.addl(offset); }
-    override string repr() { return "FieldRef($(structType.repr) @offset) on $(pointer.repr)"; }
+    override void hash(Hash hash) { hash.adds("FieldRef"); framePointer.hash(hash); hash.addl(varId); }
+    override string repr() { return "FieldRef(@varId) on $(framePointer.repr)"; }
 }
 
 class VariableDeclaration : DeclarationHolder
@@ -524,19 +602,19 @@ class VariableDeclaration : DeclarationHolder
      */
     nullable PairedTemporaryExpr initialCache;
 
-    this(this.parent, this.name, Platform platform, Type type, bool mut, this.borrowed, this.hidden) {
-        mut Type[] reverseFrame = [type];
-        mut Namespace current = parent? else die;
-        while (true) {
-            if (current.instanceOf(Declarable)) break;
-            if (auto vd = current.instanceOf(VariableDeclaration)) {
-                reverseFrame ~= vd.variable.type;
+    this(this.parent, this.name, Context context, Type type, bool mut, this.borrowed, this.hidden) {
+        (int | :none) parentId() {
+            mut Namespace current = parent? else die;
+            while (!current.instanceOf(Declarable)) {
+                if (auto vd = current.instanceOf(VariableDeclaration)) {
+                    return vd.variable.id;
+                }
+                current = current.parent? else die;
             }
-            current = current.parent? else die;
+            return :none;
         }
-        auto frame = [reverseFrame[$ - 1 - i] for i in 0 .. reverseFrame.length];
-        this.variable = findParent!Declarable(this)?
-            .declare(name, frame, mut=mut, borrowed=borrowed, platform)
+        this.variable = this.findParent!Declarable?
+            .declare(context, name, type, mut=mut, borrowed=borrowed, parentId)
             else die;
         this.isContextScope = true;
         this.initialCache = null;
@@ -829,7 +907,7 @@ class ASTFunction : ASTSymbolDeclaration
         }
 
         if (auto functionScope = findParent!FunctionScope(context.namespace)) {
-            auto spacerType = functionScope.spacerType;
+            auto spacerType = functionScope.framePlanner.spacerType(context.platform, capture=true);
             auto voidp = once new Pointer(new Void);
             auto latent = new LatentNestedFunction(fun);
 

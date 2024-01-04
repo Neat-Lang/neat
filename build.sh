@@ -81,7 +81,7 @@ cp -R src build/
 echo "Building stage 2..."
 FLAGS="$FLAGS -version=LLVMBackend"
 # see generation.md
-$NEAT $FLAGS -backend=llvm -macro-backend=c -Pcompiler:src -j src/main.nt \
+$NEAT $FLAGS -backend=llvm -macro-backend=c -macro-version=oldabi -Pcompiler:src -j src/main.nt \
     -o build/neat_stage2
 NEAT=build/neat_stage2
 

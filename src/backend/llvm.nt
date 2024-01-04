@@ -120,19 +120,16 @@ nullable BackendType toAmd64ParamType(BackendType type) {
     // only zero-sized types
     if (blobs.length == 0) return null;
     if (blobs.length == 1) return blobs[0];
-    return new BackendStructType(blobs);
+    return new BackendStructType(blobs, internal=false);
 }
 
 unittest {
-    // TODO literal
-    mut BackendType[] inputArray;
-    inputArray ~= new BackendFloatType; inputArray ~= new BackendIntType; inputArray ~= new BackendIntType;
-    auto input = new BackendStructType(inputArray);
+    auto input = new BackendStructType([new BackendFloatType, new BackendIntType, new BackendIntType], internal=false);
     auto output = toAmd64ParamType(input);
 
     mut BackendType[] expectedArray;
     expectedArray ~= new BackendLongType; expectedArray ~= new BackendIntType;
-    assert(output.same(new BackendStructType(expectedArray)));
+    assert(output.same(new BackendStructType(expectedArray, internal=false)));
 }
 
 LLVMTypeRef translateFunc(BackendFunctionPointerType backendFpType, LLVMContextRef context) {
@@ -152,26 +149,34 @@ LLVMTypeRef translateFunc(BackendFunctionPointerType backendFpType, LLVMContextR
         paramTypes ~= LLVMPointerType(
             translate(backendFpType.ret, context, true), 0);
     }
-    for (param in backendFpType.params) {
-        if (param.zeroSize) continue;
-        if (auto translatedType = toAmd64ParamType(param)) {
+    void recurse(BackendType type) {
+        if (type.zeroSize) return;
+        if (auto struct_ = type.instanceOf(BackendStructType)) {
+            if (struct_.internal && struct_.size > 16) {
+                [recurse(member) for member in struct_.members];
+                return;
+            }
+        }
+        if (auto translatedType = toAmd64ParamType(type)) {
             paramTypes ~= translate(translatedType, context, false);
-            continue;
+            return;
         }
-        if (passByMemory(param)) {
+        if (passByMemory(type)) {
             paramTypes ~= LLVMPointerType(
-                translate(param, context, false), 0);
-            continue;
+                translate(type, context, false), 0);
+            return;
         }
-        paramTypes ~= translate(param, context, false);
+        paramTypes ~= translate(type, context, false);
     }
+    [recurse(param) for param in backendFpType.params];
     return LLVMFunctionType(returnType, paramTypes.ptr, cast(int) paramTypes.length, backendFpType.variadic);
 }
 
 bool passByMemory(BackendType type) {
     // AMD64 ABI, rule 5c: aggregates over 16 bytes that are not SSE are passed in memory (byval).
-    if (type.instanceOf(BackendStructType) && type.size > 16)
-        return true;
+    if (auto struct_ = type.instanceOf(BackendStructType))
+        if (!struct_.internal && struct_.size > 16)
+            return true;
     return false;
 }
 
@@ -374,17 +379,26 @@ class LLVMBackendModule : BackendModule {
             // first attribute is sret
             LLVMAddAttributeAtIndex(llFun, 1, sretTypeAttr);
         }
-        for (i, param in params) {
-            if (passByMemory(param)) {
+        // base 1 (0 is return type)
+        mut int llvmParam = sret + 1;
+        void recurse(BackendType type) {
+            if (auto struct_ = type.instanceOf(BackendStructType)) {
+                if (struct_.internal && struct_.size > 16) {
+                    [recurse(member) for member in struct_.members];
+                    return;
+                }
+            }
+            if (passByMemory(type)) {
                 auto byvalAttrKind = LLVMGetEnumAttributeKindForName("byval", 5);
                 assert(byvalAttrKind != 0);
                 auto byvalTypeAttr = LLVMCreateTypeAttribute(
-                    this.context, byvalAttrKind, translate(param, false));
-                // base-1 (0 is return type), + 1 for sret parameter
-                int base = 1 + sret;
-                LLVMAddAttributeAtIndex(llFun, base + cast(int) i, byvalTypeAttr);
+                    this.context, byvalAttrKind, translate(type, false));
+                LLVMAddAttributeAtIndex(llFun, llvmParam++, byvalTypeAttr);
+            } else {
+                llvmParam++;
             }
         }
+        [recurse(param) for param in params];
     }
 
     void declareVar(string name, BackendType type, bool define, bool threadlocal) {
@@ -615,34 +629,48 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
         LLVMPositionBuilderAtEnd(this.entryBuilder, llLabel("entry"));
         LLVMPositionBuilderAtEnd(this.builder, llLabel("first"));
 
-        // TODO RegDefine[] llArgs
-        auto llArgs = new LLVMValueRef mut[](this.params.length);
         bool sret = passByMemory(this.ret_);
         mut int llvmParamId = sret;
-        for (int i, param in params) {
-            if (param.size == 0) {
-                llArgs[i] = null;
-                continue;
+        LLVMValueRef getArg(BackendType type) {
+            int id = llvmParamId;
+            if (type.size == 0) {
+                return null;
             }
-            auto llParam = this.mod.translate(param, allowVoid=false);
-            if (auto amd64Type = toAmd64ParamType(param)) {
-                auto llAllocaReg = LLVMBuildAlloca(this.entryBuilder, llParam, "tmparg$i".toStringz);
+            auto llType = this.mod.translate(type, allowVoid=false);
+            if (auto struct_ = type.instanceOf(BackendStructType)) {
+                if (struct_.internal && struct_.size > 16) {
+                    auto fields = [getArg(member) for member in struct_.members];
+                    mut auto result = LLVMGetUndef(llType);
+                    mut int translatedIndex = 0;
+                    for (i, field in fields) {
+                        assert(struct_.members[i].size > 0);
+                        int reg = this.nextReg;
+                        result = LLVMBuildInsertValue(
+                            this.builder, result, field, translatedIndex++, "reg$reg".toStringz);
+                    }
+                    return result;
+                }
+            }
+            if (auto amd64Type = toAmd64ParamType(type)) {
+                auto llAllocaReg = LLVMBuildAlloca(this.entryBuilder, llType, "tmparg$id".toStringz);
                 auto llAmd64Type = this.mod.translate(amd64Type, false);
                 auto llAmd64Ptr = this.mod.translate(new BackendPointerType(amd64Type, this.mod.platform), false);
                 auto llAllocaAmd64Ptr = LLVMBuildBitCast(
-                    this.builder, llAllocaReg, llAmd64Ptr, "argload_alloca$i".toStringz);
+                    this.builder, llAllocaReg, llAmd64Ptr, "argload_alloca$id".toStringz);
                 auto paramPtr = LLVMGetParam(this.function_, llvmParamId++);
                 LLVMBuildStore(this.builder, paramPtr, llAllocaAmd64Ptr);
-                llArgs[i] = LLVMBuildLoad2(this.builder, llParam, llAllocaReg, "argload$i".toStringz);
-            } else if (passByMemory(param)) {
+                return LLVMBuildLoad2(this.builder, llType, llAllocaReg, "argload$id".toStringz);
+            }
+            if (passByMemory(type)) {
                 auto paramPtr = LLVMGetParam(this.function_, llvmParamId++);
-                llArgs[i] = LLVMBuildLoad2(
-                    this.builder, llParam, paramPtr, "arg$i.load".toStringz);
+                return LLVMBuildLoad2(
+                    this.builder, llType, paramPtr, "arg$id.load".toStringz);
             } else {
-                llArgs[i] = LLVMGetParam(this.function_, llvmParamId++);
+                return LLVMGetParam(this.function_, llvmParamId++);
             }
         }
-        this.llArgs = llArgs.freeze;
+        // TODO RegDefine[] llArgs
+        this.llArgs = [getArg(param) for param in params];
     }
 
     override string toString() => "LLVMBackendFunction($(this.name))";
@@ -1032,22 +1060,31 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
             llRetReg = LLVMBuildAlloca(this.entryBuilder, llRetType, "reg$reg.ret".toStringz);
             llArgs ~= llRetReg;
         }
-        for (int i, arg in args) {
+        void recurse(BackendType type, int reg) {
             // skip 0-sized parameters
-            if (params[i].zeroSize) continue;
-            if (auto amd64Type = toAmd64ParamType(params[i])) {
-                auto llAlloca = llRegToAlloca(params[i], arg);
+            if (type.zeroSize) return;
+            if (auto struct_ = type.instanceOf(BackendStructType)) {
+                if (struct_.internal && struct_.size > 16) {
+                    [recurse(member, field(type, reg, cast(int) i)) for i, member in struct_.members];
+                    return;
+                }
+            }
+            if (auto amd64Type = toAmd64ParamType(type)) {
+                auto llAlloca = llRegToAlloca(type, reg);
                 auto llAmd64Type = this.mod.translate(amd64Type, false);
                 auto llAmd64PtrType = this.mod.translate(new BackendPointerType(amd64Type, this.mod.platform), false);
                 auto llAllocaAsAmd64Ptr = LLVMBuildBitCast(
-                    this.builder, llAlloca, llAmd64PtrType, "reg$reg.coerce$i.cast".toStringz);
+                    this.builder, llAlloca, llAmd64PtrType, "reg$reg.coerce$(llArgs.length).cast".toStringz);
                 llArgs ~= LLVMBuildLoad2(this.builder, llAmd64Type, llAllocaAsAmd64Ptr, "reg$reg.load".toStringz);
-            } else if (passByMemory(params[i])) {
-                llArgs ~= llRegToAlloca(params[i], arg);
+                return;
+            }
+            if (passByMemory(type)) {
+                llArgs ~= llRegToAlloca(type, reg);
             } else {
-                llArgs ~= llReg(arg);
+                llArgs ~= llReg(reg);
             }
         }
+        [recurse(params[i], arg) for i, arg in args];
 
         mut LLVMValueRef llFun;
 
@@ -1085,17 +1122,26 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
             LLVMAddCallSiteAttribute(llCall, 1, sretTypeAttr);
         }
 
-        for (int i, param in params) {
-            if (passByMemory(param)) {
+        // base-1 (0 is return type), + 1 for sret parameter
+        mut int llvmParam = sret + 1;
+        void recurse(BackendType type) {
+            if (auto struct_ = type.instanceOf(BackendStructType)) {
+                if (struct_.internal && struct_.size > 16) {
+                    [recurse(member) for member in struct_.members];
+                    return;
+                }
+            }
+            if (passByMemory(type)) {
                 auto byvalAttrKind = LLVMGetEnumAttributeKindForName("byval", 5);
                 assert(byvalAttrKind != 0);
                 auto byvalTypeAttr = LLVMCreateTypeAttribute(
-                    this.mod.context, byvalAttrKind, this.mod.translate(param, false));
-                // base-1 (0 is return type), + 1 for sret parameter
-                int base = 1 + sret;
-                LLVMAddCallSiteAttribute(llCall, base + cast(int) i, byvalTypeAttr);
+                    this.mod.context, byvalAttrKind, this.mod.translate(type, false));
+                LLVMAddCallSiteAttribute(llCall, llvmParam++, byvalTypeAttr);
+            } else {
+                llvmParam++;
             }
         }
+        [recurse(param) for param in params];
 
         if (sret) {
             this.defRegTransparentPtr(reg, retType, llRetReg);

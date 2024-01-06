@@ -92,7 +92,7 @@ OBJECTS=()
 # poor man's make -j
 for file in intermediate_\${ARCH}/*.c src/runtime.c; do
     obj=\${file%.c}.o
-    gcc \$ARCHFLAG -c -fpic -rdynamic -fno-strict-aliasing \$DMAIN -DNEW_ABI \$file -o \$obj &
+    gcc \$ARCHFLAG -c -fpic -rdynamic -fno-strict-aliasing \$DMAIN \$file -o \$obj &
     OBJECTS+=(\$obj)
     if [ \$I -ge \$JOBS ]; then wait -n; fi
     I=\$((I+1))
@@ -176,7 +176,7 @@ OBJECTS=()
 # poor man's make -j
 for file in intermediate_\${ARCH}/*.c src/runtime.c; do
     obj=\${file%.c}.o
-    gcc \$ARCHFLAG -c -fpic -rdynamic -fno-strict-aliasing \$DMAIN -DNEW_ABI \$file -o \$obj &
+    gcc \$ARCHFLAG -c -fpic -rdynamic -fno-strict-aliasing \$DMAIN \$file -o \$obj &
     OBJECTS+=(\$obj)
     if [ \$I -ge \$JOBS ]; then wait -n; fi
     I=\$((I+1))

@@ -26,18 +26,9 @@ struct StringArray
     void *base;
 };
 
-#ifdef NEW_ABI
 // Arrays are passed as three separate parameters. This optimizes a lot better.
 #define ARRAY_PARAM(type, valuetype, name) size_t name ## _length, type *name ## _ptr, void * name ## _base
 #define ARRAY_VALUE(name) name ## _length, name ## _ptr, name ## _base
-#define LENGTH(name) name ## _length
-#define PTR(name) name ## _ptr
-#else
-#define ARRAY_PARAM(type, valuetype, name) valuetype name
-#define ARRAY_VALUE(name) name
-#define LENGTH(name) name.length
-#define PTR(name) name.ptr
-#endif
 
 #define STRING_PARAM(name) ARRAY_PARAM(char, struct String, name)
 
@@ -54,7 +45,7 @@ void neat_runtime_unlock_stdout(void);
 
 void print(STRING_PARAM(str)) {
     neat_runtime_lock_stdout();
-    printf("%.*s\n", (int) LENGTH(str), PTR(str));
+    printf("%.*s\n", (int) str_length, str_ptr);
     fflush(stdout);
     neat_runtime_unlock_stdout();
 }
@@ -71,9 +62,9 @@ int _arraycmp(void* a, void* b, size_t la, size_t lb, size_t sz) {
     return memcmp(a, b, la * sz) == 0;
 }
 char* toStringz(STRING_PARAM(str)) {
-    char *buffer = malloc(LENGTH(str) + 1);
-    strncpy(buffer, PTR(str), LENGTH(str));
-    buffer[LENGTH(str)] = 0;
+    char *buffer = malloc(str_length + 1);
+    strncpy(buffer, str_ptr, str_length);
+    buffer[str_length] = 0;
     return buffer;
 }
 
@@ -100,16 +91,12 @@ int neat_runtime_execbg(STRING_PARAM(command), ARRAY_PARAM(struct String, struct
     int ret = fork();
     if (ret != 0) return ret;
     char *cmd = toStringz(ARRAY_VALUE(command));
-    char **args = malloc(sizeof(char*) * (LENGTH(arguments) + 2));
+    char **args = malloc(sizeof(char*) * (arguments_length + 2));
     args[0] = cmd;
-    for (int i = 0; i < LENGTH(arguments); i++) {
-#ifdef NEW_ABI
-        args[1 + i] = toStringz(PTR(arguments)[i].length, PTR(arguments)[i].ptr, PTR(arguments)[i].base);
-#else
-        args[1 + i] = toStringz(PTR(arguments)[i]);
-#endif
+    for (int i = 0; i < arguments_length; i++) {
+        args[1 + i] = toStringz(arguments_ptr[i].length, arguments_ptr[i].ptr, arguments_ptr[i].base);
     }
-    args[1 + LENGTH(arguments)] = NULL;
+    args[1 + arguments_length] = NULL;
     return execvp(cmd, args);
 }
 
@@ -136,10 +123,10 @@ bool neat_runtime_symbol_defined_in_main(STRING_PARAM(symbol)) {
 
 void neat_runtime_dlcall(STRING_PARAM(dlfile), STRING_PARAM(fun), void* arg) {
     void *handle = dlopen(toStringz(ARRAY_VALUE(dlfile)), RTLD_LAZY | RTLD_GLOBAL);
-    if (!handle) fprintf(stderr, "can't open %.*s - %s\n", (int) LENGTH(dlfile), PTR(dlfile), dlerror());
+    if (!handle) fprintf(stderr, "can't open %.*s - %s\n", (int) dlfile_length, dlfile_ptr, dlerror());
     assert(!!handle);
     void *sym = dlsym(handle, toStringz(ARRAY_VALUE(fun)));
-    if (!sym) fprintf(stderr, "can't load symbol '%.*s'\n", (int) LENGTH(fun), PTR(fun));
+    if (!sym) fprintf(stderr, "can't load symbol '%.*s'\n", (int) fun_length, fun_ptr);
     assert(!!sym);
 
     ((void(*)(void*)) sym)(arg);
@@ -162,9 +149,6 @@ int main(int argc, char **argv) {
     for (int i = 0; i < argc; i++) {
         args_ptr[i] = (struct String) { strlen(argv[i]), argv[i] };
     }
-#ifndef NEW_ABI
-    struct StringArray args = { args_length, args_ptr, args_base };
-#endif
     _run_unittests();
 #ifndef NEAT_NO_MAIN
     MAIN(ARRAY_VALUE(args));

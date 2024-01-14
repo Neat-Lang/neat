@@ -132,6 +132,49 @@ class Array : Type
         return context.compiler.exprStatement(releaseArray(context, value));
     }
 
+    override (nullable Expression | Error) index(Context context, Expression base, ASTSymbol astIndex, LocRange locRange)
+    {
+        bool gifted = base.info.lifetime == Lifetime.gifted;
+        bool allowRefReturn = !gifted && this.mutableElements;
+
+        (nullable Expression | Error) do_(Expression base) {
+            mut uninitialized Expression indexExpr;
+            mut uninitialized Expression ptrBase;
+
+            auto context = context.withNamespace(
+                context.compiler.exprAlias(context.namespace, "__array", base));
+
+            if (context.platform.platformFlags.releaseMode) {
+                indexExpr = astIndex.compile(context)?.beExpressionImplCall(context, locRange)?;
+                ptrBase = new ArrayPointer(elementType, base);
+            } else {
+                /*auto astIndexAccess = context.compiler.$expr ({
+                    import package(compiler).neat.runtime.checkIndex;
+                    checkIndex($length, $astIndex);
+                });*/
+                auto astImport = context.compiler.astImport(
+                    "neat.runtime.array", "compiler", ["checkIndex"]);
+                ASTStatement importStmt = new ASTDeclarationStatement(astImport);
+                auto arrayLength = accessMember(context, base, "length", Protection.public_, __RANGE__)?? else die;
+                auto astArrayLength = new ASTSymbolHelper(arrayLength);
+                auto call = context.compiler.astCall(
+                    new ASTIdentifier("checkIndex", moduleLevel=false),
+                    [astIndex, astArrayLength],
+                    locRange);
+                auto astIndex = context.compiler.astStatementExpression([importStmt], call);
+                indexExpr = astIndex.compile(context)?.beExpression(locRange)?;
+                ptrBase = new ArrayPointer(elementType, base);
+            }
+
+            auto indexExpr = expectImplicitConvertTo(context, indexExpr, context.nativeWordType, locRange)?;
+            assert(indexExpr.type.same(context.nativeWordType));
+            auto result = context.compiler.(dereference(pointerOffset(ptrBase, indexExpr)));
+            return result.copy(context, locRange) if gifted else result;
+        }
+        return context.compiler.consumeTemporary(
+                context, allowRefReturn, base, &do_)?? else die;
+    }
+
     override (nullable Symbol | Error) accessMember(
         Context context, nullable Expression base, string field, Protection _, LocRange locRange)
     {
@@ -798,8 +841,7 @@ Expression releaseArray(Context context, Expression value) {
 (nullable ASTSymbol | Error) parseArrayLiteral(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
-    if (parser.acceptToken(TokenType.lsquarebracket)) { }
-    else {
+    if (!parser.acceptToken(TokenType.lsquarebracket)) {
         parser.revert;
         return null;
     }
@@ -914,6 +956,15 @@ class ASTArrayLiteral : ASTSymbol
                 return this.elements[i].locRange.fail("cannot convert to shared type $(mergeType.repr)");
         }
         return new ArrayLiteral(mergeType, values.freeze, context.platform);
+    }
+
+    override string repr() {
+        mut string result;
+        for (i, elem in this.elements) {
+            if (i) result ~= ", ";
+            result ~= elem.value.repr;
+        }
+        return "[$result]";
     }
 }
 

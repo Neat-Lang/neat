@@ -160,16 +160,18 @@ class HashMap : Type
     }
 
     override (nullable Expression | Error) index(
-        Context context, Expression base, Expression index, LocRange locRange)
+        Context context, Expression base, ASTSymbol index, LocRange locRange)
     {
-        auto indexConv = expectImplicitConvertTo(context, index, this.key, locRange)?;
+        auto indexExpr = index.compile(context)?.beExpressionImplCall(context, index.locRange)?;
+        auto indexConv = expectImplicitConvertTo(context, indexExpr, this.key, locRange)?;
         return getHashmap(context, this, base, indexConv);
     }
 
     override (nullable Statement | Error) indexAssignment(
-        Context context, Expression base, Expression index, Expression value, LocRange locRange)
+        Context context, Expression base, ASTSymbol index, Expression value, LocRange locRange)
     {
-        auto indexConv = expectImplicitConvertTo(context, index, this.key, locRange)?;
+        auto indexExpr = index.compile(context)?.beExpressionImplCall(context, index.locRange)?;
+        auto indexConv = expectImplicitConvertTo(context, indexExpr, this.key, locRange)?;
         auto valueConv = expectImplicitConvertTo(context, value, this.value, locRange)?;
         return setHashmap(context, this, base, indexConv, valueConv, locRange);
     }
@@ -653,15 +655,26 @@ private Expression valuesHashmap(Context context, HashMap hashmap, Expression ba
     return context.compiler.mkCall(fn, [base]);
 }
 
+// TODO just merge this completely with ASTIndexAccess.
 class ASTHashMap : ASTSymbol
 {
     ASTSymbol key, value;
 
     this(this.key, this.value, this.locRange=__CALLER__) { }
 
-    override (Type | Error) compile(Context context) {
-        auto key = this.key.compile(context)?.beType(this.key.locRange)?;
-        auto value = this.value.compile(context)?.beType(this.value.locRange)?;
-        return new HashMap(key=key, value=value);
+    override (Symbol | Error) compile(Context context) {
+        auto key = this.key.compile(context)?;
+        if (auto keyType = key.isType(this.key.locRange)?) {
+            auto value = this.value.compile(context)?.beType(this.value.locRange)?;
+            return new HashMap(key=keyType, value=value);
+        } else if (auto keyExpr = key.isExpression(this.key.locRange)?) {
+            return context.compiler.astIndex(base=value, index=this.key, locRange=this.locRange)
+                .compile(context);
+        } else {
+            return this.key.locRange.fail(
+                "index expression must be either type (hashmap) or value (index access)");
+        }
     }
+
+    override string repr() => "$value[$key] (AA)";
 }

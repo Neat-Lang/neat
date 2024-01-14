@@ -191,6 +191,21 @@ class Pointer : Type
         return false;
     }
 
+    override (nullable Expression | Error) index(Context context, Expression base, ASTSymbol astIndex,
+        LocRange locRange)
+    {
+        auto type = base.type;
+        bool allowRefReturn = base.info.lifetime != Lifetime.gifted;
+
+        (nullable Expression | Error) do_(Expression base) {
+            auto indexExpr = astIndex.compile(context)?.beExpressionImplCall(context, locRange)?;
+            auto indexExpr = expectImplicitConvertTo(context, indexExpr, context.nativeWordType, locRange)?;
+            return context.compiler.(dereference(pointerOffset(base, indexExpr)));
+        }
+        return context.compiler.consumeTemporary(
+                context, allowRefReturn, base, &do_)?? else die;
+    }
+
     override string repr() { return this.target.repr ~ "*"; }
 
     override string mangle() { return "ptr_" ~ this.target.mangle; }
@@ -209,22 +224,28 @@ class NoopStatement : Statement
     override void hash(Hash hash) { hash.adds("NoopStatement"); }
 }
 
-(Expression | Error) beExpression(Symbol symbol, LocRange locRange=__CALLER__)
-{
+nullable Expression isExpression(Symbol symbol, LocRange locRange=__CALLER__) {
     if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
         return symbolIdent.asExpression;
     if (auto expr = symbol.instanceOf(Expression))
         return expr;
-    return locRange.fail("expression expected");
+    return null;
 }
 
-(Type | Error) beType(Symbol symbol, LocRange locRange=__CALLER__)
-{
+(Expression | Error) beExpression(Symbol symbol, LocRange locRange=__CALLER__) {
+    return symbol.isExpression(locRange)? else locRange.fail("expression expected");
+}
+
+nullable Type isType(Symbol symbol, LocRange locRange=__CALLER__) {
     if (auto type = symbol.instanceOf(Type))
         return type;
     if (auto symbolIdent = symbol.instanceOf(SymbolIdentifier))
         return symbolIdent.asType;
-    return locRange.fail("type expected");
+    return null;
+}
+
+(Type | Error) beType(Symbol symbol, LocRange locRange=__CALLER__) {
+    return symbol.isType(locRange)? else locRange.fail("type expected");
 }
 
 class PointerCast : Expression
@@ -472,9 +493,30 @@ class ASTIdentifier : ASTIdentifierSymbol
 
     this(this.name_, this.moduleLevel, this.locRange=__CALLER__) {}
 
-    override (Symbol | Error) compile(Context context)
-    {
-        return context.compiler.identifier(context, name_, moduleLevel, locRange);
+    override (Symbol | Error) compile(Context context) {
+        if (!moduleLevel) {
+            if (auto identifier = context.compiler.primitiveIdentifier(context, name_)?)
+                return identifier;
+        }
+        return resolve(context, LookupReason.identifier)??
+            else return locRange.fail("'$(name_)' not found");
+    }
+
+    override (nullable Statement | Error) assign(Context context, Expression value) {
+        auto helper = resolve(context, LookupReason.assignment)??.instanceOf(AssignmentHelper)?
+            else return null;
+        return helper.assign(context, value)?;
+    }
+
+    private (nullable Symbol | Error) resolve(Context context, LookupReason reason) {
+        if (moduleLevel) {
+            auto module_ = findParent!ModuleBase(context.namespace);
+            return module_.lookup(name_, context.withFramePointer(null, :none), reason, locRange);
+        } else if (context.namespace.isContextScope) {
+            return context.namespace.lookup(name_, context, reason, locRange);
+        } else {
+            return context.namespace.lookup(name_, context.withFramePointer(null, :none), reason, locRange);
+        }
     }
 
     override string name(WarmContext) => name_;

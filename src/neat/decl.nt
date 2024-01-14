@@ -10,6 +10,18 @@ class ASTAliasDecl : ASTSymbolDeclaration
 
     this(this.name, this.target, this.locRange=__RANGE__) { }
 
+    override (Namespace | Error) compile(Context context) {
+        if let(auto astIndex = context.compiler.destructAstIndex(target)?) {
+            auto name = this.name.name(context.warmContext);
+            /**
+             * Magic that enables `alias a = foo[5]; a = 3;`
+             */
+            return new IndexNamespace(name, expr=target, base=astIndex.base, index=astIndex.index,
+                parent=context.namespace);
+        }
+        return super.compile(context);
+    }
+
     override (Symbol | Error) compileSymbol(Context context) {
         return this.target.compile(context)?;
     }
@@ -47,4 +59,55 @@ class ASTAliasDecl : ASTSymbolDeclaration
     if (auto ret = lexicalContext.compiler.parseTemplateStub(parser, lexicalContext, name, comment, &parseRest)?)
         return ret;
     return parseRest?;
+}
+
+class IndexNamespace : Namespace
+{
+    string name;
+
+    ASTSymbol expr;
+
+    ASTSymbol base;
+
+    ASTSymbol index;
+
+    this(this.name, this.expr, this.base, this.index, Namespace parent) {
+        super(parent, isContextScope=parent.isContextScope);
+    }
+
+    override (nullable Symbol | Error) lookup(
+        string name, Context context, LookupReason reason, LocRange locRange)
+    {
+        if (name != this.name)
+            return this.parent?.lookup(name, context, reason, locRange)?? else null;
+
+        if (reason == LookupReason.identifier || reason == LookupReason.ufcs) {
+            auto ret = this.expr.compile(context)?;
+            return ret;
+        } else if (reason == LookupReason.assignment) {
+            auto base = this.base.compile(context)?.beExpressionImplCall(context, this.base.locRange)?;
+            return new IndexAssignmentHelper(base, index=this.index, this.expr.locRange);
+        } else {
+            assert(false);
+        }
+    }
+
+    override string repr() => "$name ($(expr.repr))";
+}
+
+class IndexAssignmentHelper : AssignmentHelper
+{
+    Expression base;
+
+    ASTSymbol index;
+
+    LocRange locRange;
+
+    this(this.base, this.index, this.locRange) {}
+
+    override (nullable Statement | Error) assign(Context context, Expression value) {
+        return this.base.type.indexAssignment(context, this.base, this.index, value, this.locRange);
+    }
+
+    override bool mayCallImplicit() => false;
 }

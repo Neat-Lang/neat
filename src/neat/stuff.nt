@@ -92,10 +92,9 @@ class DefineClassIntf : FinishedSymbol
 }
 
 (nullable ASTSymbol | Error) parseType(Parser parser, LexicalContext lexicalContext)
+with (parser.transaction)
 {
-    nullable ASTSymbol current = parser.parseLeafType(lexicalContext)?;
-    if (!current) return null;
-    mut ASTSymbol current = current? else die;
+    mut ASTSymbol current = parser.parseLeafType(lexicalContext)?? else return null;
     while (true) {
         auto from = parser.from;
         if (parser.acceptToken(TokenType.asterisk)) {
@@ -119,16 +118,17 @@ class DefineClassIntf : FinishedSymbol
 
                     args ~= argType? else die;
                 }
-                commit;
                 if (identifier == "function") {
                     parser.assert_(copyable, "cannot mark function noncopyable")?;
                     current = new ASTFunctionPointer(current, args, parser.to(from));
                 } else {
                     current = new ASTDelegate(current, copyable, args, parser.to(from));
                 }
+                commit;
                 continue;
             }
         }
+
         with (parser.transaction) {
             /**
              * Two kinds of mutable:
@@ -140,9 +140,8 @@ class DefineClassIntf : FinishedSymbol
             bool arrayIsMutable = parser.acceptIdentifier("mut");
             if (parser.acceptToken(TokenType.lsquarebracket)) {
                 if (parser.acceptToken(TokenType.rsquarebracket)) {
-                    commit;
-
                     current = new ASTArray(current, arrayIsMutable, parser.to(from));
+                    commit;
                     continue;
                 }
                 // hashmap? might be assignment intro
@@ -150,8 +149,8 @@ class DefineClassIntf : FinishedSymbol
                 if (!parser.acceptToken(TokenType.rsquarebracket)) {
                     return null;
                 }
-                commit;
                 current = new ASTHashMap(key=keyType, value=current, parser.to(from));
+                commit;
                 continue;
             }
         }
@@ -193,11 +192,12 @@ class DefineClassIntf : FinishedSymbol
                 } else {
                     getTemplateArg(true)?;
                 }
-                commit;
                 current = new ASTTemplateInstance(current, templateArgs, parser.to(from));
+                commit;
                 continue;
             }
         }
+        commit;
         return current;
     }
 }
@@ -960,91 +960,17 @@ class ASTIndexAccess : ASTSymbol
     override (Expression | Error) compile(Context context)
     {
         auto base = this.base.compile(context)?.beExpressionImplCall(context, this.locRange)?;
-        auto type = base.type;
-
-        // TODO what is going on here reeee
-        // should index() just take the ASTSymbol? Then Array can have an index access
-        // and declare itself as the __array context
-        if (!type.instanceOf(Array)) {
-            auto indexExpr = this.index.compile(context)?.beExpressionImplCall(context, this.locRange)?;
-            if (auto result = type.index(context, base, indexExpr, this.locRange)?) {
-                return result;
-            }
-        }
-
-        bool saveIndexValue = base.info.lifetime == Lifetime.gifted;
-        bool allowRefReturn = !saveIndexValue
-            && type.instanceOf(Array).case(null: true, Array a: a.mutableElements);
-
-
-        (nullable Expression | Error) do_(Expression base) {
-            mut uninitialized Expression indexExpr;
-            mut uninitialized Expression ptrBase;
-
-            // TODO -release
-            if (auto array_ = type.instanceOf(Array)) {
-                auto context = context.withNamespace(
-                    context.compiler.exprAlias(context.namespace, "__array", base));
-
-                if (context.platform.platformFlags.releaseMode) {
-                    indexExpr = this.index.compile(context)?.beExpressionImplCall(context, this.locRange)?;
-                    ptrBase = new ArrayPointer(array_.elementType, base);
-                } else {
-                    /*auto astIndexAccess = context.compiler.$expr ({
-                        import package(compiler).neat.runtime.checkIndex;
-                        checkIndex($length, $index);
-                    });*/
-                    auto astImport = context.compiler.astImport(
-                        "neat.runtime.array", "compiler", ["checkIndex"]);
-                    ASTStatement importStmt = new ASTDeclarationStatement(astImport);
-                    auto arrayLength = array_.accessMember(context, base, "length", Protection.public_, __RANGE__)?? else die;
-                    auto astArrayLength = new ASTSymbolHelper(arrayLength);
-                    auto call = new ASTCall(
-                        new ASTIdentifier("checkIndex", moduleLevel=false),
-                        [ASTArgument(index, "", __RANGE__), ASTArgument(astArrayLength, "", __RANGE__)],
-                        this.locRange);
-                    auto astIndex = new ASTStatementExpression([importStmt], call);
-                    indexExpr = astIndex.compile(context)?.beExpression(this.locRange)?;
-                    ptrBase = new ArrayPointer(array_.elementType, base);
-                }
-            } else if (type.instanceOf(Pointer)) {
-                indexExpr = this.index.compile(context)?.beExpressionImplCall(context, this.locRange)?;
-                ptrBase = base;
-            } else {
-                return this.locRange.fail("index access requires pointer, array or hashmap");
-            }
-
-            indexExpr = expectImplicitConvertTo(context, indexExpr, context.nativeWordType, this.locRange)?;
-
-            assert(indexExpr.type.same(context.nativeWordType));
-            auto deref = new Dereference(new PointerOffset(ptrBase, indexExpr));
-            if (saveIndexValue)
-            {
-                // This is a very silly idiom.
-                // Hint: When is 'base' released? What if we're the last thing referencing 'base'
-                // and we're assigning an index?
-                // TODO better approach
-                auto temp = new PairedTemporary(deref.type, Lifetime.gifted, context.getUniqueId);
-                auto init = new UninitializeTemporaryStatement(temp);
-                return context.compiler.wrapRef(
-                    sequence(init, new AssignStatement(temp, deref.copy(context, this.locRange)?, this.locRange)),
-                    temp, null);
-            }
-            return deref;
-        }
-        return context.compiler.consumeTemporary(
-                context, allowRefReturn, base, &do_)?? else die;
+        return base.type.index(context, base, index=this.index, this.locRange)??
+            else this.locRange.fail("$(base.type.repr) does not permit index access");
     }
 
     override (nullable Statement | Error) assign(Context context, Expression value) {
         auto base = this.base.compile(context)?.beExpressionImplCall(context, this.locRange)?;
         checkAssignmentQuarantine(context, this.locRange, base.type, value.type)?;
-        // if this is Array, we get issues compiling index without $
-        // so fall through to normal ASTAssignment behavior.
-        base.type.instanceOf(Array) && return null;
-        auto index = this.index.compile(context)?.beExpressionImplCall(context, this.locRange)?;
-        return base.type.indexAssignment(context, base, index, value, this.locRange)? else null;
+        return base.type.indexAssignment(context, base=base, index=index, value, this.locRange)? else null;
     }
+
+    override string repr() => "$base[$index]";
 }
 
 class ASTArraySlice : ASTSymbol

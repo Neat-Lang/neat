@@ -1035,6 +1035,16 @@ class ASTIndexAccess : ASTSymbol
         return context.compiler.consumeTemporary(
                 context, allowRefReturn, base, &do_)?? else die;
     }
+
+    override (nullable Statement | Error) assign(Context context, Expression value) {
+        auto base = this.base.compile(context)?.beExpressionImplCall(context, this.locRange)?;
+        checkAssignmentQuarantine(context, this.locRange, base.type, value.type)?;
+        // if this is Array, we get issues compiling index without $
+        // so fall through to normal ASTAssignment behavior.
+        base.type.instanceOf(Array) && return null;
+        auto index = this.index.compile(context)?.beExpressionImplCall(context, this.locRange)?;
+        return base.type.indexAssignment(context, base, index, value, this.locRange)? else null;
+    }
 }
 
 class ASTArraySlice : ASTSymbol
@@ -1134,6 +1144,14 @@ class ASTMember : ASTMemberBase
             return ret;
         }
         return this.locRange.fail("Member '$(name)' not found");
+    }
+
+    override (nullable Statement | Error) assign(Context context, Expression value) {
+        auto base = this.base.compile(context)?.beExpressionImplCall(context, this.locRange)?;
+        auto protection = base.type.protectionAt(context.namespace);
+        auto memberName = this.member.name(context.warmContext);
+        checkAssignmentQuarantine(context, this.locRange, base.type, value.type)?;
+        return base.type.assignMember(context, base, memberName, value, protection, this.locRange)?;
     }
 }
 
@@ -2680,41 +2698,19 @@ class ASTAssignStatement : ASTStatement
 
     this(this.target, this.value, this.locRange=__CALLER__) {}
 
-    override (StatementCompileResult | Error) compile(Context context)
-    {
-        mut Expression value = this.value.compile(context)?.beExpressionImplCall(context, this.value.locRange)?;
+    override (StatementCompileResult | Error) compile(Context context) {
+        Expression value = this.value.compile(context)?.beExpressionImplCall(context, this.value.locRange)?;
 
-        // `a[b] = c` special handling
-        // FIXME This is the wrong place for this! There needs to be a principled way to assign
-        // a value to a subfield.
-        if (auto astIndex = target.instanceOf(ASTIndexAccess)) {
-            auto base = astIndex.base.compile(context)?.beExpressionImplCall(context, astIndex.locRange)?;
-            checkAssignmentQuarantine(context, this.locRange, base.type, value.type)?;
-            // if this is Array, we get issues compiling index without $
-            base.type.instanceOf(Array) && breakelse; // I cannot resist the lure of the golf ;_;
-            auto index = astIndex.index.compile(context)?.beExpressionImplCall(context, astIndex.locRange)?;
-            if (auto assignment = base.type.indexAssignment(context, base, index, value, this.locRange)?)
-                return StatementCompileResult(assignment, context.namespace);
+        if (auto stmt = this.target.assign(context, value)?) {
+            return StatementCompileResult(stmt, context.namespace);
         }
-        // `a.b = c` special handling.
-        if (auto astMemberAccess = target.instanceOf(ASTMemberBase)) {
-            auto base = astMemberAccess.base.compile(context)?.beExpressionImplCall(context, astMemberAccess.locRange)?;
-            auto protection = base.type.protectionAt(context.namespace);
-            auto memberName = astMemberAccess.member.name(context.warmContext);
-            checkAssignmentQuarantine(context, this.locRange, base.type, value.type)?;
-            if (auto ret = base.type.assignMember(
-                    context, base, memberName, value, protection, astMemberAccess.locRange)?)
-                return StatementCompileResult(ret, context.namespace);
-        }
-
-        auto compiler = context.compiler;
 
         Symbol target = this.target.compile(context)?;
         Reference targetref = target.instanceOf(Reference)?
             else return this.locRange.fail("target of assignment must be a reference");
         this.locRange.assert(targetref.mutable, () => "target of assignment must be mutable: $(targetref.repr)")?;
         auto type = targetref.type;
-        value = expectImplicitConvertTo(context, value, type, this.locRange)?;
+        auto value = expectImplicitConvertTo(context, value, type, this.locRange)?;
 
         /**
          * Order is important here.
@@ -2739,6 +2735,7 @@ class ASTAssignStatement : ASTStatement
          * But man, what an ugly-ass dataflow...
          */
 
+        auto compiler = context.compiler;
         (nullable Statement | Error) do1(Expression tmpValue) {
             (nullable Statement | Error) do2(Expression tmpLhsPtr) {
                 auto tmpLhs = compiler.dereference(tmpLhsPtr);

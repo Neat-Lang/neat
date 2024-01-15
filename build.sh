@@ -60,7 +60,7 @@ mkdir -p build
 
 echo "Building stage 1..."
 # FIXME remove hack
-cp src/runtime.c .cache/bootstrap/v0.5.1/neat-v0.5.1-gcc/src/runtime.c
+cp src/runtime.c .cache/bootstrap/v0.5.2/neat-v0.5.2-gcc/src/runtime.c
 FLAGS="$FLAGS -version=LLVMBackend"
 FLAGS="$FLAGS -file-id-output build/fileIdPins"
 # see generation.md

@@ -192,30 +192,23 @@ void FATALERROR neat_runtime_index_oob(size_t index)
     exit(1);
 }
 
-// FIXME: rename back to _inc
+void neat_runtime_refcount_inc(const char *desc, ptrdiff_t *ptr)
+{
+    // ptrdiff_t result = *ptr += 1;
+    ptrdiff_t result = __atomic_add_fetch(ptr, 1, __ATOMIC_ACQ_REL);
+    if (result <= 1)
+    {
+        neat_runtime_refcount_violation(desc, ptr);
+    }
+}
+
+// FIXME remove
 void neat_runtime_refcount_inc2(const char *desc, ptrdiff_t *ptr)
 {
-    // ptrdiff_t result = *ptr += 1;
-    ptrdiff_t result = __atomic_add_fetch(ptr, 1, __ATOMIC_ACQ_REL);
-    if (result <= 1)
-    {
-        neat_runtime_refcount_violation(desc, ptr);
-    }
+    return neat_runtime_refcount_inc(desc, ptr);
 }
 
-// FIXME: remove
-void neat_runtime_refcount_inc(struct String desc, ptrdiff_t *ptr)
-{
-    // ptrdiff_t result = *ptr += 1;
-    ptrdiff_t result = __atomic_add_fetch(ptr, 1, __ATOMIC_ACQ_REL);
-    if (result <= 1)
-    {
-        neat_runtime_refcount_violation(desc.ptr, ptr);
-    }
-}
-
-// FIXME: rename back to _dec
-int neat_runtime_refcount_dec2(const char *desc, ptrdiff_t *ptr)
+int neat_runtime_refcount_dec(const char *desc, ptrdiff_t *ptr)
 {
     // ptrdiff_t result = *ptr -= 1;
     ptrdiff_t result = __atomic_sub_fetch(ptr, 1, __ATOMIC_ACQ_REL);
@@ -227,27 +220,20 @@ int neat_runtime_refcount_dec2(const char *desc, ptrdiff_t *ptr)
     return result == 0;
 }
 
-// FIXME: remove
-int neat_runtime_refcount_dec(struct String desc, ptrdiff_t *ptr)
+// FIXME remove
+void neat_runtime_refcount_dec2(const char *desc, ptrdiff_t *ptr)
 {
-    // ptrdiff_t result = *ptr -= 1;
-    ptrdiff_t result = __atomic_sub_fetch(ptr, 1, __ATOMIC_ACQ_REL);
-    if (result <= -1)
-    {
-        neat_runtime_refcount_violation(desc.ptr, ptr);
-    }
-
-    return result == 0;
+    neat_runtime_refcount_dec(desc, ptr);
 }
 
 void neat_runtime_class_refcount_inc(void **ptr) {
     if (!ptr) return;
-    neat_runtime_refcount_inc2("class", (ptrdiff_t*) &ptr[1]);
+    neat_runtime_refcount_inc("class", (ptrdiff_t*) &ptr[1]);
 }
 
 void neat_runtime_class_refcount_dec(void **ptr) {
     if (!ptr) return;
-    if (neat_runtime_refcount_dec2("class", (ptrdiff_t*) &ptr[1]))
+    if (neat_runtime_refcount_dec("class", (ptrdiff_t*) &ptr[1]))
     {
         void (**vtable)(void*) = *(void(***)(void*)) ptr;
         void (*destroy)(void*) = vtable[1];
@@ -260,14 +246,14 @@ void neat_runtime_intf_refcount_inc(void *ptr) {
     if (!ptr) return;
     size_t base_offset = **(size_t**) ptr;
     void **object = (void**) ((char*) ptr - base_offset);
-    neat_runtime_refcount_inc2("interface", (ptrdiff_t*) &object[1]);
+    neat_runtime_refcount_inc("interface", (ptrdiff_t*) &object[1]);
 }
 
 void neat_runtime_intf_refcount_dec(void *ptr) {
     if (!ptr) return;
     size_t base_offset = **(size_t**) ptr;
     void **object = (void**) ((char*) ptr - base_offset);
-    if (neat_runtime_refcount_dec2("interface", (ptrdiff_t*) &object[1])) {
+    if (neat_runtime_refcount_dec("interface", (ptrdiff_t*) &object[1])) {
         void (**vtable)(void*) = *(void(***)(void*)) object;
         void (*destroy)(void*) = vtable[1];
         destroy(object);

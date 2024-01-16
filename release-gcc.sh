@@ -118,30 +118,13 @@ fi
 rm neat_bootstrap
 EOT
 else
-    if [ -f "/usr/lib/llvm/15/bin/llvm-config" ]
-    then
-        LLVM_CONFIG="/usr/lib/llvm/15/bin/llvm-config"
-    elif [ -f "/usr/lib/llvm-15/bin/llvm-config" ]
-    then
-        LLVM_CONFIG="/usr/lib/llvm-15/bin/llvm-config"
-    else
-        echo "Cannot find llvm-config!" 1>&2
-        exit 1
-    fi
+    . ./find-llvm-config.sh
     CFLAGS="${CFLAGS:+ }-I$($LLVM_CONFIG --includedir) -L$($LLVM_CONFIG --libdir)"
+    install -v ./find-llvm-config.sh "$TARGET"
     cat > $TARGET/build.sh <<EOT
 #!/usr/bin/env bash
 set -exo pipefail
-if [ -f "/usr/lib/llvm/15/bin/llvm-config" ]
-then
-    LLVM_CONFIG="/usr/lib/llvm/15/bin/llvm-config"
-elif [ -f "/usr/lib/llvm-15/bin/llvm-config" ]
-then
-    LLVM_CONFIG="/usr/lib/llvm-15/bin/llvm-config"
-else
-    echo "Cannot find llvm-config!" 1>&2
-    exit 1
-fi
+. ./find-llvm-config.sh
 LLVM_CFLAGS="-I\$(\$LLVM_CONFIG --includedir) -L\$(\$LLVM_CONFIG --libdir)"
 LLVM_NTFLAGS="-I\$(\$LLVM_CONFIG --includedir) -L-L\$(\$LLVM_CONFIG --libdir)"
 if [ "\${ARCH}" == "" ]

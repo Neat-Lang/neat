@@ -22,7 +22,7 @@ fi
 
 FLAGS="$JFLAG -I$($LLVM_CONFIG --includedir) -L-L$($LLVM_CONFIG --libdir)"
 
-TAG=v0.5.2
+TAG=v0.5.3
 NEAT=.cache/bootstrap/"$TAG"/neat-"$TAG"-gcc/neat
 
 if [ ! -f "$NEAT" ]
@@ -44,8 +44,6 @@ fi
 mkdir -p build
 
 echo "Building stage 1..."
-# FIXME remove hack
-cp src/runtime.c .cache/bootstrap/v0.5.2/neat-v0.5.2-gcc/src/runtime.c
 FLAGS="$FLAGS -version=LLVMBackend"
 FLAGS="$FLAGS -file-id-output build/fileIdPins"
 # see generation.md

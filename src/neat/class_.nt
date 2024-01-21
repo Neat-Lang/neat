@@ -75,7 +75,7 @@ class ClassNamespace : Namespace
         string name, Context context, LookupReason reason, LocRange locRange)
     {
         if (auto thisPtr = context.framePointer) {
-            auto thisPtr = new PointerCast(this.class_, thisPtr);
+            auto thisPtr = new PointerCast(class_, thisPtr);
 
             if (reason != LookupReason.ufcs) {
                 if (auto result = context.compiler.accessMember(context, thisPtr, name, locRange, true)?)
@@ -124,26 +124,26 @@ class Class
 
     nullable Namespace namespace;
 
-    (string name, Protection protection, Type type)[] members;
+    mut (Protection protection, bool mutable, Type type, string name)[] members;
 
-    ClassMethod[] methods;
+    mut ClassMethod[] methods;
 
     /**
      * Things with a name that don't appear in the vtable, such as template functions
      * or type declarations.
      * May be static or not.
      */
-    (Symbol symbol, Protection protection)[string] classDecls;
+    mut (Symbol symbol, Protection protection)[string] classDecls;
 
     /*
      * Methods appearing in the classinfo struct.
      * Wait, IntfMethod? Sure: an abstract class overriding an interface.
      */
-    (ClassMethod | IntfMethod | (:baseOffset, size_t offset))[] vtable;
+    mut (ClassMethod | IntfMethod | (:baseOffset, size_t offset))[] vtable;
 
-    string vtableSymbol;
+    mut string vtableSymbol;
 
-    (void | Error) result;
+    mut (void | Error) result;
 
     string mangledName;
 
@@ -157,7 +157,7 @@ class Class
      *   {interface slots}
      * }
      */
-    Struct dataStruct;
+    mut Struct dataStruct;
 
     this(this.name, this.decl, this.superClass, this.superIntfs, this.namespace)
     {
@@ -245,7 +245,7 @@ class Class
         this.dataStruct = new Struct("", structMembers, this.decl.locRange, this.mangledName);
     }
 
-    Struct classInfoStructCache;
+    mut Struct classInfoStructCache;
 
     Struct classInfoStruct(Context context)
     {
@@ -469,7 +469,7 @@ class Class
         mut ASTStatement[] castStmts;
         mut nullable Class current = this;
         while (current) {
-            auto classType = new ClassType(current? else die, zeroInitializable=false);
+            auto classType = new ClassType(current? else die, zeroInitializable=false, overrideMutable=false);
             auto classinfo = new ASTSymbolHelper(new ClassInfo(classType));
             castStmts ~= context.compiler.$stmt if (targetClassinfo is $classinfo) {
                 void* voidPtr = this;
@@ -501,7 +501,7 @@ class Class
         };
         auto stmt = context.compiler.astSequence(castStmts);
 
-        auto classType = new ClassType(this, zeroInitializable=false);
+        auto classType = new ClassType(this, zeroInitializable=false, overrideMutable=false);
         auto methodNamespace = new ClassNamespace(this.namespace, classType);
         auto params = [
             Parameter.simple("targetClassinfo", once new Pointer(new Void)),
@@ -526,7 +526,7 @@ class Class
         recurse(this);
         auto stmt = context.compiler.astSequence(statements);
 
-        auto classType = new ClassType(this, zeroInitializable=false);
+        auto classType = new ClassType(this, zeroInitializable=false, overrideMutable=false);
         auto methodNamespace = new ClassNamespace(this.namespace, classType);
         return new ClassMethod(
             classType, __RANGE__, Protection.public_, override_=true, abstract_=false, "__destroy",
@@ -540,7 +540,10 @@ class ClassType : Type, CanTreatAsEither
 
     Class class_;
 
-    this(this.class_, this.zeroInitializable) {
+    // class in `this()` context: all fields are considered mutable.
+    bool overrideMutable;
+
+    this(this.class_, this.zeroInitializable, this.overrideMutable) {
         if (this.zeroInitializable)
             this.mangledName = "nullable_" ~ this.class_.mangledName;
         else this.mangledName = this.class_.mangledName;
@@ -549,17 +552,17 @@ class ClassType : Type, CanTreatAsEither
 
     ClassType makeNullable() {
         if (this.zeroInitializable) return this;
-        return new ClassType(this.class_, zeroInitializable=true);
+        return new ClassType(this.class_, zeroInitializable=true, overrideMutable=false);
     }
 
     ClassType makeNotNullable() {
         if (!this.zeroInitializable) return this;
-        return new ClassType(this.class_, zeroInitializable=false);
+        return new ClassType(this.class_, zeroInitializable=false, overrideMutable=false);
     }
 
     nullable ClassType superClass() {
         if (auto superClass = this.class_.superClass)
-            return new ClassType(superClass, zeroInitializable=false);
+            return new ClassType(superClass, zeroInitializable=false, overrideMutable=this.overrideMutable);
         return null;
     }
 
@@ -690,13 +693,23 @@ class ClassType : Type, CanTreatAsEither
                 auto dataMember = new StructMemberReference(asStruct, 1);
                 // select member field
                 Reference memberField() {
-                    if (self.superClass)
-                        return new StructMemberReference(dataMember, memberOffset);
                     // skip classinfo and refs
-                    return new StructMemberReference(dataMember, memberOffset + 2);
+                    auto correctedOffset = memberOffset if self.superClass else memberOffset + 2;
+                    return new StructMemberReference(dataMember, correctedOffset);
                 }
-                // Ephemeral because it's mutable.
-                return new InfoReference(memberField, mutable=true, info=ExprInfo(Lifetime.ephemeral));
+                bool mutable = self.members[memberOffset].mutable || this.overrideMutable;
+                Lifetime lifetime() {
+                    if (mutable) return Lifetime.ephemeral;
+                    // lexical base expression guarantees the class stays alive,
+                    // so we can just borrow its reference.
+                    if (baseExpr.info.lifetime == Lifetime.lexical) return Lifetime.lexical;
+                    // ASTMemberAccess takes care of cleaning up the class in the gifted case.
+                    // TODO it shouldn't be a reference though.
+                    if (baseExpr.info.(Lifetime.(lifetime == ephemeral || lifetime == gifted)))
+                        return Lifetime.ephemeral;
+                    return Lifetime.ephemeral; // fallback
+                }
+                return new InfoReference(memberField, mutable=mutable, info=ExprInfo(lifetime));
             }
             if (auto superClass = self.superClass) {
                 return recurse(superClass);
@@ -859,14 +872,14 @@ class Intf
 
     nullable Namespace namespace;
 
-    IntfMethod[] methods; // methods declared in this intf
+    mut IntfMethod[] methods; // methods declared in this intf
 
-    (IntfMethod | :baseOffset)[] vtable; // layout of the classinfo subsection generated for this intf
+    mut (IntfMethod | :baseOffset)[] vtable; // layout of the classinfo subsection generated for this intf
 
     // TODO eventually string name will go in here for .classinfo.name
-    string classInfoSymbol;
+    mut string classInfoSymbol;
 
-    (void | Error) result;
+    mut (void | Error) result;
 
     string mangledName;
 
@@ -899,7 +912,7 @@ class Intf
         return this.result;
     }
 
-    Struct intfVtableStructCache;
+    mut Struct intfVtableStructCache;
 
     Struct intfVtableStruct(Context context)
     {
@@ -1352,9 +1365,11 @@ struct ASTClassDeclMember
 {
     Protection protection;
 
-    string name;
+    bool mutable;
 
     ASTSymbol type;
+
+    string name;
 
     LocRange locRange;
 }
@@ -1433,16 +1448,16 @@ class ASTClassDecl : ASTSymbolDeclaration
         }
         auto name = this.name.name(context.warmContext);
         return new ClassType(new Class(name, this, superClass, superIntfs, context.namespace),
-            zeroInitializable=false);
+            zeroInitializable=false, overrideMutable=false);
     }
 
     (void | Error) compile2(Context context, Class target)
     {
-        auto classType = new ClassType(target, zeroInitializable=false);
+        auto classType = new ClassType(target, zeroInitializable=false, overrideMutable=false);
         auto classScope = context.compiler.symbolAlias(context.namespace, target.name, classType);
 
         mut Context currentContext = context.withNamespace(classScope);
-        mut (string name, Protection protection, Type type)[] memberFields;
+        mut (Protection protection, bool mutable, Type type, string name)[] memberFields;
         // Do those later; they need fields resolved for this.field assignments.
         mut (ASTClassDeclMethod method, Context context)[] lateMemberMethods;
         mut (Symbol symbol, Protection protection)[string] classDecls;
@@ -1451,7 +1466,7 @@ class ASTClassDecl : ASTSymbolDeclaration
             entry.case {
                 ASTClassDeclMember member: {
                     auto type = member.type.compile(currentContext)?.beType(member.locRange)?;
-                    memberFields ~= (member.name, member.protection, type);
+                    memberFields ~= (member.protection, member.mutable, type, member.name);
                 }
                 ASTClassDeclMethod method: {
                     lateMemberMethods ~= (method, currentContext);
@@ -1522,7 +1537,9 @@ class ASTClassDecl : ASTSymbolDeclaration
                 }
             }
 
-            auto classType = new ClassType(target, zeroInitializable=false);
+            // all fields are mutable in the constructor
+            bool mutable = method.name == "__ctor";
+            auto classType = new ClassType(target, zeroInitializable=false, overrideMutable=mutable);
             auto methodNamespace = new ClassNamespace(currentContext.namespace, classType);
             targetMethods[i] = new ClassMethod(
                 classType,
@@ -1829,7 +1846,7 @@ class ASTIntfDecl : ASTSymbolDeclaration
         (void | Error) addMember(LocRange locRange) {
             locRange.assert(!override_, () => "cannot override class member")?;
             locRange.assert(!abstract_, () => "cannot declare class member abstract")?;
-            members ~= ASTClassDeclMember(protection, memberName, retType? else die, locRange);
+            members ~= ASTClassDeclMember(protection, mutable, retType? else die, memberName, locRange);
         }
         addMember(locRange)?;
         while (!parser.acceptToken(TokenType.semicolon)) {

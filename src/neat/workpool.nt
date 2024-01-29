@@ -37,7 +37,7 @@ class WorkPool : WorkPoolBase
         this.total.reset;
         this.total.start;
         // Represents the "main" thread.
-        auto main = new TaskEntry("", new FailITask, currentTaskId);
+        auto main = new TaskEntry("", new FailITask, currentTaskId, this);
         this.tasks[""] = main;
         main.slice.start;
     }
@@ -121,7 +121,7 @@ class WorkPool : WorkPoolBase
             if (tasks.has(id)) {
                 return;
             }
-            entry = new TaskEntry(id, task, currentTaskId);
+            entry = new TaskEntry(id, task, currentTaskId, this);
             tasks[id] = entry;
             auto ct = currentTask;
             auto oldSlice = ct.splitSlice;
@@ -144,6 +144,31 @@ class WorkPool : WorkPoolBase
             auto consumerTask = tasks[consumer];
             consumerTask.dependencies[provider] = true;
         }
+    }
+
+    override void addBomItem(string id, string value) {
+        currentTask.addBomItem(id, value);
+    }
+
+    override string[string] bom(string rootId) {
+        mut string[string] result;
+        mut bool[string] seen;
+        void recurse(string name) {
+            if (!this.tasks.has(name) || seen.has(name)) {
+                return;
+            }
+            seen[name] = true;
+            // FIXME refcounting bug when calling .keys on gifted rvalue
+            auto v = this.tasks[name].dependencies;
+            string[] keys = v.keys;
+            [recurse(key) for key in keys];
+            auto bom = this.tasks[name].bom();
+            for (key in bom.keys) {
+                result[key] = bom[key];
+            }
+        }
+        recurse(rootId);
+        return result;
     }
 
     override ITask wait(string id) {
@@ -242,7 +267,11 @@ private class TaskEntry : Task
 
     ThreadLocal!string currentTaskId;
 
+    WorkPoolBase workPool;
+
     mut TaskSlice slice;
+
+    mut string[string] bomItems;
 
     // tasks that depend on us
     mut bool[string] dependencies;
@@ -250,7 +279,7 @@ private class TaskEntry : Task
     // tasks that we depend on
     mut bool[string] dependents;
 
-    this(this.id, this.task, this.currentTaskId) {
+    this(this.id, this.task, this.currentTaskId, this.workPool) {
         this.mutex = new Mutex;
         this.condvar = new CondVar(this.mutex);
         this.state = :pending;
@@ -273,6 +302,12 @@ private class TaskEntry : Task
 
     bool fresh() => this.task.fresh;
 
+    void addBomItem(string id, string value) {
+        this.bomItems[id] = value;
+    }
+
+    string[string] bom() => bomItems;
+
     TaskSlice splitSlice() {
         auto oldSlice = this.slice;
         this.slice = new TaskSlice(this.id, oldSlice.index + 1, oldSlice.time);
@@ -287,14 +322,14 @@ private class TaskEntry : Task
             assert(state == :pending);
             state = :running;
         }
-        runDirectly;
+        runDirectly();
     }
 
     void runDirectly() {
         this.slice.start;
         auto prevTask = currentTaskId.get;
         currentTaskId.set(id);
-        task.run;
+        task.run(workPool);
         currentTaskId.set(prevTask);
         this.slice.stop;
         with (mutex.locked) {
@@ -334,8 +369,10 @@ class ReadFileTask : ITask
         return this.text == this.newText.case(:none: die);
     }
 
-    override void run() {
+    override void run(WorkPoolBase workPool) {
         import package(compiler).helpers : read;
+        import package(compiler).std.sha256 : Sha256;
+        import package(compiler).std.string : toHexString;
 
         // TODO: if (string newText <- this.newText)
         if (this.newText != :none) {
@@ -344,13 +381,17 @@ class ReadFileTask : ITask
         } else {
             this.text = read(path);
         }
+        auto digest = new Sha256;
+        digest.update(cast(ubyte[]) this.text);
+        auto hash = digest.finalize.toHexString;
+        workPool.addBomItem(path, hash);
     }
 }
 
 class FailITask : ITask
 {
     this() { }
-    override void run() assert(false);
+    override void run(WorkPoolBase workPool) assert(false);
     override string id() => "";
     override bool fresh() => true;
 }

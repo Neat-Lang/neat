@@ -3,6 +3,8 @@ module std.file;
 macro import std.macro.assert;
 macro import std.macro.listcomprehension;
 
+import std.error;
+import std.stream;
 import std.string : cToString, cToStringFree, toStringz;
 
 extern(C) void free(void*);
@@ -159,4 +161,70 @@ void remove(string path) {
     auto ptr = path.toStringz;
     remove(ptr);
     free(ptr);
+}
+
+/**
+ * Read a file as a stream of byte ranges.
+ */
+class FileSource : Source!(ubyte[]) {
+    int fd;
+    mut bool done;
+    this(string name) {
+        import c.fcntl : open, O_RDONLY;
+        this.fd = open(name.toStringz, O_RDONLY, 0);
+        this.done = false;
+    }
+
+    override (ubyte[] | :else | Error) get() {
+        import c.unistd : close, read;
+        if (done) return :else;
+        auto buffer = new ubyte[](4096);
+        auto bytesRead = read(this.fd, buffer.ptr, buffer.length);
+        if (bytesRead <= 0) {
+            this.done = true;
+            close(this.fd);
+            // TODO errno
+            return :else if bytesRead == 0 else new Error("read() failed");
+        }
+        return buffer;
+    }
+}
+
+// Constructors can't return Error (yet?)
+(FileSink | Error) fileSink(string file) {
+    import c.fcntl : open, O_WRONLY, O_CREAT, S_IRUSR, S_IWUSR;
+    auto fd = open(file.toStringz, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR);
+    if (fd == -1) {
+        // TODO errno
+        return new Error("Could not open '$file' for writing.");
+    }
+    return new FileSink(fd);
+}
+
+/**
+ * Sink byte ranges into a file.
+ */
+class FileSink : Sink!(ubyte[]) {
+    int fd;
+    this(this.fd) {}
+
+    override (void | Error) put(ubyte[] data) {
+        import c.unistd : write;
+        mut size_t offset = 0;
+        while (offset < data.length) {
+            auto remaining = data[offset .. $];
+            auto result = write(this.fd, remaining.ptr, remaining.length);
+            if (result == -1) {
+                // TODO errno
+                return new Error("File write() failed");
+            }
+            offset += result;
+        }
+    }
+
+    // TODO sink finalization protocol
+    void close() {
+        import c.unistd : close;
+        close(this.fd); // Close the file when this object is destroyed
+    }
 }

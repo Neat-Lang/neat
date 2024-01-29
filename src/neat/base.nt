@@ -892,9 +892,11 @@ struct Parameter
         ~ "type=$type, defaultValue=..., locRange=$locRange)";
 }
 
+alias LibraryCallRecord = (string soname, string fnname);
+
 abstract class ParserHelper
 {
-    abstract (void | Error) proxyCall(ASTModuleBase astModule, string function_, void* ptr,
+    abstract (LibraryCallRecord | Error) proxyCall(ASTModuleBase astModule, string function_, void* ptr,
         LocRange locRange);
 }
 
@@ -1372,18 +1374,18 @@ class MacroState
 
     mut MacroState[] imports;
 
+    // A record of every dynamic library call done to
+    // get the macro state to where it currently is.
+    // This is used for macro caching.
+    mut LibraryCallRecord[] records;
+
     this() { }
 
     MacroState dup() {
         auto newState = new MacroState;
-        auto newMacros = new Macro mut[](this.macros.length);
-        for (i, macro_ in this.macros)
-            newMacros[i] = macro_;
-        newState.macros = newMacros.freeze;
-        auto newImports = new MacroState mut[](this.imports.length);
-        for (i, import_ in this.imports)
-            newImports[i] = import_;
-        newState.imports = newImports.freeze;
+        newState.macros = macros.dup.freeze;
+        newState.imports = imports.dup.freeze;
+        newState.records = records.dup.freeze;
         return newState;
     }
 
@@ -1779,11 +1781,23 @@ abstract class WorkPoolBase
     abstract ITask wait(string id);
     // if `provider` is not fresh, `consumer` is not fresh.
     abstract void dependency((string | :current) provider, (string | :current) consumer);
+    /**
+     * The bill-of-materials system allows validating that an artifact is still current
+     * without actually parsing anything. We attach bill items, which are key-value pairs,
+     * to the current task.
+     * Then we can query all bill items that are transitively part of a task.
+     * The point is that, for instance for a macro object, we can store the dynamic filename
+     * and bill of materials; then when we need to reload the macro, we just check that the
+     * BOM is still current.
+     * Though the API is kept generic, in practice `id` will be a filename and `value` a hash.
+     */
+    abstract void addBomItem(string id, string value);
+    abstract string[string] bom(string id);
 }
 
 interface ITask
 {
-    void run();
+    void run(WorkPoolBase workPool);
     string id();
     // Return false if environment conditions have changed from when the task was added.
     // For instance, if a file changed checksum or last-modified date.

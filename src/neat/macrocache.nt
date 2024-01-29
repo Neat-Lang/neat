@@ -1,0 +1,94 @@
+/**
+ * Allow saving and loading macro state;
+ * or rather, the required information to reconstruct a macro state.
+ */
+module neat.macrocache;
+
+macro import package(compiler).std.macro.listcomprehension;
+
+import neat.base;
+import package(compiler).std.file;
+import package(compiler).std.json;
+import package(compiler).std.json.stream;
+import package(compiler).std.sha256;
+import package(compiler).std.stream;
+import package(compiler).std.string;
+import polyhash;
+
+private alias CompilerError = Error;
+
+(void | CompilerError) saveMacroCache(string importDesc, string[string] bom, LibraryCallRecord[] records) {
+    auto target = importDesc.targetFile;
+    auto tmp = importDesc.tmpFile;
+    auto file = fileSink(tmp).toCompilerError?;
+    mut (string key, JSONValue value)[] transformBom;
+    for (key in bom.keys) transformBom ~= (key, JSONValue(bom[key]));
+    auto dto = MacroCacheDto(
+        fileHashes=JSONValue(transformBom),
+        records=[RecordDto(soname=a.soname, fnname=a.fnname) for a in records],
+        compilerHash=compilerHashStr,
+    );
+    dto.encode(new JsonPrinter(file)).toCompilerError?;
+    file.close;
+    tmp.rename(target);
+}
+
+(string[string] bom, LibraryCallRecord[] records | :missing | CompilerError) loadMacroCache(string importDesc) {
+    auto target = importDesc.targetFile;
+    if (!target.exists) return :missing;
+    auto file = new FileSource(target);
+    auto source = new JsonLexer(file);
+    auto dto = source.decode!MacroCacheDto.toCompilerError?;
+    // cached from older compiler version
+    if (dto.compilerHash != compilerHashStr) return :missing;
+    mut string[string] bom;
+    for (value in dto.fileHashes.object) {
+        auto file = value.key;
+        // file removed
+        if (!file.exists) return :missing;
+        auto currentFile = file.readText;
+        auto digest = new Sha256;
+        digest.update(cast(ubyte[]) currentFile);
+        auto hexstr = digest.finalize.toHexString;
+        // hash changed
+        if (value.value.str != hexstr) return :missing;
+        // unchanged from cache.
+        bom[file] = value.value.str;
+    }
+    return (bom=bom, records=[(soname=a.soname, fnname=a.fnname) for a in dto.records]);
+}
+
+private auto toCompilerError(T)(T value) {
+    import package(compiler).std.error : Error;
+
+    return value.case(Error err: new CompilerError([err.range], err.message));
+}
+
+private string compilerHashStr() {
+    auto hash = new Hash;
+    hash.apply(compiler_hash_add, compiler_hash_mult);
+    return hash.text;
+}
+
+private string targetFile(string importDesc) => ".obj/macrocache_$(importDesc.filter)";
+
+private string tmpFile(string importDesc) => ".obj/.macrocache_$(importDesc.filter).tmp";
+
+private string filter(string desc) => desc.replace(" ", "_").replace("/", "_").replace("(", "_").replace(")", "_");
+
+struct MacroCacheDto {
+    // TODO
+    // string[string] fileHashes;
+    JSONValue fileHashes;
+    RecordDto[] records;
+    string compilerHash;
+
+}
+
+struct RecordDto {
+    string soname;
+    string fnname;
+}
+
+private extern(C) long compiler_hash_add();
+private extern(C) long compiler_hash_mult();

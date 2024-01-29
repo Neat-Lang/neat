@@ -4408,7 +4408,7 @@ class AstCompileTask : ITask
         }
     }
 
-    override void run() {
+    override void run(WorkPoolBase workPool) {
         this.coldContext.modulePreProcessor.process(astModule);
 
         this.result = compileModule(
@@ -4483,14 +4483,50 @@ class ImportTask : ImportModuleBaseTask
         }
     }
 
-    override void run() {
-        this.lexicalContext.compiler.workPool
-            .dependency(provider=id_, consumer=moduleParseTaskId);
+    override void run(WorkPoolBase workPool) {
+        workPool.dependency(provider=id_, consumer=moduleParseTaskId);
+
+        void seterror(Error error) { this.result = error; }
+        version (firstpass) {}
+        else {
+            import neat.macrocache : loadMacroCache;
+            auto cached = loadMacroCache(id_).case(Error e: return seterror(e));
+            if let (auto cached = cached.case(:missing: breakelse)) {
+                // add "fake" bom from cache
+                auto bom = cached.bom;
+                for (key in bom.keys) {
+                    lexicalContext.compiler.workPool.addBomItem(key, bom[key]);
+                }
+
+                auto macroState = new MacroState;
+                for (entry in cached.records) {
+                    neat_runtime_dlcall(entry.soname, entry.fnname, macroState);
+                    macroState.records ~= entry;
+                }
+
+                // fake macro import module, will only be used for its macro state
+                // TODO: (ASTModule | MacroState | ...) result;
+                this.result = new ASTModule(name="", new Package(name="cachestub", "", []),
+                    path="", moduleParseTaskId="", macroState=macroState, locRange=__RANGE__,
+                    parent=null);
+                return;
+            }
+        }
         this.result = this.lexicalContext.resolveImport(import_).case(
             ASTModuleBase base: base.instanceOf(ASTModule)? else die,
             Error err: err);
+        version (firstpass) {}
+        else if (import_.isMacroImport) {
+            import neat.macrocache : saveMacroCache;
+            auto bom = lexicalContext.compiler.workPool.bom(id_);
+            if let (auto records = module_.case(Error: breakelse).macroState.records) {
+                saveMacroCache(id, bom, records).case(Error e: return seterror(e));
+            }
+        }
     }
 }
+
+extern(C) void neat_runtime_dlcall(string soname, string name, void* arg);
 
 (ASTImportStatement | :none | Error) parseImportStatement(Parser parser, LexicalContext lexicalContext)
 {
@@ -4571,8 +4607,7 @@ class ImportTask : ImportModuleBaseTask
     parser.expectToken(TokenType.semicolon)?;
 
     auto newMacroState = astModule.macroState.dup;
-
-    helper.proxyCall(astModule, identifier, newMacroState, parser.to(from))?;
+    newMacroState.records ~= helper.proxyCall(astModule, identifier, newMacroState, parser.to(from))?;
 
     auto subModule = new ASTModule(
         astModule.name, astModule.pak, astModule.path, astModule.moduleParseTaskId,
@@ -4653,8 +4688,7 @@ class LexicalContextImpl : LexicalContext
             return (:none);
         ASTImportStatement importStmt:
             parser.commit;
-            if (!toplevel && importStmt.isMacroImport)
-            {
+            if (!toplevel && importStmt.isMacroImport) {
                 return parser.fail("macro import not allowed here");
             }
 
@@ -4663,6 +4697,7 @@ class LexicalContextImpl : LexicalContext
             auto task = new ImportTask(id, lexicalContext, importStmt, lexicalContext.moduleParseTaskId);
             auto import_ = new ASTImport(importStmt, (pool, task));
 
+            // If not toplevel, the import may be conditional.
             if (toplevel) pool.queue(task);
 
             return (protection, import_);
@@ -4757,6 +4792,7 @@ class LexicalContextImpl : LexicalContext
                 continue;
             }
             auto id = import_.statement.repr(lexicalContext.pak.name);
+            auto task = lexicalContext.compiler.workPool.wait(id).instanceOf(ImportTask)? else die;
 
             module_.macroState = module_.macroState.dup;
             lexicalContext = new LexicalContextImpl(
@@ -4764,9 +4800,7 @@ class LexicalContextImpl : LexicalContext
                 module_.macroState, helper);
 
             lexicalContext.compiler.workPool.dependency(provider=id, consumer=:current);
-            lexicalContext.macroState.addImport(
-                lexicalContext.compiler.workPool.wait(id)
-                    .instanceOf(ImportTask).module_?.macroState);
+            lexicalContext.macroState.addImport(task.module_?.macroState);
         }
         importGroup = null;
     }
@@ -4989,7 +5023,7 @@ class ParseAstModuleTask : ITask
     }
     override string id() => "parse ast $path";
     override bool fresh() => true;
-    override void run() {
+    override void run(WorkPoolBase workPool) {
         this.result = parse;
     }
     (ASTModule | Error) parse() {

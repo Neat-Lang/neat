@@ -27,8 +27,6 @@ struct ASTEitherDeclEntry
 {
     LocRange locRange;
 
-    bool fail;
-
     ASTSymbol symbol;
 }
 
@@ -40,25 +38,20 @@ class ASTEitherDecl : ASTSymbol
 
     override (Type | Error) compile(Context context)
     {
-        auto partTypes = new (bool fail, Type) mut[](this.partTypes.length);
+        auto partTypes = new Type mut[](this.partTypes.length);
         for (i, partType in this.partTypes) {
-            auto type = partType.symbol.compile(context)?.beType(partType.locRange)?;
-            partTypes[i] = (partType.fail, type);
+            partTypes[i] = partType.symbol.compile(context)?.beType(partType.locRange)?;
         }
 
         return new Either(partTypes.freeze);
     }
 
     override string repr() {
-        string repr(bool fail, ASTSymbol sym) {
-            if (fail) return "fail $(sym.repr)";
-            return sym.repr;
-        }
         mut string parts;
         for (type in partTypes) {
             if (!parts.empty)
                 parts ~= " | ";
-            parts ~= repr(type.fail, type.symbol);
+            parts ~= type.symbol.repr;
         }
         return "($parts)";
     }
@@ -87,7 +80,7 @@ class EitherExpr : Expression
         int offsetTarget = generator.fun.fieldOffset(eitherType, reg, 0);
         int offsetValue = generator.fun.intLiteral(offset + 1);
         int rawValueTarget = generator.fun.fieldOffset(eitherType, reg, 1);
-        BackendType backendValueType = either.types[offset].type.emit(generator.platform);
+        BackendType backendValueType = either.types[offset].emit(generator.platform);
         int valueTarget = generator.fun.bitcast(
             rawValueTarget, new BackendPointerType(backendValueType, generator.platform));
 
@@ -129,7 +122,7 @@ class EitherMember : Expression
     int offset;
 
     this(this.value, this.offset) {
-        this.type = this.value.type.instanceOf(Either).types[this.offset].type;
+        this.type = this.value.type.instanceOf(Either).types[this.offset];
         this.info = this.value.info;
     }
 
@@ -154,12 +147,12 @@ class EitherMember : Expression
 
 class Either : Type, Hashable
 {
-    (bool fail, Type type)[] types;
+    Type[] types;
 
     this(this.types) {
         this.zeroInitializable = false;
         this.hasElaborateCopyConstructor = false;
-        for (entry in this.types) if (entry.type.hasElaborateCopyConstructor) {
+        for (type in this.types) if (type.hasElaborateCopyConstructor) {
             this.hasElaborateCopyConstructor = true;
             break;
         }
@@ -168,8 +161,8 @@ class Either : Type, Hashable
     override BackendType emit(Platform platform) {
         mut int size = 0;
         mut int alignment = 1;
-        for (pair in this.types) {
-            auto backendType = pair.type.emit(platform);
+        for (type in this.types) {
+            auto backendType = type.emit(platform);
 
             if (backendType.size > size) size = backendType.size;
             if (backendType.alignment > alignment) alignment = backendType.alignment;
@@ -185,11 +178,11 @@ class Either : Type, Hashable
     override (nullable Expression | Error) implicitConvertFrom(
         Context context, Expression source, LocRange locRange)
     {
-        for (int i, entry in this.types) {
-            if (entry.type.same(source.type)) return new EitherExpr(this, source, i);
+        for (int i, type in this.types) {
+            if (type.same(source.type)) return new EitherExpr(this, source, i);
         }
-        for (int i, entry in this.types) {
-            if (auto converted = context.compiler.implicitConvertTo(context, source, entry.type, locRange)?)
+        for (int i, type in this.types) {
+            if (auto converted = context.compiler.implicitConvertTo(context, source, type, locRange)?)
                 return new EitherExpr(this, converted, i);
         }
         return null;
@@ -232,7 +225,7 @@ class Either : Type, Hashable
         if (!otherEither || otherEither.types.length != types.length)
             return false;
         for (i in 0 .. types.length)
-            if (!types[i].type.triviallyConvertsTo(otherEither.types[i].type))
+            if (!types[i].triviallyConvertsTo(otherEither.types[i]))
                 return false;
         return true;
     }
@@ -242,7 +235,7 @@ class Either : Type, Hashable
         if (!other || types.length != other.types.length)
             return false;
         for (i, type in types)
-            if (!type.type.same(other.types[i].type))
+            if (!type.same(other.types[i]))
                 return false;
         return true;
     }
@@ -251,7 +244,7 @@ class Either : Type, Hashable
         import package(compiler).std.algorithm : all;
 
         (:checked | :harmless) value() {
-            if (this.types.all(a => a.type.quarantinePolicy.value == :harmless))
+            if (this.types.all(a => a.quarantinePolicy.value == :harmless))
                 return :harmless;
             return :checked;
         }
@@ -260,22 +253,22 @@ class Either : Type, Hashable
 
     override (void | Error) checkQuarantine(Context context, LocRange locRange, QuarantineReason reason) {
         for (type in this.types) {
-            type.type.checkQuarantine(context, locRange, reason)?;
+            type.checkQuarantine(context, locRange, reason)?;
         }
     }
 
     override string mangle() {
         mut string ret = "either";
         for (i, type in types)
-            ret ~= "_" ~ type.type.mangle();
+            ret ~= "_" ~ type.mangle();
         return ret;
     }
 
     override string repr() {
         mut string ret = "(";
-        for (i, entry in types) {
+        for (i, type in types) {
             if (i) ret ~= " | ";
-            ret ~= entry.type.repr();
+            ret ~= type.repr();
         }
         ret ~= ")";
         return ret;
@@ -284,8 +277,8 @@ class Either : Type, Hashable
     override void hash(Hash hash) {
         hash.adds("Either");
         hash.addl(types.length);
-        for (entry in types)
-            entry.type.hash(hash);
+        for (type in types)
+            type.hash(hash);
     }
 
     /**
@@ -317,11 +310,10 @@ class Either : Type, Hashable
             auto valueType = new EitherType(expr);
 
             mut nullable Statement ifTree;
-            for (int i, entry in types) {
+            for (int i, type in types) {
                 auto member = new EitherMember(expr, i);
 
-                if (auto destroy = entry.type.endLifetime(context, member))
-                {
+                if (auto destroy = type.endLifetime(context, member)) {
                     Expression test = context.compiler.binaryOp(
                         "==", context, valueType, context.compiler.intLiteral(i + 1))?;
                     ifTree = context.compiler.ifStatement(test, destroy, ifTree);
@@ -358,7 +350,7 @@ class Either : Type, Hashable
                     auto typeEq = context.compiler.astBinaryOp(
                         "==", new ASTSymbolHelper(lhsType), new ASTSymbolHelper(rhsType));
                     mut ASTEitherCaseExprCase[] eqCases;
-                    for (i, entry in types) {
+                    for (i, type in types) {
                         auto rhsMember = new EitherMember(rhs, cast(int) i);
                         auto memberEq = context.compiler.astBinaryOp(
                             "==",
@@ -366,7 +358,7 @@ class Either : Type, Hashable
                             new ASTSymbolHelper(rhsMember));
 
                         eqCases ~= ASTEitherCaseExprCase(
-                            __RANGE__, new ASTSymbolHelper(entry.type), "a", fail=false, memberEq);
+                            __RANGE__, new ASTSymbolHelper(type), "a", memberEq);
                     }
                     auto eqTest = new ASTEitherCaseExpr(__RANGE__, new ASTSymbolHelper(lhs), eqCases);
                     auto combinedExpr = context.compiler.astBinaryOp("&&", typeEq, eqTest);
@@ -383,13 +375,12 @@ class Either : Type, Hashable
     override (ASTSymbol | Error) hash(CompilerBase compiler, ASTSymbol value)
     {
         mut ASTEitherCaseExprCase[] cases;
-        for (int i, entry in types) {
+        for (int i, type in types) {
             auto astI = compiler.astNumberLiteral(i);
             cases ~= ASTEitherCaseExprCase(
                 __RANGE__,
-                type=new ASTSymbolHelper(entry.type),
+                type=new ASTSymbolHelper(type),
                 identifier="a",
-                fail=false,
                 expr=compiler.$expr __hash(a) ^ $astI);
         }
         return compiler.astEitherCaseExpr(value, cases);
@@ -533,16 +524,16 @@ class ASTEitherCaseExpr : ASTSymbol
 
             mut int matchIndex = -1;
             for (int k, eitherType in either.types) {
-                if (caseType.same(eitherType.type)) {
-                    caseLoc.assert(matchIndex == -1, () => "either type $(eitherType.type.repr) matched twice")?;
+                if (caseType.same(eitherType)) {
+                    caseLoc.assert(matchIndex == -1, () => "either type $(eitherType.repr) matched twice")?;
                     matchIndex = k;
                 }
             }
             if (matchIndex == -1) {
                 // look for weaker match
                 for (int k, eitherType in either.types) {
-                    if (eitherType.type.triviallyConvertsTo(caseType)) {
-                        caseLoc.assert(matchIndex == -1, () => "either type $(eitherType.type.repr) matched twice")?;
+                    if (eitherType.triviallyConvertsTo(caseType)) {
+                        caseLoc.assert(matchIndex == -1, () => "either type $(eitherType.repr) matched twice")?;
                         matchIndex = k;
                     }
                 }
@@ -561,10 +552,10 @@ class ASTEitherCaseExpr : ASTSymbol
 
         for (i, handled in handled) {
             if (!handled) {
-                // print("type $(either.types[i].type.repr) not handled, default type");
-                // return locRange.fail("Type " ~ either.types[i].type.repr() ~ " not handled!");
+                // print("type $(either.types[i].repr) not handled, default type");
+                // return locRange.fail("Type " ~ either.types[i].repr() ~ " not handled!");
                 // silently pass through
-                merger.add(new NullExpr(either.types[i].type), __RANGE__, context)?;
+                merger.add(new NullExpr(either.types[i]), __RANGE__, context)?;
             }
         }
 
@@ -618,12 +609,15 @@ class ASTEitherCaseExpr : ASTSymbol
 
         mut (int case_, Expression expr, bool unlikely)[] branches;
         for (i, case_ in this.cases) {
+            import neat.bottom : Bottom;
+
             int matchIndex = matchIndexes[i];
 
             assert(matchIndex != -1);
 
-            bool unlikely = true if case_.fail else false;
-            branches ~= (matchIndex + 1, handleCase(case_, matchIndex)?, unlikely);
+            auto expr = handleCase(case_, matchIndex)?;
+            bool unlikely = true if expr.type.instanceOf(Bottom) else false;
+            branches ~= (matchIndex + 1, expr, unlikely);
         }
         /*auto astMergeType = new ASTSymbolHelper(mergeType);
         auto default_ = (context.compiler.$expr ({
@@ -640,9 +634,8 @@ class ASTEitherCaseExpr : ASTSymbol
                 // generate passthrough expr
                 auto passthroughCase = ASTEitherCaseExprCase(
                     __RANGE__,
-                    new ASTSymbolHelper(either.types[i].type),
+                    new ASTSymbolHelper(either.types[i]),
                     "a",
-                    fail=false,
                     new ASTIdentifier("a", moduleLevel=false));
                 branches ~= (i + 1, handleCase(passthroughCase, i)?, false);
             }
@@ -741,7 +734,7 @@ private (Expression | Error) compileExprCaseExpr(Context context, Expression bas
         if (parsedType) identifier = parser.parseIdentifier;
         parser.expectToken(TokenType.colon)?;
         ASTSymbol expr = lexicalContext.compiler.parseExpression(parser, lexicalContext)?? else die;
-        cases ~= ASTEitherCaseExprCase(parser.to(caseFrom), type, identifier, false, expr);
+        cases ~= ASTEitherCaseExprCase(parser.to(caseFrom), type, identifier, expr);
     }
     return new ASTEitherCaseExpr(parser.to(from), current, cases);
 }
@@ -780,16 +773,16 @@ class ASTEitherCaseStmt : ASTStatement
                 Type type = case_.type.compile(context)?.beType(case_.locRange)?;
 
                 mut int matched = -1;
-                for (int k, entry in either.types) {
-                    if (type.same(entry.type)) {
+                for (int k, eitherType in either.types) {
+                    if (type.same(eitherType)) {
                         case_.locRange.assert(matched == -1, () => "either type $(type.repr()) matched twice")?;
                         matched = k;
                     }
                 }
                 if (matched == -1) {
                     // look for weaker match
-                    for (int k, entry in either.types) {
-                        if (entry.type.triviallyConvertsTo(type)) {
+                    for (int k, eitherType in either.types) {
+                        if (eitherType.triviallyConvertsTo(type)) {
                             case_.locRange.assert(matched == -1, () => "either type $(type.repr()) matched twice")?;
                             matched = k;
                         }
@@ -821,7 +814,7 @@ class ASTEitherCaseStmt : ASTStatement
                         ifTree = ifStatement(test, defaultPair.statement, ifTree);
                     }
                 } else if (!handled) {
-                    return locRange.fail("Type " ~ either.types[i].type.repr() ~ " not handled!");
+                    return locRange.fail("Type " ~ either.types[i].repr() ~ " not handled!");
                 }
             }
             return ifTree;
@@ -849,7 +842,6 @@ ASTEitherCaseExprCase rewriteNullAsNullptr(ASTEitherCaseExprCase case_)
                 case_.locRange,
                 new ASTIdentifier("nullptr_t", moduleLevel=false, case_.locRange),
                 identifier="",
-                fail=case_.fail,
                 expr=case_.expr,
             );
         }

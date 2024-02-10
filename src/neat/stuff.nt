@@ -220,21 +220,17 @@ with (parser.transaction)
     parser.commit;
     mut ASTEitherDeclEntry[] declEntries;
     mut (string name, LocRange locRange, ASTSymbol sym)[] members;
-    mut bool failAnnot = false;
-    if (parser.acceptIdentifier("fail")) failAnnot = true;
     void flush() {
         assert(members.length > 0);
 
         if (members.length == 1 && members[0].name == "") {
-            declEntries ~= ASTEitherDeclEntry(members[0].locRange, failAnnot, members[0].sym);
+            declEntries ~= ASTEitherDeclEntry(members[0].locRange, members[0].sym);
         } else {
             declEntries ~= ASTEitherDeclEntry(
                 parser.to(from),
-                failAnnot,
                 new ASTTupleType([(a.name, a.sym) for a in members], parser.to(from)));
         }
         members = [];
-        failAnnot = false;
     }
     while (!parser.acceptToken(TokenType.rparen)) {
         if (members.length) {
@@ -248,10 +244,7 @@ with (parser.transaction)
                 }
                 return parser.to(from).fail("tuple: ',' or '|' expected");
             }
-            if (eithersep) {
-                flush;
-                if (parser.acceptIdentifier("fail")) failAnnot = true;
-            }
+            if (eithersep) flush;
         }
         auto from = parser.from;
         auto type = parser.parseType(lexicalContext)?;
@@ -851,7 +844,7 @@ class WrapReference : Reference
 }
 
 // TODO can we use util.TypeMerger here?
-(Type | fail :failure) mergeTypes(Type first, Type second) {
+(Type | :failure) mergeTypes(Type first, Type second) {
     if (first.same(second)) return first;
     // TODO conversion
     return :failure;
@@ -1204,7 +1197,7 @@ class ASTPropagateFailureExpr : ASTSymbol
             }
             if (auto classType = base.type.instanceOf(ClassType)) if (classType.class_.errorclass) {
                 // hack: create a placeholder one-entry Either type so we can strip out the class so bottom remains.
-                return new EitherExpr(new Either([(false, base.type)]), base, 0);
+                return new EitherExpr(new Either([base.type]), base, 0);
             }
             return base;
         }
@@ -1213,22 +1206,18 @@ class ASTPropagateFailureExpr : ASTSymbol
         context.assert2(!!either, this.locRange, "base of '?' must be sumtype")?;
         mut ASTEitherCaseExprCase[] cases;
         mut bool anyNonlocalExits = false;
-        for (k, v in either.types) {
+        for (type in either.types) {
             ASTSymbol expr() {
                 auto a = new ASTIdentifier("a", false);
-                if (v.fail) {
+                if (auto class_ = type.instanceOf(ClassType)) if (class_.class_.errorclass) {
                     anyNonlocalExits = true;
                     return new ASTReturn(a, this.locRange);
                 }
-                if (auto class_ = v.type.instanceOf(ClassType)) if (class_.class_.errorclass) {
-                    anyNonlocalExits = true;
-                    return new ASTReturn(a, this.locRange);
-                }
-                if (v.type.instanceOf(SymbolIdentifierType)?.name == "else") {
+                if (type.instanceOf(SymbolIdentifierType)?.name == "else") {
                     anyNonlocalExits = true;
                     return new ASTBreakElse(this.locRange);
                 }
-                if (v.type.instanceOf(NullPointer)) {
+                if (type.instanceOf(NullPointer)) {
                     anyNonlocalExits = true;
                     return new ASTBreakElse(this.locRange);
                 }
@@ -1236,9 +1225,8 @@ class ASTPropagateFailureExpr : ASTSymbol
             }
             cases ~= ASTEitherCaseExprCase(
                 this.locRange,
-                new ASTSymbolHelper(v.type),
+                new ASTSymbolHelper(type),
                 "a",
-                fail=v.fail,
                 expr=expr,
             );
         }
@@ -1495,7 +1483,7 @@ class ASTReference : ASTSymbol
     return null;
 }
 
-(string text, int size | fail :error, string) processChar(string text) {
+(string text, int size | :error, string) processChar(string text) {
     assert(!text.empty);
     if (text.front != '\\') {
         return (text[0 .. 1], 1);
@@ -1523,7 +1511,7 @@ class ASTReference : ASTSymbol
     } else if (ctl == 'x') {
         if (text.length < 4) return (:error, "expected two-digit hex code");
         char ch1 = text[2], ch2 = text[3];
-        (int | fail :error, string) decodeHex(char ch) {
+        (int | :error, string) decodeHex(char ch) {
             if (ch >= '0' && ch <= '9')
                 return ch - '0';
             if (ch >= 'a' && ch <= 'f')
@@ -1532,7 +1520,9 @@ class ASTReference : ASTSymbol
                 return ch + 10 - 'A';
             return (:error, "unknown hex digit '" ~ ch ~ "'");
         }
-        return ("" ~ cast(char) (decodeHex(ch1)? * 16 + decodeHex(ch2)?), 4);
+        auto h1 = decodeHex(ch1).case((:error, string s): return (:error, s));
+        auto h2 = decodeHex(ch2).case((:error, string s): return (:error, s));
+        return ("" ~ cast(char) (h1 * 16 + h2), 4);
     } else {
         return (:error, "unknown control sequence \\$ctl");
     }
@@ -2230,9 +2220,9 @@ class ASTVoidExpression : ASTSymbol
     Context context, Either either, Expression source, Type extractType, LocRange locRange)
 {
     mut ASTEitherCaseExprCase[] cases;
-    for (k, v in either.types) {
+    for (type in either.types) {
         // return out all types that aren't the extract type
-        bool return_ = !v.type.same(extractType);
+        bool return_ = !type.same(extractType);
         ASTSymbol expr() {
             auto a = new ASTIdentifier("a", false);
             if (return_) return new ASTReturn(a);
@@ -2240,9 +2230,8 @@ class ASTVoidExpression : ASTSymbol
         }
         cases ~= ASTEitherCaseExprCase(
             __RANGE__,
-            new ASTSymbolHelper(v.type),
+            new ASTSymbolHelper(type),
             "a",
-            fail=v.fail,
             expr=expr);
     }
 
@@ -2252,14 +2241,6 @@ class ASTVoidExpression : ASTSymbol
     auto ret = case_.compile(context);
     context.popErrorLoc;
     return ret;
-}
-
-private Type typeWithoutFail(Either source)
-{
-    if ([count a in source.types where !a.fail] == 1) {
-        return [first a.type for a in source.types where !a.fail];
-    }
-    return new Either([a for a in source.types where !a.fail]);
 }
 
 class InfoExpression : Expression
@@ -2371,10 +2352,9 @@ class ASTIfStatement : ASTStatement
                 auto tempSource = new PairedTemporaryExpr(source.type, source.info.lifetime, context.getUniqueId);
                 auto initTemp = new InitializeTemporaryExprStatement(tempSource, source);
                 // check expected type
-                auto remainingType = typeWithoutFail(sourceType);
-                mut Type testedType = remainingType;
-                if (remainingType.zeroInitializable && context.compiler.isClassType(remainingType)) {
-                    testedType = remainingType.makeNotNullable;
+                mut Type testedType = sourceType;
+                if (sourceType.zeroInitializable && context.compiler.isClassType(sourceType)) {
+                    testedType = sourceType.makeNotNullable;
                 }
                 if (!extractdecl.infer) {
                     auto declType = extractdecl.type.compile(context)?.beType(extractdecl.locRange)?;
@@ -2383,7 +2363,7 @@ class ASTIfStatement : ASTStatement
                         () => "expected $(declType.repr), but got $(testedType.repr)")?;
                 }
 
-                auto value = pickEither(context, sourceType, tempSource, remainingType, extractdecl.locRange)?;
+                auto value = pickEither(context, sourceType, tempSource, sourceType, extractdecl.locRange)?;
                 prelude = initTemp;
                 // ignore lifetime, it's just a null check
                 test = new InfoExpression(value, ExprInfo(Lifetime.permanent));
@@ -2947,11 +2927,11 @@ class ASTVarExtractDeclStatement : ASTStatement
 
         mut uninitialized Type type;
         if (this.type) type = this.type.compile(context)?.beType(this.locRange)?;
-        else type = typeWithoutFail(sourceType);
+        else type = sourceType;
 
         bool inTargetType(Type source) {
             if (auto either = type.instanceOf(Either))
-                return [any a.type.same(source) for a in either.types];
+                return [any type.same(source) for type in either.types];
             return type.same(source);
         }
 
@@ -2961,8 +2941,7 @@ class ASTVarExtractDeclStatement : ASTStatement
         auto astType = new ASTSymbolHelper(type);
 
         mut ASTEitherCaseExprCase[] cases;
-        for (i, entry in sourceType.types) {
-            auto sourceMemberType = entry.type;
+        for (sourceMemberType in sourceType.types) {
             bool return_ = !sourceMemberType.inTargetType;
             // auto expr = (context.compiler.$expr return a) if return_
             //     else context.compiler.$expr ({ $astType x = a; x; });
@@ -2972,7 +2951,6 @@ class ASTVarExtractDeclStatement : ASTStatement
                 locRange=this.locRange,
                 type=new ASTSymbolHelper(sourceMemberType),
                 identifier="a",
-                fail=entry.fail,
                 expr=expr);
         }
 
@@ -3357,7 +3335,7 @@ class ASTForLoop : ASTStatement
     return new ASTSymbolQuote(lexicalContext.quoteScope, token, parser.to(from));
 }
 
-(ExtForVarDecl | fail :fail | Error) parseExtForVarDecl(Parser parser, LexicalContext lexicalContext)
+(ExtForVarDecl | :fail | Error) parseExtForVarDecl(Parser parser, LexicalContext lexicalContext)
 {
     parser.begin;
     auto from = parser.from;

@@ -4,6 +4,15 @@ NEAT=${NEAT:-build/neat}
 NEATFLAGS="-Pimports:test/imports"
 NEATFLAGS="${NEATFLAGS} -Prunnable:test/runnable:compiler,imports"
 NEATFLAGS="${NEATFLAGS} -Pfail_compilation:test/fail_compilation:compiler,imports"
+WINEMODE=0
+
+if [ $1 == "win64" ]
+then
+    WINEMODE=1
+    NEATFLAGS="${NEATFLAGS} -target x86_64-w64-mingw32"
+    export WINEDEBUG=-all
+    shift
+fi
 
 num_total=$(ls -q test/runnable/*.nt test/fail_compilation/*.nt |wc -l)
 build_failed=0
@@ -35,13 +44,18 @@ do
     fi
     echo "$file"...
     executable=build/"$file"
+    run=$executable
+    if [ $WINEMODE -eq 1 ]; then
+        executable="${executable}.exe"
+        run="wine $executable"
+    fi
     CMD="$NEAT $NEATFLAGS \"$file\" -o \"$executable\""
     if ! eval $CMD 2>&1 |cat>build/out.txt
     then
         build_failed=$((build_failed+1))
         echo $CMD
         cat build/out.txt
-    elif ! "$executable"
+    elif ! sh -c "$run"
     then
         run_failed=$((run_failed+1))
     fi

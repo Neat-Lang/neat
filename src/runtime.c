@@ -1,16 +1,18 @@
-#include <dlfcn.h>
 #include <errno.h>
+#ifdef linux
+#include <dlfcn.h>
 #ifdef __GLIBC__
 #include <execinfo.h>
 #endif
 #include <pthread.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 struct String
 {
@@ -88,6 +90,7 @@ int neat_runtime_system_iret(STRING_PARAM(command)) {
 }
 
 int neat_runtime_execbg(STRING_PARAM(command), ARRAY_PARAM(struct String, struct StringArray, arguments)) {
+#ifdef linux
     int ret = fork();
     if (ret != 0) return ret;
     char *cmd = toStringz(ARRAY_VALUE(command));
@@ -98,8 +101,13 @@ int neat_runtime_execbg(STRING_PARAM(command), ARRAY_PARAM(struct String, struct
     }
     args[1 + arguments_length] = NULL;
     return execvp(cmd, args);
+#else
+    fprintf(stderr, "TODO!\n");
+    exit(1);
+#endif
 }
 
+#ifdef linux
 bool neat_runtime_waitpid(int pid) {
     int wstatus;
     int ret = waitpid(pid, &wstatus, 0);
@@ -131,6 +139,7 @@ void neat_runtime_dlcall(STRING_PARAM(dlfile), STRING_PARAM(fun), void* arg) {
 
     ((void(*)(void*)) sym)(arg);
 }
+#endif
 
 void *neat_runtime_alloc(size_t size) {
     return calloc(1, size);
@@ -261,24 +270,31 @@ void neat_runtime_intf_refcount_dec(void *ptr) {
     }
 }
 
-void neat_runtime_refcount_set(size_t *ptr, size_t value)
-{
+void neat_runtime_refcount_set(size_t *ptr, size_t value) {
     // *ptr = value;
     __atomic_store(ptr, &value, __ATOMIC_RELEASE);
 }
 
 int neat_runtime_errno() { return errno; }
 
+#ifdef linux
 pthread_mutex_t stdout_lock;
+#endif
 
 __attribute__((constructor)) void neat_runtime_stdout_lock_init(void) {
+#ifdef linux
     pthread_mutex_init(&stdout_lock, NULL);
+#endif
 }
 
 void neat_runtime_lock_stdout(void) {
+#ifdef linux
     pthread_mutex_lock(&stdout_lock);
+#endif
 }
 
 void neat_runtime_unlock_stdout(void) {
+#ifdef linux
     pthread_mutex_unlock(&stdout_lock);
+#endif
 }

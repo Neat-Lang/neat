@@ -116,7 +116,12 @@ BackgroundCompilation emitModule(
         mut string[] args;
 
         string[] baseArgs = ["-c", "-fpic", "-fno-strict-aliasing", src, "-o", obj];
-        exec = getEnv("CC", "gcc");
+        mut string defaultGcc = "gcc";
+        // blithely assume it's the default
+        if (settings.triple != "x86_64-pc-linux-gnu") {
+            defaultGcc = "$(settings.triple)-gcc";
+        }
+        exec = getEnv("CC", defaultGcc);
         if (settings.optimize) args = baseArgs ~ "-O3";
         else args = baseArgs;
         if (settings.extraCFlags.length > 0) args ~= settings.extraCFlags.split(" ");
@@ -190,6 +195,8 @@ class BuildSettings
 
     Backend backend;
 
+    string triple;
+
     bool x86_32;
 
     bool caching;
@@ -213,10 +220,10 @@ class BuildSettings
             if (x86_32) return new BackendIntType;
             else return new BackendLongType;
         }
-        return new Platform(macroWordType, platformFlags, versions, isMacro=forMacro);
+        return new Platform(macroWordType, platformFlags, versions, triple=triple, isMacro=forMacro);
     }
 
-    this(this.compiler, this.backend, this.x86_32, this.caching, this.versions,
+    this(this.compiler, this.backend, this.triple, this.x86_32, this.caching, this.versions,
          this.platformFlags, this.optimize, this.forMacro,
          this.extraCFlags, this.pool, this.loopPass) { }
 }
@@ -642,6 +649,7 @@ class Options
     mut bool dontLink;
     mut bool optimize;
     mut bool caching;
+    mut string triple, macroTriple;
     mut bool x86_32, macro_x86_32;
     mut string intermediateListFile;
     mut nullable Backend backend, macroBackend;
@@ -671,6 +679,8 @@ class Options
         this.generation = __GENERATION__;
         this.threads = 0;
         this.fileIdTable = new FileIdTableImpl;
+        this.triple = "x86_64-pc-linux-gnu";
+        this.macroTriple = "x86_64-pc-linux-gnu";
     }
 
     ArgParser argParser() {
@@ -719,6 +729,8 @@ class Options
         parser.add("macro-version", :multiArgs, "Define a version for the macro platform");
         parser.add("m32", :noArg, "Set 32-bit target for the output platform");
         parser.add("macro-m32", :noArg, "Set 32-bit target for the macro platform");
+        parser.add("target", :stringArg, "Set target triple for the output platform");
+        parser.add("macro-target", :stringArg, "Set target triple for the macro platform");
         parser.add("print-generation", :noArg, "Print the compiler generation");
         parser.add("next-generation", :noArg, "Increment the emitted compiler generation");
         parser.add("uml", :stringArg, "Generate class UML diagrams");
@@ -799,6 +811,8 @@ class Options
         }
         if (result.has("m32")) { this.x86_32 = true; }
         if (result.has("macro-m32")) { this.macro_x86_32 = true; }
+        if (result.has("target")) { this.triple = result.get("target"); }
+        if (result.has("macro-target")) { this.macroTriple = result.get("macro-target"); }
         if (result.has("print-generation")) {
             print(itoa(__GENERATION__));
             exit(0); // TODO return :exit
@@ -860,11 +874,14 @@ class Options
     }
 
     string[] allVersions() {
-        return ["generation$(i+1)" for i in 0 .. this.generation] ~ this.versions;
+        return ["generation$(i+1)" for i in 0 .. this.generation]
+            ~ platformVersions(this.triple) ~ this.versions;
     }
 
     string[] allMacroVersions() {
-        return ["generation$(i+1)" for i in 0 .. __GENERATION__] ~ ["macro"] ~ this.macroVersions;
+        return ["generation$(i+1)" for i in 0 .. __GENERATION__]
+            ~ platformVersions(this.macroTriple)
+            ~ ["macro"] ~ this.macroVersions;
     }
 
     void addPackage(string pak, bool relative) {
@@ -892,6 +909,20 @@ class Options
         }
         parseArgs("neat.ini", args);
     }
+}
+
+string[] platformVersions(string triple) {
+    auto parts = triple.split("-");
+    if (parts.length < 3) return null;
+    mut string[] versions;
+    if (parts[2] == "mingw" || parts[2] == "mingw32") {
+        versions ~= "mingw";
+        versions ~= "windows";
+    }
+    if (parts[2] == "linux") {
+        versions ~= "linux";
+    }
+    return versions;
 }
 
 ASTModule builtinSymbols(Options options) {
@@ -923,13 +954,13 @@ ASTModule builtinSymbols(Options options) {
     auto compiler = new CompilerImpl(
         defaultImports, packages, options.cFlags, workPool, options.fileIdTable);
     auto settings = new BuildSettings(compiler, options.backend? else die,
-        x86_32=options.x86_32, caching=options.caching, versions=options.allVersions,
-        platformFlags=options.platformFlags, optimize=options.optimize, forMacro=false,
-        extraCFlags=options.extraCFlags, pool=workPool, loopPass=loopPass);
+        triple=options.triple, x86_32=options.x86_32, caching=options.caching,
+        versions=options.allVersions, platformFlags=options.platformFlags, optimize=options.optimize,
+        forMacro=false, extraCFlags=options.extraCFlags, pool=workPool, loopPass=loopPass);
     auto macroSettings = new BuildSettings(compiler, options.macroBackend? else die,
-        x86_32=options.macro_x86_32, caching=options.caching, versions=options.allMacroVersions,
-        platformFlags=options.macroPlatformFlags, optimize=false, forMacro=true,
-        extraCFlags = options.macroExtraCFlags, pool=workPool, loopPass=loopPass);
+        triple=options.macroTriple, x86_32=options.macro_x86_32, caching=options.caching,
+        versions=options.allMacroVersions, platformFlags=options.macroPlatformFlags, optimize=false,
+        forMacro=true, extraCFlags = options.macroExtraCFlags, pool=workPool, loopPass=loopPass);
     auto parserHelper = new ParserHelperImpl(macroSettings, compiler.fileIdTable);
     // FIXME break reference loop
     compiler.parserHelper = parserHelper;
@@ -1015,11 +1046,29 @@ long long int compiler_hash_mult() { return $(mult)LL; }
             baseFlags ~= " -flto";
     }
 
-    mut string flags = baseFlags ~ " -rdynamic";
-    mut string linkerFlags = " -ldl";
+    mut string flags = baseFlags;
+    mut string linkerFlags;
+    if (![any a == "mingw" for a in options.allVersions]) {
+        flags ~= " -rdynamic";
+        linkerFlags ~= " -ldl";
+    }
     for (linkerArg in options.linkerArgs) linkerFlags ~= " " ~ linkerArg;
     mut string compilerCmd = "clang-15 -opaque-pointers -Wno-unused-command-line-argument -Wno-unknown-attributes -fpic";
-    if (options.backend.instanceOf(CBackend)) compilerCmd = getEnv("CC", "gcc");
+    if (options.backend.instanceOf(CBackend)) {
+        mut string defaultGcc = "gcc";
+        // blithely assume it's the default
+        if (options.triple != "x86_64-pc-linux-gnu") {
+            defaultGcc = "$(options.triple)-gcc";
+        }
+        compilerCmd = getEnv("CC", defaultGcc);
+    } else {
+        version (LLVMBackend) {
+            if (options.backend.instanceOf(LLVMBackend)) {
+                flags ~= " -rdynamic";
+                flags ~= " -target $(options.triple)";
+            }
+        }
+    }
     if (options.noMain)
         flags ~= " -DNEAT_NO_MAIN";
     else

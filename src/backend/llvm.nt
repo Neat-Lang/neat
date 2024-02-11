@@ -79,8 +79,11 @@ LLVMTypeRef translate(BackendType type, LLVMContextRef context, bool allowVoid, 
 nullable BackendType fixupParamType(BackendType type, Platform platform) {
     if (platform.amd64) {
         auto ret = type.toAmd64ParamTypeImpl;
-        if (ret.same(type)) return null;
-        return ret;
+        if (!ret.same(type)) return ret;
+    }
+    if (platform.win64) {
+        auto ret = type.toWin64ParamTypeImpl;
+        if (!ret.same(type)) return ret;
     }
     return null;
 }
@@ -141,6 +144,16 @@ unittest {
     assert(output.same(new BackendStructType(expectedArray, internal=false)));
 }
 
+BackendType toWin64ParamTypeImpl(BackendType type) {
+    if (auto struct_ = type.instanceOf(BackendStructType)) {
+        if (struct_.size == 1) return new BackendCharType;
+        if (struct_.size == 2) return new BackendShortType;
+        if (struct_.size == 4) return new BackendIntType;
+        if (struct_.size == 8) return new BackendLongType;
+    }
+    return type;
+}
+
 LLVMTypeRef translateFunc(BackendFunctionPointerType backendFpType, LLVMContextRef context, Platform platform) {
     bool sret = passByMemory(backendFpType.ret, platform);
     mut LLVMTypeRef returnType;
@@ -187,6 +200,17 @@ bool passByMemory(BackendType type, Platform platform) {
         if (auto struct_ = type.instanceOf(BackendStructType))
             if (!struct_.internal && struct_.size > 16)
                 return true;
+    }
+    if (platform.win64) {
+        /**
+         * See https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170#parameter-passing
+         * Structs and unions of size 8, 16, 32, or 64 bits, and __m64 types, are passed as if they were integers
+         * of the same size.
+         * Structs or unions of other sizes are passed as a pointer to memory allocated by the caller.
+         */
+        if (type.instanceOf(BackendStructType)?.(size > 0 && size != 1 && size != 2 && size != 4 && size != 8)) {
+            return true;
+        }
     }
     return false;
 }
@@ -403,7 +427,7 @@ class LLVMBackendModule : BackendModule {
                     return;
                 }
             }
-            if (passByMemory(type, this.platform)) {
+            if (!this.platform.win64 && passByMemory(type, this.platform)) {
                 auto byvalAttrKind = LLVMGetEnumAttributeKindForName("byval", 5);
                 assert(byvalAttrKind != 0);
                 auto byvalTypeAttr = LLVMCreateTypeAttribute(
@@ -1137,7 +1161,7 @@ class LLVMBackendFunction : BackendFunction, PhiCapable {
                     return;
                 }
             }
-            if (passByMemory(type, this.mod.platform)) {
+            if (!this.mod.platform.win64 && passByMemory(type, this.mod.platform)) {
                 auto byvalAttrKind = LLVMGetEnumAttributeKindForName("byval", 5);
                 assert(byvalAttrKind != 0);
                 auto byvalTypeAttr = LLVMCreateTypeAttribute(

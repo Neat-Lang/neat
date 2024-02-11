@@ -1,10 +1,15 @@
 module std.thread;
 
-import c.pthread;
 import neat.runtime : assert;
 import std.stdio;
 
-pragma(lib, "pthread");
+version (windows) {
+    import c.windows;
+} else {
+    import c.pthread;
+    import c.semaphore;
+    pragma(lib, "pthread");
+}
 
 /**
  * This class implements mutual exclusion.
@@ -15,24 +20,45 @@ pragma(lib, "pthread");
  */
 class Mutex
 {
-    pthread_mutex_t mutex;
+    version (windows) {
+        CRITICAL_SECTION section;
+    } else {
+        pthread_mutex_t mutex;
+    }
     mut bool isLocked;
 
     this() {
-        mut pthread_mutexattr_t attrs;
-        pthread_mutexattr_init(&attrs);
-        pthread_mutexattr_settype(&attrs, PTHREAD_MUTEX_ERRORCHECK);
-        pthread_mutex_init(&mutex, &attrs);
+        version (windows) {
+            InitializeCriticalSection(&section);
+        } else {
+            mut pthread_mutexattr_t attrs;
+            pthread_mutexattr_init(&attrs);
+            pthread_mutexattr_settype(&attrs, PTHREAD_MUTEX_ERRORCHECK);
+            pthread_mutex_init(&mutex, &attrs);
+        }
         isLocked = false;
     }
 
+    // TODO class destructor
+    /*
+    ~this() {
+        version (windows) {
+            DeleteCriticalSection(&section);
+        }
+    }
+    */
+
     /// Lock the mutex.
     void lock() {
-        int ret = pthread_mutex_lock(&mutex);
-        if (ret) {
-            import c.stdlib : exit;
-            print("pthread_mutex_lock $ret");
-            exit(1);
+        version (windows) {
+            EnterCriticalSection(&section);
+        } else {
+            int ret = pthread_mutex_lock(&mutex);
+            if (ret) {
+                import c.stdlib : exit;
+                print("pthread_mutex_lock $ret");
+                exit(1);
+            }
         }
         assert(!isLocked);
         isLocked = true;
@@ -53,11 +79,15 @@ class Mutex
     void unlock() {
         assert(isLocked);
         isLocked = false;
-        int ret = pthread_mutex_unlock(&mutex);
-        if (ret) {
-            import c.stdlib : exit;
-            print("pthread_mutex_unlock $ret");
-            exit(1);
+        version (windows) {
+            LeaveCriticalSection(&section);
+        } else {
+            int ret = pthread_mutex_unlock(&mutex);
+            if (ret) {
+                import c.stdlib : exit;
+                print("pthread_mutex_unlock $ret");
+                exit(1);
+            }
         }
     }
 }
@@ -118,43 +148,89 @@ private struct UnlockGuard
  */
 class CondVar
 {
-    pthread_cond_t cond;
+    version (windows) {
+        // ad-hoc, inefficient implementation
+        Mutex innerMutex;
+        mut int waiting;
+        Semaphore activated, confirmed;
+    } else {
+        pthread_cond_t cond;
+    }
 
     Mutex mutex;
 
-    this(this.mutex) { pthread_cond_init(&cond, null); }
+    this(this.mutex) {
+        version (windows) {
+            this.innerMutex = new Mutex;
+            this.waiting = 0;
+            this.activated = new Semaphore(0);
+            this.confirmed = new Semaphore(0);
+        } else {
+            pthread_cond_init(&cond, null);
+        }
+    }
 
     /// Wait for a thread to signal us.
     void wait() {
-        assert(mutex.isLocked);
-        mutex.isLocked = false;
-        int ret = pthread_cond_wait(&cond, &this.mutex.mutex);
-        if (ret) {
-            import c.stdlib : exit;
-            print("pthread_cond_wait $ret");
-            exit(1);
+        version (windows) {
+            with (innerMutex.locked)
+                waiting++;
+            with (mutex.unlocked) {
+                activated.acquire;
+                confirmed.release;
+            }
+        } else {
+            assert(mutex.isLocked);
+            mutex.isLocked = false;
+            int ret = pthread_cond_wait(&cond, &this.mutex.mutex);
+            if (ret) {
+                import c.stdlib : exit;
+                print("pthread_cond_wait $ret");
+                exit(1);
+            }
+            assert(!mutex.isLocked);
+            mutex.isLocked = true;
         }
-        assert(!mutex.isLocked);
-        mutex.isLocked = true;
     }
 
     /// Wake up (at least) one waiting thread.
     void signal() {
-        int ret = pthread_cond_signal(&cond);
-        if (ret) {
-            import c.stdlib : exit;
-            print("pthread_cond_signal $ret");
-            exit(1);
+        version (windows) {
+            with (innerMutex.locked) {
+                if (waiting == 0) return;
+                activated.release;
+                confirmed.acquire;
+                waiting--;
+            }
+        } else {
+            int ret = pthread_cond_signal(&cond);
+            if (ret) {
+                import c.stdlib : exit;
+                print("pthread_cond_signal $ret");
+                exit(1);
+            }
         }
     }
 
     /// Wake up all waiting threads.
     void broadcast() {
-        int ret = pthread_cond_broadcast(&cond);
-        if (ret) {
-            import c.stdlib : exit;
-            print("pthread_cond_broadcast $ret");
-            exit(1);
+        version (windows) {
+            with (innerMutex.locked) {
+                for (int _ in 0 .. waiting) {
+                    activated.release;
+                }
+                for (int _ in 0 .. waiting) {
+                    confirmed.acquire;
+                }
+                waiting = 0;
+            }
+        } else {
+            int ret = pthread_cond_broadcast(&cond);
+            if (ret) {
+                import c.stdlib : exit;
+                print("pthread_cond_broadcast $ret");
+                exit(1);
+            }
         }
     }
 }
@@ -216,23 +292,72 @@ template Waitable(T)
  */
 class Semaphore
 {
-    Waitable!int waitable;
+    version (windows) {
+        HANDLE sem;
+    } else {
+        sem_t sem;
+    }
 
     /// Initialize the class with a number of available tokens.
-    this(int i) { this.waitable = new Waitable!int(i); }
+    this(int i) {
+        version (windows) {
+            this.sem = CreateSemaphore(null, i, lMaximumCount=0x7fff_ffff, name=null);
+        } else {
+            if (sem_init(&sem, pshared=0, value=i) == -1) {
+                errnoDie("sem_init()");
+            }
+        }
+    }
+
+    // TODO class destructor
+    /*~this() {
+        if (sem_destroy(&sem) == -1) {
+            errnoDie("sem_destroy()");
+        }
+    }*/
 
     /// Consume a token if available; block if not.
     void acquire() {
-        bool greaterZero(int i) { return i > 0; }
-        int decrement(int i) { return i - 1; }
-        waitable.waitReact(&greaterZero, &decrement);
+        version (windows) {
+            int ret = WaitForSingleObject(this.sem, milliseconds=INFINITE);
+            if (ret != 0) {
+                import neat.runtime : die, print;
+                print("WaitForSingleObject() failed: $ret");
+                die;
+            }
+        } else {
+            if (sem_wait(&sem) == -1) {
+                if (neat_runtime_errno == EINTR)
+                    return acquire;
+                errnoDie("sem_wait()");
+            }
+        }
     }
 
     /// Provide a token.
     void release() {
-        int increment(int i) { return i + 1; }
-        waitable.update(&increment);
+        version (windows) {
+            int ret = ReleaseSemaphore(this.sem, 1, lpPreviousCount=null);
+            if (ret == 0) {
+                import neat.runtime : die, print;
+                print("ReleaseSemaphore() failed: $ret");
+                die;
+            }
+        } else {
+            if (sem_post(&sem) == -1) {
+                errnoDie("sem_post()");
+            }
+        }
     }
+}
+
+private alias EINTR = 4;
+private extern(C) int neat_runtime_errno();
+
+private void errnoDie(string msg) {
+    import neat.runtime : die, print;
+    print("$msg failed: $(neat_runtime_errno)");
+    die;
 }
 
 /**
@@ -245,17 +370,29 @@ abstract class Task
 
 private class Thread
 {
-    pthread_t thr;
+    version (windows) {
+        mut HANDLE thr;
+    } else {
+        pthread_t thr;
+    }
     ThreadPool pool;
     void delegate() runDg;
 
     this(this.pool) { runDg = &run; }
     void start() {
-        // placeholder that's definitely (I'd hope so!) large enough for a pthread_attr_t.
-        mut pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setstacksize(&attr, 8*1024*1024);
-        pthread_create(&thr, &attr, &call_thread_dg, &runDg);
+        version (windows) {
+            this.thr = CreateThread(null, 8*1024*1024, &callThreadDg, &runDg, 0, null);
+            if (!this.thr) {
+                import neat.runtime : die, print;
+                print("CreateThread() failed");
+                die;
+            }
+        } else {
+            mut pthread_attr_t attr;
+            pthread_attr_init(&attr);
+            pthread_attr_setstacksize(&attr, 8*1024*1024);
+            pthread_create(&thr, &attr, &callThreadDg, &runDg);
+        }
     }
     void run() {
         while (true) {
@@ -263,6 +400,13 @@ private class Thread
             pool.doneTasks.release;
         }
     }
+}
+
+// TODO extern(C) with definition?
+void callThreadDg(void* arg) {
+    auto dg = *(cast(void delegate!()*) arg);
+
+    dg();
 }
 
 /**
@@ -331,51 +475,73 @@ class ThreadPool
 // TODO: null to function ptr
 private void nothing(void*) { }
 
-// TODO: tomorrow, class in template docgen!
 /**
  * This class wraps a value that is unique per thread accessing it.
  */
-template ThreadLocal(T) {
-    class ThreadLocal {
+class ThreadLocal(T) {
+    version (windows) {
+        DWORD key;
+    } else {
         pthread_key_t key;
-        /// Initialize a `ThreadLocal`.
-        this() {
+    }
+    /// Initialize a `ThreadLocal`.
+    this() {
+        version (windows) {
+            key = TlsAlloc;
+            if (key == TLS_OUT_OF_INDEXES) {
+                import neat.runtime : die, print;
+                print("TlsAlloc() failed: out of indexes");
+                die;
+            }
+        } else {
             pthread_key_create(&key, &nothing);
         }
-        /**
-         * Set the `ThreadLocal` to a new value.
-         */
-        void set(mut T value) {
-            import neat.runtime.stdlib : malloc, memcpy, memset;
+    }
+    /**
+     * Set the `ThreadLocal` to a new value.
+     */
+    void set(mut T value) {
+        import neat.runtime.stdlib : malloc, memcpy, memset;
 
-            mut auto memory = pthread_getspecific(key);
-            if (!memory) {
-                memory = malloc(sizeof(T));
+        version (windows) {
+            mut void* memory = TlsGetValue(key);
+        } else {
+            mut void* memory = pthread_getspecific(key);
+        }
+        if (!memory) {
+            memory = malloc(sizeof(T));
+            version (windows) {
+                TlsSetValue(this.key, memory);
+            } else {
                 pthread_setspecific(key, memory);
             }
-            // TODO: __leak()?
-            memcpy(memory, &value, sizeof(T));
-            // destroy the value without releasing it: cause a leak.
-            memset(&value, 0, sizeof(T));
         }
-        /**
-         * Get the value stored in the `ThreadLocal`.
-         * If `set` has not been called, the default value for the type
-         * is returned.
-         */
-        T get() {
-            import neat.runtime.stdlib : memcpy, memset;
+        // TODO: __leak()?
+        memcpy(memory, &value, sizeof(T));
+        // destroy the value without releasing it: cause a leak.
+        memset(&value, 0, sizeof(T));
+    }
+    /**
+     *Get the value stored in the `ThreadLocal`.
+     * If `set` has not been called, the default value for the type
+     * is returned.
+     */
+    T get() {
+        import neat.runtime.stdlib : memcpy, memset;
 
+        version (windows) {
+            auto memory = TlsGetValue(key);
+        } else {
             auto memory = pthread_getspecific(key);
-            if (!memory) {
-                T t;
-                return t;
-            }
-            mut uninitialized T copy;
-            memcpy(&copy, memory, sizeof(T));
-            mut auto result = copy;
-            memset(&copy, 0, sizeof(T));
-            return result;
         }
+        if (!memory) {
+            T t;
+            return t;
+        }
+        mut uninitialized T copy;
+        memcpy(&copy, memory, sizeof(T));
+        mut auto result = copy;
+        memset(&copy, 0, sizeof(T));
+        return result;
     }
 }

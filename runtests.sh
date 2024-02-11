@@ -6,7 +6,7 @@ NEATFLAGS="${NEATFLAGS} -Prunnable:test/runnable:compiler,imports"
 NEATFLAGS="${NEATFLAGS} -Pfail_compilation:test/fail_compilation:compiler,imports"
 WINEMODE=0
 
-if [ $1 == "win64" ]
+if [ "${1:-}" = "win64" ]
 then
     WINEMODE=1
     NEATFLAGS="${NEATFLAGS} -target x86_64-w64-mingw32"

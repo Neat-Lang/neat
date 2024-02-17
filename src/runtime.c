@@ -13,6 +13,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 struct String
 {
@@ -34,6 +37,12 @@ struct StringArray
 
 #define STRING_PARAM(name) ARRAY_PARAM(char, struct String, name)
 
+#ifdef _WIN32
+#define EXPORT __declspec(dllexport)
+#else
+#define EXPORT
+#endif
+
 struct String string_alloc(size_t length) {
     void *memory = malloc(sizeof(size_t) * 3 + length);
     ((size_t*) memory)[0] = 1; // references
@@ -42,22 +51,23 @@ struct String string_alloc(size_t length) {
     return (struct String) { length, memory + sizeof(size_t) * 3, memory };
 }
 
-void neat_runtime_lock_stdout(void);
-void neat_runtime_unlock_stdout(void);
+EXPORT void neat_runtime_lock_stdout(void);
+EXPORT void neat_runtime_unlock_stdout(void);
 
-void print(STRING_PARAM(str)) {
+EXPORT void print(STRING_PARAM(str)) {
     neat_runtime_lock_stdout();
     printf("%.*s\n", (int) str_length, str_ptr);
     fflush(stdout);
     neat_runtime_unlock_stdout();
 }
 
-void assert(int test) {
+EXPORT void assert(int test) {
     if (!test) {
         fprintf(stderr, "Assertion failed! Aborting.\n");
         exit(1);
     }
 }
+
 int neat_runtime_ptr_test(void* ptr) { return !!ptr; }
 int _arraycmp(void* a, void* b, size_t la, size_t lb, size_t sz) {
     if (la != lb) return 0;
@@ -90,7 +100,22 @@ int neat_runtime_system_iret(STRING_PARAM(command)) {
 }
 
 int neat_runtime_execbg(STRING_PARAM(command), ARRAY_PARAM(struct String, struct StringArray, arguments)) {
-#ifdef linux
+#ifdef _WIN32
+    char *cmd = toStringz(ARRAY_VALUE(command));
+    char **args = malloc(sizeof(char*) * (arguments_length + 2));
+    args[0] = cmd;
+    for (int i = 0; i < arguments_length; i++) {
+        args[i + 1] = toStringz(arguments_ptr[i].length, arguments_ptr[i].ptr, arguments_ptr[i].base);
+    }
+    args[arguments_length + 1] = NULL;
+
+    int pid = _spawnvp(_P_NOWAIT, cmd, (const char *const *) args);
+    if (pid == -1) {
+        fprintf(stderr, "Error spawning process! %.*s\n", command_length, command_ptr);
+        exit(1);
+    }
+    return pid;
+#else
     int ret = fork();
     if (ret != 0) return ret;
     char *cmd = toStringz(ARRAY_VALUE(command));
@@ -101,21 +126,53 @@ int neat_runtime_execbg(STRING_PARAM(command), ARRAY_PARAM(struct String, struct
     }
     args[1 + arguments_length] = NULL;
     return execvp(cmd, args);
-#else
-    fprintf(stderr, "TODO!\n");
-    exit(1);
 #endif
 }
 
-#ifdef linux
 bool neat_runtime_waitpid(int pid) {
+#ifdef _WIN32
+    HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+    if (process == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "OpenProcess() failed: %s\n", GetLastError());
+        return false;
+    }
+
+    // Wait until child process exits
+    if (WaitForSingleObject(process, INFINITE) != WAIT_OBJECT_0) {
+        fprintf(stderr, "WaitForSingleObject() failed: %s\n", GetLastError());
+        CloseHandle(process);
+        return false;
+    }
+
+    DWORD exitCode;
+    if (!GetExitCodeProcess(process, &exitCode)) {
+        fprintf(stderr, "GetExitCodeProcess() failed: %s\n", GetLastError());
+        CloseHandle(process);
+        return false;
+    }
+
+    CloseHandle(process);
+    return exitCode == 0;
+#else
     int wstatus;
     int ret = waitpid(pid, &wstatus, 0);
     if (ret == -1) fprintf(stderr, "waitpid() failed: %s\n", strerror(errno));
     return WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0;
+#endif
 }
 
 // No idea why this is necessary.
+#ifdef _WIN32
+__attribute__((optnone))
+__attribute__((optimize(0)))
+bool neat_runtime_symbol_defined_in_main(STRING_PARAM(symbol)) {
+    void *main = GetModuleHandle(NULL);
+    char *symbolPtr = toStringz(ARRAY_VALUE(symbol));
+    void *sym = GetProcAddress(main, symbolPtr);
+    free(symbolPtr);
+    return sym ? true : false;
+}
+#else
 __attribute__((optnone))
 __attribute__((optimize(0)))
 bool neat_runtime_symbol_defined_in_main(STRING_PARAM(symbol)) {
@@ -128,8 +185,24 @@ bool neat_runtime_symbol_defined_in_main(STRING_PARAM(symbol)) {
     dlclose(main);
     return sym ? true : false;
 }
+#endif
 
 void neat_runtime_dlcall(STRING_PARAM(dlfile), STRING_PARAM(fun), void* arg) {
+#ifdef _WIN32
+    HMODULE handle = LoadLibrary(toStringz(ARRAY_VALUE(dlfile)));
+    if (!handle) {
+        fprintf(stderr, "can't open %.*s - error code %d\n", (int) dlfile_length, dlfile_ptr, GetLastError());
+        assert(false);
+    }
+
+    void *sym = GetProcAddress(handle, toStringz(ARRAY_VALUE(fun)));
+    if (!sym) {
+        fprintf(stderr, "can't load symbol '%.*s' - error code %d\n", (int) fun_length, fun_ptr, GetLastError());
+        assert(false);
+    }
+
+    ((void (*)(void*)) sym)(arg);
+#else
     void *handle = dlopen(toStringz(ARRAY_VALUE(dlfile)), RTLD_LAZY | RTLD_GLOBAL);
     if (!handle) fprintf(stderr, "can't open %.*s - %s\n", (int) dlfile_length, dlfile_ptr, dlerror());
     assert(!!handle);
@@ -138,10 +211,10 @@ void neat_runtime_dlcall(STRING_PARAM(dlfile), STRING_PARAM(fun), void* arg) {
     assert(!!sym);
 
     ((void(*)(void*)) sym)(arg);
-}
 #endif
+}
 
-void *neat_runtime_alloc(size_t size) {
+EXPORT void *neat_runtime_alloc(size_t size) {
     return calloc(1, size);
 }
 
@@ -195,13 +268,13 @@ void FATALERROR neat_runtime_refcount_violation(const char *desc, ptrdiff_t *ptr
     exit(1);
 }
 
-void FATALERROR neat_runtime_index_oob(size_t index)
+EXPORT void FATALERROR neat_runtime_index_oob(size_t index)
 {
     fprintf(stderr, "Array index out of bounds: %zd\n", index);
     exit(1);
 }
 
-void neat_runtime_refcount_inc(const char *desc, ptrdiff_t *ptr)
+EXPORT void neat_runtime_refcount_inc(const char *desc, ptrdiff_t *ptr)
 {
     // ptrdiff_t result = *ptr += 1;
     ptrdiff_t result = __atomic_add_fetch(ptr, 1, __ATOMIC_ACQ_REL);
@@ -212,12 +285,12 @@ void neat_runtime_refcount_inc(const char *desc, ptrdiff_t *ptr)
 }
 
 // FIXME remove
-void neat_runtime_refcount_inc2(const char *desc, ptrdiff_t *ptr)
+EXPORT void neat_runtime_refcount_inc2(const char *desc, ptrdiff_t *ptr)
 {
     return neat_runtime_refcount_inc(desc, ptr);
 }
 
-int neat_runtime_refcount_dec(const char *desc, ptrdiff_t *ptr)
+EXPORT int neat_runtime_refcount_dec(const char *desc, ptrdiff_t *ptr)
 {
     // ptrdiff_t result = *ptr -= 1;
     ptrdiff_t result = __atomic_sub_fetch(ptr, 1, __ATOMIC_ACQ_REL);
@@ -230,17 +303,17 @@ int neat_runtime_refcount_dec(const char *desc, ptrdiff_t *ptr)
 }
 
 // FIXME remove
-void neat_runtime_refcount_dec2(const char *desc, ptrdiff_t *ptr)
+EXPORT void neat_runtime_refcount_dec2(const char *desc, ptrdiff_t *ptr)
 {
     neat_runtime_refcount_dec(desc, ptr);
 }
 
-void neat_runtime_class_refcount_inc(void **ptr) {
+EXPORT void neat_runtime_class_refcount_inc(void **ptr) {
     if (!ptr) return;
     neat_runtime_refcount_inc("class", (ptrdiff_t*) &ptr[1]);
 }
 
-void neat_runtime_class_refcount_dec(void **ptr) {
+EXPORT void neat_runtime_class_refcount_dec(void **ptr) {
     if (!ptr) return;
     if (neat_runtime_refcount_dec("class", (ptrdiff_t*) &ptr[1]))
     {
@@ -251,14 +324,14 @@ void neat_runtime_class_refcount_dec(void **ptr) {
     }
 }
 
-void neat_runtime_intf_refcount_inc(void *ptr) {
+EXPORT void neat_runtime_intf_refcount_inc(void *ptr) {
     if (!ptr) return;
     size_t base_offset = **(size_t**) ptr;
     void **object = (void**) ((char*) ptr - base_offset);
     neat_runtime_refcount_inc("interface", (ptrdiff_t*) &object[1]);
 }
 
-void neat_runtime_intf_refcount_dec(void *ptr) {
+EXPORT void neat_runtime_intf_refcount_dec(void *ptr) {
     if (!ptr) return;
     size_t base_offset = **(size_t**) ptr;
     void **object = (void**) ((char*) ptr - base_offset);
@@ -270,7 +343,7 @@ void neat_runtime_intf_refcount_dec(void *ptr) {
     }
 }
 
-void neat_runtime_refcount_set(size_t *ptr, size_t value) {
+EXPORT void neat_runtime_refcount_set(size_t *ptr, size_t value) {
     // *ptr = value;
     __atomic_store(ptr, &value, __ATOMIC_RELEASE);
 }
@@ -287,13 +360,13 @@ __attribute__((constructor)) void neat_runtime_stdout_lock_init(void) {
 #endif
 }
 
-void neat_runtime_lock_stdout(void) {
+EXPORT void neat_runtime_lock_stdout(void) {
 #ifdef linux
     pthread_mutex_lock(&stdout_lock);
 #endif
 }
 
-void neat_runtime_unlock_stdout(void) {
+EXPORT void neat_runtime_unlock_stdout(void) {
 #ifdef linux
     pthread_mutex_unlock(&stdout_lock);
 #endif

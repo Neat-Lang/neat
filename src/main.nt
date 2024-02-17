@@ -33,7 +33,11 @@ import package(compiler).std.thread;
 import package(compiler).std.argparse;
 import c_header("sys/inotify.h");
 
-extern(C) int getpid();
+version (windows) {
+    extern(C) int GetCurrentProcessId();
+} else {
+    extern(C) int getpid();
+}
 extern(C) void neat_runtime_system(string command);
 extern(C) void neat_runtime_dlcall(string soname, string name, void* arg);
 extern(C) bool neat_runtime_waitpid(int pid);
@@ -460,14 +464,29 @@ class ParserHelperImpl : ParserHelper
         auto result = buildAstModule(astModule, this.settings, [], [], this.fileIdTable, dummyOptions)?;
         string name = result.module_.extractFunction(function_, settings, locRange)?.mangle;
         // write into unique tmp to avoid collision between processes
-        int pid = getpid;
-        string soname = ".obj/macro_$(name)_$(result.hash.text).so";
-        auto tmpname = ".obj/macro_$(name)_$(result.hash.text).$pid.so";
+        version (windows) {
+            int pid = GetCurrentProcessId;
+        } else {
+            int pid = getpid;
+        }
+        version (windows) {
+            string ext = "dll";
+        } else {
+            string ext = "so";
+        }
+        string soname = ".obj/macro_$(name)_$(result.hash.text).$ext";
+        auto tmpname = ".obj/macro_$(name)_$(result.hash.text).$pid.$ext";
         bool verbose = settings.platform.platformFlags.verbose;
 
         if (!settings.caching || !exists(soname)) {
-            settings.backend.linkSharedLib(soname=tmpname, flags=settings.extraCFlags, verbose=verbose, result.objFiles);
-            neat_runtime_system("mv $tmpname $soname");
+            mut auto objFiles = result.objFiles;
+            version (windows) {
+                // Very big TODO
+                objFiles ~= "build/neat.exe";
+            }
+            settings.backend.linkSharedLib(soname=tmpname, flags=settings.extraCFlags, verbose=verbose, objFiles,
+                settings.platform);
+            tmpname.rename(soname);
         }
         neat_runtime_dlcall(soname, name, ptr);
         return (soname=soname, fnname=name);
@@ -1107,6 +1126,8 @@ long long int compiler_hash_mult() { return $(mult)LL; }
         }
         version (firstpass) {
             exec(options.output, options.runArgs);
+        } else version (windows) {
+            exec(options.output, options.runArgs);
         } else {
             alias WTERMSIG = a => a & 0x7f;
             alias WIFSIGNALED = a => (a & 0x7f + 1) >> 1 > 0;
@@ -1177,30 +1198,37 @@ void main(mut string[] args)
     }
 }
 
-void watchForChanges(WorkPool workPool) {
-    import c.unistd : read, close;
-
-    auto files = [task.instanceOf(ReadFileTask).path for task in workPool.allDependencies("")
-        where task.instanceOf(ReadFileTask)];
-    print("Change any file to continue.");
-    int fd = inotify_init;
-    auto watches = [fd.inotify_add_watch(file.toStringz, IN_MODIFY | IN_DELETE_SELF) for file in files];
-    auto buf = new ubyte mut[](8192);
-    while (true) {
-        long len = read(fd, buf.ptr, buf.length);
-        mut int offs = 0;
-        while (offs < len) {
-            auto event = cast(inotify_event*) &buf[offs];
-            auto target = [first file for i, file in files where watches[i] == event.wd];
-            print("File '$target' changed, continuing...");
-            break;
-            // print("event $(event.mask), $(event.len), $(event.wd) for target=$target");
-            offs += sizeof(inotify_event) + event.len;
-        }
-        break;
+version (windows) {
+    void watchForChanges(WorkPool workPool) {
+        print("Not implemented on Windows!");
+        exit(1);
     }
-    [fd.inotify_rm_watch(watch) for watch in watches];
-    close(fd);
+} else {
+    void watchForChanges(WorkPool workPool) {
+        import c.unistd : read, close;
+
+        auto files = [task.instanceOf(ReadFileTask).path for task in workPool.allDependencies("")
+            where task.instanceOf(ReadFileTask)];
+        print("Change any file to continue.");
+        int fd = inotify_init;
+        auto watches = [fd.inotify_add_watch(file.toStringz, IN_MODIFY | IN_DELETE_SELF) for file in files];
+        auto buf = new ubyte mut[](8192);
+        while (true) {
+            long len = read(fd, buf.ptr, buf.length);
+            mut int offs = 0;
+            while (offs < len) {
+                auto event = cast(inotify_event*) &buf[offs];
+                auto target = [first file for i, file in files where watches[i] == event.wd];
+                print("File '$target' changed, continuing...");
+                break;
+                // print("event $(event.mask), $(event.len), $(event.wd) for target=$target");
+                offs += sizeof(inotify_event) + event.len;
+            }
+            break;
+        }
+        [fd.inotify_rm_watch(watch) for watch in watches];
+        close(fd);
+    }
 }
 
 (void | Error) build(

@@ -43,25 +43,43 @@ int system_iret(string command) {
 int exec(string path, string[] args) {
     import neat.runtime.stdlib : fprintf, stderr;
 
-    int ret = fork();
-    if (ret != 0) {
-        mut int wstatus;
-        int ret = waitpid(ret, &wstatus, 0);
-        if (ret == -1) {
-            fprintf(stderr, "waitpid() failed: %s\n", strerror(neat_runtime_errno));
+    version (windows) {
+        import c.windows : STARTUPINFO, PROCESS_INFORMATION, CreateProcess, WaitForSingleObject, INFINITE, CloseHandle;
+
+        mut string cmdline = path;
+        for (arg in args) cmdline ~= arg;
+        auto cmdlinePtr = cmdline.toStringz;
+        mut STARTUPINFO info;
+        mut PROCESS_INFORMATION processInfo;
+        if (!CreateProcess(null, cmdlinePtr, null, null, true, 0, null, null, &info, &processInfo)) {
+            fprintf(stderr, "CreateProcess() failed\n");
+            return 1;
         }
-        return wstatus;
+        WaitForSingleObject(processInfo.hProcess, INFINITE);
+        CloseHandle(processInfo.hProcess);
+        CloseHandle(processInfo.hThread);
+        return 0;
+    } else {
+        int ret = fork();
+        if (ret != 0) {
+            mut int wstatus;
+            int ret = waitpid(ret, &wstatus, 0);
+            if (ret == -1) {
+                fprintf(stderr, "waitpid() failed: %s\n", strerror(neat_runtime_errno));
+            }
+            return wstatus;
+        }
+        char* pathC = toStringz(path);
+        auto argsArray = new char*[](args.length + 1);
+        char** argsC = argsArray.ptr;
+        argsC[0] = pathC;
+        for (i, arg in args) {
+            argsC[i + 1] = arg.toStringz;
+        }
+        argsC[args.length + 1] = null;
+        execv(pathC, argsC);
+        return 0;
     }
-    char* pathC = toStringz(path);
-    auto argsArray = new char*[](args.length + 1);
-    char** argsC = argsArray.ptr;
-    argsC[0] = pathC;
-    for (i, arg in args) {
-        argsC[i + 1] = arg.toStringz;
-    }
-    argsC[args.length + 1] = null;
-    execv(pathC, argsC);
-    return 0;
 }
 
 private extern(C) int fork();

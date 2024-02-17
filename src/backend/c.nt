@@ -16,10 +16,15 @@ class CBackend : Backend {
     override void hash(Hash hash) {
         hash.adds("gcc");
     }
-    override void linkSharedLib(string soname, string flags, bool verbose, string[] objFiles) {
+    override void linkSharedLib(string soname, string flags, bool verbose, string[] objFiles, Platform platform) {
         string objStr = [join " " ~ a for a in objFiles];
-        string basecmd = getEnv("CC", "gcc") ~ " -fpic -fno-strict-aliasing "
+        mut string basecmd = getEnv("CC", "gcc") ~ " -fpic -fno-strict-aliasing "
             ~ flags;
+        if (platform.wordSize == 8) {
+            basecmd ~= " -m64";
+        } else {
+            basecmd ~= " -m32";
+        }
         string cmd = "$basecmd -shared -g $objStr -o $soname";
         if (verbose) {
             print("\$ $cmd");
@@ -96,8 +101,20 @@ class CBackendModule : BackendModule {
         if (name == "memcpy" || name == "malloc" || name == "calloc"
             || name == "strlen" || name == "realpath" || name == "getenv"
             || name == "atoi" || name == "atof" || name == "atoll" || name == "memcmp"
-            || name == "memset"
+            || name == "memset" || name == "free"
         ) return; // in header, don't redeclare - may conflict
+        mut string qualifier = "";
+        if (this.platform.win64) {
+            if (forMacro) {
+                if (neat_runtime_symbol_defined_in_main(name)) {
+                    qualifier ~= "__declspec(dllimport) ";
+                } else {
+                    qualifier ~= "__declspec(dllexport) ";
+                }
+            } else {
+                qualifier ~= "__declspec(dllexport) ";
+            }
+        }
         mut string argstr = "(";
         mut int argnum = 0;
         void add(string arg) {
@@ -126,7 +143,7 @@ class CBackendModule : BackendModule {
         } else {
             retstr = typeFmt(ret);
         }
-        this.output.print(retstr ~ " " ~ name ~ argstr ~ ";");
+        this.output.print(qualifier ~ " " ~ retstr ~ " " ~ name ~ argstr ~ ";");
     }
 
     void defineVar(string name, BackendType type, bool threadlocal)
@@ -152,10 +169,13 @@ class CBackendModule : BackendModule {
         this.globals.add(Global(name, fpType));
         return new CBackendFunction(this, name, ret, args);
     }
-    override void declareSymbolList(string name, size_t length)
-    {
+    override void declareSymbolList(string name, size_t length) {
         string globalDecl = "void *" ~ name ~ "[" ~ ltoa(length) ~ "]";
-        this.output.print("extern " ~ globalDecl ~ ";");
+        mut string modifier;
+        if (this.platform.win64 && forMacro && neat_runtime_symbol_defined_in_main(name)) {
+            modifier ~= "__declspec(dllimport) ";
+        }
+        this.output.print("extern $modifier" ~ globalDecl ~ ";");
         this.globals.add(Global(name, null));
     }
     override void defineSymbolList(string name, (string | size_t)[] symbols)
@@ -982,13 +1002,17 @@ class CBackendFunction : BackendFunction {
         }
         [recurse(arg, "arg$i") for i, arg in this.args];
         argstr ~= ")";
+        mut string qualifier;
+        if (this.mod.platform.win64 && this.mod.forMacro && !neat_runtime_symbol_defined_in_main(name)) {
+            qualifier ~= "__declspec(dllexport) ";
+        }
         mut string retstr;
         if (this.ret_.size > 0) {
             retstr = mod.typeFmt(this.ret_);
         } else {
             retstr = "void";
         }
-        this.mod.output.print(retstr ~ " " ~ this.name ~ argstr ~ "{");
+        this.mod.output.print("$qualifier$retstr $(this.name)$argstr {");
         for (reconLine in reconstituteArgs) {
             this.mod.output.print("  $reconLine");
         }

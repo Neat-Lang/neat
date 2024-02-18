@@ -470,20 +470,37 @@ class Class
         mut nullable Class current = this;
         while (current) {
             auto classType = new ClassType(current? else die, zeroInitializable=false, overrideMutable=false);
-            auto classinfo = new ASTSymbolHelper(new ClassInfo(classType));
-            castStmts ~= context.compiler.$stmt if (targetClassinfo is $classinfo) {
-                void* voidPtr = this;
-                return voidPtr;
-            };
+            if (context.platform.dllsafe) {
+                auto classinfo = context.compiler.astStringLiteral(classType.class_.mangledName);
+                castStmts ~= context.compiler.$stmt if (targetClassinfo == $classinfo) {
+                    void* voidPtr = this;
+                    return voidPtr;
+                };
+            } else {
+                auto classinfo = new ASTSymbolHelper(new ClassInfo(classType));
+                castStmts ~= context.compiler.$stmt if (targetClassinfo is $classinfo) {
+                    void* voidPtr = this;
+                    return voidPtr;
+                };
+            }
             void recurse(Intf intf) {
                 auto intfType = new IntfType(intf, zeroInitializable=false);
                 auto astIntf = new ASTSymbolHelper(intfType);
-                auto intfClassinfo = new ASTSymbolHelper(new ClassInfo(intfType));
-                castStmts ~= context.compiler.$stmt if (targetClassinfo is $intfClassinfo) {
-                    $astIntf intf = this;
-                    void* voidPtr = intf;
-                    return voidPtr;
-                };
+                if (context.platform.dllsafe) {
+                    auto intfInfo = context.compiler.astStringLiteral(intf.mangledName);
+                    castStmts ~= context.compiler.$stmt if (targetClassinfo == $intfInfo) {
+                        $astIntf intf = this;
+                        void* voidPtr = intf;
+                        return voidPtr;
+                    };
+                } else {
+                    auto intfClassinfo = new ASTSymbolHelper(new ClassInfo(intfType));
+                    castStmts ~= context.compiler.$stmt if (targetClassinfo is $intfClassinfo) {
+                        $astIntf intf = this;
+                        void* voidPtr = intf;
+                        return voidPtr;
+                    };
+                }
                 for (superIntf in intf.superIntfs) {
                     recurse(superIntf);
                 }
@@ -503,10 +520,19 @@ class Class
 
         auto classType = new ClassType(this, zeroInitializable=false, overrideMutable=false);
         auto methodNamespace = new ClassNamespace(this.namespace, classType);
-        auto params = [
-            Parameter.simple("targetClassinfo", once new Pointer(new Void)),
-            Parameter.simple("freeOnNull", once new Boolean),
-        ];
+        Parameter[] params() {
+            if (context.platform.dllsafe) {
+                return [
+                    Parameter.simple("targetClassinfo", once new Array(new Character, context.platform)),
+                    Parameter.simple("freeOnNull", once new Boolean),
+                ];
+            } else {
+                return [
+                    Parameter.simple("targetClassinfo", once new Pointer(new Void)),
+                    Parameter.simple("freeOnNull", once new Boolean),
+                ];
+            }
+        }
         return new ClassMethod(
             classType, __RANGE__, Protection.public_, override_=true, abstract_=false, "__instanceof",
             once new Pointer(new Void), params,
@@ -2068,7 +2094,17 @@ class ASTInstanceOf : ASTSymbol
                 else assert(false);
             }
             ASTSymbol astTarget = new ASTSymbolHelper(target);
-            ASTSymbol astClassInfo = new ASTSymbolHelper(classInfo);
+            ASTSymbol astClassInfo() {
+                if (context.platform.dllsafe) {
+                    if (auto targetClass = targetClass)
+                        return context.compiler.astStringLiteral(targetClass.class_.mangledName);
+                    else if (auto targetIntf = targetIntf)
+                        return context.compiler.astStringLiteral(targetIntf.intf.mangledName);
+                    else assert(false);
+                } else {
+                    return new ASTSymbolHelper(classInfo);
+                }
+            }
 
             // disable lifetime accounting for this call
             auto plainBase = new OverrideLifetimeExpr(base, ExprInfo(Lifetime.permanent));
@@ -2077,11 +2113,18 @@ class ASTInstanceOf : ASTSymbol
 
             if (type.instanceOf(IntfType)) {
                 auto astBase = new ASTSymbolHelper(plainBase);
+                ASTSymbol instanceofType() {
+                    if (context.platform.dllsafe) {
+                        return context.compiler.$type $astTarget function(void*, string, bool);
+                    } else {
+                        return context.compiler.$type $astTarget function(void*, void*, bool);
+                    }
+                }
                 auto instanceOfExpr = context.compiler.$expr ({
                     auto baseOffset = **cast(size_t**) $astBase;
                     auto object = &(cast(char*) $astBase)[-baseOffset];
                     // vtable 0 is always instanceof
-                    auto fn = (*cast($astTarget function(void*, void*, bool)**) object)[0];
+                    auto fn = (*cast($instanceofType**) object)[0];
                     fn(object, $astClassInfo, $astFreeOnNull);
                 });
                 if (auto ret = instanceOfExpr.compile(context)?.beExpression?)

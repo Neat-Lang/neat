@@ -28,10 +28,14 @@ import polyhash;
 import package(compiler).std.algorithm;
 import package(compiler).std.file;
 import package(compiler).std.json;
+import package(compiler).std.process : currentProcessPath, exec;
 import package(compiler).std.string;
 import package(compiler).std.thread;
 import package(compiler).std.argparse;
-import c_header("sys/inotify.h");
+version (windows) {}
+else {
+    import c_header("sys/inotify.h");
+}
 
 version (windows) {
     extern(C) int GetCurrentProcessId();
@@ -126,8 +130,11 @@ BackgroundCompilation emitModule(
             defaultGcc = "$(settings.triple)-gcc";
         }
         exec = getEnv("CC", defaultGcc);
-        if (settings.optimize) args = baseArgs ~ "-O3";
-        else args = baseArgs;
+        args = baseArgs;
+        if (settings.optimize) args ~= "-O3";
+        if (settings.platform.win64) {
+            args ~= "-Wno-parentheses-equality";
+        }
         if (settings.extraCFlags.length > 0) args ~= settings.extraCFlags.split(" ");
 
         string cmd = exec ~ " " ~ args.join(" ");
@@ -483,8 +490,12 @@ class ParserHelperImpl : ParserHelper
         if (!settings.caching || !exists(soname)) {
             mut auto objFiles = result.objFiles;
             version (windows) {
-                // Very big TODO
-                objFiles ~= "build/neat.exe";
+                /**
+                 * Because the DLLs will be loaded into this process, link
+                 * *against current executable file.*
+                 * Yes, this works.
+                 */
+                objFiles ~= currentProcessPath;
             }
             settings.backend.linkSharedLib(soname=tmpname, flags=settings.extraCFlags, verbose=verbose, objFiles,
                 settings.platform);
@@ -1016,7 +1027,7 @@ ASTModule builtinSymbols(Options options) {
     auto astModule = getModule(compiler, mainFile, null, false, parserHelper, __RANGE__)?;
     BuildResult result = buildAstModule(astModule, settings, moduleVisitors,
         compilationVisitors, compiler.fileIdTable, options)?;
-    mut string fileArgs = [join " " ~ a for a in result.objFiles];
+    mut string[] fileArgs = result.objFiles;
     string[] intermediateFiles = result.intermediateFiles;
     if (options.umlFile != "") {
         umlVisitor.writeTo(options.umlFile);
@@ -1032,7 +1043,7 @@ ASTModule builtinSymbols(Options options) {
 long long int compiler_hash_mult() { return $(mult)LL; }
 "       );
     }
-    fileArgs ~= " " ~ binHashOutput;
+    fileArgs ~= binHashOutput;
     mut auto intermediates = result.intermediateFiles;
     intermediates ~= binHashOutput;
 
@@ -1052,7 +1063,7 @@ long long int compiler_hash_mult() { return $(mult)LL; }
     auto unittestFile = ".obj/_run_unittests.c";
 
     unittestFile.write(unittestCode);
-    fileArgs ~= " " ~ unittestFile;
+    fileArgs ~= unittestFile;
     intermediates ~= unittestFile;
 
     (string | Error) mainName() => result.module_.extractFunction("main", settings, __RANGE__)?
@@ -1068,23 +1079,23 @@ long long int compiler_hash_mult() { return $(mult)LL; }
         return;
     }
 
-    mut string baseFlags;
-    if (options.optimize) baseFlags ~= " -Ofast";
-    if (options.extraCFlags) baseFlags ~= " $(settings.extraCFlags)";
+    mut string[] baseFlags;
+    if (options.optimize) baseFlags ~= "-Ofast";
+    if (options.extraCFlags) baseFlags ~= settings.extraCFlags;
 
     version (LLVMBackend) {
         if (options.backend.instanceOf(LLVMBackend) && options.optimize)
-            baseFlags ~= " -flto";
+            baseFlags ~= "-flto";
     }
 
-    mut string flags = baseFlags;
-    mut string linkerFlags;
+    mut string[] flags = baseFlags;
+    mut string[] linkerFlags;
     if (![any a == "mingw" for a in options.allVersions]) {
-        flags ~= " -rdynamic";
-        linkerFlags ~= " -ldl";
+        flags ~= "-rdynamic";
+        linkerFlags ~= "-ldl";
     }
-    for (linkerArg in options.linkerArgs) linkerFlags ~= " " ~ linkerArg;
-    mut string compilerCmd = "clang-15 -opaque-pointers -Wno-unused-command-line-argument -Wno-unknown-attributes -fpic";
+    linkerFlags ~= options.linkerArgs;
+    mut string compilerCmd = "clang-15";
     if (options.backend.instanceOf(CBackend)) {
         mut string defaultGcc = "gcc";
         // blithely assume it's the default
@@ -1095,20 +1106,29 @@ long long int compiler_hash_mult() { return $(mult)LL; }
     } else {
         version (LLVMBackend) {
             if (options.backend.instanceOf(LLVMBackend)) {
-                flags ~= " -rdynamic";
-                flags ~= " -target $(options.triple)";
+                flags ~= [
+                    "-opaque-pointers", "-Wno-unused-command-line-argument", "-Wno-unknown-attributes", "-fpic",
+                    "-rdynamic", "-target", options.triple,
+                ];
             }
         }
     }
     if (options.mwindows) {
-        linkerFlags ~= " -mwindows";
+        linkerFlags ~= "-mwindows";
     }
     if (options.noMain)
-        flags ~= " -DNEAT_NO_MAIN";
+        flags ~= "-DNEAT_NO_MAIN";
     else
-        flags ~= " -DMAIN=$(mainName?)";
-    string runtime = execPath ~ "/src/runtime.c";
-    string cmd = "$compilerCmd$flags$fileArgs $runtime -o $(options.output)$linkerFlags";
+        flags ~= "-DMAIN=$(mainName?)";
+    flags ~= fileArgs;
+    version (firstpass) {
+        flags ~= "$execPath/src/runtime.c";
+    } else {
+        flags ~= execPath.sub("src").sub("runtime.c");
+    }
+    flags ~= ["-o", options.output];
+    flags ~= linkerFlags;
+    string cmd = compilerCmd ~ " " ~ flags.join(" ");
     if (settings.platform.platformFlags.verbose) {
         print("\$ $cmd");
     }
@@ -1127,7 +1147,6 @@ long long int compiler_hash_mult() { return $(mult)LL; }
     if (options.cpr) workPool.report;
     if (options.run) {
         import neat.runtime.stdlib : fprintf, stderr;
-        import package(compiler).std.process : exec;
 
         auto debugCmd = options.output ~ " " ~ options.runArgs.join(" ");
         if (settings.platform.platformFlags.verbose) {
@@ -1160,7 +1179,8 @@ void main(mut string[] args)
     string executable = args[0];
     args = args[1 .. $];
     string[] allArgs = args;
-    string execPath = "/proc/self/exe".realpath.dirname;
+    version (firstpass) string execPath = "/proc/self/exe".realpath.dirname;
+    else string execPath = currentProcessPath.dirname;
     auto options = new Options;
     // TODO make configurable somehow? commandline arg?
     options.parseConfig(execPath ~ "/neat.ini");

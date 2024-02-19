@@ -84,7 +84,7 @@ FILE* neat_runtime_stdout() {
     return stdout;
 }
 
-void neat_runtime_system(STRING_PARAM(command)) {
+EXPORT void neat_runtime_system(STRING_PARAM(command)) {
     char *cmd = toStringz(ARRAY_VALUE(command));
     int ret = system(cmd);
     if (ret != 0) fprintf(stderr, "command failed with %i\n", ret);
@@ -92,7 +92,7 @@ void neat_runtime_system(STRING_PARAM(command)) {
     free(cmd);
 }
 
-int neat_runtime_system_iret(STRING_PARAM(command)) {
+EXPORT int neat_runtime_system_iret(STRING_PARAM(command)) {
     char *cmd = toStringz(ARRAY_VALUE(command));
     int ret = system(cmd);
     free(cmd);
@@ -111,7 +111,7 @@ int neat_runtime_execbg(STRING_PARAM(command), ARRAY_PARAM(struct String, struct
 
     int pid = _spawnvp(_P_NOWAIT, cmd, (const char *const *) args);
     if (pid == -1) {
-        fprintf(stderr, "Error spawning process! %.*s\n", command_length, command_ptr);
+        fprintf(stderr, "Error spawning process! %.*s\n", (int) command_length, command_ptr);
         exit(1);
     }
     return pid;
@@ -131,22 +131,18 @@ int neat_runtime_execbg(STRING_PARAM(command), ARRAY_PARAM(struct String, struct
 
 bool neat_runtime_waitpid(int pid) {
 #ifdef _WIN32
-    HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
-    if (process == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "OpenProcess() failed: %s\n", GetLastError());
-        return false;
-    }
+    HANDLE process = (HANDLE) (size_t) pid;
 
     // Wait until child process exits
     if (WaitForSingleObject(process, INFINITE) != WAIT_OBJECT_0) {
-        fprintf(stderr, "WaitForSingleObject() failed: %s\n", GetLastError());
+        fprintf(stderr, "WaitForSingleObject() failed: %lu\n", GetLastError());
         CloseHandle(process);
         return false;
     }
 
     DWORD exitCode;
     if (!GetExitCodeProcess(process, &exitCode)) {
-        fprintf(stderr, "GetExitCodeProcess() failed: %s\n", GetLastError());
+        fprintf(stderr, "GetExitCodeProcess() failed: %lu\n", GetLastError());
         CloseHandle(process);
         return false;
     }
@@ -191,13 +187,13 @@ void neat_runtime_dlcall(STRING_PARAM(dlfile), STRING_PARAM(fun), void* arg) {
 #ifdef _WIN32
     HMODULE handle = LoadLibrary(toStringz(ARRAY_VALUE(dlfile)));
     if (!handle) {
-        fprintf(stderr, "can't open %.*s - error code %d\n", (int) dlfile_length, dlfile_ptr, GetLastError());
+        fprintf(stderr, "can't open %.*s - error code %lu\n", (int) dlfile_length, dlfile_ptr, GetLastError());
         assert(false);
     }
 
     void *sym = GetProcAddress(handle, toStringz(ARRAY_VALUE(fun)));
     if (!sym) {
-        fprintf(stderr, "can't load symbol '%.*s' - error code %d\n", (int) fun_length, fun_ptr, GetLastError());
+        fprintf(stderr, "can't load symbol '%.*s' - error code %lu\n", (int) fun_length, fun_ptr, GetLastError());
         assert(false);
     }
 
@@ -348,7 +344,7 @@ EXPORT void neat_runtime_refcount_set(size_t *ptr, size_t value) {
     __atomic_store(ptr, &value, __ATOMIC_RELEASE);
 }
 
-int neat_runtime_errno() { return errno; }
+EXPORT int neat_runtime_errno() { return errno; }
 
 #ifdef linux
 pthread_mutex_t stdout_lock;

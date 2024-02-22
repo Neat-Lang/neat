@@ -3635,7 +3635,8 @@ class ASTStaticIfStatement : ASTStatement
 (nullable ASTDeclaration | Error) parseDeclaration(ParserImpl parser, LexicalContext lexicalContext) {
     parser.begin;
     auto from = parser.from;
-    parseImportStatement(parser, lexicalContext)?.case {
+    // we may be deep in a version block, ie. not toplevel.
+    parseImportStatement(parser, lexicalContext, toplevel=false)?.case {
         (:none): {}
         ASTImportStatement importStmt:
             parser.commit;
@@ -4502,8 +4503,7 @@ class ImportTask : ImportModuleBaseTask
 
 extern(C) void neat_runtime_dlcall(string soname, string name, void* arg);
 
-(ASTImportStatement | :none | Error) parseImportStatement(Parser parser, LexicalContext lexicalContext)
-{
+(ASTImportStatement | :none | Error) parseImportStatement(Parser parser, LexicalContext lexicalContext, bool toplevel) {
     parser.begin;
     auto from = parser.from;
     bool isMacroImport = parser.acceptIdentifier("macro");
@@ -4518,7 +4518,7 @@ extern(C) void neat_runtime_dlcall(string soname, string name, void* arg);
         :macroTask, ImportModuleBaseTask task) target;
     parser.commit;
 
-    auto macroArgs = new ParseImportArgs(parser, lexicalContext);
+    auto macroArgs = new ParseImportArgs(parser, lexicalContext, toplevel);
     lexicalContext.macroState.applyMacro(macroArgs);
     if (macroArgs.done) {
         target = macroArgs.getModule(lexicalContext.compiler)?.case(
@@ -4653,7 +4653,7 @@ class LexicalContextImpl : LexicalContext
         protection = Protection.private_;
     }
 
-    parseImportStatement(parser, lexicalContext).case {
+    parseImportStatement(parser, lexicalContext, toplevel=toplevel).case {
         Error err:
             parser.revert;
             return err;
@@ -4826,10 +4826,14 @@ class LexicalContextImpl : LexicalContext
     (string name, string pak) target = import_.target.case(
         (:normal, string name, string pak): (name, pak),
         (:macro_, ASTModuleBase module_): return module_.instanceOf(ASTModule)? else die,
-        (:macroTask, ImportModuleBaseTask task): return compiler.workPool
-            .wait(task.id)
-            .instanceOf(ImportModuleBaseTask)
-            .module_?.instanceOf(ASTModule)? else die);
+        (:macroTask, ImportModuleBaseTask task): ({
+            // in case it was a macro task in a version block or something
+            compiler.workPool.queue(task);
+            return compiler.workPool
+                .wait(task.id)
+                .instanceOf(ImportModuleBaseTask)
+                .module_?.instanceOf(ASTModule)? else die;
+        }));
     mut Package pak = selectPackage(compiler.allPackages, pak, import_.locRange)?;
     // TODO enum SearchMode { Transitive, Direct, Commandline }
     mut bool transitive = true;

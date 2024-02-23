@@ -7,20 +7,30 @@ then
 fi
 VERSION="$1"
 
-LLVM=0
-NTFLAGS="-O"
+BUILD=""
+STAGE1FLAGS="-O"
+STAGE2FLAGS="-O"
 RELEASE=""
 ARCHS=64
+export WINEDEBUG=-all
 
 if [ $(basename $0) == "release-llvm.sh" ]
 then
-    LLVM=1
-    NTFLAGS="${NTFLAGS} -version=LLVMBackend"
+    BUILD="llvm"
+    STAGE1FLAGS="${STAGE1FLAGS} -version=LLVMBackend"
+    STAGE2FLAGS="${STAGE2FLAGS} -macro-version=LLVMBackend -version=LLVMBackend"
     RELEASE="neat-$VERSION-llvm"
 elif [ $(basename $0) == "release-gcc.sh" ]
 then
+    BUILD="gcc"
     ARCHS="32 64"
     RELEASE="neat-$VERSION-gcc"
+elif [ $(basename $0) == "release-win64-gcc.sh" ]
+then
+    BUILD="win64-gcc"
+    RELEASE="neat-$VERSION-win64-gcc"
+    STAGE1FLAGS="${STAGE1FLAGS} -target=windows -dllsafe"
+    STAGE2FLAGS="${STAGE2FLAGS} -macro-target=windows -macro-dllsafe -target=windows -dllsafe"
 else
     echo "Unknown release name $(basename $0)"
     exit 1
@@ -48,14 +58,14 @@ do
         ARCHFLAGS = "-m32"
     fi
     build/neat -backend=c -Pcompiler:src -dump-intermediates build/intermediates.txt src/main.nt -c \
-        $ARCHFLAGS $NTFLAGS
+        $ARCHFLAGS $STAGE1FLAGS
 
     mkdir $TARGET/intermediate_$ARCH
     cp $(tail -n +2 build/intermediates.txt) $TARGET/intermediate_$ARCH/
     head -1 build/intermediates.txt > $TARGET/main.txt
 done
 
-if [ $LLVM -eq 0 ]
+if [ "$BUILD" = "gcc" ]
 then
     cat > $TARGET/build.sh <<EOT
 #!/usr/bin/env bash
@@ -114,10 +124,41 @@ then
 -macro-m32
 EOI
 fi
-./neat_bootstrap -j src/main.nt $NTFLAGS -o neat
+./neat_bootstrap -j src/main.nt $STAGE2FLAGS -o neat
 rm neat_bootstrap
 EOT
-else
+    chmod +x $TARGET/build.sh
+elif [ "$BUILD" = "win64-gcc" ]
+then
+    cat > $TARGET/build.bat <<EOT
+SETLOCAL
+FOR /F %%I IN (main.txt) DO SET "DMAIN=-DMAIN=%%I"
+SET "CFLAGS=%CFLAGS% -Ofast -fno-strict-aliasing -pthread"
+SET "LINKFLAGS=-Wl,/STACK:8388608"
+FOR /R %%F IN (*.c) DO (
+    SET "obj=%%~dpnF.o"
+    SETLOCAL ENABLEDELAYEDEXPANSION
+    ECHO gcc -m64 -w -c -g -fpic -rdynamic -fno-strict-aliasing %DMAIN% %%~fF -o !obj!
+    gcc -m64 -w -c -g -fpic -rdynamic -fno-strict-aliasing %DMAIN% %%~fF -o !obj!
+    CALL SET obj=%%obj:\\=@%%
+    CALL SET obj=%%obj:@=\\\\%%
+    ECHO !obj! >> objects.txt
+    ENDLOCAL
+)
+gcc -m64 -g -fpic -rdynamic -fno-strict-aliasing @objects.txt -o neat_bootstrap -lm %CFLAGS% %LINKFLAGS%
+REM FOR /F "delims=" %%I IN (objects.txt) DO DEL %%I
+ECHO -syspackage compiler:src > neat.ini
+ECHO -backend=c >> neat.ini
+ECHO -target=x86_64-w64-mingw32 >> neat.ini
+ECHO -macro-target=x86_64-w64-mingw32 >> neat.ini
+ECHO -macro-dllsafe >> neat.ini
+ECHO -running-compiler-version=$VERSION >> neat.ini
+neat_bootstrap -j src/main.nt $STAGE2FLAGS -o neat
+REM DEL neat_bootstrap
+ENDLOCAL
+EOT
+elif [ "$BUILD" = "llvm" ]
+then
     . ./find-llvm-config.sh
     CFLAGS="${CFLAGS:+ }-I$($LLVM_CONFIG --includedir) -L$($LLVM_CONFIG --libdir)"
     install -v ./find-llvm-config.sh "$TARGET"
@@ -167,9 +208,10 @@ done
 for i in \$(seq \$JOBS); do wait -n; done
 gcc \$ARCHFLAG -fpic -rdynamic -fno-strict-aliasing \${OBJECTS[@]} -o neat_bootstrap -ldl -lm -lLLVM \$CFLAGS
 rm \${OBJECTS[@]}
-./neat_bootstrap -j -macro-backend=c src/main.nt \${LLVM_NTFLAGS} $NTFLAGS -o neat
+./neat_bootstrap -j -macro-backend=c src/main.nt \${LLVM_NTFLAGS} $STAGE2FLAGS -o neat
 rm neat_bootstrap
 EOT
+    chmod +x $TARGET/build.sh
     cat > $TARGET/neat.ini <<EOT
 -syspackage compiler:src
 -backend=llvm
@@ -179,16 +221,28 @@ EOT
 -running-compiler-version=$VERSION
 -extra-cflags=\$ARCHFLAG
 EOT
+else
+    echo "Unknown build '$BUILD'!"
+    exit 1
 fi
-chmod +x $TARGET/build.sh
 
 for ARCH in $ARCHS
 do
     echo "Test $ARCH"
     TEST_TARGET="test_${RELEASE}_${ARCH}"
     cp -R "${TARGET}" "${TEST_TARGET}"
-    (cd "${TEST_TARGET}" && ./build.sh)
-    NEAT="${TEST_TARGET}"/neat ./runtests.sh
+    if [ "$BUILD" = "win64-gcc" ]; then
+        (cd "${TEST_TARGET}" &&  wine build.bat)
+    else
+        (cd "${TEST_TARGET}" && ./build.sh)
+    fi
+    if [ "$BUILD" = "win64-gcc" ]; then
+        NEAT="wine \"${TEST_TARGET}\"/neat.exe"
+        ./runtests.sh win64
+    else
+        NEAT="${TEST_TARGET}"/neat
+        ./runtests.sh
+    fi
     rm -rf "${TEST_TARGET}"
 done
 (cd "$RELEASE"

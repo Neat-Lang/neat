@@ -16,6 +16,34 @@ differences of LLVM's and gcc's backend, both Neat backends are equally capable.
 
 The installation instructions assume, and are tested with, Ubuntu 22.04. Take required steps as equivalent for your system.
 
+Install on Windows
+------------------
+
+Warning: as I don't have any Windows computer around, very little testing effort has gone into this deployment.
+The testsuite passes on Wine, that's about all I can say.
+
+1. Install `llvm-mingw with LLVM 15 <https://github.com/mstorsjo/llvm-mingw/releases/tag/20220906>`_.
+
+2. Ensure that the 'bin' folder of llvm-mingw distro is in the `PATH`.
+
+3. Download the latest win64-gcc release from https://github.com/neat-lang/neat/releases
+
+4. Execute `build.bat`. This should (eventually) create a file `neat.exe`.
+
+5. Test the compiler: save a file 'hello.nt'::
+
+    module hello;
+    import std.stdio;
+    void main() { print("Hello World"); }
+
+Then compile it with::
+
+    neat hello.nt
+    hello.exe
+
+If that printed "Hello World", your Neat compiler is now ready for use!
+
+
 Install with LLVM
 -----------------
 

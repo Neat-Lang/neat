@@ -122,6 +122,11 @@ compiler will select a type-appropriate default representation. For class and st
 
     print("$remaining bottles of beer on the wall.");
 
+As in Python, expressions with a trailing `=` are quoted in the output::
+
+    int a = 2, b = 3;
+    print("$(a + b =)"); // "a + b = 5"
+
 :code:`\`Hello World\`` is a literal string. Unlike regular string literals,
 escape sequences and format string quotes are not processed.
 

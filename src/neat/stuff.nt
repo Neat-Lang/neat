@@ -1483,65 +1483,6 @@ class ASTReference : ASTSymbol
     return null;
 }
 
-(string text, int size | :error, string) processChar(string text) {
-    assert(!text.empty);
-    if (text.front != '\\') {
-        return (text[0 .. 1], 1);
-    }
-    if (text.length == 1)
-        return (:error, "expected control character");
-    char ctl = text[1];
-    // TODO use char literals
-    if (ctl == 'r') {
-        return ("\r", 2);
-    } else if (ctl == '$') {
-        return ("\$", 2);
-    } else if (ctl == 'n') {
-        return ("\n", 2);
-    } else if (ctl == 't') {
-        return ("\t", 2);
-    } else if (ctl == '"') {
-        return ("\"", 2);
-    } else if (ctl == '\'') {
-        return ("'", 2);
-    } else if (ctl == '\\') {
-        return ("\\", 2);
-    } else if (ctl == '0') {
-        return ("\x00", 2); // TODO \0
-    } else if (ctl == 'x') {
-        if (text.length < 4) return (:error, "expected two-digit hex code");
-        char ch1 = text[2], ch2 = text[3];
-        (int | :error, string) decodeHex(char ch) {
-            if (ch >= '0' && ch <= '9')
-                return ch - '0';
-            if (ch >= 'a' && ch <= 'f')
-                return ch + 10 - 'a';
-            if (ch >= 'A' && ch <= 'F')
-                return ch + 10 - 'A';
-            return (:error, "unknown hex digit '" ~ ch ~ "'");
-        }
-        auto h1 = decodeHex(ch1).case((:error, string s): return (:error, s));
-        auto h2 = decodeHex(ch2).case((:error, string s): return (:error, s));
-        return ("" ~ cast(char) (h1 * 16 + h2), 4);
-    } else {
-        return (:error, "unknown control sequence \\$ctl");
-    }
-}
-
-(string | (:error, string msg)) cleanup(mut string s) {
-    mut string ret;
-    while (!s.empty) {
-        processChar(s).case {
-            (:error, string msg):
-                return (:error, msg);
-            (string text, int size):
-                ret ~= text;
-                s = s[size .. $];
-        }
-    }
-    return ret;
-}
-
 (ASTSymbol | Error) parseCharLiteral(
     Parser parser, LexicalContext lexicalContext)
 {
@@ -1557,51 +1498,6 @@ class ASTReference : ASTSymbol
         return parser.fail("closing quote expected");
     auto locRange = parser.to(from);
     return new ASTCharLiteral(res.text.front, locRange);
-}
-
-(ASTSymbol | Error) parseStringLiteral(ParserImpl parser, LexicalContext lexicalContext, TokenType literalToken)
-{
-    auto from = parser.from;
-    if (parser.acceptToken(literalToken))
-        return new ASTStringLiteral("", parser.to(from));
-    mut string str = parser.acceptTokenStr(TokenType.stringLiteral)
-        .case(:none: return parser.fail("lexer error: string literal should be here"));
-    mut ASTSymbol[] parts;
-    if (literalToken == TokenType.doubleQuote) {
-        str = str.cleanup.case((:error, string msg): return parser.fail(msg));
-    }
-    parts ~= new ASTStringLiteral(str, parser.to(from));
-    while (parser.acceptToken(TokenType.formatQuoteStart)) {
-        if (parser.acceptToken(TokenType.lparen)) {
-            auto litFrom = parser.from;
-            ASTSymbol expr = parser.parseExpression(lexicalContext)??
-                else return parser.to(litFrom).fail("Expression expected.");
-            if (!parser.acceptToken(TokenType.rparen))
-                return parser.fail("closing ')' expected");
-            parts ~= expr;
-        } else {
-            auto varFrom = parser.from;
-            auto var = parser.parseIdentifier;
-            parser.to(varFrom).assert(var != "", () => "Identifier expected.")?;
-            parts ~= new ASTIdentifier(var, moduleLevel=false, parser.to(varFrom));
-        }
-        auto from = parser.from;
-        mut string str = parser.acceptTokenStr(TokenType.stringLiteral)
-            .case(:none: continue);
-        if (literalToken == TokenType.doubleQuote) {
-            str = str.cleanup.case((:error, string msg): return parser.fail(msg));
-        }
-        parts ~= new ASTStringLiteral(str, parser.to(from));
-    }
-    if (!parser.acceptToken(literalToken))
-        return parser.fail("closing quote expected");
-
-    if (parts.length == 1) {
-        if (auto literal = parts[0].instanceOf(ASTStringLiteral))
-            return literal;
-    }
-
-    return new ASTFormatString(parts, parser.to(from));
 }
 
 (nullable ASTSymbol | Error) parseBuiltin(ParserImpl parser, LexicalContext lexicalContext)

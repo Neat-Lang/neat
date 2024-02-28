@@ -816,3 +816,62 @@ class TypeMerger
 
     context.assert2(false, locRange, "Cannot assign quarantined type to occluded container field.")?;
 }
+
+(string text, int size | :error, string) processChar(string text) {
+    assert(!text.empty);
+    if (text.front != '\\') {
+        return (text[0 .. 1], 1);
+    }
+    if (text.length == 1)
+        return (:error, "expected control character");
+    char ctl = text[1];
+    // TODO use char literals
+    if (ctl == 'r') {
+        return ("\r", 2);
+    } else if (ctl == '$') {
+        return ("\$", 2);
+    } else if (ctl == 'n') {
+        return ("\n", 2);
+    } else if (ctl == 't') {
+        return ("\t", 2);
+    } else if (ctl == '"') {
+        return ("\"", 2);
+    } else if (ctl == '\'') {
+        return ("'", 2);
+    } else if (ctl == '\\') {
+        return ("\\", 2);
+    } else if (ctl == '0') {
+        return ("\x00", 2); // TODO \0
+    } else if (ctl == 'x') {
+        if (text.length < 4) return (:error, "expected two-digit hex code");
+        char ch1 = text[2], ch2 = text[3];
+        (int | :error, string) decodeHex(char ch) {
+            if (ch >= '0' && ch <= '9')
+                return ch - '0';
+            if (ch >= 'a' && ch <= 'f')
+                return ch + 10 - 'a';
+            if (ch >= 'A' && ch <= 'F')
+                return ch + 10 - 'A';
+            return (:error, "unknown hex digit '" ~ ch ~ "'");
+        }
+        auto h1 = decodeHex(ch1).case((:error, string s): return (:error, s));
+        auto h2 = decodeHex(ch2).case((:error, string s): return (:error, s));
+        return ("" ~ cast(char) (h1 * 16 + h2), 4);
+    } else {
+        return (:error, "unknown control sequence \\$ctl");
+    }
+}
+
+(string | (:error, string msg)) cleanup(mut string s) {
+    mut string ret;
+    while (!s.empty) {
+        processChar(s).case {
+            (:error, string msg):
+                return (:error, msg);
+            (string text, int size):
+                ret ~= text;
+                s = s[size .. $];
+        }
+    }
+    return ret;
+}

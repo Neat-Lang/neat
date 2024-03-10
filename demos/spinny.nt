@@ -2,10 +2,11 @@ module spinny;
 
 macro import std.macro.cimport;
 import c_header("GL/gl.h");
-import c_header("GL/glu.h");
+import c_header("GL/glext.h", "-include GL/gl.h -DGL_GLEXT_PROTOTYPES");
 import c_header("GLFW/glfw3.h");
 import std.math;
 import std.math.matrix;
+import std.math.vector;
 import std.stdio;
 
 version (windows) {
@@ -28,11 +29,49 @@ class Ring {
     float pulseSpeed;
     float height;
     int textureId;
+    int vao;
+    int vbo;
     mut float rotation;
     mut float pulse;
+
     this(this.rotSpeed, this.pulseSpeed, this.height, this.textureId) {
         this.rotation = 0;
+
+        // Generate VAO and VBO
+        glGenVertexArrays(1, &this.vao);
+        glGenBuffers(1, &this.vbo);
+
+        // Bind VAO and VBO
+        glBindVertexArray(this.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, this.vbo);
+
+        // Prepare vertex data
+        alias Data = (vec3f pos, vec2f tex);
+        // + 1 to close the loop
+        auto vertexData = new Data mut[]((ringSteps + 1) * sizeof(float));
+        for (i in 0 .. ringSteps + 1) {
+            float at = i * 1f / ringSteps;
+            float to = (i + 1) * 1f / ringSteps;
+            vertexData[i * 4 + 0] = (vec3f(sin(at * PI2), 0, cos(at * PI2)), vec2f(at, 0));
+            vertexData[i * 4 + 1] = (vec3f(sin(to * PI2), 0, cos(to * PI2)), vec2f(to, 0));
+            vertexData[i * 4 + 2] = (vec3f(sin(at * PI2), this.height, cos(at * PI2)), vec2f(at, 1));
+            vertexData[i * 4 + 3] = (vec3f(sin(to * PI2), this.height, cos(to * PI2)), vec2f(to, 1));
+        }
+
+        // Upload vertex data to VBO
+        glBufferData(GL_ARRAY_BUFFER, vertexData.length * sizeof(Data), vertexData.ptr, GL_STATIC_DRAW);
+
+        // Set vertex attribute pointers
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Data), null);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Data), cast(void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+
+        // Unbind VAO and VBO
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
     }
+
     void step(float f) {
         this.rotation += this.rotSpeed * f;
         this.pulse += this.pulseSpeed * f;
@@ -70,26 +109,20 @@ Ring[] initRings() {
     return result;
 }
 
-void display(Ring[] rings) {
-    glTranslatef(0, 0, -2.0);
+void display(Ring[] rings, mat4x4 view, mat4x4 projection, int mvpUniform) {
     for (int i, ring in rings) {
-        glPushMatrix;
-            float r = 1 + sin(ring.pulse) * 0.1;
-            float h = ring.height;
-            glTranslatef(0, (i - cast(int) rings.length / 2) * 0.1f, 0);
-            glRotatef(ring.rotation, 0, 1, 0);
-            glBindTexture(GL_TEXTURE_2D, ring.textureId);
-            glBegin(GL_QUADS);
-            for (i in 0 .. ringSteps) {
-                float at = i * 1f / ringSteps;
-                float to = (i + 1) * 1f / ringSteps;
-                glTexCoord2f(at, 0); glVertex3f(sin(at * PI2) * r, 0, cos(at * PI2) * r);
-                glTexCoord2f(to, 0); glVertex3f(sin(to * PI2) * r, 0, cos(to * PI2) * r);
-                glTexCoord2f(to, 1); glVertex3f(sin(to * PI2) * r, h, cos(to * PI2) * r);
-                glTexCoord2f(at, 1); glVertex3f(sin(at * PI2) * r, h, cos(at * PI2) * r);
-            }
-            glEnd;
-        glPopMatrix;
+        mat4x4 model = mat4x4.identity
+            .translate(0, (i - cast(int) rings.length / 2) * 0.1f, 0)
+            .rotateY(ring.rotation * PI / 180)
+            .scale(1 + sin(ring.pulse) * 0.1, 1, 1 + sin(ring.pulse) * 0.1);
+
+        mut mat4x4 MVP = projection.mul(view).mul(model).transpose;
+
+        glUniformMatrix4fv(mvpUniform, 1, GL_FALSE, cast(float*) &MVP);
+
+        glBindVertexArray(ring.vao);
+        glBindTexture(GL_TEXTURE_2D, ring.textureId);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, ringSteps * 4);
     }
 }
 
@@ -99,24 +132,61 @@ void step(Ring[] rings, float step) {
     }
 }
 
+alias vertexShaderSource = "
+    #version 400 core
+    layout (location = 0) in vec3 aPos;
+    layout (location = 1) in vec2 aTexCoord;
+    out vec2 TexCoord;
+    uniform mat4 MVP;
+    void main() {
+        gl_Position = MVP * vec4(aPos, 1.0);
+        TexCoord = aTexCoord;
+    }";
+
+alias fragmentShaderSource = "
+    #version 400 core
+    in vec2 TexCoord;
+    out vec4 FragColor;
+    uniform sampler2D Texture;
+    void main() {
+        vec4 texColor = texture(Texture, TexCoord);
+        if (texColor.a == 0.0) {
+            discard;
+        }
+        FragColor = texColor;
+    }";
+
 void main(string[] args) {
     glfwInit;
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
     auto window = glfwCreateWindow(800, 600, "Spinny Barcode Demo", null, null);
 
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
-    glClearColor(1, 1, 1, 1);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glAlphaFunc(GL_GREATER, 0);
-    glEnable(GL_TEXTURE_2D);
-    glEnable(GL_ALPHA_TEST);
-    glEnable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
+    int vertexShader = glCreateShader(GL_VERTEX_SHADER);
+    mut auto vertexShaderSourcePtr = vertexShaderSource.ptr;
+    vertexShader.glShaderSource(1, &vertexShaderSourcePtr, null);
+    vertexShader.glCompileShader;
+    vertexShader.verify;
+
+    int fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    mut auto fragmentShaderSourcePtr = fragmentShaderSource.ptr;
+    fragmentShader.glShaderSource(1, &fragmentShaderSourcePtr, null);
+    fragmentShader.glCompileShader;
+    fragmentShader.verify;
+
+    int shaderProgram = glCreateProgram;
+    shaderProgram.glAttachShader(vertexShader);
+    shaderProgram.glAttachShader(fragmentShader);
+    shaderProgram.glLinkProgram;
+
+    // Get MVP uniform location
+    auto mvpUniform = glGetUniformLocation(shaderProgram, "MVP");
 
     auto rings = initRings;
     mut float lastFrameTime = 0;
@@ -127,14 +197,15 @@ void main(string[] args) {
         glfwGetFramebufferSize(window, &width, &height);
         glViewport(0, 0, width, height);
 
+        glClearColor(1, 1, 1, 1);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity;
-        gluPerspective(80, width * 1f/height, 0.01, 100.0);
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity;
 
-        display(rings);
+        shaderProgram.glUseProgram;
+
+        mat4x4 view = mat4x4.identity.translate(0, 0, -2.0);
+        mat4x4 projection = mat4x4.perspective(80, width * 1f/height, 0.01, 100.0);
+
+        display(rings, view, projection, mvpUniform);
 
         glfwSwapBuffers(window);
         auto time = cast(float) glfwGetTime;
@@ -146,6 +217,20 @@ void main(string[] args) {
 
     glfwDestroyWindow(window);
     glfwTerminate;
+}
+
+void verify(int shaderId) {
+    mut int isCompiled;
+    glGetShaderiv(shaderId, GL_COMPILE_STATUS, &isCompiled);
+    if (isCompiled) return;
+    mut int maxLength = 0;
+    glGetShaderiv(shaderId, GL_INFO_LOG_LENGTH, &maxLength);
+
+    auto errorLog = new string(maxLength);
+    glGetShaderInfoLog(shaderId, maxLength, &maxLength, errorLog.ptr);
+
+    print(errorLog);
+    assert(false);
 }
 
 extern(C) int rand();

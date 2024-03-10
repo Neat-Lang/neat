@@ -1,6 +1,7 @@
 module spinny;
 
 macro import std.macro.cimport;
+macro import std.macro.easymacro;
 import c_header("GL/gl.h");
 import c_header("GL/glext.h", "-include GL/gl.h -DGL_GLEXT_PROTOTYPES");
 import c_header("GLFW/glfw3.h");
@@ -23,6 +24,44 @@ alias rings = 16;
 alias texWidth = 768;
 alias ringSteps = 90;
 alias PI2 = (cast(float) (PI * 2));
+
+void setupVertexPointers(T)() {
+    macro {
+        import neat.float : Float;
+        import neat.tuples : TupleType;
+        import neat.types : Integer;
+        import neat.util : ASTSymbolHelper;
+        import neat.vectors : VectorType;
+        auto T = type("T")?;
+        auto tuple = T.instanceOf(TupleType)? else return __RANGE__.fail("expected tuple for vertex data");
+        for (i, member in tuple.members) {
+            auto name = member.name, type = member.type;
+            auto astI = compiler.astNumberLiteral(i);
+            (ASTSymbol | Error) transformSimpleType(Type type) {
+                if (type.instanceOf(Float)) return compiler.astIdentifier("GL_FLOAT");
+                if (type.instanceOf(Integer)) return compiler.astIdentifier("GL_INT");
+                return __RANGE__.fail("expected simple type, not $(type.repr)");
+            }
+            auto prefix = new TupleType(tuple.members[0 .. i]);
+            auto astPrefix = new ASTSymbolHelper(prefix);
+            void do_(ASTSymbol astLen, ASTSymbol astType) {
+                code {
+                    glVertexAttribPointer($astI, $astLen, $astType, GL_FALSE, sizeof(T), cast(void*) sizeof($astPrefix));
+                    glEnableVertexAttribArray($astI);
+                }
+            }
+            if (auto vector_ = type.instanceOf(VectorType)) {
+                auto astLen = compiler.astNumberLiteral(vector_.length);
+                auto astType = transformSimpleType(vector_.elementType)?;
+                do_(astLen, astType);
+            } else {
+                auto astLen = compiler.astNumberLiteral(1);
+                auto astType = transformSimpleType(type)?;
+                do_(astLen, astType);
+            }
+        }
+    }
+}
 
 class Ring {
     float rotSpeed;
@@ -47,25 +86,21 @@ class Ring {
 
         // Prepare vertex data
         alias Data = (vec3f pos, vec2f tex);
+        mut Data mut[] vertexData;
         // + 1 to close the loop
-        auto vertexData = new Data mut[]((ringSteps + 1) * sizeof(float));
         for (i in 0 .. ringSteps + 1) {
             float at = i * 1f / ringSteps;
             float to = (i + 1) * 1f / ringSteps;
-            vertexData[i * 4 + 0] = (vec3f(sin(at * PI2), 0, cos(at * PI2)), vec2f(at, 0));
-            vertexData[i * 4 + 1] = (vec3f(sin(to * PI2), 0, cos(to * PI2)), vec2f(to, 0));
-            vertexData[i * 4 + 2] = (vec3f(sin(at * PI2), this.height, cos(at * PI2)), vec2f(at, 1));
-            vertexData[i * 4 + 3] = (vec3f(sin(to * PI2), this.height, cos(to * PI2)), vec2f(to, 1));
+            vertexData ~= (vec3f(sin(at * PI2), 0, cos(at * PI2)), vec2f(at, 0));
+            vertexData ~= (vec3f(sin(to * PI2), 0, cos(to * PI2)), vec2f(to, 0));
+            vertexData ~= (vec3f(sin(at * PI2), this.height, cos(at * PI2)), vec2f(at, 1));
+            vertexData ~= (vec3f(sin(to * PI2), this.height, cos(to * PI2)), vec2f(to, 1));
         }
 
         // Upload vertex data to VBO
         glBufferData(GL_ARRAY_BUFFER, vertexData.length * sizeof(Data), vertexData.ptr, GL_STATIC_DRAW);
 
-        // Set vertex attribute pointers
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Data), null);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Data), cast(void*)(3 * sizeof(float)));
-        glEnableVertexAttribArray(1);
+        setupVertexPointers!Data;
 
         // Unbind VAO and VBO
         glBindBuffer(GL_ARRAY_BUFFER, 0);

@@ -1,0 +1,1183 @@
+module vulkantest;
+
+macro import std.macro.cimport;
+macro import std.macro.easymacro;
+import c_header("GLFW/glfw3.h", "-include vulkan/vulkan.h");
+import c_header("vulkan/vulkan.h");
+import neat.runtime : die;
+import std.file;
+import std.math.vector;
+import std.stdio;
+import std.string;
+
+version (windows) {
+    pragma(lib, "vulkan-1");
+} else {
+    pragma(lib, "glfw");
+    pragma(lib, "vulkan");
+}
+
+alias width = 800;
+alias height = 600;
+alias maxFramesInFlight = 2;
+
+struct QueueFamilyIndices {
+    uint32_t graphicsFamily;
+    bool hasGraphicsFamily;
+    uint32_t presentFamily;
+    bool hasPresentFamily;
+    bool isComplete;
+}
+
+struct SwapChainSupportDetails {
+    VkSurfaceCapabilitiesKHR capabilities;
+    VkSurfaceFormatKHR[] formats;
+    VkPresentModeKHR[] presentModes;
+}
+
+struct Vertex {
+    vec2f pos;
+    vec3f color;
+
+    static VkVertexInputBindingDescription[] getBindingDescription() {
+        mut VkVertexInputBindingDescription mut[] bindingDescription;
+        bindingDescription ~= VkVertexInputBindingDescription(
+            binding=0, stride=sizeof(Vertex), inputRate = VK_VERTEX_INPUT_RATE_VERTEX);
+        return bindingDescription.freeze;
+    }
+
+    static VkVertexInputAttributeDescription[] getAttributeDescriptions() {
+        mut VkVertexInputAttributeDescription mut[] attributeDescriptions;
+
+        attributeDescriptions ~= VkVertexInputAttributeDescription(
+            location=0, binding=0, format=VK_FORMAT_R32G32_SFLOAT, offset=0);
+        attributeDescriptions ~= VkVertexInputAttributeDescription(
+            location=1, binding=0, format=VK_FORMAT_R32G32B32_SFLOAT, offset=8);
+
+        return attributeDescriptions.freeze;
+    }
+}
+
+Vertex[] vertices() {
+    return [
+        Vertex(vec2f(0.0f, -0.5f), vec3f(1.0f, 1.0f, 1.0f)),
+        Vertex(vec2f(0.5f, 0.5f), vec3f(1.0f, 1.0f, 1.0f)),
+        Vertex(vec2f(-0.5f, 0.5f), vec3f(1.0f, 1.0f, 1.0f)),
+    ];
+}
+
+alias vertexShaderCode = "#version 450
+layout(location = 0) in vec2 inPosition;
+layout(location = 1) in vec3 inColor;
+layout(location = 0) out vec3 fragColor;
+void main() {
+    gl_Position = vec4(inPosition, 0.0, 1.0);
+    fragColor = inColor;
+}";
+
+alias fragmentShaderCode = "#version 450
+layout(location = 0) in vec3 fragColor;
+layout(location = 0) out vec4 outColor;
+void main() {
+    outColor = vec4(fragColor, 1.0);
+}";
+
+VkResult CreateDebugUtilsMessengerEXT(VkInstance instance,
+    VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
+    VkAllocationCallbacks* pAllocator,
+    VkDebugUtilsMessengerEXT* pDebugMessenger)
+{
+    auto func = cast(PFN_vkCreateDebugUtilsMessengerEXT) vkGetInstanceProcAddr(
+        instance, "vkCreateDebugUtilsMessengerEXT");
+    if (func != cast(PFN_vkCreateDebugUtilsMessengerEXT) null) {
+        return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
+    } else {
+        return VK_ERROR_EXTENSION_NOT_PRESENT;
+    }
+}
+
+void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger,
+    VkAllocationCallbacks* pAllocator)
+{
+    auto func = cast(PFN_vkDestroyDebugUtilsMessengerEXT) vkGetInstanceProcAddr(
+        instance, "vkDestroyDebugUtilsMessengerEXT");
+    if (func != cast(PFN_vkDestroyDebugUtilsMessengerEXT) null) {
+        func(instance, debugMessenger, pAllocator);
+    }
+}
+
+class HelloTriangleApplication {
+    this() { }
+    void run() {
+        this.initWindow;
+        this.initVulkan;
+        this.mainLoop;
+        this.cleanup;
+    }
+
+    mut GLFWwindow* window;
+
+    VkInstance instance;
+    VkDebugUtilsMessengerEXT debugMessenger;
+    VkSurfaceKHR surface;
+
+    mut VkPhysicalDevice physicalDevice;
+    VkDevice device;
+
+    VkQueue graphicsQueue;
+    VkQueue presentQueue;
+
+    VkSwapchainKHR swapChain;
+    mut VkImage[] swapChainImages;
+    mut VkFormat swapChainImageFormat;
+    mut VkExtent2D swapChainExtent;
+    mut VkImageView mut[] swapChainImageViews;
+    VkRenderPass renderPass;
+    VkPipelineLayout pipelineLayout;
+    VkPipeline graphicsPipeline;
+    mut VkFramebuffer mut[] swapChainFramebuffers;
+
+    VkCommandPool commandPool;
+    mut VkCommandBuffer mut[] commandBuffers;
+
+    mut VkSemaphore mut[] imageAvailableSemaphores;
+    mut VkSemaphore mut[] renderFinishedSemaphores;
+    mut VkFence mut[] inFlightFences;
+    mut uint32_t currentFrame;
+
+    mut bool framebufferResized;
+
+    VkBuffer vertexBuffer;
+    VkDeviceMemory vertexBufferMemory;
+
+    void initWindow() {
+        glfwInit;
+
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+
+        this.window = glfwCreateWindow(width, height, "Vulkan", null, null);
+        glfwSetWindowUserPointer(this.window, cast(void*) this);
+        glfwSetFramebufferSizeCallback(this.window, &framebufferResizeCallback);
+    }
+
+    void initVulkan() {
+        print("create instance");
+        this.createInstance;
+        print("setup debug");
+        this.setupDebugMessenger;
+        print("create surface");
+        this.createSurface;
+        print("pick phys");
+        this.pickPhysicalDevice;
+        print("create logic");
+        this.createLogicalDevice;
+        print("create swapchain");
+        this.createSwapChain;
+        print("create image views");
+        this.createImageViews;
+        print("create render pass");
+        this.createRenderPass;
+        this.createGraphicsPipeline;
+        this.createFramebuffers;
+        this.createCommandPool;
+        this.createVertexBuffer;
+        this.createCommandBuffers;
+        this.createSyncObjects;
+    }
+
+    void mainLoop() {
+        while (!glfwWindowShouldClose(this.window)) {
+            glfwPollEvents;
+            this.drawFrame;
+        }
+
+        vkDeviceWaitIdle(this.device);
+    }
+
+    void cleanupSwapChain() {
+        for (framebuffer in this.swapChainFramebuffers) {
+            vkDestroyFramebuffer(this.device, framebuffer, null);
+        }
+
+        vkFreeCommandBuffers(this.device, this.commandPool, cast(uint32_t)this.commandBuffers.length, this.commandBuffers.ptr);
+
+        vkDestroyPipeline(this.device, this.graphicsPipeline, null);
+        vkDestroyPipelineLayout(this.device, this.pipelineLayout, null);
+        vkDestroyRenderPass(this.device, this.renderPass, null);
+
+        for (imageView in this.swapChainImageViews) {
+            vkDestroyImageView(this.device, imageView, null);
+        }
+
+        vkDestroySwapchainKHR(this.device, this.swapChain, null);
+    }
+
+    void cleanup() {
+        this.cleanupSwapChain;
+
+        vkDestroyBuffer(this.device, this.vertexBuffer, null);
+        vkFreeMemory(this.device, this.vertexBufferMemory, null);
+
+        for (i in 0 .. maxFramesInFlight) {
+            vkDestroySemaphore(this.device, this.renderFinishedSemaphores[i], null);
+            vkDestroySemaphore(this.device, this.imageAvailableSemaphores[i], null);
+            vkDestroyFence(this.device, this.inFlightFences[i], null);
+        }
+
+        vkDestroyCommandPool(this.device, this.commandPool, null);
+
+        vkDestroyDevice(this.device, null);
+
+        if (enableValidationLayers) {
+            DestroyDebugUtilsMessengerEXT(this.instance, this.debugMessenger, null);
+        }
+
+        vkDestroySurfaceKHR(this.instance, this.surface, null);
+        vkDestroyInstance(this.instance, null);
+
+        glfwDestroyWindow(this.window);
+
+        glfwTerminate;
+    }
+
+    void recreateSwapChain() {
+        mut int width = 0, height = 0;
+        glfwGetFramebufferSize(this.window, &width, &height);
+        while (width == 0 || height == 0) {
+            glfwGetFramebufferSize(this.window, &width, &height);
+            glfwWaitEvents;
+        }
+
+        vkDeviceWaitIdle(this.device);
+
+        this.cleanupSwapChain;
+
+        this.createSwapChain;
+        this.createImageViews;
+        this.createRenderPass;
+        this.createGraphicsPipeline;
+        this.createFramebuffers;
+        this.createCommandBuffers;
+    }
+
+    void createInstance() {
+        if (enableValidationLayers && !this.checkValidationLayerSupport) {
+            print("validation layers requested, but not available!");
+            die;
+        }
+
+        mut VkApplicationInfo appInfo;
+        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+        appInfo.pApplicationName = "Hello Triangle";
+        appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+        appInfo.pEngineName = "No Engine";
+        appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+        appInfo.apiVersion = VK_API_VERSION_1_0;
+
+        mut VkInstanceCreateInfo createInfo;
+        createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        createInfo.pApplicationInfo = &appInfo;
+
+        auto extensions = this.getRequiredExtensions;
+        createInfo.enabledExtensionCount = cast(uint32_t) extensions.length;
+        createInfo.ppEnabledExtensionNames = extensions.ptr;
+
+        mut VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo;
+        if (enableValidationLayers) {
+            createInfo.enabledLayerCount = cast(uint32_t) validationLayers.length;
+            createInfo.ppEnabledLayerNames = validationLayers.ptr;
+
+            this.populateDebugMessengerCreateInfo(&debugCreateInfo);
+            createInfo.pNext = cast(VkDebugUtilsMessengerCreateInfoEXT*) &debugCreateInfo;
+        } else {
+            createInfo.enabledLayerCount = 0;
+            createInfo.pNext = null;
+        }
+
+        if (vkCreateInstance(&createInfo, null, &this.instance) != VK_SUCCESS) {
+            print("failed to create instance!");
+            die;
+        }
+    }
+
+    void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT* createInfo) {
+        VkDebugUtilsMessengerCreateInfoEXT init;
+        *createInfo = init;
+        // createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+        createInfo.sType = 1000128004;
+        createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        // TODO
+        // createInfo.pfnUserCallback = &debugCallback;
+    }
+
+    void setupDebugMessenger() {
+        if (!enableValidationLayers) return;
+
+        mut VkDebugUtilsMessengerCreateInfoEXT createInfo;
+        this.populateDebugMessengerCreateInfo(&createInfo);
+
+        if (CreateDebugUtilsMessengerEXT(this.instance, &createInfo, null, &this.debugMessenger) != VK_SUCCESS) {
+            print("failed to set up debug messenger!");
+            die;
+        }
+    }
+
+    void createSurface() {
+        if (glfwCreateWindowSurface(this.instance, this.window, null, &this.surface) != VK_SUCCESS) {
+            print("failed to create window surface!");
+            die;
+        }
+    }
+
+    void pickPhysicalDevice() {
+        mut uint32_t deviceCount = 0;
+        vkEnumeratePhysicalDevices(this.instance, &deviceCount, null);
+
+        if (deviceCount == 0) {
+            print("failed to find GPUs with Vulkan support!");
+            die;
+        }
+
+        auto devices = new VkPhysicalDevice[](deviceCount);
+        vkEnumeratePhysicalDevices(this.instance, &deviceCount, devices.ptr);
+
+        for (device in devices) {
+            if (true || this.isDeviceSuitable(device)) {
+                this.physicalDevice = device;
+                break;
+            }
+        }
+
+        if (this.physicalDevice == null) {
+            print("failed to find a suitable GPU!");
+            die;
+        }
+    }
+
+    void createLogicalDevice() {
+        QueueFamilyIndices indices = this.findQueueFamilies(this.physicalDevice);
+
+        mut VkDeviceQueueCreateInfo[] queueCreateInfos;
+        float[] queuePriority = [1.0f];
+
+        mut VkDeviceQueueCreateInfo queueCreateInfo;
+        queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queueCreateInfo.queueFamilyIndex = indices.graphicsFamily;
+        queueCreateInfo.queueCount = 1;
+        queueCreateInfo.pQueuePriorities = queuePriority.ptr;
+        queueCreateInfos ~= queueCreateInfo;
+
+        mut VkPhysicalDeviceFeatures deviceFeatures;
+
+        mut VkDeviceCreateInfo createInfo;
+        createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        createInfo.queueCreateInfoCount = cast(uint32_t) queueCreateInfos.length;
+        createInfo.pQueueCreateInfos = queueCreateInfos.ptr;
+        createInfo.pEnabledFeatures = &deviceFeatures;
+        createInfo.enabledExtensionCount = cast(uint32_t) deviceExtensions.length;
+        createInfo.ppEnabledExtensionNames = deviceExtensions.ptr;
+
+        if (enableValidationLayers) {
+            createInfo.enabledLayerCount = cast(uint32_t) validationLayers.length;
+            createInfo.ppEnabledLayerNames = validationLayers.ptr;
+        } else {
+            createInfo.enabledLayerCount = 0;
+        }
+
+        if (vkCreateDevice(this.physicalDevice, &createInfo, null, &this.device) != VK_SUCCESS) {
+            print("failed to create logical device!");
+            die;
+        }
+
+        vkGetDeviceQueue(this.device, indices.graphicsFamily, 0, &this.graphicsQueue);
+        vkGetDeviceQueue(this.device, indices.presentFamily, 0, &this.presentQueue);
+    }
+
+    void createSwapChain() {
+        SwapChainSupportDetails swapChainSupport = this.querySwapChainSupport(this.physicalDevice);
+
+        VkSurfaceFormatKHR surfaceFormat = this.chooseSwapSurfaceFormat(swapChainSupport.formats);
+        VkPresentModeKHR presentMode = this.chooseSwapPresentMode(swapChainSupport.presentModes);
+        VkExtent2D extent = this.chooseSwapExtent(swapChainSupport.capabilities);
+
+        mut uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
+        if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) {
+            imageCount = swapChainSupport.capabilities.maxImageCount;
+        }
+
+        mut VkSwapchainCreateInfoKHR createInfo;
+        createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+        createInfo.surface = this.surface;
+        createInfo.minImageCount = imageCount;
+        createInfo.imageFormat = surfaceFormat.format;
+        createInfo.imageColorSpace = surfaceFormat.colorSpace;
+        createInfo.imageExtent = extent;
+        createInfo.imageArrayLayers = 1;
+        createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+        QueueFamilyIndices indices = this.findQueueFamilies(this.physicalDevice);
+        uint32_t[] queueFamilyIndices = [indices.graphicsFamily, indices.presentFamily];
+
+        if (indices.graphicsFamily != indices.presentFamily) {
+            createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+            createInfo.queueFamilyIndexCount = 2;
+            createInfo.pQueueFamilyIndices = queueFamilyIndices.ptr;
+        } else {
+            createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        }
+
+        createInfo.preTransform = swapChainSupport.capabilities.currentTransform;
+        createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        createInfo.presentMode = presentMode;
+        createInfo.clipped = VK_TRUE;
+
+        if (vkCreateSwapchainKHR(this.device, &createInfo, null, &this.swapChain) != VK_SUCCESS) {
+            print("failed to create swap chain!");
+            die;
+        }
+
+        vkGetSwapchainImagesKHR(this.device, this.swapChain, &imageCount, null);
+        this.swapChainImages = new VkImage[](imageCount);
+        vkGetSwapchainImagesKHR(this.device, this.swapChain, &imageCount, this.swapChainImages.ptr);
+
+        this.swapChainImageFormat = surfaceFormat.format;
+        this.swapChainExtent = extent;
+    }
+
+    void createImageViews() {
+        this.swapChainImageViews = new VkImageView mut[](this.swapChainImages.length);
+
+        for (i in 0 .. this.swapChainImages.length) {
+            mut VkImageViewCreateInfo createInfo;
+            createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            createInfo.image = this.swapChainImages[i];
+            createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            createInfo.format = this.swapChainImageFormat;
+            createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            createInfo.subresourceRange.baseMipLevel = 0;
+            createInfo.subresourceRange.levelCount = 1;
+            createInfo.subresourceRange.baseArrayLayer = 0;
+            createInfo.subresourceRange.layerCount = 1;
+
+            if (vkCreateImageView(
+                this.device, &createInfo, null, &this.swapChainImageViews[i]) != VK_SUCCESS)
+            {
+                print("failed to create image views!");
+                die;
+            }
+        }
+    }
+
+    void createRenderPass() {
+        mut VkAttachmentDescription colorAttachment;
+        colorAttachment.format = this.swapChainImageFormat;
+        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        mut VkAttachmentReference colorAttachmentRef;
+        colorAttachmentRef.attachment = 0;
+        colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        mut VkSubpassDescription subpass;
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &colorAttachmentRef;
+
+        mut VkSubpassDependency dependency;
+        dependency.srcSubpass = -1; // VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.srcAccessMask = 0;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        mut VkRenderPassCreateInfo renderPassInfo;
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = 1;
+        renderPassInfo.pAttachments = &colorAttachment;
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subpass;
+        renderPassInfo.dependencyCount = 1;
+        renderPassInfo.pDependencies = &dependency;
+
+        if (vkCreateRenderPass(this.device, &renderPassInfo, null, &this.renderPass) != VK_SUCCESS) {
+            print("failed to create render pass!");
+            die;
+        }
+    }
+
+    void createGraphicsPipeline() {
+        auto vertShaderCode = readFile("shaders/vert.spv");
+        auto fragShaderCode = readFile("shaders/frag.spv");
+
+        VkShaderModule vertShaderModule = this.createShaderModule(vertShaderCode);
+        VkShaderModule fragShaderModule = this.createShaderModule(fragShaderCode);
+
+        mut VkPipelineShaderStageCreateInfo vertShaderStageInfo;
+        vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vertShaderStageInfo.module = vertShaderModule;
+        vertShaderStageInfo.pName = "main";
+
+        mut VkPipelineShaderStageCreateInfo fragShaderStageInfo;
+        fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        fragShaderStageInfo.module = fragShaderModule;
+        fragShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo[] shaderStages = [vertShaderStageInfo, fragShaderStageInfo];
+
+        auto bindingDescription = Vertex.getBindingDescription;
+        auto attributeDescriptions = Vertex.getAttributeDescriptions;
+
+        mut VkPipelineVertexInputStateCreateInfo vertexInputInfo;
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInputInfo.vertexBindingDescriptionCount = 1;
+        vertexInputInfo.pVertexBindingDescriptions = bindingDescription.ptr;
+        vertexInputInfo.vertexAttributeDescriptionCount = cast(uint32_t) attributeDescriptions.length;
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.ptr;
+
+        mut VkPipelineInputAssemblyStateCreateInfo inputAssembly;
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+        mut VkViewport viewport;
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = cast(float) this.swapChainExtent.width;
+        viewport.height = cast(float) this.swapChainExtent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+
+        mut VkRect2D scissor;
+        scissor.offset = VkOffset2D(0, 0);
+        scissor.extent = this.swapChainExtent;
+
+        mut VkPipelineViewportStateCreateInfo viewportState;
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.pViewports = &viewport;
+        viewportState.scissorCount = 1;
+        viewportState.pScissors = &scissor;
+
+        mut VkPipelineRasterizationStateCreateInfo rasterizer;
+        rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterizer.depthClampEnable = VK_FALSE;
+        rasterizer.rasterizerDiscardEnable = VK_FALSE;
+        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizer.lineWidth = 1.0f;
+        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+        rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        rasterizer.depthBiasEnable = VK_FALSE;
+
+        mut VkPipelineMultisampleStateCreateInfo multisampling;
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.sampleShadingEnable = VK_FALSE;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        mut VkPipelineColorBlendAttachmentState colorBlendAttachment;
+        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        colorBlendAttachment.blendEnable = VK_FALSE;
+
+        mut VkPipelineColorBlendStateCreateInfo colorBlending;
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.logicOpEnable = VK_FALSE;
+        colorBlending.logicOp = VK_LOGIC_OP_COPY;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &colorBlendAttachment;
+        // TODO
+        /*colorBlending.blendConstants[0] = 0.0f;
+        colorBlending.blendConstants[1] = 0.0f;
+        colorBlending.blendConstants[2] = 0.0f;
+        colorBlending.blendConstants[3] = 0.0f;*/
+
+        mut VkPipelineLayoutCreateInfo pipelineLayoutInfo;
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.setLayoutCount = 0;
+        pipelineLayoutInfo.pushConstantRangeCount = 0;
+
+        if (vkCreatePipelineLayout(this.device, &pipelineLayoutInfo, null, &this.pipelineLayout) != VK_SUCCESS) {
+            print("failed to create pipeline layout!");
+            die;
+        }
+
+        mut VkGraphicsPipelineCreateInfo pipelineInfo;
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = shaderStages.ptr;
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterizer;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.layout = this.pipelineLayout;
+        pipelineInfo.renderPass = this.renderPass;
+        pipelineInfo.subpass = 0;
+        pipelineInfo.basePipelineHandle = null;
+
+        if (vkCreateGraphicsPipelines(this.device, null, 1, &pipelineInfo, null, &this.graphicsPipeline) != VK_SUCCESS) {
+            print("failed to create graphics pipeline!");
+            die;
+        }
+
+        vkDestroyShaderModule(this.device, fragShaderModule, null);
+        vkDestroyShaderModule(this.device, vertShaderModule, null);
+    }
+
+    void createFramebuffers() {
+        this.swapChainFramebuffers = new VkFramebuffer mut[](this.swapChainImageViews.length);
+
+
+        for (i in 0 .. this.swapChainImageViews.length) {
+            VkImageView[] attachments = [this.swapChainImageViews[i]];
+
+            mut VkFramebufferCreateInfo framebufferInfo;
+            framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            framebufferInfo.renderPass = this.renderPass;
+            framebufferInfo.attachmentCount = 1;
+            framebufferInfo.pAttachments = attachments.ptr;
+            framebufferInfo.width = this.swapChainExtent.width;
+            framebufferInfo.height = this.swapChainExtent.height;
+            framebufferInfo.layers = 1;
+
+            if (vkCreateFramebuffer(this.device, &framebufferInfo, null, &this.swapChainFramebuffers[i]) != VK_SUCCESS) {
+                print("failed to create framebuffer!");
+                die;
+            }
+        }
+    }
+
+    void createCommandPool() {
+        QueueFamilyIndices queueFamilyIndices = this.findQueueFamilies(this.physicalDevice);
+
+        mut VkCommandPoolCreateInfo poolInfo;
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily;
+
+        if (vkCreateCommandPool(this.device, &poolInfo, null, &this.commandPool) != VK_SUCCESS) {
+            print("failed to create command pool!");
+            die;
+        }
+    }
+
+    void createVertexBuffer() {
+        import neat.runtime.stdlib : memcpy;
+        VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.length;
+
+        mut VkBuffer stagingBuffer;
+        mut VkDeviceMemory stagingBufferMemory;
+        this.createBuffer(
+            bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            &stagingBuffer, &stagingBufferMemory);
+
+        mut void* data;
+        vkMapMemory(this.device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, vertices.ptr, cast(size_t) bufferSize);
+        vkUnmapMemory(this.device, stagingBufferMemory);
+
+        this.createBuffer(
+            bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            &this.vertexBuffer, &this.vertexBufferMemory);
+
+        this.copyBuffer(stagingBuffer, this.vertexBuffer, bufferSize);
+
+        vkDestroyBuffer(this.device, stagingBuffer, null);
+        vkFreeMemory(this.device, stagingBufferMemory, null);
+    }
+
+    void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
+        VkBuffer* buffer, VkDeviceMemory* bufferMemory)
+    {
+        mut VkBufferCreateInfo bufferInfo;
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = size;
+        bufferInfo.usage = usage;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateBuffer(this.device, &bufferInfo, null, buffer) != VK_SUCCESS) {
+            print("failed to create buffer!");
+            die;
+        }
+
+        mut VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(this.device, *buffer, &memRequirements);
+
+        mut VkMemoryAllocateInfo allocInfo;
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = this.findMemoryType(memRequirements.memoryTypeBits, properties);
+
+        if (vkAllocateMemory(this.device, &allocInfo, null, bufferMemory) != VK_SUCCESS) {
+            print("failed to allocate buffer memory!");
+            die;
+        }
+
+        vkBindBufferMemory(this.device, *buffer, *bufferMemory, 0);
+    }
+
+    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+        mut VkCommandBufferAllocateInfo allocInfo;
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandPool = this.commandPool;
+        allocInfo.commandBufferCount = 1;
+
+        mut auto commandBuffer = new VkCommandBuffer[](1);
+        vkAllocateCommandBuffers(this.device, &allocInfo, commandBuffer.ptr);
+
+        mut VkCommandBufferBeginInfo beginInfo;
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+        vkBeginCommandBuffer(commandBuffer[0], &beginInfo);
+
+        mut VkBufferCopy copyRegion;
+        copyRegion.srcOffset = 0;
+        copyRegion.dstOffset = 0;
+        copyRegion.size = size;
+        vkCmdCopyBuffer(commandBuffer[0], srcBuffer, dstBuffer, 1, &copyRegion);
+
+        vkEndCommandBuffer(commandBuffer[0]);
+
+        mut VkSubmitInfo submitInfo;
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = commandBuffer.ptr;
+
+        vkQueueSubmit(this.graphicsQueue, 1, &submitInfo, null);
+        vkQueueWaitIdle(this.graphicsQueue);
+
+        vkFreeCommandBuffers(this.device, this.commandPool, 1, commandBuffer.ptr);
+    }
+
+    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+        // TODO
+        return 1;
+        mut VkPhysicalDeviceMemoryProperties memProperties;
+        vkGetPhysicalDeviceMemoryProperties(this.physicalDevice, &memProperties);
+
+        /*for (i in 0 .. memProperties.memoryTypeCount) {
+            if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                return i;
+            }
+        }
+        */
+
+        print("failed to find suitable memory type of $(*cast(int*) &memProperties)");
+        die;
+    }
+
+    void createCommandBuffers() {
+        this.commandBuffers = new VkCommandBuffer mut[](this.swapChainFramebuffers.length);
+
+        mut VkCommandBufferAllocateInfo allocInfo;
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = this.commandPool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = cast(uint32_t) this.commandBuffers.length;
+
+        if (vkAllocateCommandBuffers(this.device, &allocInfo, this.commandBuffers.ptr) != VK_SUCCESS) {
+            print("failed to allocate command buffers!");
+            die;
+        }
+
+        for (i in 0 .. this.commandBuffers.length) {
+            mut VkCommandBufferBeginInfo beginInfo;
+            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+            if (vkBeginCommandBuffer(this.commandBuffers[i], &beginInfo) != VK_SUCCESS) {
+                print("failed to begin recording command buffer!");
+                die;
+            }
+
+            mut VkRenderPassBeginInfo renderPassInfo;
+            renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            renderPassInfo.renderPass = this.renderPass;
+            renderPassInfo.framebuffer = this.swapChainFramebuffers[i];
+            renderPassInfo.renderArea.offset = VkOffset2D(0, 0);
+            renderPassInfo.renderArea.extent = this.swapChainExtent;
+
+            VkClearValue mut[] clearColor = new VkClearValue mut[](1);
+            *cast(vec4f*) &clearColor[0] = vec4f(0.0f, 0.0f, 0.0f, 1.0f);
+            renderPassInfo.clearValueCount = 1;
+            renderPassInfo.pClearValues = clearColor.ptr;
+
+            vkCmdBeginRenderPass(this.commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+            vkCmdBindPipeline(this.commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, this.graphicsPipeline);
+
+            VkBuffer[] vertexBuffers = [this.vertexBuffer];
+            VkDeviceSize[] offsets = [0];
+            vkCmdBindVertexBuffers(this.commandBuffers[i], 0, 1, vertexBuffers.ptr, offsets.ptr);
+
+            vkCmdDraw(this.commandBuffers[i], cast(uint32_t) vertices.length, 1, 0, 0);
+
+            vkCmdEndRenderPass(this.commandBuffers[i]);
+
+            if (vkEndCommandBuffer(this.commandBuffers[i]) != VK_SUCCESS) {
+                print("failed to record command buffer!");
+                die;
+            }
+        }
+    }
+
+    void createSyncObjects() {
+        this.imageAvailableSemaphores = new VkSemaphore mut[](maxFramesInFlight);
+        this.renderFinishedSemaphores = new VkSemaphore mut[](maxFramesInFlight);
+        this.inFlightFences = new VkFence mut[](maxFramesInFlight);
+
+        mut VkSemaphoreCreateInfo semaphoreInfo;
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+        mut VkFenceCreateInfo fenceInfo;
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+        for (i in 0 .. maxFramesInFlight) {
+            if (vkCreateSemaphore(this.device, &semaphoreInfo, null, &this.imageAvailableSemaphores[i]) != VK_SUCCESS ||
+                vkCreateSemaphore(this.device, &semaphoreInfo, null, &this.renderFinishedSemaphores[i]) != VK_SUCCESS ||
+                vkCreateFence(this.device, &fenceInfo, null, &this.inFlightFences[i]) != VK_SUCCESS) {
+                print("failed to create synchronization objects for a frame!");
+                die;
+            }
+        }
+    }
+
+    void drawFrame() {
+        vkWaitForFences(this.device, 1, &this.inFlightFences[this.currentFrame], VK_TRUE, uint64_t.max);
+
+        mut uint32_t imageIndex;
+        VkResult result = vkAcquireNextImageKHR(this.device, this.swapChain, uint64_t.max, this.imageAvailableSemaphores[this.currentFrame], null, &imageIndex);
+
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            this.recreateSwapChain;
+            return;
+        } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            print("failed to acquire swap chain image!");
+            die;
+        }
+
+        vkResetFences(this.device, 1, &this.inFlightFences[this.currentFrame]);
+
+        vkResetCommandBuffer(this.commandBuffers[this.currentFrame], 0);
+        this.recordCommandBuffer(this.commandBuffers[this.currentFrame], imageIndex);
+
+        mut VkSubmitInfo submitInfo;
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+        VkSemaphore[] waitSemaphores = [this.imageAvailableSemaphores[this.currentFrame]];
+        VkPipelineStageFlags[] waitStages = [VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT];
+        submitInfo.waitSemaphoreCount = 1;
+        submitInfo.pWaitSemaphores = waitSemaphores.ptr;
+        submitInfo.pWaitDstStageMask = waitStages.ptr;
+
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &this.commandBuffers[this.currentFrame];
+
+        VkSemaphore[] signalSemaphores = [this.renderFinishedSemaphores[this.currentFrame]];
+        submitInfo.signalSemaphoreCount = 1;
+        submitInfo.pSignalSemaphores = signalSemaphores.ptr;
+
+        if (vkQueueSubmit(this.graphicsQueue, 1, &submitInfo, this.inFlightFences[this.currentFrame]) != VK_SUCCESS) {
+            print("failed to submit draw command buffer!");
+            die;
+        }
+
+        mut VkPresentInfoKHR presentInfo;
+        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+
+        presentInfo.waitSemaphoreCount = 1;
+        presentInfo.pWaitSemaphores = signalSemaphores.ptr;
+
+        VkSwapchainKHR[] swapChains = [this.swapChain];
+        presentInfo.swapchainCount = 1;
+        presentInfo.pSwapchains = swapChains.ptr;
+        presentInfo.pImageIndices = &imageIndex;
+
+        auto result = vkQueuePresentKHR(this.presentQueue, &presentInfo);
+
+        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || this.framebufferResized) {
+            this.framebufferResized = false;
+            this.recreateSwapChain;
+        } else if (result != VK_SUCCESS) {
+            print("failed to present swap chain image!");
+            die;
+        }
+
+        this.currentFrame = (this.currentFrame + 1) % maxFramesInFlight;
+    }
+
+    void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
+        mut VkCommandBufferBeginInfo beginInfo;
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+        if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+            print("failed to begin recording command buffer!");
+            die;
+        }
+
+        mut VkRenderPassBeginInfo renderPassInfo;
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = this.renderPass;
+        renderPassInfo.framebuffer = this.swapChainFramebuffers[imageIndex];
+        renderPassInfo.renderArea.offset = VkOffset2D(0, 0);
+        renderPassInfo.renderArea.extent = this.swapChainExtent;
+
+        VkClearValue mut[] clearColor = new VkClearValue mut[](1);
+        *cast(vec4f*) &clearColor[0] = vec4f(0.0f, 0.0f, 0.0f, 1.0f);
+        renderPassInfo.clearValueCount = 1;
+        renderPassInfo.pClearValues = clearColor.ptr;
+
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, this.graphicsPipeline);
+
+        VkBuffer[] vertexBuffers = [this.vertexBuffer];
+        VkDeviceSize[] offsets = [0];
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers.ptr, offsets.ptr);
+
+        vkCmdDraw(commandBuffer, cast(uint32_t) vertices.length, 1, 0, 0);
+
+        vkCmdEndRenderPass(commandBuffer);
+
+        if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+            print("failed to record command buffer!");
+            die;
+        }
+    }
+
+    bool isDeviceSuitable(VkPhysicalDevice device) {
+        QueueFamilyIndices indices = this.findQueueFamilies(device);
+
+        bool extensionsSupported = this.checkDeviceExtensionSupport(device);
+
+        mut bool swapChainAdequate = false;
+        if (extensionsSupported) {
+            SwapChainSupportDetails swapChainSupport = this.querySwapChainSupport(device);
+            swapChainAdequate = !swapChainSupport.formats.empty && !swapChainSupport.presentModes.empty;
+        }
+
+        return indices.isComplete && extensionsSupported && swapChainAdequate;
+    }
+
+    bool checkDeviceExtensionSupport(VkPhysicalDevice device) {
+        mut uint32_t extensionCount;
+        vkEnumerateDeviceExtensionProperties(device, null, &extensionCount, null);
+
+        auto availableExtensions = new VkExtensionProperties[](extensionCount);
+        vkEnumerateDeviceExtensionProperties(device, null, &extensionCount, availableExtensions.ptr);
+
+        return true;
+        /*
+        int requiredExtensionsLeft = cast(int) deviceExtensions.length;
+        for (extension in availableExtensions) {
+            for (i in 0 .. deviceExtensions.length) {
+                if (extension.extensionName.ptr.cToString == deviceExtensions[i].ptr.cToString) {
+                    requiredExtensionsLeft--;
+                    break;
+                }
+            }
+        }
+
+        return requiredExtensionsLeft == 0;*/
+    }
+
+    QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
+        mut QueueFamilyIndices indices;
+
+        mut uint32_t queueFamilyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, null);
+
+        mut auto queueFamilies = new VkQueueFamilyProperties[](queueFamilyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.ptr);
+
+        for (i in 0 .. queueFamilyCount) {
+            if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+                indices.graphicsFamily = i;
+                indices.hasGraphicsFamily = true;
+            }
+
+            mut VkBool32 presentSupport = false;
+            vkGetPhysicalDeviceSurfaceSupportKHR(device, i, this.surface, &presentSupport);
+
+            if (presentSupport) {
+                indices.presentFamily = i;
+                indices.hasPresentFamily = true;
+            }
+
+            if (indices.isComplete) {
+                break;
+            }
+        }
+
+        return indices;
+    }
+
+    SwapChainSupportDetails querySwapChainSupport(VkPhysicalDevice device) {
+        mut SwapChainSupportDetails details;
+
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, this.surface, &details.capabilities);
+
+        mut uint32_t formatCount;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(device, this.surface, &formatCount, null);
+
+        if (formatCount != 0) {
+            details.formats = new VkSurfaceFormatKHR[](formatCount);
+            vkGetPhysicalDeviceSurfaceFormatsKHR(device, this.surface, &formatCount, details.formats.ptr);
+        }
+
+        mut uint32_t presentModeCount;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(device, this.surface, &presentModeCount, null);
+
+        if (presentModeCount != 0) {
+            details.presentModes = new VkPresentModeKHR[](presentModeCount);
+            vkGetPhysicalDeviceSurfacePresentModesKHR(device, this.surface, &presentModeCount, details.presentModes.ptr);
+        }
+
+        return details;
+    }
+
+    VkSurfaceFormatKHR chooseSwapSurfaceFormat(VkSurfaceFormatKHR[] availableFormats) {
+        for (availableFormat in availableFormats) {
+            if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                return availableFormat;
+            }
+        }
+
+        return availableFormats[0];
+    }
+
+    VkPresentModeKHR chooseSwapPresentMode(VkPresentModeKHR[] availablePresentModes) {
+        for (availablePresentMode in availablePresentModes) {
+            if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
+                return availablePresentMode;
+            }
+        }
+
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
+
+    VkExtent2D chooseSwapExtent(VkSurfaceCapabilitiesKHR capabilities) {
+        if (capabilities.currentExtent.width != uint32_t.max) {
+            return capabilities.currentExtent;
+        } else {
+            mut int width, height;
+            glfwGetFramebufferSize(window, &width, &height);
+
+            mut VkExtent2D actualExtent = VkExtent2D(cast(uint32_t) width, cast(uint32_t) height);
+
+            actualExtent.width = mathClamp(
+                actualExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
+            actualExtent.height = mathClamp(
+                actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+
+            return actualExtent;
+        }
+    }
+
+    VkShaderModule createShaderModule(ubyte[] code) {
+        mut VkShaderModuleCreateInfo createInfo;
+        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        createInfo.codeSize = code.length;
+        createInfo.pCode = cast(uint32_t*) code.ptr;
+
+        mut VkShaderModule shaderModule;
+        if (vkCreateShaderModule(this.device, &createInfo, null, &shaderModule) != VK_SUCCESS) {
+            print("failed to create shader module!");
+            die;
+        }
+
+        return shaderModule;
+    }
+
+    char*[] getRequiredExtensions() {
+        mut uint32_t glfwExtensionCount = 0;
+        auto glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+
+        mut auto extensions = new char* mut[](glfwExtensionCount);
+        for (i in 0 .. glfwExtensionCount) {
+            extensions[i] = glfwExtensions[i];
+        }
+
+        if (enableValidationLayers) {
+            // extensions ~= VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+            extensions ~= "VK_EXT_debug_utils";
+        }
+
+        return extensions.freeze;
+    }
+
+    bool checkValidationLayerSupport() {
+        mut uint32_t layerCount;
+        vkEnumerateInstanceLayerProperties(&layerCount, null);
+
+        auto availableLayers = new VkLayerProperties[](layerCount);
+        vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.ptr);
+
+        // TODO
+        /*for (layerName_ in validationLayers) {
+            bool layerFound = false;
+
+            for (layerProperties in availableLayers) {
+                if (layerName_ == layerProperties.layerName.ptr.cToString) {
+                    layerFound = true;
+                    break;
+                }
+            }
+
+            if (!layerFound) {
+                return false;
+            }
+        }*/
+
+        return true;
+    }
+}
+
+void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
+    auto app = cast(HelloTriangleApplication*) glfwGetWindowUserPointer(window);
+    app.framebufferResized = true;
+}
+
+int VK_MAKE_VERSION(int major, int minor, int patch) => major << 22 | minor < 12 | patch;
+
+int VK_MAKE_API_VERSION(int variant, int major, int minor, int patch) =>
+    variant << 29 | major << 22 | minor << 12 | patch;
+
+alias VK_API_VERSION_1_0 = VK_MAKE_API_VERSION(0, 1, 0, 0);
+
+char*[] validationLayers() => ["VK_LAYER_KHRONOS_validation".toStringz];
+// char*[] deviceExtensions() => [VK_KHR_SWAPCHAIN_EXTENSION_NAME];
+char*[] deviceExtensions() => ["VK_KHR_swapchain".toStringz];
+
+version (debug) {
+    alias enableValidationLayers = true;
+} else {
+    alias enableValidationLayers = false;
+}
+
+uint32_t mathClamp(uint32_t value, uint32_t min, uint32_t max) {
+    return min if value < min else max if value > max else value;
+}
+
+void main() {
+    auto app = new HelloTriangleApplication;
+
+    app.run;
+}

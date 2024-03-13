@@ -3922,7 +3922,7 @@ class Module : ModuleBase
     LocRange locRange;
 
     // Inert imports have no lookup effect, they solely define a module dependency
-    mut (Module mod, (:inert|:private_|:public_) visibility, string[] symbols)[] imports;
+    mut (Module mod, (:inert|:private_|:public_) visibility, (string name, Symbol symbol)[] symbols)[] imports;
 
     // so we can make a CompilationTask->ParseAstModuleTask dep
     string moduleParseTaskId;
@@ -3949,7 +3949,7 @@ class Module : ModuleBase
         this.resolver.register(name, protection, symbol);
     }
 
-    override void addImport(ModuleBase module_, bool public_, string[] symbols) {
+    override void addImport(ModuleBase module_, bool public_, (string name, Symbol symbol)[] symbols) {
         auto module_ = module_.instanceOf(Module)? else die;
         // TODO error?
         // TODO merge symbols?
@@ -3962,9 +3962,7 @@ class Module : ModuleBase
     }
 
     override void addModuleDependency(ModuleBase module_) {
-        string[] empty;
-        // TODO , [])
-        this.imports ~= (module_.instanceOf(Module)? else die, :inert, empty);
+        this.imports ~= (module_.instanceOf(Module)? else die, :inert, []);
     }
 
     override string mangle() { return this.mangledName; }
@@ -4063,7 +4061,9 @@ class Module : ModuleBase
             // TODO yet another import class? struct? we've written this line three times now...
             auto importMod = import_.mod;
             assert(!!importMod);
-            if (!import_.symbols.length || [any a == name for a in import_.symbols]) {
+            if (!import_.symbols.empty) {
+                [return a.symbol for a in import_.symbols where a.name == name];
+            } else {
                 if (Symbol entry = importMod.lookupPublic(context, locRange, name)?)
                     return entry;
             }
@@ -4091,8 +4091,11 @@ class Module : ModuleBase
                 continue;
             auto importMod = import_.mod;
             assert(!!importMod);
-            if (!import_.symbols.length || [any a == name for a in import_.symbols]) {
-                if (auto sym = importMod.lookupPublic(context, locRange, name)?) return sym;
+            if (!import_.symbols.empty) {
+                [return a.symbol for a in import_.symbols where a.name == name];
+            } else {
+                if (Symbol entry = importMod.lookupPublic(context, locRange, name)?)
+                    return entry;
             }
         }
         assert(!this.parent);
@@ -4249,7 +4252,7 @@ class ImportNamespace : Namespace
 {
     Module module_;
 
-    string[] symbols;
+    (string name, Symbol symbol)[] symbols;
 
     this(this.parent, this.module_, this.symbols) {
         this.isContextScope = this.parent.isContextScope;
@@ -4258,7 +4261,9 @@ class ImportNamespace : Namespace
     override (nullable Symbol | Error) lookup(
         string name, Context context, LookupReason reason, LocRange locRange)
     {
-        if (!symbols.length || [any symbol == name for symbol in symbols]) {
+        if (!symbols.empty) {
+            [return a.symbol for a in symbols where a.name == name];
+        } else {
             auto sym = module_.lookupPublic(
                 context.withFramePointer(null, :none),
                 locRange,
@@ -4333,7 +4338,16 @@ class ASTImport : ASTDeclaration
     override (Namespace | Error) compile(Context context) {
         auto id = context.compiler.queueModuleCompilation(context, this.module_?);
         auto module_ = context.compiler.getCompiledModule(id)?.instanceOf(Module)? else die;
-        auto namespace = new ImportNamespace(context.namespace, module_, this.statement.symbols);
+        mut (string name, Symbol symbol)[] symbols;
+        for (name in this.statement.symbols) {
+            // TODO lookup with symbol identifier's range
+            auto sym = module_.lookupPublic(
+                context.withFramePointer(null, :none),
+                statement.locRange,
+                name)?? else return statement.locRange.fail("'$name' import not found");
+            symbols ~= (name, sym);
+        }
+        auto namespace = new ImportNamespace(context.namespace, module_, symbols);
         auto contextModule = findParent!Module(context.namespace);
 
         contextModule.addModuleDependency(module_);
@@ -4815,9 +4829,9 @@ class LexicalContextImpl : LexicalContext
                     auto importedModule = context.compiler.getCompiledModule(id)?;
 
                     bool public_ = entry.protection == Protection.public_;
+                    auto symbols = lookupSymbols(context, import_.statement.symbols, importedModule, import_.locRange)?;
 
-                    module_.addImport(
-                        importedModule, public_=public_, import_.statement.symbols);
+                    module_.addImport(importedModule, public_=public_, symbols);
                 } else {
                     print("declaration $(astDecl.repr)");
                     assert(false);
@@ -4848,6 +4862,18 @@ class LexicalContextImpl : LexicalContext
     context.modulePostProcessor.process(module_);
 
     return module_;
+}
+
+private ((string name, Symbol symbol)[] | Error) lookupSymbols(
+    Context context, string[] symbols, ModuleBase module_, LocRange locRange)
+{
+    mut (string name, Symbol symbol)[] result;
+    for (name in symbols) {
+        auto entry = (module_.instanceOf(Module)? else die).lookupPublic(context, locRange, name)??
+            else return locRange.fail("'$name' import not found");
+        result ~= (name, entry);
+    }
+    return result;
 }
 
 (ASTModule | Error) getModule(CompilerBase compiler, mut string filename, mut nullable Package pak, bool search,

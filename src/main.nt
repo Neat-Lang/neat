@@ -85,7 +85,7 @@ BackgroundCompilation emitModule(
     auto symbols = module_.finishedSymbols;
     [symbol.hash(hash) for symbol in symbols];
     visitorLock.lock;
-    [[visitor.visit(symbol) for symbol in symbols] for visitor in visitors];
+    [[visitor.visit(module_, symbol) for symbol in symbols] for visitor in visitors];
     visitorLock.unlock;
 
     mut string objFile = ".obj/$(hash.text).o";
@@ -192,9 +192,10 @@ class UnittestVisitor : CompilationVisitor
 
     this() { }
 
-    override void visit(FinishedSymbol sym) {
-        if (auto uf = sym.instanceOf(CompiledUnittestFunction))
-        {
+    override void visit(ModuleBase module_, FinishedSymbol sym) {
+        if (!module_.pak.unittest_)
+            return;
+        if (auto uf = sym.instanceOf(CompiledUnittestFunction)) {
             symbols ~= uf.fun.mangle;
         }
     }
@@ -577,7 +578,7 @@ class UmlVisitor : CompilationVisitor
 
     this() { }
 
-    override void visit(FinishedSymbol sym) {
+    override void visit(ModuleBase _, FinishedSymbol sym) {
         if (auto defClass = sym.instanceOf(DefineClassIntf)) {
             defClass.obj.case {
                 Class class_: {
@@ -689,7 +690,7 @@ class Options
     mut nullable Backend backend, macroBackend;
     mut int generation;
     mut string umlFile;
-    mut bool unittest_;
+    mut (bool | string) unittest_;
     mut bool noMain;
     mut bool cpr; // critical path report
     mut PlatformFlags platformFlags, macroPlatformFlags;
@@ -715,6 +716,15 @@ class Options
         this.fileIdTable = new FileIdTableImpl;
         this.triple = "x86_64-pc-linux-gnu";
         this.macroTriple = "x86_64-pc-linux-gnu";
+    }
+
+    bool unittestEnabled((string | :root) pak) {
+        pak.case {
+            string pak:
+                return this.unittest_.case(bool b: b, string s: s == pak);
+            :root:
+                return this.unittest_.case(bool b: b, string s: false);
+        }
     }
 
     ArgParser argParser() {
@@ -751,6 +761,7 @@ class Options
         parser.add("o", "output", :stringArg, "Filename of the output binary");
         parser.add("O", "optimize", :noArg, "Optimize the output");
         parser.add("unittest", :noArg, "Run unittests");
+        parser.add("unittest", :stringArg, "Run unittests for a given package");
         parser.add("no-main", :noArg, "Don't call the main function");
         parser.add("release", :noArg, "Disable bounds checking");
         parser.add("v", "verbose", :noArg, "Print info about compiler steps");
@@ -824,7 +835,7 @@ class Options
         if (result.has("L")) { this.linkerArgs ~= result.getMultiple("L"); }
         if (result.has("output")) { this.output = result.get("output"); }
         if (result.has("optimize")) { this.optimize = true; }
-        if (result.has("unittest")) { this.unittest_ = true; }
+        if (result.has("unittest")) { this.unittest_ = result.get("unittest").(true if that == "" else that); }
         if (result.has("no-main")) { this.noMain = true; }
         if (result.has("release")) { this.platformFlags.releaseMode = true; }
         if (result.has("verbose")) {
@@ -1030,7 +1041,7 @@ ASTModule builtinSymbols(Options options) {
     mut ASTModuleVisitor[] moduleVisitors;
 
     auto unittestVisitor = new UnittestVisitor;
-    if (options.unittest_) {
+    if (options.unittest_.case(bool b: b, string s: true)) {
         compilationVisitors ~= unittestVisitor;
     }
 
@@ -1294,7 +1305,10 @@ version (windows) {
     // Add "." default package for commandline builds
     // This must be first in the list so that commandline can always override it.
     auto packages = options.astPackages.resolvePackages(execPath);
-    auto packages = [new Package(name="src", path=realpath("."), packages)] ~ packages;
+    [pak.enableUnittest for pak in packages where options.unittestEnabled(pak.name)];
+    auto rootPackage = new Package(name="src", path=realpath("."), packages);
+    if (options.unittestEnabled(:root)) rootPackage.enableUnittest;
+    auto packages = [rootPackage] ~ packages;
 
     if (!options.output.length) options.output = mainFile.basename.withoutExtension;
 
@@ -1303,6 +1317,7 @@ version (windows) {
 
 (void | Error) buildPackage(Options options, WorkPool workPool, string[] allArgs, string execPath, int loopPass) {
     mut Package[] packages = options.astPackages.resolvePackages(execPath);
+    [pak.enableUnittest for pak in packages where options.unittestEnabled(pak.name)];
     BinaryPackageFile pkgFile() {
         loadPkgFile(".", options.runningCompilerVersion).case {
             PackageFile file:
@@ -1340,6 +1355,8 @@ version (windows) {
         }
     }
     auto pkg = pkg;
+    if (options.unittestEnabled(:root))
+        pkg.enableUnittest;
     writePkgLock(packageLock, ".");
 
     Package[] allRecursiveDeps() {

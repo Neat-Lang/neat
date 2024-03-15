@@ -424,7 +424,7 @@ With block
 
 The `with` block takes an expression and makes its fields implicitly accessible::
 
-    auto s = (foo: 2, bar: 3);
+    auto s = (foo=2, bar=3);
 
     int baz = 5;
     with (s) {

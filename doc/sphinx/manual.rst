@@ -419,6 +419,25 @@ As with regular `if`, `breakelse` jumps to the `else` block or past the statemen
 This idiom is aimed at code that wants to use the result of a chain of `?` expressions,
 but doesn't particularly care about its truth value.
 
+With block
+^^^^^^^^^^
+
+The `with` block takes an expression and makes its fields implicitly accessible::
+
+    auto s = (foo: 2, bar: 3);
+
+    int baz = 5;
+    with (s) {
+        assert(foo == 2);
+        assert(bar == 3);
+        // we can still access other variables.
+        assert(baz == 5);
+        // lookup proceeds lexically, so the
+        // variable masks the `with` statement.
+        int bar = 8;
+        assert(bar == 8);
+    }
+
 While loop
 ^^^^^^^^^^
 

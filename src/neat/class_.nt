@@ -20,11 +20,9 @@ class ClassMethod : Function
 {
     Protection protection;
 
-    bool override_;
+    (:override_ | :abstract_ | :normal) mode;
 
-    bool abstract_;
-
-    this(ClassType classType, this.locRange, this.protection, this.override_, this.abstract_, this.name,
+    this(ClassType classType, this.locRange, this.protection, this.mode, this.name,
          this.retWIP, this.params, this.statement, this.macroState, this.parent)
     {
         this.hasThisArg = true;
@@ -330,7 +328,7 @@ class Class
             if (!similarEntries.empty) {
                 auto bestEntry = [argmin(a.flaws) a for a in similarEntries];
                 if (bestEntry.flaws == 0) {
-                    method.locRange.assert(method.override_,
+                    method.locRange.assert(method.mode == :override_,
                         () => "Expected 'override' attribute for overriding method.")?;
                 } else {
                     vtable[bestEntry.offset].case {
@@ -344,7 +342,7 @@ class Class
                 continue;
             }
 
-            method.locRange.assert(!method.override_,
+            method.locRange.assert(method.mode != :override_,
                 () => "'override' specified but method does not override a parent method.")?;
             // print("b: $(this.name): vtable[$(vtable.length)] = $(method.name)");
             addedMethods ~= method;
@@ -355,7 +353,7 @@ class Class
             for (auto method in vtable) {
                 method.case {
                     ClassMethod method: {
-                        if (method.abstract_)
+                        if (method.mode == :abstract_)
                             return this.decl.locRange.fail(
                                 "Abstract method '$(method.name)' not overridden in non-abstract class $(this.name)");
                     }
@@ -534,7 +532,7 @@ class Class
             }
         }
         return new ClassMethod(
-            classType, __RANGE__, Protection.public_, override_=true, abstract_=false, "__instanceof",
+            classType, __RANGE__, Protection.public_, mode=:override_, "__instanceof",
             once new Pointer(new Void), params,
             stmt, new MacroState, methodNamespace);
     }
@@ -555,7 +553,7 @@ class Class
         auto classType = new ClassType(this, zeroInitializable=false, overrideMutable=false);
         auto methodNamespace = new ClassNamespace(this.namespace, classType);
         return new ClassMethod(
-            classType, __RANGE__, Protection.public_, override_=true, abstract_=false, "__destroy",
+            classType, __RANGE__, Protection.public_, mode=:override_, "__destroy",
             once new Void, [], stmt, new MacroState, methodNamespace);
     }
 }
@@ -1404,9 +1402,7 @@ struct ASTClassDeclMethod
 {
     Protection protection;
 
-    bool override_;
-
-    bool abstract_;
+    (:static_ | :override_ | :abstract_ | :normal) mode;
 
     string name;
 
@@ -1569,8 +1565,7 @@ class ASTClassDecl : ASTSymbolDeclaration
                 classType,
                 method.locRange,
                 method.protection,
-                method.override_,
-                method.abstract_,
+                method.mode.case(:static_: die),
                 method.name,
                 method.ret.compile(methodContext)?.beType(method.locRange)?,
                 methodParams,
@@ -1755,34 +1750,44 @@ class ASTIntfDecl : ASTSymbolDeclaration
     auto from = parser.from;
     mut nullable ASTSymbol retType;
     mut string memberName;
-    mut bool override_ = false;
-    mut bool abstract_ = false;
-    mut Protection protection = Protection.public_;
+    mut (:abstract_ | :override_ | :static_ | :normal) mode = :normal;
+    mut (Protection | :default_) protection = :default_;
     while (true) {
+        auto from = parser.from;
         if (parser.acceptIdentifier("override")) {
-            override_ = true;
+            parser.to(from).assert(mode == :normal, "conflicting attributes on method")?;
+            mode = :override_;
             continue;
         }
         if (parser.acceptIdentifier("abstract")) {
-            abstract_ = true;
+            parser.to(from).assert(mode == :normal, "conflicting attributes on method")?;
+            mode = :abstract_;
             continue;
         }
-        // FIXME only allow one
+        if (parser.acceptIdentifier("static")) {
+            parser.to(from).assert(mode == :normal, "conflicting attributes on method")?;
+            mode = :static_;
+            continue;
+        }
         // FIXME parseProtection?
         if (parser.acceptIdentifier("public")) {
+            parser.to(from).assert(protection == :default_, "conflicting protection on method")?;
             protection = Protection.public_;
             continue;
         }
         if (parser.acceptIdentifier("private")) {
+            parser.to(from).assert(protection == :default_, "conflicting protection on method")?;
             protection = Protection.private_;
             continue;
         }
         if (parser.acceptIdentifier("protected")) {
+            parser.to(from).assert(protection == :default_, "conflicting protection on method")?;
             protection = Protection.protected_;
             continue;
         }
         break;
     }
+    auto protection = protection.case(:default_: Protection.public_);
 
     if (auto decl = lexicalContext.compiler.parseDeclaration(parser, lexicalContext)?) {
         return [(decl, protection)];
@@ -1792,7 +1797,7 @@ class ASTIntfDecl : ASTSymbolDeclaration
 
     if (parser.acceptIdentifier("this"))
     {
-        parser.assert_(!override_, "cannot override constructor")?;
+        parser.assert_(mode != :override_, "cannot override constructor")?;
         retType = new ASTIdentifier("void", false);
         memberName = "__ctor";
     }
@@ -1844,7 +1849,7 @@ class ASTIntfDecl : ASTSymbolDeclaration
         auto params = parseParameterList(parser, lexicalContext, variadic=false, thisAssignment=true)?;
         assert(!params.variadic);
         mut nullable ASTStatement stmt = null;
-        if (abstract_ && parser.acceptToken(TokenType.semicolon)) {
+        if (mode == :abstract_ && parser.acceptToken(TokenType.semicolon)) {
             ASTSymbol astName = new ASTStringLiteral(className.repr ~ "." ~ memberName);
             stmt = lexicalContext.compiler.$stmt {
                 import package(compiler).neat.runtime.stdlib : exit;
@@ -1857,7 +1862,7 @@ class ASTIntfDecl : ASTSymbolDeclaration
             stmt = lexicalContext.compiler.parseFunctionBody(parser, lexicalContext)?;
         }
         ASTClassEntry entry = ASTClassDeclMethod(
-            protection, override_, abstract_, memberName,
+            protection, mode, memberName,
             retType? else die, params.params, locRange,
             comment, stmt? else die);
         return [entry];
@@ -1866,8 +1871,12 @@ class ASTIntfDecl : ASTSymbolDeclaration
     {
         mut ASTClassEntry[] members;
         (void | Error) addMember(LocRange locRange) {
-            locRange.assert(!override_, () => "cannot override class member")?;
-            locRange.assert(!abstract_, () => "cannot declare class member abstract")?;
+            mode.case {
+                :override_: return locRange.fail("cannot override class member")?;
+                :abstract_: return locRange.fail("cannot declare class member abstract")?;
+                :static_: return locRange.fail("TODO static class fields?")?;
+                :normal: {}
+            }
             members ~= ASTClassDeclMember(protection, mutable, retType? else die, memberName, locRange);
         }
         addMember(locRange)?;

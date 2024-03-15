@@ -1484,13 +1484,30 @@ class ASTClassDecl : ASTSymbolDeclaration
 
         (void | Error) walk(ASTClassEntry entry) {
             entry.case {
-                ASTClassDeclMember member: {
+                ASTClassDeclMember member:
                     auto type = member.type.compile(currentContext)?.beType(member.locRange)?;
                     memberFields ~= (member.protection, member.mutable, type, member.name);
-                }
-                ASTClassDeclMethod method: {
-                    lateMemberMethods ~= (method, currentContext);
-                }
+                ASTClassDeclMethod method:
+                    if (method.mode == :static_) {
+                        import neat.function_ : compile;
+                        auto params = [param.case(
+                            ASTParameter a: compile(a, context),
+                            ASTThisAssignment a: a.locRange.fail("cannot this-assign in static method"))?
+                            for param in method.params];
+                        auto fun = new Function(
+                            method.name,
+                            method.ret.compile(context)?.beType(method.ret.locRange)?,
+                            params,
+                            method.body_, macroState=context.macroState, hasThisArg=false, method.locRange);
+                        fun.comment = method.comment;
+                        fun.quoteScope = context.quoteScope;
+                        fun.parent = context.namespace;
+                        fun.resetMangleCache;
+                        context.namespace.findParent!ModuleBase.track(fun);
+                        classDecls[method.name] = (fun, method.protection);
+                    } else {
+                        lateMemberMethods ~= (method, currentContext);
+                    }
                 /**
                  * Note: currentContext gets overwritten even in version blocks,
                  * because version blocks *don't* open a scope.
@@ -2082,7 +2099,7 @@ class ASTInstanceOf : ASTSymbol
             locRange.assert(targetClass || targetIntf, () => "Target of instanceOf must be class or interface.")?;
             if (targetClass) {
                 // might be in a template instantiated with targetClass!
-                auto targetClassModule = findParent!ModuleBase(targetClass.class_.namespace);
+                auto targetClassModule = targetClass.class_.namespace.findParent!ModuleBase;
 
                 context.compilingModule.addModuleDependency(targetClassModule? else die);
                 if (auto classType = type.instanceOf(ClassType))

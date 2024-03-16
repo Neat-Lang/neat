@@ -130,6 +130,23 @@ As in Python, expressions with a trailing `=` are quoted in the output::
 :code:`\`Hello World\`` is a literal string. Unlike regular string literals,
 escape sequences and format string quotes are not processed.
 
+A backslash in a string starts an escape sequence.
+These escape sequences are supported in strings:
+
+- `\\r`: carriage return
+- `\\n`: newline
+- `\\t`: tab
+- `\\"`: double quote
+- `\\'`: single quote
+- `\\\\`: backslash
+- `\\0`: null character
+- `\\x##`: two-digit hexadecimal character code (e.g., `\\x0A` for newline)
+- `\\$`: dollar sign
+
+Additionally, as in Rust, a backslash followed by a newline character (`\\n` or `\\r\\n`) indicates
+a line continuation. The newline and all succeeding whitespace are removed. Note that as *opposed*
+to Rust, newline characters beyond the first are not skipped!
+
 `1.2` is a `double` literal. `1.2f` is a `float` literal.
 
 Arithmetic

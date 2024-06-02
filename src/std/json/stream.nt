@@ -529,32 +529,22 @@ class JsonValueSink : Sink!JsonToken
 (void | Error) encodeField(T)(string field, T value, Sink!JsonToken sink) {
     macro {
         import neat.either;
-        import neat.util : ASTSymbolHelper, SymbolIdentifierType;
+        import neat.util : ASTSymbolHelper;
+        import std.json.util : isThisOrNoneType;
 
         auto T = type("T")?;
-        if (auto eitherType = T.instanceOf(Either)) {
-            auto types = eitherType.types;
-            if (types.length == 2) {
-                mut nullable Type otherType = null;
-                if (types[0].same(new SymbolIdentifierType("none"))) {
-                    otherType = types[1];
-                } else if (types[1].same(new SymbolIdentifierType("none"))) {
-                    otherType = types[0];
-                }
-                if (auto otherType = otherType) {
-                    auto astOtherType = new ASTSymbolHelper(otherType);
-                    code {
-                        value.case {
-                            :none: {} /* encode nothing */
-                            $astOtherType entry:
-                                sink.put(field)?;
-                                sink.put(:colon)?;
-                                .encode(entry, sink)?;
-                        }
-                    }
-                    return;
+        if (auto otherType = T.isThisOrNoneType) {
+            auto astOtherType = new ASTSymbolHelper(otherType);
+            code {
+                value.case {
+                    :none: {} /* encode nothing */
+                    $astOtherType entry:
+                        sink.put(field)?;
+                        sink.put(:colon)?;
+                        .encode(entry, sink)?;
                 }
             }
+            return;
         } else {
             code {
                 sink.put(field)?;
@@ -652,6 +642,8 @@ unittest
     assert(JSONValue([2, 3, 4]).source.decode!(int[]) == [2, 3, 4]);
     assert(JSONValue(["foo", "bar"]).source.decode!(string[]) == ["foo", "bar"]);
     assert(JSONValue(null).source.decode!nullptr_t == null);
+    assert(JSONValue({"a": 2, "b": 3}).source.decode!((int a, int b)) == (a=2, b=3));
+    assert(JSONValue({"a": 2}).source.decode!((int a, (int | :none) b)) == (a=2, b=:none));
 
     assert(`5`.source.decode!int == 5);
     assert(`true`.source.decode!bool == true);
@@ -681,8 +673,10 @@ private (T | Error) decodeWithToken(T)(Source!JsonToken source, JsonToken token)
     macro {
         import neat.array;
         import neat.struct_;
+        import neat.tuples : TupleType;
         import neat.types;
         import neat.util : ASTSymbolHelper, NullPointer;
+        import std.json.util : isThisOrNoneType;
 
         auto T = type("T")?;
         if (T.instanceOf(Integer) || T.instanceOf(Long) || T.instanceOf(Short)) {
@@ -748,27 +742,52 @@ private (T | Error) decodeWithToken(T)(Source!JsonToken source, JsonToken token)
                     return result;
                 }
             }
-        } else if (auto struct_ = T.instanceOf(Struct)) {
+        } else if (T.instanceOf(Struct) || T.instanceOf(TupleType)) {
             code {
                 if (token != :objectStart)
                     return new DecodeError("expected '{', but got $(token.toString)");
             }
             mut ASTSymbol[] args;
-            for (i, member in struct_.members) {
-                auto astName = compiler.astStringLiteral(member.name);
-                auto astFieldType = new ASTSymbolHelper(member.type);
-                auto astField = compiler.astIdentifier("field$i");
-                code { mut ($astFieldType | :none) $astField = :none; }
-                // TODO
-                // if let((Expression expr, LocRange range) = member.default_?) {
-                if let((Expression expr, LocRange range) pair = member.default_?) {
-                    auto astExpr = new ASTSymbolHelper(pair.expr, pair.range);
-                    args ~= compiler.$expr $astField.case(:none: $astExpr);
-                } else {
-                    args ~= compiler.$expr
-                        $astField.case(:none: return new DecodeError("missing field $($astName)"));
+            if (auto struct_ = T.instanceOf(Struct)) {
+                for (i, member in struct_.members) {
+                    auto astName = compiler.astStringLiteral(member.name);
+                    auto astFieldType = new ASTSymbolHelper(member.type);
+                    auto astField = compiler.astIdentifier("field$i");
+                    // TODO: if let((auto expr, auto range) = member.default_?) {
+                    if let((Expression expr, LocRange range) pair = member.default_?) {
+                        code { mut ($astFieldType | :none) $astField = :none; }
+                        auto astExpr = new ASTSymbolHelper(pair.expr, pair.range);
+                        args ~= compiler.$expr $astField.case(:none: $astExpr);
+                    } else if (auto subtype = member.type.isThisOrNoneType) {
+                        auto astSubType = new ASTSymbolHelper(subtype);
+                        code { mut ($astSubType | :none) $astField = :none; }
+                        args ~= astField;
+                    } else {
+                        code { mut ($astFieldType | :none) $astField = :none; }
+                        args ~= compiler.$expr
+                            $astField.case(:none: return new DecodeError("missing struct field $($astName)"));
+                    }
                 }
-            }
+            } else if (auto tuple = T.instanceOf(TupleType)) {
+                for (i, member in tuple.members) {
+                    if (member.name.empty) {
+                        return __RANGE__.fail(
+                            "Don't know how to decode tuple with missing name on field $(T.toString)");
+                    }
+                    auto astName = compiler.astStringLiteral(member.name);
+                    auto astField = compiler.astIdentifier("field$i");
+                    if (auto subtype = member.type.isThisOrNoneType) {
+                        auto astSubType = new ASTSymbolHelper(subtype);
+                        code { mut ($astSubType | :none) $astField = :none; }
+                        args ~= astField;
+                    } else {
+                        auto astFieldType = new ASTSymbolHelper(member.type);
+                        code { mut ($astFieldType | :none) $astField = :none; }
+                        args ~= compiler.$expr
+                            $astField.case(:none: return new DecodeError("missing tuple field $($astName)"));
+                    }
+                }
+            } else assert(false);
             code {
                 // TODO single mode variable
                 mut bool startOfObject = true;
@@ -801,15 +820,34 @@ private (T | Error) decodeWithToken(T)(Source!JsonToken source, JsonToken token)
                             lastKey = :none;
                             startOfObject = false;
                             macro {
-                                for (i, member in struct_.members) {
-                                    auto astFieldType = new ASTSymbolHelper(member.type);
+                                mut (string name, Type type)[] fields;
+                                if (auto struct_ = T.instanceOf(Struct)) {
+                                    for (member in struct_.members) {
+                                        fields ~= member.((name, type));
+                                    }
+                                } else if (auto tuple = T.instanceOf(TupleType)) {
+                                    fields = tuple.members;
+                                } else assert(false);
+                                for (i, field in fields) {
                                     auto astField = compiler.astIdentifier("field$i");
-                                    auto nameStr = compiler.astStringLiteral(member.name);
-                                    code {
-                                        if (key == $nameStr) {
-                                            $astField = .decode!($astFieldType)(source)?;
-                                            expectSeparator = true;
-                                            continue;
+                                    auto nameStr = compiler.astStringLiteral(field.name);
+                                    if (auto subtype = field.type.isThisOrNoneType) {
+                                        auto astSubType = new ASTSymbolHelper(subtype);
+                                        code {
+                                            if (key == $nameStr) {
+                                                $astField = .decode!($astSubType)(source)?;
+                                                expectSeparator = true;
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        auto astFieldType = new ASTSymbolHelper(field.type);
+                                        code {
+                                            if (key == $nameStr) {
+                                                $astField = .decode!($astFieldType)(source)?;
+                                                expectSeparator = true;
+                                                continue;
+                                            }
                                         }
                                     }
                                 }
@@ -823,8 +861,13 @@ private (T | Error) decodeWithToken(T)(Source!JsonToken source, JsonToken token)
                     }
                 }
             }
-            auto call = compiler.(astCall(astIdentifier("T"), args));
-            code { return $call; }
+            if (T.instanceOf(Struct)) {
+                auto call = compiler.(astCall(astIdentifier("T"), args));
+                code { return $call; }
+            } else {
+                auto expr = compiler.astTupleLiteral(args);
+                code { return $expr; }
+            }
         } else {
             return __RANGE__.fail("Don't know how to decode $(T.toString)");
         }

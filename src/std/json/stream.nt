@@ -266,6 +266,8 @@ class JsonValueSource : Source!JsonToken
                     return true;
                 int i:
                     return i;
+                nullptr_t:
+                    return null;
                 string s:
                     return s;
                 JSONValue[] array:
@@ -451,9 +453,10 @@ class JsonValueSink : Sink!JsonToken
         import neat.array;
         import neat.either;
         import neat.struct_;
+        import neat.tuples;
         import neat.types;
         import neat.vectors;
-        import neat.util : ASTSymbolHelper, NullPointer, SymbolIdentifierType;
+        import neat.util : NullPointer;
 
         auto T = type("T")?;
 
@@ -490,6 +493,22 @@ class JsonValueSink : Sink!JsonToken
                 code { .encode(value[$astI], sink)?; }
             }
             code { sink.put(:arrayEnd)?; }
+        } else if (auto tuple = T.instanceOf(TupleType)) {
+            for (member in tuple.members) {
+                if (member.name.empty) {
+                    return __RANGE__.fail("Don't know how to encode tuple with missing name on field $(T.toString)");
+                }
+            }
+            code { sink.put(:objectStart)?; }
+            for (i, member in tuple.members) {
+                auto name = compiler.astIdentifier(member.name);
+                auto nameStr = compiler.astStringLiteral(member.name);
+                if (i > 0) code {
+                    sink.put(:comma)?;
+                }
+                code { encodeField($nameStr, value.$name, sink)?; }
+            }
+            code { sink.put(:objectEnd)?; }
         } else if (auto struct_ = T.instanceOf(Struct)) {
             code { sink.put(:objectStart)?; }
             for (i, member in struct_.members) {
@@ -498,39 +517,50 @@ class JsonValueSink : Sink!JsonToken
                 if (i > 0) code {
                     sink.put(:comma)?;
                 }
-                if (auto eitherType = member.type.instanceOf(Either)) {
-                    auto types = eitherType.types;
-                    if (types.length == 2) {
-                        mut nullable Type otherType = null;
-                        if (types[0].same(new SymbolIdentifierType("none"))) {
-                            otherType = types[1];
-                        } else if (types[1].same(new SymbolIdentifierType("none"))) {
-                            otherType = types[0];
-                        }
-                        if (auto otherType = otherType) {
-                            auto astOtherType = new ASTSymbolHelper(otherType);
-                            code {
-                                value.$name.case {
-                                    :none: {} /* encode nothing */
-                                    $astOtherType field:
-                                        sink.put($nameStr)?;
-                                        sink.put(:colon)?;
-                                        .encode(field, sink)?;
-                                }
-                            }
-                            continue;
-                        }
-                    }
-                }
-                code {
-                    sink.put($nameStr)?;
-                    sink.put(:colon)?;
-                    .encode(value.$name, sink)?;
-                }
+                code { encodeField($nameStr, value.$name, sink)?; }
             }
             code { sink.put(:objectEnd)?; }
         } else {
             return __RANGE__.fail("Don't know how to encode $(T.toString)");
+        }
+    }
+}
+
+(void | Error) encodeField(T)(string field, T value, Sink!JsonToken sink) {
+    macro {
+        import neat.either;
+        import neat.util : ASTSymbolHelper, SymbolIdentifierType;
+
+        auto T = type("T")?;
+        if (auto eitherType = T.instanceOf(Either)) {
+            auto types = eitherType.types;
+            if (types.length == 2) {
+                mut nullable Type otherType = null;
+                if (types[0].same(new SymbolIdentifierType("none"))) {
+                    otherType = types[1];
+                } else if (types[1].same(new SymbolIdentifierType("none"))) {
+                    otherType = types[0];
+                }
+                if (auto otherType = otherType) {
+                    auto astOtherType = new ASTSymbolHelper(otherType);
+                    code {
+                        value.case {
+                            :none: {} /* encode nothing */
+                            $astOtherType entry:
+                                sink.put(field)?;
+                                sink.put(:colon)?;
+                                .encode(entry, sink)?;
+                        }
+                    }
+                    return;
+                }
+            }
+        } else {
+            code {
+                sink.put(field)?;
+                sink.put(:colon)?;
+                .encode(value, sink)?;
+            }
         }
     }
 }
@@ -585,6 +615,15 @@ unittest {
 
 unittest {
     auto sink = new JsonValueSink;
+    // TODO: (foo=1, bar=2).encode
+    // TODO: (foo=1,).encode
+    // TODO: or even (foo=1).encode
+    ((foo=1, bar=2)).encode(sink).case(Error: assert(false));
+    assert(sink.value == JSONValue({ "foo": 1, "bar": 2}));
+}
+
+unittest {
+    auto sink = new JsonValueSink;
     alias vec3i = Vector(int, 3);
     vec3i(1, 2, 3).encode(sink).case(Error: assert(false));
     assert(sink.value == JSONValue([1, 2, 3]));
@@ -612,6 +651,7 @@ unittest
     assert(JSONValue([]).source.decode!(int[]) == []);
     assert(JSONValue([2, 3, 4]).source.decode!(int[]) == [2, 3, 4]);
     assert(JSONValue(["foo", "bar"]).source.decode!(string[]) == ["foo", "bar"]);
+    assert(JSONValue(null).source.decode!nullptr_t == null);
 
     assert(`5`.source.decode!int == 5);
     assert(`true`.source.decode!bool == true);
@@ -642,7 +682,7 @@ private (T | Error) decodeWithToken(T)(Source!JsonToken source, JsonToken token)
         import neat.array;
         import neat.struct_;
         import neat.types;
-        import neat.util : ASTSymbolHelper;
+        import neat.util : ASTSymbolHelper, NullPointer;
 
         auto T = type("T")?;
         if (T.instanceOf(Integer) || T.instanceOf(Long) || T.instanceOf(Short)) {
@@ -657,6 +697,13 @@ private (T | Error) decodeWithToken(T)(Source!JsonToken source, JsonToken token)
                 token.case {
                     bool b: return b;
                     default: return new DecodeError("expected boolean, but got $(token.toString)");
+                }
+            }
+        } else if (T.instanceOf(NullPointer)) {
+            code {
+                token.case {
+                    nullptr_t: return null;
+                    default: return new DecodeError("expected null, but got $(token.toString)");
                 }
             }
         } else if (T.same(type("JSONValue")?)) {

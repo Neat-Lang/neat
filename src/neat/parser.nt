@@ -383,6 +383,7 @@ int find(string haystack, string needle)
 }
 
 extern(C) void exit(int);
+extern(C) double pow(double, double);
 
 struct Loc {
     int fileId;
@@ -562,11 +563,18 @@ with (parser.transaction)
     parser.strip;
     mut string number = parser.acceptTokenStr(TokenType.number)
         .case(:none: return :failure);
-    if (parser.acceptIdentifier("f")) {
+    // scientific notation
+    mut (int | :none) exponent = parser.parseExponentModifier;
+    // ways to end a number: `2f`, `2e1`, `2e1f`
+    if (parser.acceptIdentifier("f") || exponent != :none) {
         commit;
         number = number.replace("_", "");
         // 2f, -3f
-        return (:success, atoi(number).(-that if negative else that));
+        mut double d = atoi(number).(-that if negative else that);
+        if (int exponent = exponent.case(:none: breakelse)) {
+            d *= pow(10, exponent);
+        }
+        return (:success, d);
     }
     if (!parser.acceptToken(TokenType.dot)) return :failure;
     number ~= ".";
@@ -575,12 +583,42 @@ with (parser.transaction)
         .case(:none: return :failure);
     if (parser.hard_eof) return :failure;
     number ~= cont;
+    exponent = parser.parseExponentModifier;
     commit;
     number = number.replace("_", "");
     mut double d = atof(number);
     if (negative) d = -d;
+    if (int exponent = exponent.case(:none: breakelse)) {
+        d *= pow(10, exponent);
+    }
     if (parser.acceptIdentifier("f")) {
         return (:success, cast(float) d);
     }
     return (:success, d);
+}
+
+private (int | :none) parseExponentModifier(Parser parser) {
+    parser.begin;
+    auto identifier = parser.parseIdentifier;
+    if (identifier.empty) {
+        parser.revert;
+        return :none;
+    }
+    if (identifier == "e" && parser.acceptToken(TokenType.minus)) {
+        parser.acceptTokenStr(TokenType.number).case {
+            :none:
+                parser.revert;
+                return :none;
+            string expNum:
+                parser.commit;
+                return -atoi(expNum);
+        }
+    }
+    // 3e10 is <number:3>, <identifier:e10>.
+    if (identifier.startsWith("e") && identifier[1 .. $].("$(that.atoi)" == that)) {
+        parser.commit;
+        return atoi(identifier[1 .. $]);
+    }
+    parser.revert;
+    return :none;
 }

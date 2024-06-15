@@ -20,13 +20,53 @@ class SocketError : Error {
         return new SocketError("Failed to resolve host: $errnoStr");
     }
 
-    auto addr = sockaddr_in(AF_INET, htons(port), in_addr((cast(int*)(hostInfo.h_addr_list[0]))[0]), 0);
-
+    mut auto addr = sockaddr_in(AF_INET, htons(port), in_addr((cast(int*)(hostInfo.h_addr_list[0]))[0]), 0);
     if (connect(handle, &addr, sizeof(sockaddr_in)) == -1) {
         return new SocketError("Failed to connect to host: $errnoStr");
     }
 
     return new Socket(handle);
+}
+
+(ListenSocket | SocketError) listen(string host, short port, int backlog = 10) {
+    import std.string : toStringz;
+
+    int handle = socket(AF_INET, SOCK_STREAM, 0);
+    if (handle == -1) {
+        return new SocketError("Failed to create socket: $errnoStr");
+    }
+
+    hostent* hostInfo = gethostbyname(host.toStringz);
+    if (hostInfo is null) {
+        return new SocketError("Failed to resolve host: $errnoStr");
+    }
+
+    mut auto addr = sockaddr_in(AF_INET, htons(port), in_addr((cast(int*)(hostInfo.h_addr_list[0]))[0]), 0);
+    if (bind(handle, &addr, sizeof(sockaddr_in)) == -1) {
+        return new SocketError("Failed to bind to $host:$port: $errnoStr");
+    }
+
+    if (listen(handle, backlog) == -1) {
+        return new SocketError("Failed to listen on $host:$port: $errnoStr");
+    }
+
+    return new ListenSocket(handle);
+}
+
+class ListenSocket
+{
+    private int handle;
+
+    // package
+    public this(this.handle) { }
+
+    (Socket | SocketError) accept() {
+        int handle = .accept(this.handle, null, 0);
+        if (handle == -1) {
+            return new SocketError("Failed to accept connection: $errnoStr");
+        }
+        return new Socket(handle);
+    }
 }
 
 // This is a good candidate for "non-empty array" type once we have that.
@@ -96,17 +136,21 @@ struct sockaddr_in {
     long padding;
 }
 
-extern(C) int socket(int domain, int type, int protocol);
-extern(C) int connect(int sockfd, void* addr, int addrlen);
-extern(C) hostent* gethostbyname(char* name);
-extern(C) short htons(short hostshort);
-extern(C) size_t send(int sockfd, void* buf, size_t len, int flags);
-extern(C) size_t recv(int sockfd, void* buf, size_t len, int flags);
-extern(C) void close(int fd);
-extern(C) char* strerror(int errnum);
-extern(C) int neat_runtime_errno();
+// FIXME private {}
+private extern(C) int socket(int domain, int type, int protocol);
+private extern(C) int listen(int sockfd, int backlog);
+private extern(C) int connect(int sockfd, void* addr, int addrlen);
+private extern(C) int bind(int sockfd, void* addr, int addrlen);
+private extern(C) int accept(int sockfd, void* addr, int addrlen);
+private extern(C) hostent* gethostbyname(char* name);
+private extern(C) short htons(short hostshort);
+private extern(C) size_t send(int sockfd, void* buf, size_t len, int flags);
+private extern(C) size_t recv(int sockfd, void* buf, size_t len, int flags);
+private extern(C) void close(int fd);
+private extern(C) char* strerror(int errnum);
+private extern(C) int neat_runtime_errno();
 
-string errnoStr() {
+private string errnoStr() {
     import std.string : cToString;
 
     return cToString(strerror(neat_runtime_errno()));
